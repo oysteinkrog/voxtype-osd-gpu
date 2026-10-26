@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use skrifa::GlyphId;
-use vo_scene::font::{Face, FontRegistry};
 use vo_scene::display::{BlendMode, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget};
+use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, RRect};
 
 use crate::color::linear_premul;
@@ -166,7 +166,6 @@ struct LayerTex {
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
 }
-
 
 /// Draws display lists. Holds the pipelines, the glyph atlas and the per-frame buffers, all
 /// reused from frame to frame.

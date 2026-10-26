@@ -47,8 +47,11 @@ fn live_text_tags_glyphs_with_word_ids() {
 fn an_added_ellipsis_belongs_to_no_word() {
     let fonts = fonts();
     let mut s = scene(&fonts);
-    let words: Vec<Word> =
-        ["one", "two", "three", "four", "five", "six"].iter().zip(1..).map(|(w, id)| Word { id, text: w.to_string() }).collect();
+    let words: Vec<Word> = ["one", "two", "three", "four", "five", "six"]
+        .iter()
+        .zip(1..)
+        .map(|(w, id)| Word { id, text: w.to_string() })
+        .collect();
     let live = Element::live_text("live", &words).text_style(TextStyle::default().clamp_lines(1)).width(60.0);
     s.apply(Element::column("root").child(live), 0.0);
     let list = s.sample(0.0);

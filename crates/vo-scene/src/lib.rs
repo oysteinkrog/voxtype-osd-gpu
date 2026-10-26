@@ -20,6 +20,6 @@ pub mod scene;
 pub mod text;
 
 pub use display::DisplayList;
-pub use font::{FontId, FontRegistry};
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
+pub use font::{FontId, FontRegistry};
 pub use scene::{NodeId, Presence, Scene};

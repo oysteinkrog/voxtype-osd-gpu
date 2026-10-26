@@ -23,9 +23,7 @@ fn toast(title: &str, body: &str) -> Element<Msg> {
     let header = Element::row("header")
         .gap(8.0)
         .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::hex(0x4cc38a, 1.0)))
-        .child(
-            Element::label("title", title).text_style(TextStyle::new(0, 15.0, 19.0)).grow(1.0),
-        )
+        .child(Element::label("title", title).text_style(TextStyle::new(0, 15.0, 19.0)).grow(1.0))
         .child(close);
     Element::panel("toast")
         .width(320.0)

@@ -162,7 +162,7 @@ impl TextLayout for ShapedLayout {
 
         let m = face.skrifa().metrics(FontSize::new(style.size), LocationRef::default());
         let first_baseline = 0.5 * (style.line_height - (m.ascent - m.descent)) + m.ascent;
-        let mut ellipsis: Option<(Vec<(u32, f32, f32)>, f32)> = None;
+        let mut ellipsis: Option<Ellipsis> = None;
         let mut out = ShapedText::default();
         let mut ends: Vec<f32> = Vec::new();
         let mut widest = 0.0f32;
@@ -218,9 +218,11 @@ fn shape(shaper: &ShaperFont<'_, '_>, text: &str) -> harfrust::Buffer {
     buf
 }
 
-/// The ellipsis as `(glyph, x offset, y offset)` from its pen start, and its width. Three
-/// full stops when the font has no ellipsis character.
-fn ellipsis_glyphs(shaper: &ShaperFont<'_, '_>, k: f32) -> (Vec<(u32, f32, f32)>, f32) {
+/// Ellipsis glyphs as `(glyph, x offset, y offset)` from the pen start, and their width.
+type Ellipsis = (Vec<(u32, f32, f32)>, f32);
+
+/// The ellipsis, or three full stops when the font has no ellipsis character.
+fn ellipsis_glyphs(shaper: &ShaperFont<'_, '_>, k: f32) -> Ellipsis {
     let mut buf = shape(shaper, "\u{2026}");
     if buf.glyph_infos().iter().any(|g| g.glyph_id == 0) {
         buf = shape(shaper, "...");
@@ -322,17 +324,20 @@ mod tests {
     fn advance(t: &ShapedLayout, c: char, size: f32) -> f32 {
         let face = t.fonts().get(0).unwrap();
         let font = face.skrifa();
-        font.glyph_metrics(FontSize::new(size), LocationRef::default()).advance_width(font.charmap().map(c).unwrap()).unwrap()
+        font.glyph_metrics(FontSize::new(size), LocationRef::default())
+            .advance_width(font.charmap().map(c).unwrap())
+            .unwrap()
     }
 
     #[test]
     fn real_glyph_ids_and_advances() {
         let t = shaped();
-        let s = t.layout("Hex", &STYLE, None);
+        // No kerning pairs in "Hil", so the pen moves by the plain advances.
+        let s = t.layout("Hil", &STYLE, None);
         let ids: Vec<u32> = s.glyphs.iter().map(|g| g.glyph).collect();
-        assert_eq!(ids, vec![gid(&t, 'H'), gid(&t, 'e'), gid(&t, 'x')]);
+        assert_eq!(ids, vec![gid(&t, 'H'), gid(&t, 'i'), gid(&t, 'l')]);
         assert_ne!(ids[0], 'H' as u32);
-        let (h, e, x) = (advance(&t, 'H', 20.0), advance(&t, 'e', 20.0), advance(&t, 'x', 20.0));
+        let (h, e, x) = (advance(&t, 'H', 20.0), advance(&t, 'i', 20.0), advance(&t, 'l', 20.0));
         assert!((s.glyphs[1].pos.x - h).abs() < 1e-3);
         assert!((s.glyphs[2].pos.x - h - e).abs() < 1e-3);
         assert!((s.size.w - h - e - x).abs() < 1e-3);
