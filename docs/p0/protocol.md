@@ -19,9 +19,9 @@ revision recorder (P0-08, see `diff-report.md`). [V]
   casing, punctuation and some words. A preview final equals the last preview revision.
 - **Word timing** is available from parakeet-rs (`get_timed_transcript`), per token, in
   80 ms encoder frames. [V]
-- **Per-word confidence is not available** from parakeet-rs 0.3.5: the decoder takes the
-  arg max of the logits and drops them. Getting it needs a small patch to the crate
-  (section 6). [V]
+- **Per-word confidence** comes from a patched parakeet-rs (fork branch
+  `voxtype-confidence`, one commit on 0.3.5) that keeps the softmax probability of each
+  emitted token. Upstream 0.3.5 drops the logits. [V]
 - **Status** after stop is a fraction and a text line, from `S {"text", "fraction"}`
   worker lines. [V, `src/transcribe/worker.rs`]
 
@@ -200,12 +200,9 @@ id.
 
 ## 6. Open items
 
-1. **Confidence from Parakeet.** parakeet-rs 0.3.5 `ParakeetUnified::decode_encoder_frames`
-   takes the arg max of the joint logits and drops them. A patch that also keeps
-   `softmax(logits)[token]` per emitted token, stored next to `accumulated_timed_tokens`,
-   is about 20 lines. It needs a fork branch of parakeet-rs and a `[patch.crates-io]`
-   entry in voxtype. Cost per token: one softmax over about 1024 entries (1023 vocabulary lines plus blank), small
-   next to the decoder run. [V for the code path; G for the size]
+1. **Confidence upstream.** The parakeet-rs patch (about 40 lines, one pass over the
+   logits per emitted token) lives on the oysteinkrog fork, wired into voxtype with a
+   `[patch.crates-io]` entry. Offering it upstream would drop the fork. [V]
 2. **Timing resolution.** Token times are 80 ms encoder frames, and a token's start is the
    frame where it was emitted, which can trail the sound. Good enough for word age; not
    for karaoke-style highlight. [V for the frame size; I for the lag]

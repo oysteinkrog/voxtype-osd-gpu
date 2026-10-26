@@ -20,9 +20,10 @@ repo. [V] marks a measured result, [I] an inference, [G] a guess.
 4. **The diff is cheap.** 6 µs median, 74 µs worst, for up to 299 words, in a release
    build. The 1 ms budget in the roadmap is not a concern; no 200-word window is needed
    for speed. [V]
-5. **No per-word confidence yet.** parakeet-rs 0.3.5 drops the decoder scores, so all
-   words carry `conf: null`. The overlay must use word age until the crate is patched
-   (`protocol.md` section 6). [V]
+5. **Per-word confidence works and means something.** With the parakeet-rs fork branch
+   `voxtype-confidence`, all 3507 words carry a score. Median 0.991; 704 words (20 %)
+   are under 0.8. Words that the Cohere final later changed have a median of 0.793,
+   against 0.993 for words it kept, and 16 of the 31 changed words are under 0.8. [V]
 
 ## Corpus
 
@@ -148,9 +149,9 @@ cargo run --release -p vo-core --example revdiff -- <private dir> 48
 
 ## Open problems
 
-1. **Confidence.** Needs a parakeet-rs fork patch (about 20 lines, [G]) to keep the
-   softmax score of each emitted token. Until then the overlay's confidence styling has
-   only word age to go on.
+1. **Confidence thresholds.** A word's score is the lowest softmax probability of its
+   tokens (voxtype commit 51ce290, parakeet-rs fork commit f250ecc). The 0.8 line above
+   is a first look, not a tuned threshold; only 31 changed words back it.
 2. **Few engine finals.** Only 14 recordings used Cohere, because the config switched to
    preview finals on 2026-10-25. More engine data would firm up the move and removal
    numbers. A second replay with Cohere on the same WAVs would give 94, at about 2.4 GiB
