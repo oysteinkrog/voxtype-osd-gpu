@@ -127,8 +127,8 @@ fn vs_word (@builtin(vertex_index) vid: u32) -> VOut {
   let radius = max (p.stroke * ppu * mix (0.6, 1.4, ev.rem), 0.6);
   // Each particle stands for about 1.25 px² of ink (`set_word`), and a sprite of radius r
   // spreads its light over about pi r² / 3 px². Scale so the forming word carries about the
-  // light of the solid word, with a little extra for glow.
-  let ink = clamp (1.4 * 1.25 * 3.0 / (PI * radius * radius), 0.0, 1.0);
+  // light of the solid word, with extra for glow.
+  let ink = clamp (2.0 * 1.25 * 3.0 / (PI * radius * radius), 0.0, 1.0);
   let a = sd.color.a * light * sd.visible * ink;
   return sprite (vid % 6u, p_px, v_px, radius, vec4f (sd.color.rgb * a, a));
 }
