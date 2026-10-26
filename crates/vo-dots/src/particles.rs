@@ -22,7 +22,7 @@ pub fn check_cells(w: i32, h: i32, thick: i32) -> Vec<(i32, i32)> {
     let c = (w, 0.0);
     let mut out = Vec::new();
     for (p, q) in [(a, b), (b, c)] {
-        let steps = ((q.0 - p.0) as f32).abs().max((q.1 - p.1).abs()).ceil() as i32 * 2;
+        let steps = (q.0 - p.0).abs().max((q.1 - p.1).abs()).ceil() as i32 * 2;
         for i in 0..=steps {
             let k = i as f32 / steps as f32;
             let (x, y) = (p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k);
