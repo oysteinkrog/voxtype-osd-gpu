@@ -79,7 +79,7 @@ fn toast_goldens() {
         images.push(Image { name: name.into(), w, h, channels: 4, px });
     }
     // Mid enter is fainter than settled: the presence fade is part way.
-    let ink = |img: &Image| img.px.chunks_exact(4).map(|p| p[3] as u64).sum::<u64>();
+    let ink = |img: &Image| img.px.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum::<u64>();
     assert!(ink(&images[0]) < ink(&images[1]), "mid enter should be fainter than settled");
 
     let failures: Vec<String> =
