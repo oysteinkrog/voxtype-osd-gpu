@@ -24,7 +24,7 @@ struct Layer {
   // xy: where that texture's top left sits in target pixels (0 except in an offscreen layer
   // sized to its bounds). zw: the same for the layer texture a composite reads.
   origin: vec4f,
-  // A composite's source layer texture: width, height in pixels, bloom strength.
+  // A composite's source layer texture: width, height in pixels, bloom strength, 1 in light mode.
   src: vec4f,
 };
 

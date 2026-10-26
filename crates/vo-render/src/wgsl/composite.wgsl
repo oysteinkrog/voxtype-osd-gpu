@@ -27,7 +27,7 @@ fn layer_texel (frag: vec2f) -> vec2i {
 }
 
 // A layer with bloom: the layer plus `layer.src.z` times its blurred copy, both premultiplied,
-// alpha saturated. Only on the effect path, where every texture is linear Rgba16Float.
+// alpha saturated; in light mode (`layer.src.w`) the copy is a dark shadow under the layer. Only on the effect path, where every texture is linear Rgba16Float.
 @group(0) @binding(1) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(2) var bloom_samp: sampler;
 
@@ -35,6 +35,10 @@ fn layer_texel (frag: vec2f) -> vec2i {
   let base = textureLoad (layer_tex, layer_texel (frag.xy), 0);
   let uv = (frag.xy + layer.origin.xy - layer.origin.zw) / layer.src.xy;
   let glow = textureSampleLevel (bloom_tex, bloom_samp, uv, 0.0);
-  let c = base + layer.src.z * glow;
+  var c = base + layer.src.z * glow;
+  if (layer.src.w != 0.0) {
+    // Light mode: the blurred copy is a soft dark shadow under the layer, not added light.
+    c = base + (1.0 - base.a) * vec4f (0.0, 0.0, 0.0, min (layer.src.z * glow.a, 0.85));
+  }
   return vec4f (c.rgb, min (c.a, 1.0)) * (layer.t.w * clip_coverage (frag.xy));
 }

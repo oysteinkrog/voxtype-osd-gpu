@@ -52,6 +52,13 @@ pub struct Options<M> {
     pub cpu_first_frame: bool,
     /// How properties move that no `.motion()` call names (`Scene::with_default_motion`).
     pub default_motion: vo_scene::Motion,
+    /// Reduced motion (`Scene::with_reduced_motion`). Default: `VO_REDUCED_MOTION=1` in the
+    /// environment.
+    pub reduced_motion: bool,
+    /// Effect quality tier (`vo_render::Quality`). Default: `VO_QUALITY`, else full.
+    pub quality: vo_render::Quality,
+    /// Light-mode shading (`Renderer::set_light`). Default: `VO_LIGHT=1` in the environment.
+    pub light: bool,
 }
 
 impl<M> Default for Options<M> {
@@ -64,20 +71,36 @@ impl<M> Default for Options<M> {
             diagnostics: None,
             cpu_first_frame: false,
             default_motion: vo_scene::element::DEFAULT_MOTION,
+            reduced_motion: env_flag("VO_REDUCED_MOTION"),
+            quality: vo_render::Quality::from_env().unwrap_or_default(),
+            light: env_flag("VO_LIGHT"),
         }
     }
 }
 
 impl<M> Options<M> {
+    /// Applies the quality tier and light mode to a renderer.
+    pub(crate) fn configure(&self, r: &mut vo_render::Renderer) {
+        r.set_quality(self.quality);
+        r.set_light(self.light);
+    }
+
     /// The scene with the text layout these options ask for.
     pub(crate) fn scene(&mut self) -> vo_scene::Scene<M> {
-        let scene = vo_scene::Scene::new().with_default_motion(self.default_motion);
+        let scene = vo_scene::Scene::new()
+            .with_default_motion(self.default_motion)
+            .with_reduced_motion(self.reduced_motion);
         match self.text.take() {
             Some(text) => scene.with_text(text),
             None if !self.fonts.is_empty() => scene.with_text(Box::new(ShapedLayout::new(self.fonts.clone()))),
             None => scene,
         }
     }
+}
+
+/// True when the variable is set to `1`, `true` or `yes`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
 }
 
 /// Runs `app` as a live overlay with default options.

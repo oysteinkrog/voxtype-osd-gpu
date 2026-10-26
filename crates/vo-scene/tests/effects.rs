@@ -57,3 +57,25 @@ fn bloom_makes_an_offscreen_layer_with_its_values() {
     let b = bloom.expect("a bloom layer");
     assert!((b.strength - 1.5).abs() < 1e-3 && (b.radius - 12.0).abs() < 1e-3, "{b:?}");
 }
+
+#[test]
+fn reduced_motion_jumps_travel_and_keeps_fades() {
+    use vo_scene::Transition;
+    let view = |x: f32| {
+        root(vec![Element::shape("dot", ShapeKind::Circle)
+            .size(10.0, 10.0)
+            .fill(Color::WHITE)
+            .offset(x, 0.0)
+            .presence(Transition::fade().offset(0.0, 40.0), Transition::fade())])
+    };
+    let mut scene = Scene::new().with_reduced_motion(true);
+    scene.apply(view(0.0), 0.0);
+    let id = scene.find(&["root", "dot"]).unwrap();
+    // Entering: no travel from the enter offset, but the fade is kept.
+    let s = scene.sampled(id, 0.02).unwrap();
+    assert_eq!(s.transform.f, 0.0, "entered with travel");
+    assert!(s.opacity < 1.0, "the fade went too");
+    // A new offset target jumps.
+    scene.apply(view(50.0), 1.0);
+    assert_eq!(scene.sampled(id, 1.0).unwrap().transform.e, 50.0);
+}

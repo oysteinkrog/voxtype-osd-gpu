@@ -172,6 +172,7 @@ pub(crate) fn drive<A: App, E: From<OfflineError>>(
 ) -> Result<u64, E> {
     let (device, queue) = headless_gpu()?;
     let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
+    options.configure(&mut off.renderer);
     let mut driver = start(app, scenario, &mut options);
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
 

@@ -72,6 +72,43 @@ const MAX_LEVELS: u32 = 6;
 /// How much of the lower level each bloom upsample mixes in.
 const BLOOM_MIX: f32 = 0.65;
 
+/// Quality tiers (MO09). Every tier draws a correct picture; a lower one leaves out the costly
+/// effects. `Full` is the default. The renderer drops one tier by itself when a texture for the
+/// effect path cannot be allocated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quality {
+    /// No bloom, no glow, no drop shadow.
+    Minimal,
+    /// Glow and drop shadow from the shape shader, no bloom: every frame takes the direct path.
+    NoBloom,
+    #[default]
+    Full,
+}
+
+impl Quality {
+    /// `full`, `no-bloom` or `minimal`.
+    pub fn parse(s: &str) -> Option<Quality> {
+        match s.trim() {
+            "full" => Some(Quality::Full),
+            "no-bloom" => Some(Quality::NoBloom),
+            "minimal" => Some(Quality::Minimal),
+            _ => None,
+        }
+    }
+
+    /// From `VO_QUALITY`, when it is set to a known tier.
+    pub fn from_env() -> Option<Quality> {
+        std::env::var("VO_QUALITY").ok().and_then(|v| Quality::parse(&v))
+    }
+
+    fn lower(self) -> Quality {
+        match self {
+            Quality::Full => Quality::NoBloom,
+            _ => Quality::Minimal,
+        }
+    }
+}
+
 /// The shape shader: `common.wgsl` and `shapes.wgsl`.
 pub fn shape_shader_source() -> String {
     [wgsl("common.wgsl", COMMON_WGSL), wgsl("shapes.wgsl", SHAPES_WGSL)].join("\n")
@@ -317,6 +354,9 @@ pub struct Renderer {
     uniform_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     fx_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     pool: Vec<PoolTex>,
+    quality: Quality,
+    /// Light-mode shading (FX14).
+    light: bool,
 }
 
 struct FxShared {
@@ -399,6 +439,8 @@ impl Renderer {
             uniform_buf: None,
             fx_buf: None,
             pool: Vec::new(),
+            quality: Quality::from_env().unwrap_or_default(),
+            light: false,
         }
     }
 
@@ -434,6 +476,21 @@ impl Renderer {
             .sum()
     }
 
+    /// The quality tier. Starts from `VO_QUALITY`, else `Full`.
+    pub fn quality(&self) -> Quality {
+        self.quality
+    }
+
+    pub fn set_quality(&mut self, q: Quality) {
+        self.quality = q;
+    }
+
+    /// Light-mode shading (FX14): a bloom becomes a soft dark shadow under its layer instead of
+    /// added light, because light added to a light backdrop washes out. Off by default.
+    pub fn set_light(&mut self, light: bool) {
+        self.light = light;
+    }
+
     /// Whether the last frame took the effect path.
     pub fn last_frame_had_effects(&self) -> bool {
         self.scene.is_some()
@@ -456,7 +513,7 @@ impl Renderer {
     /// Records the frame into `enc` without submitting, so a caller can add a copy after it.
     pub fn encode(&mut self, list: &DisplayList, scale: f32, target: &Target, enc: &mut wgpu::CommandEncoder) {
         let (w, h) = (target.width(), target.height());
-        let effects = list.layers.iter().any(|l| bloom_of(&l.target).is_some());
+        let effects = self.quality == Quality::Full && list.layers.iter().any(|l| bloom_of(&l.target).is_some());
         let format = if effects { EFFECT_FORMAT } else { target.format() };
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
         self.shapes.clear();
@@ -476,6 +533,9 @@ impl Renderer {
         root.bounds = [0.0, 0.0, w as f32, h as f32];
         self.surfaces.push(root);
         self.scene = None;
+        // An effect frame allocates its textures inside an error scope, so a failed allocation
+        // drops a quality tier and redoes the frame instead of drawing with a broken texture.
+        let scope = effects.then(|| self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory));
         if effects {
             self.ensure_fx();
             self.scene = Some(self.acquire(w, h, EFFECT_FORMAT));
@@ -489,6 +549,16 @@ impl Renderer {
             self.visit(&frame, 0, &top, 0);
         }
         self.place_surfaces(format);
+        if let Some(scope) = scope {
+            let mut pop = std::pin::pin!(scope.pop());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            if let std::task::Poll::Ready(Some(e)) = std::future::Future::poll(pop.as_mut(), &mut cx) {
+                eprintln!("vo-render: effect textures failed ({e}); dropping to quality {:?}", self.quality.lower());
+                self.quality = self.quality.lower();
+                self.pool.clear();
+                return self.encode(list, scale, target, enc);
+            }
+        }
         self.upload(format, target.format(), w, h);
         self.encode_passes(target, format, enc);
         self.pool.retain(|p| p.used || self.frame - p.last_used < POOL_KEEP_FRAMES);
@@ -520,7 +590,7 @@ impl Renderer {
                 let uniform = self.push_uniform(f, parent, opacity);
                 let child = self.surfaces.len();
                 let mut s = Surface::new();
-                if let Some(b) = bloom.filter(|b| b.strength > 0.0) {
+                if let Some(b) = bloom.filter(|b| f.effects && b.strength > 0.0) {
                     s.bloom = Some(bloom_plan(b, ppu));
                 }
                 self.surfaces.push(s);
@@ -546,6 +616,9 @@ impl Renderer {
                 ItemKind::Shapes => {
                     let start = self.shapes.len() as u32;
                     for s in &f.list.shapes[range] {
+                        if self.quality == Quality::Minimal && s.fill.is_halo() {
+                            continue;
+                        }
                         if let Some(mut g) = GpuShape::new(s, &to_px, ppu, opacity) {
                             if !f.effects {
                                 g.clamp_glow();
@@ -742,7 +815,7 @@ impl Renderer {
                         child.size[0] as f32,
                         child.size[1] as f32,
                         child.bloom.as_ref().map_or(0.0, |b| b.strength),
-                        0.0,
+                        self.light as u32 as f32,
                     ];
                 }
                 self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));

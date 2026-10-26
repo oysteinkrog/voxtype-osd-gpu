@@ -298,3 +298,57 @@ fn direct_path_caps_glow_strength() {
     // The renderer chooses the direct path for a list with no bloom.
     assert!(!off.renderer.last_frame_had_effects());
 }
+
+/// Quality tiers: `NoBloom` takes the direct path and draws a bloom layer as a plain layer,
+/// `Minimal` also leaves out glow and shadow, and `Full` is the default.
+#[test]
+fn quality_tiers_drop_effects() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    assert_eq!(off.renderer.quality(), vo_render::Quality::Full);
+    let bloom = bloom_scene(&font);
+    let full = render(&mut off, "q", &bloom, 1.0).px;
+    assert!(off.renderer.last_frame_had_effects());
+    off.renderer.set_quality(vo_render::Quality::NoBloom);
+    let no_bloom = render(&mut off, "q", &bloom, 1.0).px;
+    assert!(!off.renderer.last_frame_had_effects());
+    assert_ne!(full, no_bloom);
+    // Glow stays at NoBloom and goes at Minimal, where only the plain shapes are left.
+    let glow = glow_scene();
+    let with_glow = render(&mut off, "q", &glow, 1.0).px;
+    off.renderer.set_quality(vo_render::Quality::Minimal);
+    let without = render(&mut off, "q", &glow, 1.0).px;
+    let plain = DisplayList {
+        shapes: glow.shapes.iter().filter(|s| !s.fill.is_halo()).copied().collect(),
+        ..glow.clone()
+    };
+    // The plain list has fewer shapes, so its single shape item must shrink with it.
+    let mut plain = plain;
+    plain.items[0].len = plain.shapes.len() as u32;
+    let expected = render(&mut off, "q", &plain, 1.0).px;
+    assert_ne!(with_glow, without);
+    assert_eq!(without, expected);
+}
+
+/// Light mode: a bloom is a soft dark shadow under its layer, not added light.
+#[test]
+fn light_mode_bloom_golden() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    off.renderer.set_light(true);
+    let bg = ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 124.0, 0.0), Paint::solid(hex(0xf3f4f6)));
+    let capsule = ShapeInstance::capsule(Rect::new(20.0, 22.0, 70.0, 20.0), Paint::solid(hex(0x2563eb)));
+    let word = run(&font, "light", 110.0, 44.0, 30.0, hex(0x111827));
+    let list = Builder::new(240.0, 124.0).build(
+        vec![bg],
+        Some((Bloom { strength: 1.0, radius: 6.0 }, vec![capsule], word)),
+        Vec::new(),
+    );
+    let img = render(&mut off, "fx-bloom-light-1x", &list, 1.0);
+    assert_premultiplied(&img);
+    support::check(&img, Tolerance::default()).unwrap();
+}

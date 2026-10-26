@@ -25,4 +25,4 @@ pub mod text;
 pub mod vector;
 
 pub use offscreen::Offscreen;
-pub use renderer::{Renderer, Target};
+pub use renderer::{Quality, Renderer, Target};

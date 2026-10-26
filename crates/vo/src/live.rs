@@ -80,7 +80,9 @@ impl<A: App> Live<A> {
         } else {
             self.surface = host.open(&self.spec)?;
             let gpu = host.gpu()?;
-            self.renderer = Some(Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone()));
+            let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone());
+            options.configure(&mut r);
+            self.renderer = Some(r);
         }
         if let Some(inbox) = &options.inbox {
             inbox.connect(host.waker());
@@ -180,7 +182,11 @@ impl<A: App> HostApp for Live<A> {
             HostEvent::GpuReady { .. } => match host.gpu() {
                 Ok(gpu) => {
                     let fonts = self.options_rest.as_ref().map(|o| o.fonts.clone()).unwrap_or_default();
-                    self.renderer = Some(Renderer::with_fonts(&gpu.device, &gpu.queue, fonts));
+                    let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
+                    if let Some(o) = &self.options_rest {
+                        o.configure(&mut r);
+                    }
+                    self.renderer = Some(r);
                     // The GPU draws a frame even when the scene has settled: that frame
                     // replaces the CPU one.
                     self.driver().dirty = true;
