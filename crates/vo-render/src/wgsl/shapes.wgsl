@@ -66,6 +66,8 @@ struct ShapeOut {
   } else if (fill_kind == PAINT_SHADOW) {
     m += max (abs (s.fill_p.x), abs (s.fill_p.y)) + 3.0 * s.fill_p.z + max (s.fill_p.w, 0.0);
   }
+  // Motion blur smears the shape half its smear either way.
+  m += 0.5 * length (layer.smear.xy);
   var p: vec2f;
   if (kind == KIND_CIRCLE) {
     let r = s.geom.z + m;
@@ -255,22 +257,24 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
   return vec4f (rgb * a, min (a, 1.0));
 }
 
-@fragment fn fs_shape (in: ShapeOut) -> @location(0) vec4f {
+// Premultiplied colour of the shape at layer point `p`, whose pixel centre is at `frag_x` in
+// target pixels (for bands). No clip, no output encode.
+fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
   let kind = in.kinds & 0xffu;
   let fill_kind = (in.kinds >> 8u) & 0xffu;
   if (fill_kind >= PAINT_GLOW) {
-    let d = sd_shape (kind, in.p, in.clip.x + layer.origin.x, in);
-    return finish (halo (in, fill_kind, d) * clip_coverage (in.clip.xy));
+    let d = sd_shape (kind, p, frag_x, in);
+    return halo (in, fill_kind, d);
   }
   var d: f32;
   if (kind == KIND_CIRCLE) {
-    d = length (in.p - in.geom.xy) - in.geom.z;
+    d = length (p - in.geom.xy) - in.geom.z;
   } else if (kind == KIND_LINE) {
-    d = sd_segment (in.p, in.geom.xy, in.geom.zw);
+    d = sd_segment (p, in.geom.xy, in.geom.zw);
   } else if (kind == KIND_BAND) {
-    d = sd_band (in.p, in.geom, in.radii.xy, in.clip.x + layer.origin.x, in.band_px);
+    d = sd_band (p, in.geom, in.radii.xy, frag_x, in.band_px);
   } else {
-    d = sd_rrect (in.p, in.geom, in.radii);
+    d = sd_rrect (p, in.geom, in.radii);
   }
   // Distance and half stroke width in physical pixels. Coverage is the overlap of the pixel's
   // one-pixel box with the filled half-plane or the stroke band, exact for straight edges
@@ -283,8 +287,31 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
   }
   let stroke_cov = clamp (min (dp + 0.5, hw) - max (dp - 0.5, -hw), 0.0, 1.0);
 
-  let fill = paint ((in.kinds >> 8u) & 0xffu, in.fill_c0, in.fill_c1, in.fill_p, in.p) * fill_cov;
-  let stroke = paint ((in.kinds >> 16u) & 0xffu, in.stroke_c0, in.stroke_c1, in.stroke_p, in.p) * stroke_cov;
-  let c = stroke + fill * (1.0 - stroke.a);
+  let fill = paint ((in.kinds >> 8u) & 0xffu, in.fill_c0, in.fill_c1, in.fill_p, p) * fill_cov;
+  let stroke = paint ((in.kinds >> 16u) & 0xffu, in.stroke_c0, in.stroke_c1, in.stroke_p, p) * stroke_cov;
+  return stroke + fill * (1.0 - stroke.a);
+}
+
+// Motion blur takes one sample per pixel of smear, 4 to 32 of them, so thin stems do not show
+// as separate copies.
+fn smear_samples () -> i32 {
+  return clamp (i32 (ceil (length (layer.smear.zw))), 4, 32);
+}
+
+@fragment fn fs_shape (in: ShapeOut) -> @location(0) vec4f {
+  let frag_x = in.clip.x + layer.origin.x;
+  var c: vec4f;
+  if (all (layer.smear.xy == vec2f (0.0))) {
+    c = shade (in, in.p, frag_x);
+  } else {
+    // The average over the shutter: samples spread evenly over the smear, centred on the
+    // shape's position.
+    let n = smear_samples ();
+    for (var i = 0; i < n; i++) {
+      let k = (f32 (i) + 0.5) / f32 (n) - 0.5;
+      c += shade (in, in.p - k * layer.smear.xy, frag_x - k * layer.smear.z);
+    }
+    c /= f32 (n);
+  }
   return finish (c * clip_coverage (in.clip.xy));
 }

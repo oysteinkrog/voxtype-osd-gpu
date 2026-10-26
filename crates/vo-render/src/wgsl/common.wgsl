@@ -26,6 +26,8 @@ struct Layer {
   origin: vec4f,
   // A composite's source layer texture: width, height in pixels, bloom strength, 1 in light mode.
   src: vec4f,
+  // Motion blur: the smear in layer units (xy) and in target pixels (zw); zero for none.
+  smear: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;

@@ -65,6 +65,10 @@ pub struct Layer {
     /// Content outside this shape is not drawn. In layer space.
     pub clip: Option<RRect>,
     pub target: LayerTarget,
+    /// Motion blur (FX12): the distance the content moves while the shutter is open, in layer
+    /// units. The renderer averages the content along this segment, centred on its position.
+    /// Zero for none.
+    pub motion_blur: Point,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -78,6 +82,7 @@ impl Layer {
             blend: BlendMode::Normal,
             clip: None,
             target: LayerTarget::Direct,
+            motion_blur: Point::ZERO,
             items: 0..0,
         }
     }

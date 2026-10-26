@@ -198,6 +198,7 @@ struct LayerUniform {
     viewport: [f32; 4],
     origin: [f32; 4],
     src: [f32; 4],
+    smear: [f32; 4],
 }
 
 /// One block of `Fx` in `bloom.wgsl`.
@@ -226,6 +227,8 @@ struct LayerState {
     clip: Option<ClipState>,
     /// `x0, y0, x1, y1` in target pixels.
     scissor: [f32; 4],
+    /// Motion blur smear in target pixels, this layer's own plus its parents'.
+    smear: [f32; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,7 +547,14 @@ impl Renderer {
 
         if !list.layers.is_empty() {
             let full = [0.0, 0.0, w as f32, h as f32];
-            let top = LayerState { to_px: Affine::IDENTITY, ppu: 1.0, opacity: 1.0, clip: None, scissor: full };
+            let top = LayerState {
+                to_px: Affine::IDENTITY,
+                ppu: 1.0,
+                opacity: 1.0,
+                clip: None,
+                scissor: full,
+                smear: [0.0; 2],
+            };
             let frame = Frame { list, scale, effects, encode_srgb: encode_srgb as u32 as f32, target: [w, h] };
             self.visit(&frame, 0, &top, 0);
         }
@@ -608,7 +618,18 @@ impl Renderer {
         if opacity <= 0.0 {
             return;
         }
-        let state = LayerState { to_px, ppu, opacity, clip, scissor };
+        // The layer's smear in target pixels: its own, through its linear part, plus its parents'.
+        let mb = layer.motion_blur;
+        let smear = [
+            parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y),
+            parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y),
+        ];
+        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear };
+        // Content reaches half the smear further either way.
+        let reach = |b: [f32; 4]| {
+            let (hx, hy) = (0.5 * smear[0].abs(), 0.5 * smear[1].abs());
+            [b[0] - hx, b[1] - hy, b[2] + hx, b[3] + hy]
+        };
         let uniform = self.push_uniform(f, &state, opacity);
         for item in f.list.layer_items(li) {
             let range = item.start as usize..(item.start + item.len) as usize;
@@ -628,7 +649,7 @@ impl Renderer {
                                 &RRect::new(vo_scene::geom::Rect::new(q[0], q[1], q[2] - q[0], q[3] - q[1]), 0.0),
                                 &to_px,
                             );
-                            grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                            grow(&mut self.surfaces[draw_surface].bounds, intersect(reach(b), scissor));
                             self.shapes.push(g);
                         }
                     }
@@ -638,7 +659,7 @@ impl Renderer {
                     let start = self.glyphs.len() as u32;
                     for g in &f.list.glyphs[range] {
                         if let Some(inst) = self.glyph(g, &state) {
-                            grow(&mut self.surfaces[draw_surface].bounds, intersect(glyph_bounds(&inst), scissor));
+                            grow(&mut self.surfaces[draw_surface].bounds, intersect(reach(glyph_bounds(&inst)), scissor));
                             self.glyphs.push(inst);
                         }
                     }
@@ -775,7 +796,16 @@ impl Renderer {
     /// filled in by [`Renderer::place_surfaces`] once every surface is sized.
     fn push_uniform(&mut self, f: &Frame, st: &LayerState, opacity: f32) -> u32 {
         let m = &st.to_px;
+        // The smear back in layer units, through the inverse of the linear part.
+        let det = m.a * m.d - m.b * m.c;
+        let [sx, sy] = st.smear;
+        let smear = if (sx != 0.0 || sy != 0.0) && det != 0.0 {
+            [(m.d * sx - m.c * sy) / det, (m.a * sy - m.b * sx) / det, sx, sy]
+        } else {
+            [0.0; 4]
+        };
         let mut u = LayerUniform {
+            smear,
             m: [m.a, m.b, m.c, m.d],
             t: [m.e, m.f, st.ppu, opacity],
             viewport: [0.0, 0.0, f.encode_srgb, 0.0],
@@ -1226,7 +1256,6 @@ impl Renderer {
         self.pipelines.clear();
         Ok(n)
     }
-
     /// Creates the pipeline for `format`, `pipe` and `blend` on first use.
     fn pipeline(&mut self, format: wgpu::TextureFormat, pipe: Pipe, blend: BlendMode) {
         let key = (format, pipe, blend);

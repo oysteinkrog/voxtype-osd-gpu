@@ -117,6 +117,14 @@ impl<M> Node<M> {
         }
     }
 
+    /// The rate of change of `slot` at `t`, per second.
+    fn velocity(&self, slot: u8, t: f64) -> f64 {
+        match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
+            Ok(i) => self.chans[i].1.sample(t).1,
+            Err(_) => 0.0,
+        }
+    }
+
     pub fn has(&self, slot: u8) -> bool {
         self.chans.binary_search_by_key(&slot, |(s, _)| *s).is_ok()
     }
@@ -803,7 +811,18 @@ impl<M> Scene<M> {
         let leaving = leaving || n.leaving.is_some_and(|(since, _)| t >= since);
         let m = local.then(&parent_m);
         let as_layer = matches!(n.kind, Kind::Layer { .. });
-        if !as_layer && m.is_translation() {
+        // Motion blur: the distance moved while the shutter is open, in the parent's units.
+        let mut smear = Point::ZERO;
+        if n.has(Slot::Shutter as u8) {
+            let shutter = n.value(Slot::Shutter as u8, t);
+            let v = |a: Slot, b: Slot| (n.velocity(a as u8, t) + n.velocity(b as u8, t)) * shutter;
+            smear = Point::new(v(Slot::X, Slot::OffsetX) as f32, v(Slot::Y, Slot::OffsetY) as f32);
+            // In the node's own units, which its scale divides.
+            let k = n.value(Slot::Scale as u8, t).abs().max(1e-3) as f32;
+            smear = Point::new(smear.x / k, smear.y / k);
+        }
+        let blurred = smear.x.abs() + smear.y.abs() > 0.01;
+        if !as_layer && !blurred && m.is_translation() {
             self.emit_body(id, t, m, size, alpha * opacity, layer, leaving, items, out);
             return;
         }
@@ -824,7 +843,16 @@ impl<M> Scene<M> {
             }
             _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
         };
-        out.layers.push(Layer { parent: Some(layer), transform, opacity: group, blend, clip, target, items: 0..0 });
+        out.layers.push(Layer {
+            parent: Some(layer),
+            transform,
+            opacity: group,
+            blend,
+            clip,
+            target,
+            motion_blur: smear,
+            items: 0..0,
+        });
         let mut own = Vec::new();
         self.emit_body(id, t, Affine::IDENTITY, size, inside, index, leaving, &mut own, out);
         out.layers[index as usize].items = close_items(&mut own, out);

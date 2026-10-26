@@ -80,6 +80,7 @@ pub(crate) enum Slot {
     ShadowBlur = 39,
     BloomStrength = 40,
     BloomRadius = 41,
+    Shutter = 42,
 }
 
 impl Slot {
@@ -107,7 +108,8 @@ impl Slot {
             s if s < Slot::GlowColor as u8 => Prop::TextColor,
             s if s < Slot::ShadowColor as u8 => Prop::Glow,
             s if s < Slot::BloomStrength as u8 => Prop::Shadow,
-            _ => Prop::Bloom,
+            s if s < Slot::Shutter as u8 => Prop::Bloom,
+            _ => Prop::MotionBlur,
         }
     }
 
@@ -149,6 +151,8 @@ pub enum Prop {
     Shadow,
     /// Bloom strength and radius.
     Bloom,
+    /// The motion blur shutter.
+    MotionBlur,
 }
 
 /// How a property moves to a new target.
@@ -736,6 +740,15 @@ impl<M> Element<M> {
         }
         self.set(Slot::BloomStrength as u8, strength);
         self.set(Slot::BloomRadius as u8, radius);
+        self
+    }
+
+    /// Motion blur (FX12): while the element moves, its content is smeared along the distance it
+    /// travels in `shutter` seconds (1/60 is a light blur at 60 fps, 1/30 a strong one). The
+    /// speed comes from its position and offset springs. Text in it blurs as a whole.
+    pub fn motion_blur(mut self, shutter: f32) -> Element<M> {
+        self.set(Slot::Shutter as u8, shutter.max(0.0));
+        self.motion.push((Prop::MotionBlur, Motion::Snap));
         self
     }
 

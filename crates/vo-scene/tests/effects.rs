@@ -79,3 +79,18 @@ fn reduced_motion_jumps_travel_and_keeps_fades() {
     scene.apply(view(50.0), 1.0);
     assert_eq!(scene.sampled(id, 1.0).unwrap().transform.e, 50.0);
 }
+
+#[test]
+fn motion_blur_follows_the_spring_speed() {
+    let view = |x: f32| root(vec![El::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE).offset(x, 0.0).motion_blur(1.0 / 30.0)]);
+    let mut scene = Scene::new();
+    scene.apply(view(0.0), 0.0);
+    // At rest: no blur layer.
+    assert!(scene.sample(0.5).layers.iter().all(|l| l.motion_blur.x == 0.0));
+    scene.apply(view(200.0), 1.0);
+    let moving = scene.sample(1.05);
+    let smear = moving.layers.iter().map(|l| l.motion_blur.x).fold(0.0, f32::max);
+    assert!(smear > 1.0, "a moving dot smears: {smear}");
+    // Settled again: no blur.
+    assert!(scene.sample(5.0).layers.iter().all(|l| l.motion_blur.x.abs() < 0.01));
+}

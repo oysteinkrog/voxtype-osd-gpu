@@ -352,3 +352,34 @@ fn light_mode_bloom_golden() {
     assert_premultiplied(&img);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+/// Motion blur: a capsule and a word in a layer smeared 24 px to the right, next to the same
+/// content at rest.
+#[test]
+fn motion_blur_golden() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let mut list = Builder::new(240.0, 124.0).build(
+        vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 124.0, 0.0), Paint::solid(hex(0x101420)))],
+        Some((
+            Bloom { strength: 0.0, radius: 1.0 },
+            vec![ShapeInstance::capsule(Rect::new(20.0, 20.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0)))],
+            run(&font, "swift", 110.0, 40.0, 26.0, hex(0xffffff)),
+        )),
+        vec![
+            ShapeInstance::capsule(Rect::new(20.0, 76.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0))),
+        ],
+    );
+    list.layers[1].motion_blur = Point::new(24.0, 0.0);
+    let img = render(&mut off, "fx-motion-blur-1x", &list, 1.0);
+    assert_premultiplied(&img);
+    support::check(&img, Tolerance::default()).unwrap();
+    // The smear spreads the capsule: a pixel just past its right end is partly covered.
+    let lit = |x: u32| {
+        let p = &img.px[((30 * img.w + x) * 4) as usize..][..3];
+        p[2] > 60
+    };
+    assert!(lit(84) && !lit(94), "smear reach");
+}
