@@ -45,9 +45,14 @@ pub struct Layer {
     pub parent: Option<LayerIndex>,
     /// Layer space to surface space (logical units), already composed with every parent.
     pub transform: Affine,
-    /// Group opacity. On an offscreen layer it applies once, when the layer is composited.
-    /// On a direct layer the renderer multiplies it into each instance, so overlapping
-    /// instances inside the layer show through each other.
+    /// The layer's own group opacity, relative to its parent layer: the product of the
+    /// opacities of the nodes from the parent layer down to this one. It is not multiplied
+    /// by any parent layer's opacity; the renderer multiplies it down the tree, so the
+    /// opacity a layer ends up drawn with is the product along its parent chain.
+    ///
+    /// On an offscreen layer it applies once, when the layer is composited. On a direct
+    /// layer the renderer multiplies it into each instance, so overlapping instances inside
+    /// the layer show through each other.
     pub opacity: f32,
     pub blend: BlendMode,
     /// Content outside this shape is not drawn. In layer space.
