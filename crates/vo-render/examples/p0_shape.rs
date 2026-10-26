@@ -12,7 +12,7 @@ mod common;
 use std::time::Instant;
 
 use common::*;
-use unicode_linebreak::{BreakOpportunity, linebreaks};
+use unicode_linebreak::{linebreaks, BreakOpportunity};
 
 const LINE_A: &str = "so the plan for tomorrow is that we meet at nine in the small room on the second floor and go through the list of open bugs one by one before lunch then after lunch we split up and test";
 const LINE_B: &str = "when the build finishes I want to look at the numbers for the first frame again because last week they were much higher on the office machine than at home and nobody could explain why that would be the case";

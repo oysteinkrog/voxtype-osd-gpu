@@ -37,7 +37,14 @@ struct Placed {
 /// Lays the texts out with cmap and advances (no shaping), wrapping at
 /// `wrap_px`, rotated by `deg` about the first origin, then moves everything
 /// so the ink starts at `pad` pixels. Returns glyphs and canvas size.
-fn layout(font: &FontRef, atlas: &mut Atlas, px: f32, deg: f32, wrap_px: f32, texts: &[&str]) -> (Vec<Placed>, u32, u32) {
+fn layout(
+    font: &FontRef,
+    atlas: &mut Atlas,
+    px: f32,
+    deg: f32,
+    wrap_px: f32,
+    texts: &[&str],
+) -> (Vec<Placed>, u32, u32) {
     let upem = font.head().unwrap().units_per_em() as f32;
     let k = px / upem;
     let cmap = font.charmap();
@@ -309,7 +316,13 @@ fn contact_sheet(path: &str, gpu: &[f32], reference: &[f32], w: u32, h: u32, zoo
     write_png_rgb(path, zw, total_h, &rgb);
 }
 
-fn time_glyphs(gpu: &Gpu, r: &mut SlugRenderer, font: &FontRef, atlas: &mut Atlas, px: f32) -> Option<(usize, f64, f64, f64)> {
+fn time_glyphs(
+    gpu: &Gpu,
+    r: &mut SlugRenderer,
+    font: &FontRef,
+    atlas: &mut Atlas,
+    px: f32,
+) -> Option<(usize, f64, f64, f64)> {
     let (d, q) = (&gpu.device, &gpu.queue);
     if !d.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
         return None;
@@ -462,7 +475,13 @@ fn main() {
                         e.ink_px, e.max, e.p99_ink, e.mean_ink, e.mean_edge, e.over_10, coarse.max, coarse.mean_edge
                     );
                     if scale == 1.0 {
-                        let zoom = if px <= 14.0 { 4 } else if px <= 24.0 { 2 } else { 1 };
+                        let zoom = if px <= 14.0 {
+                            4
+                        } else if px <= 24.0 {
+                            2
+                        } else {
+                            1
+                        };
                         contact_sheet(&format!("{OUT_DIR}/slug-{px}px-rot{deg}-{name}.png"), &g, &rf, w, h, zoom);
                     }
                     let wst = &mut worst[i];

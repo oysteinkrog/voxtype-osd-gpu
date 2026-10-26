@@ -13,8 +13,7 @@ pub fn plasma_font_family() -> String {
     std::fs::read_to_string(format!("{home}/.config/kdeglobals"))
         .ok()
         .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("font=").map(|v| v.split(',').next().unwrap_or("").to_string()))
+            s.lines().find_map(|l| l.strip_prefix("font=").map(|v| v.split(',').next().unwrap_or("").to_string()))
         })
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| "Noto Sans".into())

@@ -151,17 +151,21 @@ fn render(font: &FontRef, hb: &harfrust::ShaperFont, text: &str, px: f32, mode: 
     let target = |mode| Target::Smooth { mode, symmetric_rendering: true, preserve_linear_metrics: false };
     let hinting = match mode {
         Mode::LightAuto => Some(
-            HintingInstance::new(&outlines, Size::new(px), LocationRef::default(), skrifa::outline::HintingOptions {
-                engine: Engine::Auto(None),
-                target: target(SmoothMode::Light),
-            })
+            HintingInstance::new(
+                &outlines,
+                Size::new(px),
+                LocationRef::default(),
+                skrifa::outline::HintingOptions { engine: Engine::Auto(None), target: target(SmoothMode::Light) },
+            )
             .unwrap(),
         ),
         Mode::Interpreter => Some(
-            HintingInstance::new(&outlines, Size::new(px), LocationRef::default(), skrifa::outline::HintingOptions {
-                engine: Engine::Interpreter,
-                target: target(SmoothMode::Normal),
-            })
+            HintingInstance::new(
+                &outlines,
+                Size::new(px),
+                LocationRef::default(),
+                skrifa::outline::HintingOptions { engine: Engine::Interpreter, target: target(SmoothMode::Normal) },
+            )
             .unwrap(),
         ),
         Mode::Unhinted => None,
@@ -192,7 +196,11 @@ fn render(font: &FontRef, hb: &harfrust::ShaperFont, text: &str, px: f32, mode: 
 /// drift along the line stays in the number.
 fn diff(a: &Ink, b: &Ink) -> (f32, f32) {
     let at = |i: &Ink, x: i32, y: i32| {
-        if x >= 0 && y >= 0 && (x as usize) < i.w && (y as usize) < i.h { i.v[y as usize * i.w + x as usize] } else { 0.0 }
+        if x >= 0 && y >= 0 && (x as usize) < i.w && (y as usize) < i.h {
+            i.v[y as usize * i.w + x as usize]
+        } else {
+            0.0
+        }
     };
     let (w, h) = (a.w.max(b.w) as i32 + 2, a.h.max(b.h) as i32 + 2);
     let mut best = (f32::MAX, 0.0f32);

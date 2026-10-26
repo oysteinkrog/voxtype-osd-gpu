@@ -55,7 +55,10 @@ pub fn shader_source_with(footprint: Footprint) -> String {
     let mut hb = [HB_GPU_VERTEX, HB_GPU_FRAGMENT, HB_GPU_DRAW_FRAGMENT].concat();
     if footprint == Footprint::AxisLength {
         for (from, to) in [
-            ("let pixelsPerEm = 1.0 / fwidth (renderCoord);", "let pixelsPerEm = 1.0 / _vo_ems_per_pixel (renderCoord);"),
+            (
+                "let pixelsPerEm = 1.0 / fwidth (renderCoord);",
+                "let pixelsPerEm = 1.0 / _vo_ems_per_pixel (renderCoord);",
+            ),
             ("let emsPerPixel = fwidth (renderCoord);", "let emsPerPixel = _vo_ems_per_pixel (renderCoord);"),
         ] {
             assert!(hb.contains(from), "hb-gpu WGSL changed: {from}");
@@ -104,12 +107,7 @@ impl Uniforms {
     /// Orthographic camera over `w` x `h` physical pixels, Y down.
     pub fn pixels(w: f32, h: f32) -> Self {
         Self {
-            mvp: [
-                [2.0 / w, 0.0, 0.0, 0.0],
-                [0.0, -2.0 / h, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [-1.0, 1.0, 0.0, 1.0],
-            ],
+            mvp: [[2.0 / w, 0.0, 0.0, 0.0], [0.0, -2.0 / h, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [-1.0, 1.0, 0.0, 1.0]],
             viewport: [w, h],
             gamma: 1.0,
             stem_darkening: 0.0,

@@ -30,7 +30,7 @@
 //! ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
 //! PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 
-use skrifa::outline::{DrawSettings, OutlinePen, pen::PathStyle};
+use skrifa::outline::{pen::PathStyle, DrawSettings, OutlinePen};
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::raw::TableProvider;
 use skrifa::{GlyphId, MetadataProvider};
@@ -149,8 +149,7 @@ impl Encoder {
         self.x_scale = upem;
         self.y_scale = upem;
         if let Some(glyph) = font.outline_glyphs().get(gid) {
-            let settings = DrawSettings::unhinted(Size::unscaled(), location)
-                .with_path_style(PathStyle::HarfBuzz);
+            let settings = DrawSettings::unhinted(Size::unscaled(), location).with_path_style(PathStyle::HarfBuzz);
             glyph.draw(settings, self).ok()?;
         }
         self.encode()
@@ -457,11 +456,8 @@ impl Encoder {
                 curve_texel[i] = texel - 1;
             }
             let has_next = i + 1 < num_curves && !curves[i + 1].contour_start;
-            let (nx, ny) = if has_next {
-                (quantize(curves[i + 1].p2[0]), quantize(curves[i + 1].p2[1]))
-            } else {
-                (0, 0)
-            };
+            let (nx, ny) =
+                if has_next { (quantize(curves[i + 1].p2[0]), quantize(curves[i + 1].p2[1])) } else { (0, 0) };
             buf[texel] = [quantize(c.p3[0]), quantize(c.p3[1]), nx, ny];
             texel += 1;
         }
@@ -581,10 +577,7 @@ fn cubic_farthest_fit_inside(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2], p3: [f64;
     if depth >= 8 {
         return false;
     }
-    let mid = [
-        (p0[0] + 3.0 * (p1[0] + p2[0]) + p3[0]) * 0.125,
-        (p0[1] + 3.0 * (p1[1] + p2[1]) + p3[1]) * 0.125,
-    ];
+    let mid = [(p0[0] + 3.0 * (p1[0] + p2[0]) + p3[0]) * 0.125, (p0[1] + 3.0 * (p1[1] + p2[1]) + p3[1]) * 0.125];
     if mid[0].hypot(mid[1]) > tol {
         return false;
     }
