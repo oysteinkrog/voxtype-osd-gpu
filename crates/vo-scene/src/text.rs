@@ -42,8 +42,10 @@ pub const ELLIPSIS_CLUSTER: u32 = u32::MAX;
 
 pub trait TextLayout {
     /// Breaks `text` into lines no wider than `max_width` (one line for `None`, apart from
-    /// line breaks in the text) and places its glyphs. A word longer than the width gets a
-    /// line of its own. `style.max_lines` and `style.ellipsis` cut the result.
+    /// line breaks in the text) and places its glyphs. A word longer than the width starts
+    /// a new line and breaks between characters, as Pango's `WRAP_WORD_CHAR` does
+    /// (`EstimateText` lets it overflow instead). `style.max_lines` and `style.ellipsis` cut
+    /// the result.
     fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText;
 }
 
@@ -133,10 +135,12 @@ impl ShapedLayout {
 struct Segment {
     glyphs: Range<usize>,
     width: f32,
-    /// Width of the whitespace at the end of the run.
-    trailing: f32,
     /// The text must break after this run.
     hard: bool,
+    /// The width that must fit after the line's earlier runs for this run to join them:
+    /// its own width less its trailing whitespace, or for the first piece of a word split
+    /// between characters, the whole word's, so that the word starts a new line.
+    fit_width: f32,
 }
 
 impl TextLayout for ShapedLayout {
@@ -152,7 +156,10 @@ impl TextLayout for ShapedLayout {
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let run = shape(&shaper, text);
         let (infos, pos) = (run.glyph_infos(), run.glyph_positions());
-        let segments = segments(text, infos, pos, k, style.tracking);
+        let mut segments = segments(text, infos, pos, k, style.tracking);
+        if let Some(max) = max_width {
+            segments = split_long_words(text, segments, infos, pos, k, style.tracking, max);
+        }
         let mut lines = fit(&segments, max_width);
         let max_lines = style.max_lines as usize;
         let dropped = max_lines > 0 && lines.len() > max_lines;
@@ -254,7 +261,52 @@ fn segments(text: &str, infos: &[GlyphInfo], pos: &[GlyphPosition], k: f32, trac
             trailing = if is_space(text, infos[g].cluster) { trailing + advance } else { 0.0 };
             g += 1;
         }
-        out.push(Segment { glyphs: start..g, width, trailing, hard: op == BreakOpportunity::Mandatory });
+        let hard = op == BreakOpportunity::Mandatory;
+        out.push(Segment { glyphs: start..g, width, hard, fit_width: width - trailing });
+    }
+    out
+}
+
+/// Splits each run too wide for a line on its own into one run per cluster, so the fitter
+/// can break it between characters. Space pieces never start a line, and the last
+/// piece keeps the run's hard break.
+fn split_long_words(
+    text: &str,
+    segments: Vec<Segment>,
+    infos: &[GlyphInfo],
+    pos: &[GlyphPosition],
+    k: f32,
+    tracking: f32,
+    max_width: f32,
+) -> Vec<Segment> {
+    if segments.iter().all(|s| s.fit_width <= max_width + FIT_TOLERANCE) {
+        return segments;
+    }
+    let mut out = Vec::with_capacity(segments.len());
+    for s in segments {
+        if s.fit_width <= max_width + FIT_TOLERANCE {
+            out.push(s);
+            continue;
+        }
+        let first = out.len();
+        let mut g = s.glyphs.start;
+        while g < s.glyphs.end {
+            let start = g;
+            let cluster = infos[g].cluster;
+            let mut width = 0.0;
+            while g < s.glyphs.end && infos[g].cluster == cluster {
+                width += pos[g].x_advance as f32 * k + tracking;
+                g += 1;
+            }
+            let piece = if is_space(text, cluster) {
+                Segment { glyphs: start..g, width, hard: false, fit_width: 0.0 }
+            } else {
+                Segment { glyphs: start..g, width, hard: false, fit_width: width }
+            };
+            out.push(piece);
+        }
+        out[first].fit_width = s.fit_width;
+        out.last_mut().expect("a run has glyphs").hard = s.hard;
     }
     out
 }
@@ -264,7 +316,7 @@ fn fit(segments: &[Segment], max_width: Option<f32>) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let (mut start, mut x) = (0, 0.0f32);
     for (i, s) in segments.iter().enumerate() {
-        if i > start && max_width.is_some_and(|max| x + s.width - s.trailing > max + FIT_TOLERANCE) {
+        if i > start && s.fit_width > 0.0 && max_width.is_some_and(|max| x + s.fit_width > max + FIT_TOLERANCE) {
             lines.push(start..i);
             (start, x) = (i, 0.0);
         }
@@ -370,9 +422,31 @@ mod tests {
         assert_eq!(t3.pos.y, one.glyphs[0].pos.y + 26.0);
         // Spaces place no glyph.
         assert_eq!(two.glyphs.len(), 11);
-        // A word wider than the width gets its own line and overflows it.
+        // Words wider than the width break between characters: one per line here, with
+        // the spaces at the ends of lines.
         let narrow = t.layout("one two three", &STYLE, Some(1.0));
-        assert_eq!(narrow.size.h, 78.0);
+        assert_eq!(narrow.size.h, 11.0 * 26.0);
+    }
+
+    #[test]
+    fn a_long_word_starts_a_new_line_then_breaks_between_characters() {
+        let t = shaped();
+        let word = "abcdefghijklmnopqrstuvwxyz";
+        let width = t.layout("abcdefghij", &STYLE, None).size.w + 1.0;
+        let s = t.layout(&format!("hi {word} end"), &STYLE, Some(width));
+        let line_of = |cluster: u32| {
+            let g = s.glyphs.iter().find(|g| g.cluster == cluster).unwrap();
+            ((g.pos.y - s.glyphs[0].pos.y) / 26.0).round() as u32
+        };
+        // "hi" alone, then the word from the start of the next line, ten letters a line.
+        assert_eq!(line_of(0), 0);
+        assert_eq!(line_of(3), 1);
+        assert!(t.layout(word, &STYLE, None).size.w > width);
+        assert_eq!(line_of(3 + 9), 1);
+        assert_eq!(line_of(3 + 10), 2);
+        assert_eq!(line_of(3 + 20), 3);
+        assert_eq!(s.glyphs.iter().find(|g| g.cluster == 3 + 10).unwrap().pos.x, 0.0);
+        assert!(s.size.w <= width + FIT_TOLERANCE, "{}", s.size.w);
     }
 
     #[test]
