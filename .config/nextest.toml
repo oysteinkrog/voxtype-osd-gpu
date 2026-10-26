@@ -1,0 +1,16 @@
+# Test profiles. See docs/dev-loop.md.
+#
+# default: the CPU loop. Test binaries named gpu_* need a Vulkan device and
+#          are left out, so `just test` never touches the GPU.
+# gpu:     only the gpu_* binaries (goldens and other GPU checks), one at a time
+#          so they do not fight over the device.
+
+[profile.default]
+default-filter = "not binary(/^gpu_/)"
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+[profile.gpu]
+default-filter = "binary(/^gpu_/)"
+test-threads = 1
+success-output = "immediate"
+failure-output = "immediate"
