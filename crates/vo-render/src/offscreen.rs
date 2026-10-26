@@ -161,7 +161,7 @@ impl Offscreen {
 #[cfg(feature = "png")]
 pub fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {
     let straight: Vec<u8> =
-        rgba.chunks_exact(4).flat_map(|p| crate::color::unpremultiply_srgb8([p[0], p[1], p[2], p[3]])).collect();
+        rgba.as_chunks::<4>().0.iter().flat_map(|&p| crate::color::unpremultiply_srgb8(p)).collect();
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, width, height);
     enc.set_color(png::ColorType::Rgba);
