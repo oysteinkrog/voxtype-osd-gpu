@@ -209,7 +209,7 @@ fn render_coverage(gpu: &Gpu, r: &mut SlugRenderer, atlas: &Atlas, glyphs: &[Pla
     q.submit([enc.finish()]);
     rb.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = rb.slice(..).get_mapped_range();
+    let data = rb.slice(..).get_mapped_range().expect("map");
     let mut out = vec![0f32; (w * h) as usize];
     for y in 0..h {
         for x in 0..w {
@@ -382,7 +382,7 @@ fn time_glyphs(gpu: &Gpu, r: &mut SlugRenderer, font: &FontRef, atlas: &mut Atla
     rb.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let period = q.get_timestamp_period() as f64;
-    let data = rb.slice(..).get_mapped_range();
+    let data = rb.slice(..).get_mapped_range().expect("map");
     let ts: &[u64] = bytemuck::cast_slice(&data);
     let (mut clear, mut glyph) = (Vec::new(), Vec::new());
     // Skip the first 20 frames (clock ramp).
