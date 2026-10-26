@@ -6,7 +6,9 @@
 //! region follows the panel. With `--move` the panel slides inside the overlay and the region
 //! is sent again with every surface commit, which tests per-frame region updates.
 //!
-//!   blur_probe [--secs S] [--move] [--no-blur] [--steps N]
+//!   blur_probe [--secs S] [--move] [--no-blur] [--steps N] [--backdrop-only]
+//!
+//! `--backdrop-only` shows just the test pattern, as a busy desktop behind another overlay.
 //!
 //! Prints the compositor's capabilities, then one line per second with frames and region
 //! updates sent.
@@ -52,6 +54,7 @@ struct App {
     effect: Option<ExtBackgroundEffectSurfaceV1>,
     caps: Option<u32>,
     moving: bool,
+    backdrop_only: bool,
     steps: u32,
     start: Instant,
     frames: u64,
@@ -148,7 +151,7 @@ impl App {
     }
 
     fn draw_over(&mut self, qh: &QueueHandle<App>) {
-        if !self.over_ready {
+        if !self.over_ready || self.backdrop_only {
             return;
         }
         let px0 = self.panel_x();
@@ -376,6 +379,7 @@ fn main() {
         effect,
         caps: None,
         moving: flag("--move"),
+        backdrop_only: flag("--backdrop-only"),
         steps,
         start: Instant::now(),
         frames: 0,
