@@ -63,6 +63,26 @@ Pointer enter, leave and click against the last sampled node bounds; hit-test re
 host for click-through; layer-shell keyboard interactivity mode; the toast dismiss action; the preview
 tool's scrub controls.
 
+## Time model notes
+
+Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, `track`, `hash`,
+`event_log`).
+
+- **Target-mode tracks ignore easing.** A target track retargets its channel at each keyframe, and the
+  spring does the motion between targets. A target that moves along a curve has no closed form, so the
+  keyframe's Bezier easing only applies in offset mode, where the eased value is added to the channel's
+  output.
+- **Retarget rule.** `Channel::retarget(t, ..)` with a `t` earlier than the latest segment drops every
+  segment after `t` and continues from the state at `t`, so an earlier event rewrites the future. A
+  replay editor wants that. A host bug that feeds events out of order would silently drop motion, so the
+  scene must `debug_assert` that events arrive in time order.
+- **Segments use `f64`.** Times, positions and velocities in a segment are `f64`, so a seek late in a long
+  export stays exact. Values become `f32` when they go into the display list.
+- **`pop` overshoots 4.6%.** A damping ratio of 0.7 gives 4.6% overshoot, not the 6% that
+  `CAPABILITIES.md` states. `Spring::POP` keeps 0.7; a 6% overshoot would need a ratio of about 0.67.
+- **Stagger.** `stagger_fit(i, n, gap, cap)` is the default: it shrinks the gap so the last item starts
+  by `cap`. `stagger(i, gap, cap)` only clamps, so items past the cap start together.
+
 ## Crates
 
 | Crate | Contents |
