@@ -26,6 +26,11 @@ struct Live<A: App> {
     cpu: Option<CpuRenderer>,
     /// The host's number of the first GPU frame, for the startup report.
     first_gpu_frame: Option<u64>,
+    /// With diagnostics: the display list of the last frame before a settle, to tell a frame
+    /// drawn while idle.
+    settled_list: Option<DisplayList>,
+    /// The host asked for the next frame (resize, GPU hand-over), so it may repeat the last.
+    host_asked: bool,
     surface: SurfaceId,
     list: DisplayList,
     /// The last region sent to the host, for `InputMode::Regions` specs.
@@ -120,6 +125,14 @@ impl<A: App> Live<A> {
     fn after_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) {
         let n = self.frames;
         self.frames += 1;
+        let host_asked = std::mem::take(&mut self.host_asked);
+        if let Some(before) = self.settled_list.take() {
+            if !host_asked && before == self.list {
+                if let Some(d) = self.diag() {
+                    d.idle_frame(n, t);
+                }
+            }
+        }
         let host_diag = host.diag().clone();
         let moving = self.driver().moving(t);
         self.driver().dirty = false;
@@ -130,6 +143,9 @@ impl<A: App> Live<A> {
             host.request_frame(id);
         } else {
             // The last frame until the next event: what follows is idle.
+            if self.diag().is_some() {
+                self.settled_list = Some(self.list.clone());
+            }
             if let Some(d) = self.diag() {
                 d.settled(t, &host_diag);
             }
@@ -149,11 +165,11 @@ impl<A: App> HostApp for Live<A> {
     }
 
     fn event(&mut self, host: &mut dyn HostCtl, event: HostEvent) {
-        let was_dirty = self.driver.as_ref().is_none_or(|d| d.dirty);
         match event {
             HostEvent::Configured { id, t, size, scale } if id == self.surface => {
                 self.driver().scene.set_viewport(t, size, scale);
                 self.driver().dirty = true;
+                self.host_asked = true;
             }
             HostEvent::Pointer(ev) if ev.surface == self.surface => self.driver().pointer(&ev),
             HostEvent::Timer { t } => self.driver().fire_timers(t),
@@ -168,6 +184,7 @@ impl<A: App> HostApp for Live<A> {
                     // The GPU draws a frame even when the scene has settled: that frame
                     // replaces the CPU one.
                     self.driver().dirty = true;
+                    self.host_asked = true;
                 }
                 Err(e) => {
                     self.error = Some(e);
@@ -189,12 +206,6 @@ impl<A: App> HostApp for Live<A> {
                 return;
             }
             _ => {}
-        }
-        if !was_dirty && self.driver.as_ref().is_some_and(|d| d.dirty) {
-            let t = host.now();
-            if let Some(d) = self.diag() {
-                d.changed(t);
-            }
         }
         self.after_change(host);
     }
@@ -243,6 +254,8 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
         renderer: None,
         cpu: None,
         first_gpu_frame: None,
+        settled_list: None,
+        host_asked: false,
         surface: 0,
         list: DisplayList::default(),
         region: None,
