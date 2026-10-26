@@ -1,6 +1,7 @@
 # voxtype-osd-gpu: agent rules
 
-- Read `docs/ROADMAP.md` section 8 (decisions) and the bead you are working on first.
+- Read `docs/FRAMEWORK-PLAN.md` first: it overrides `docs/ROADMAP.md` where they differ. Then
+  `docs/ROADMAP.md` section 8 (decisions) and the bead you are working on.
 - Builds and tests go through `heavy-build` (load the `heavy-build` skill). Long builds run detached.
 - Never open a window on the real display. Use offscreen rendering or a nested
   `kwin_wayland --virtual` (see the `headless-app-ui` skill).
