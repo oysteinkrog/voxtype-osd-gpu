@@ -205,11 +205,11 @@ impl SlugRenderer {
                 module: &module,
                 entry_point: Some("vs_glyph"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<GlyphInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &attrs,
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,

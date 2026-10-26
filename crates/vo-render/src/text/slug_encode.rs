@@ -32,6 +32,7 @@
 
 use skrifa::outline::{DrawSettings, OutlinePen, pen::PathStyle};
 use skrifa::prelude::{LocationRef, Size};
+use skrifa::raw::TableProvider;
 use skrifa::{GlyphId, MetadataProvider};
 
 /// Sub-unit quantisation: blob coordinates are font units times this.
@@ -399,6 +400,7 @@ impl Encoder {
         }
 
         // Sort: descending by max, ascending by min.
+        let infos = &infos[..];
         let desc = |key: fn(&CurveInfo) -> f64| {
             move |a: u32, b: u32| {
                 let (av, bv) = (key(&infos[a as usize]), key(&infos[b as usize]));

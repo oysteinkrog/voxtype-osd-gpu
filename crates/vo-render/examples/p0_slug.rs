@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use common::*;
 use skrifa::prelude::{LocationRef, Size};
+use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use vo_render::text::slug_encode::Encoder;
 use vo_render::text::slug_gpu::{Atlas, GlyphInstance, SlugRenderer, Uniforms};

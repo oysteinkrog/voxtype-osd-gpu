@@ -14,6 +14,7 @@ mod common;
 use common::*;
 use skrifa::outline::{DrawSettings, Engine, HintingInstance, OutlinePen, SmoothMode, Target};
 use skrifa::prelude::{LocationRef, Size};
+use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use zeno::{Command, Mask};
 
