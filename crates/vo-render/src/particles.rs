@@ -245,6 +245,25 @@ impl Camera {
             focal_px: px_per_unit,
         }
     }
+
+    /// The perspective of an overlay target `target` pixels in size, seen through a part of
+    /// it: a view `size` pixels in size whose top left is at `origin` in target pixels (an
+    /// offscreen layer). World units map to target pixels by `scale`; the eye is `distance`
+    /// units in front of the target's centre, so every view of one target shares one
+    /// vanishing point. With the view at the origin and the target's size, this is
+    /// [`Camera::overlay`] in pixels.
+    pub fn overlay_view(target: [f32; 2], origin: [f32; 2], size: [f32; 2], scale: f32, distance: f32) -> Camera {
+        let ([w0, h0], [ox, oy], [w, h], d) = (target, origin, size, distance);
+        Camera {
+            view_proj: [
+                [2.0 * scale / w, 0.0, 0.0, 0.0],
+                [0.0, -2.0 * scale / h, 0.0, 0.0],
+                [-(w0 - 2.0 * ox - w) / (w * d), -(h - h0 + 2.0 * oy) / (h * d), -0.6 / d, -1.0 / d],
+                [-1.0 - 2.0 * ox / w, 1.0 + 2.0 * oy / h, 0.55, 1.0],
+            ],
+            focal_px: scale,
+        }
+    }
 }
 
 /// How sprites combine with what is below.
@@ -1469,7 +1488,16 @@ impl Particles {
     /// Sets up view `view` (1 to [`VIEWS`] - 1) after [`Particles::prepare`]: the same frame
     /// drawn into another target, such as an offscreen layer, with its own transform, size
     /// and format. Blend, depth and samples are the prepared frame's.
-    pub fn set_view(&mut self, view: u32, to_px: Affine, width: u32, height: u32, format: wgpu::TextureFormat) {
+    /// `camera` replaces the prepared frame's camera for this view.
+    pub fn set_view(
+        &mut self,
+        view: u32,
+        to_px: Affine,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        camera: Option<Camera>,
+    ) {
         assert!(view > 0 && view < VIEWS, "view {view} is not 1 to {}", VIEWS - 1);
         let Some((_, blend, depth, samples)) = self.draw_key else { return };
         let m = to_px;
@@ -1480,6 +1508,10 @@ impl Particles {
             t: [m.e, m.f, px_per_unit, 0.0],
             viewport: [width as f32, height as f32, srgb as u32 as f32, 0.0],
             ..self.frame_data
+        };
+        let frame = match camera {
+            Some(c) => GpuFrame { view_proj: c.view_proj, cam: [1.0, c.focal_px, 0.0, 0.0], ..frame },
+            None => frame,
         };
         self.queue.write_buffer(&self.frame, view as u64 * VIEW_STRIDE, bytemuck::bytes_of(&frame));
         let key = (format, blend, depth, samples);
@@ -1809,6 +1841,31 @@ mod tests {
         // No room: a fresh layout.
         let r = allocate(100, &[60, 60], |i| (i == 0).then_some((20, 60)));
         assert_eq!(r, vec![(0, 60), (60, 40)]);
+    }
+
+    #[test]
+    fn a_view_of_part_of_the_target_sees_the_same_perspective() {
+        let project = |c: &Camera, p: [f32; 3], size: [f32; 2]| {
+            let m = c.view_proj;
+            let mut o = [0.0f32; 4];
+            for (col, v) in m.iter().zip([p[0], p[1], p[2], 1.0]) {
+                for r in 0..4 {
+                    o[r] += col[r] * v;
+                }
+            }
+            [(o[0] / o[3] * 0.5 + 0.5) * size[0], (0.5 - o[1] / o[3] * 0.5) * size[1]]
+        };
+        let (target, scale, d) = ([640.0, 360.0], 2.0, 500.0);
+        let whole = Camera::overlay_view(target, [0.0, 0.0], target, scale, d);
+        let part = Camera::overlay_view(target, [200.0, 90.0], [180.0, 120.0], scale, d);
+        for p in [[150.0, 70.0, 0.0], [130.0, 60.0, 120.0], [160.0, 80.0, -300.0]] {
+            let a = project(&whole, p, target);
+            let b = project(&part, p, [180.0, 120.0]);
+            assert!((a[0] - 200.0 - b[0]).abs() < 1e-2 && (a[1] - 90.0 - b[1]).abs() < 1e-2, "{p:?}: {a:?} {b:?}");
+        }
+        // The plane z = 0 lands on the pixels the 2D transform gives.
+        let a = project(&whole, [150.0, 70.0, 0.0], target);
+        assert!((a[0] - 300.0).abs() < 1e-3 && (a[1] - 140.0).abs() < 1e-3, "{a:?}");
     }
 
     #[test]

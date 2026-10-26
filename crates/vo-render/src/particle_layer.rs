@@ -32,7 +32,7 @@ use vo_scene::geom::{Affine, Point};
 
 use crate::particle_text::{word_runs, ParticleText};
 use crate::particles::{
-    EmitterId, EmitterSpec, FrameParams, Part, ParticleConfig, Particles, SlotLook, MAX_EMITTERS, VIEWS,
+    Camera, EmitterId, EmitterSpec, FrameParams, Part, ParticleConfig, Particles, SlotLook, MAX_EMITTERS, VIEWS,
 };
 
 /// Word slots: live words that can form at once.
@@ -40,6 +40,9 @@ const WORD_SLOTS: u32 = 16;
 /// Free particles for all emitter elements together.
 const FREE_CAPACITY: u32 = 131_072;
 const TRAIL_CAPACITY: u32 = 1024;
+/// The eye's distance in front of the target for 3D emitters, in target sizes (the larger
+/// side): about a 50 degree field of view.
+const EYE_DISTANCE: f32 = 1.1;
 
 struct Pool {
     node: u64,
@@ -363,7 +366,11 @@ impl ParticleLayer {
             }
         }
         let hidden = EmitterLook { brightness: 0.0, ..EmitterLook::default() };
-        let params = FrameParams::new(self.t, Affine::scale(s), width, height, format);
+        // 3D emitters (D302) are seen in perspective from in front of the target's centre.
+        let target = [width as f32, height as f32];
+        let distance = EYE_DISTANCE * target[0].max(target[1]) / s;
+        let mut params = FrameParams::new(self.t, Affine::scale(s), width, height, format);
+        params.camera = Some(Camera::overlay_view(target, [0.0, 0.0], target, s, distance));
         parts.prepare(&params, &|id| looks.get(id as usize).copied().flatten().unwrap_or(hidden), &slots);
         self.views.push((0, 0));
         for p in &self.placements {
@@ -376,7 +383,9 @@ impl ParticleLayer {
             }
             let ([ox, oy], [w, h]) = surface(p.surface);
             let to_px = Affine { a: s, b: 0.0, c: 0.0, d: s, e: -ox as f32, f: -oy as f32 };
-            parts.set_view(view, to_px, w, h, format);
+            let origin = [ox as f32, oy as f32];
+            let camera = Camera::overlay_view(target, origin, [w as f32, h as f32], s, distance);
+            parts.set_view(view, to_px, w, h, format, Some(camera));
             self.views.push((p.surface, view));
         }
     }

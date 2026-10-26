@@ -14,7 +14,7 @@ use vo_render::{Renderer, Target};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::emitter::{Emitter, RingEmitter, WordParticles};
 use vo_scene::font::{test_font_path, FontRegistry};
-use vo_scene::geom::Size;
+use vo_scene::geom::{Color, Size};
 use vo_scene::text::ShapedLayout;
 use vo_scene::Scene;
 
@@ -142,5 +142,83 @@ fn scene_particles_are_the_same_at_any_frame_rate() {
         assert_eq!(differ, 0, "frame at {} s: {differ} bytes differ between 60 fps and 144 Hz", times[i]);
     }
     let img = Image { name: "particle-layer".into(), w: W, h: H * times.len() as u32, channels: 4, px: a.concat() };
+    support::check(&img, Tolerance { per_pixel: 4, max_fraction: 0.002 }).unwrap();
+}
+
+/// A tilted torus of out-of-focus particles (D302, FX16).
+#[derive(Debug)]
+struct Torus;
+
+impl vo_scene::emitter::EmitterSource for Torus {
+    fn sim(&self, _: f64) -> vo_scene::emitter::EmitterSim {
+        vo_scene::emitter::EmitterSim { swirl: 0.8, life: 2.0, ..vo_scene::emitter::EmitterSim::torus(70.0, 10.0) }
+    }
+
+    fn look(&self, _: f64) -> vo_scene::emitter::EmitterLook {
+        vo_scene::emitter::EmitterLook {
+            rotation: vo_scene::emitter::tilt_x(1.1),
+            size: 1.2,
+            brightness: 0.3,
+            ramp: [Color::hex(0xbfe0ff, 1.0), Color::hex(0x7aa8ff, 0.8), Color::hex(0x5060ff, 0.0)],
+            style: vo_scene::emitter::SpriteStyle::Bokeh { focus: 0.55, aperture: 25.0 },
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn a_3d_emitter_looks_the_same_in_an_offscreen_layer() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let gpu = support::gpu();
+    let frame = |offscreen: bool| {
+        let mut renderer = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+        let target = Target::new(&gpu.device, W, H, FORMAT);
+        let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+        scene.set_viewport(0.0, Size::new(W as f32, H as f32), 1.0);
+        let mut e = Emitter::new(Arc::new(Torus), 4096, 3);
+        e.three_d = true;
+        // Off centre, so the offscreen layer's texture does not start at the target's corner.
+        let torus = Element::emitter("torus", e).size(200.0, 140.0);
+        let holder = if offscreen { Element::layer("holder").offscreen() } else { Element::layer("holder") };
+        let view = Element::column("root").pad_xy(130.0, 60.0).child(holder.child(torus));
+        scene.apply(view, 0.0);
+        let mut px = Vec::new();
+        for i in 0..=60 {
+            let t = i as f64 / 60.0;
+            let list = scene.sample(t);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.encode(&list, 1.0, &target, &mut enc);
+            if i == 60 {
+                px = read(&gpu, &target, enc);
+            } else {
+                gpu.queue.submit([enc.finish()]);
+            }
+        }
+        px
+    };
+    let direct = frame(false);
+    let layered = frame(true);
+    let lit = direct.chunks(4).filter(|c| c[3] > 8).count();
+    // The offscreen texture holds 8-bit sums, so a few bright overlaps round differently;
+    // the shape and its place must not change.
+    let off = direct.iter().zip(&layered).filter(|(a, b)| a.abs_diff(**b) > 3).count();
+    let centre = |px: &[u8]| {
+        let (mut sx, mut sy, mut sw) = (0.0f64, 0.0f64, 0.0f64);
+        for (i, c) in px.chunks(4).enumerate() {
+            let k = c[3] as f64;
+            sx += k * (i as u32 % W) as f64;
+            sy += k * (i as u32 / W) as f64;
+            sw += k;
+        }
+        (sx / sw, sy / sw, sw)
+    };
+    let (a, b) = (centre(&direct), centre(&layered));
+    println!("lit pixels {lit}, {off} channels differ by more than 3; centre {a:?} and {b:?}");
+    assert!(lit > 2000, "the torus draws: {lit}");
+    assert!(off * 1000 < direct.len(), "an offscreen layer changes the torus: {off} channels");
+    assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "an offscreen layer moves the torus");
+    assert!((a.2 - b.2).abs() < a.2 * 1e-3, "an offscreen layer changes the light");
+    let img = Image { name: "particle-layer-3d".into(), w: W, h: H, channels: 4, px: direct };
     support::check(&img, Tolerance { per_pixel: 4, max_fraction: 0.002 }).unwrap();
 }
