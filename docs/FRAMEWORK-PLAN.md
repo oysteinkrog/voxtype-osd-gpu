@@ -159,6 +159,55 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
   only, no video: 0.9 s. With PNGs as well: 11.3 s, peak RSS 511 MB, 29 MB of PNGs. One PNG writer
   thread took 85 s, because unpremultiply and deflate cost about 140 ms per 1080p frame.
 
+## Effects notes (M4, 2026-10-26)
+
+Oystein pulled the effects work forward on 2026-10-26, to run in parallel with M2. It was planned
+after M3, the macOS host, which has since been dropped.
+
+- **Two pass lists, chosen per frame.** A frame with no layer effect takes the direct path, as before:
+  everything draws into the target. A frame with any bloom layer takes the effect path: the scene and
+  every offscreen layer draw into `Rgba16Float` textures, each bloom layer runs its pyramid, and a last
+  pass tone maps, encodes and dithers into the target. The toast and the Swiss popup never take the
+  effect path, so their goldens and the budget are unchanged.
+- **Offscreen layers are sized to what they draw**, plus the bloom's reach (3 times 2 to the power of
+  the level count, in pixels), rounded up to 64 pixels, at a whole-pixel offset, from a texture pool
+  that frees a texture after 120 unused frames. Exact group opacity (`.offscreen()`) now costs a texture
+  the size of the group, not of the target.
+- **Scene API.** `Element::glow(colour, radius, strength)` and `Element::shadow(colour, dx, dy, blur)` on
+  anything that draws a shape; `Element::bloom(strength, radius)` on a layer, which makes it offscreen.
+  All are spring channels (`Prop::Glow`, `Prop::Shadow`, `Prop::Bloom`). Text glows through a bloom
+  layer around it, because glyphs have coverage but no distance.
+- **Display list.** Glow and shadow are fill paints (`PaintKind::Glow`, `PaintKind::Shadow`) on their own
+  shape instances, drawn under the shape, so plain shapes pay nothing. Bloom is
+  `LayerTarget::Offscreen { bloom: Some(Bloom) }`.
+- **Glow** is `strength * exp(-d / radius)` of the shape's distance, in the shape shader, with no blur
+  pass. Strength above 1 is light above 1 on the effect path; the direct path caps it at 1 so the hue
+  holds. Around a stroke it falls off on both sides of the stroke.
+- **Drop shadow** is the closed-form Gaussian of a rounded box (exact in x, four samples in y). Lines and
+  bands use the error function of their distance instead.
+- **Bloom** is the Call of Duty: Advanced Warfare pyramid: 13-tap downsample, Karis average on the first
+  level, 3x3 tent upsample, each level mixed 0.65 with the one below. The level count follows the radius
+  (level 1 spreads about 2 pixels, each level doubles), and the deepest level fades in, so a radius on a
+  spring changes smoothly. The bloom is added on top of the layer, premultiplied, with alpha saturated,
+  so the halo shows over a transparent desktop. Nothing is unpremultiplied in the pyramid.
+- **Tone map.** A shoulder above 0.95 on the brightest straight channel brings light above 1 back under
+  1 with the hue kept. A pure white becomes 0.982. Then sRGB encode and a dither of one code value from
+  the pixel position only, so frames do not change between runs.
+- **Subpixel motion.** The pyramid's grid is fixed to the texture, so it is not exactly translation
+  invariant: a dot moved across a pixel in eighths changes its halo's light by up to 2.3% and moves its
+  centroid within 0.06 px of the dot.
+- **Determinism.** Two renderers give the same bytes for every effect golden, and two exports of
+  `glow_demo` give the same 360 frame hashes.
+- **Measured** (`glow_demo -- --bench`, NVIDIA desktop, timestamp queries, median of 200 frames): at
+  600x300 the effect path takes 0.047 ms of GPU time against 0.015 ms for the same scene drawn
+  without effects; at 1920x1080, 0.212 ms against 0.081 ms. Pooled textures: 1.8 MB at 600x300 and
+  20.2 MB at 1920x1080, most of it the scene texture. Cold first frame of a 600x300 effect scene, from
+  process start to readback, 124 to 132 ms against 123 to 129 ms for the direct scene, so the extra
+  pipelines cost a few ms.
+- **Not done.** The CPU first frame skips glows, shadows and bloom. Glyph-level effects (TY17), the noise
+  library (FX10) and quality tiers (MO09) are next steps: MO09 switches bloom off by leaving
+  `bloom` out of the display list, which drops the frame to the direct path.
+
 ## Crates
 
 | Crate | Contents |
