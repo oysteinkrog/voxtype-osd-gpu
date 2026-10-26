@@ -27,7 +27,6 @@
 //!   sub-surface goes desynchronized and runs on its own. Input regions live on the GPU
 //!   surface, so the overlay is click-through until the first GPU frame.
 
-mod blur;
 mod handlers;
 
 use std::ptr::NonNull;
@@ -39,10 +38,6 @@ use smithay_client_toolkit::compositor::{CompositorState, Region};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::presentation_time::PresentationTimeState;
 use smithay_client_toolkit::reexports::calloop::{self, EventLoop};
-use smithay_client_toolkit::reexports::protocols::ext::background_effect::v1::client::{
-    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
-    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
-};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
@@ -54,7 +49,7 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
-    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode, InputRegion,
+    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode,
     Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId, SurfaceKind, Waker,
 };
 use wayland_client::globals::registry_queue_init;
@@ -192,10 +187,6 @@ pub(crate) struct Surf {
     pub(crate) last_present: Option<f64>,
     pub(crate) refresh: f64,
     pending_input: Option<InputMode>,
-    /// The compositor blur object, made on the first blur change, and a region waiting for
-    /// the frame's commit (`Some(None)` turns the blur off).
-    blur: Option<ExtBackgroundEffectSurfaceV1>,
-    pending_blur: Option<Option<InputRegion>>,
 }
 
 impl Surf {
@@ -356,8 +347,6 @@ pub struct State {
     xdg: Option<XdgShell>,
     /// Both or neither: fractional scale needs the viewport to map buffers back.
     fractional: Option<(WpFractionalScaleManagerV1, WpViewporter)>,
-    /// `ext-background-effect-v1`; `caps.backdrop_blur` follows its capabilities event.
-    blur: Option<ExtBackgroundEffectManagerV1>,
     pub(crate) presentation: PresentationTimeState,
     caps: HostCaps,
     pub(crate) diag: HostDiag,
@@ -416,14 +405,13 @@ impl WaylandHost {
             no_activate: layer_shell.is_some(),
             layer_shell: layer_shell.is_some(),
             exclusive_zone: layer_shell.is_some(),
-            // Set by the manager's capabilities event, which the first roundtrip brings.
+            // The blur protocols are bound by the spike, not yet by this host.
             backdrop_blur: false,
             fractional_scale: fractional.is_some(),
             present_feedback: has("wp_presentation"),
             cpu_first_frame: subcompositor.is_some() && shm.is_some(),
         };
         let presentation = PresentationTimeState::bind(&globals, &qh);
-        let blur = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()).ok();
 
         let event_loop: EventLoop<'static, State> =
             EventLoop::try_new().map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
@@ -451,7 +439,6 @@ impl WaylandHost {
             layer_shell,
             xdg,
             fractional,
-            blur,
             presentation,
             caps,
             diag,
@@ -612,20 +599,8 @@ impl State {
         }
     }
 
-    /// Sets the blur region on the surface the GPU draws into, for its next commit.
-    fn apply_blur(&mut self, i: usize, region: Option<&InputRegion>) {
-        let (Some(manager), true) = (&self.blur, self.caps.backdrop_blur) else { return };
-        let s = &mut self.surfaces[i];
-        let wl = s.gpu_wl().clone();
-        let effect = s.blur.get_or_insert_with(|| manager.get_background_effect(&wl, &self.qh, ()));
-        blur::set_region(&self.compositor, effect, region);
-    }
-
     pub(crate) fn remove(&mut self, i: usize) {
         let s = self.surfaces.remove(i);
-        if let Some(effect) = &s.blur {
-            effect.destroy();
-        }
         drop(s);
         let _ = self.conn.flush();
     }
@@ -691,15 +666,9 @@ impl State {
         let drawn = app.cpu_frame(self, &mut cpu);
         self.in_frame = None;
         let Ok(i) = self.index(id) else { return };
-        let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
-        if pending.0.is_some() || pending.1.is_some() {
+        if let Some(mode) = self.surfaces[i].pending_input.take() {
             let gpu_wl = self.surfaces[i].gpu_wl().clone();
-            if let Some(mode) = pending.0 {
-                self.apply_input(&gpu_wl, &mode);
-            }
-            if let Some(region) = pending.1 {
-                self.apply_blur(i, region.as_ref());
-            }
+            self.apply_input(&gpu_wl, &mode);
             gpu_wl.commit();
         }
         if !drawn {
@@ -790,9 +759,6 @@ impl State {
         let Ok(i) = self.index(id) else { return };
         if let Some(mode) = self.surfaces[i].pending_input.take() {
             self.apply_input(&wl, &mode);
-        }
-        if let Some(region) = self.surfaces[i].pending_blur.take() {
-            self.apply_blur(i, region.as_ref());
         }
         let queue = self.gpu.as_ref().unwrap().gpu.queue.clone();
         queue.present(tex);
@@ -1018,8 +984,6 @@ impl HostCtl for State {
             last_present: None,
             refresh: 0.0,
             pending_input: None,
-            blur: None,
-            pending_blur: None,
         });
         Ok(id)
     }
@@ -1034,15 +998,6 @@ impl HostCtl for State {
                     let wl = self.surfaces[i].gpu_wl().clone();
                     self.apply_input(&wl, &mode);
                     wl.commit();
-                    let _ = self.conn.flush();
-                }
-            }
-            SurfaceChange::Blur(region) => {
-                if self.in_frame == Some(id) {
-                    self.surfaces[i].pending_blur = Some(region);
-                } else {
-                    self.apply_blur(i, region.as_ref());
-                    self.surfaces[i].gpu_wl().commit();
                     let _ = self.conn.flush();
                 }
             }
