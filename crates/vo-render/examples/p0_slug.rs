@@ -444,7 +444,9 @@ fn main() {
         .map(|&(fp, _)| SlugRenderer::with_footprint(&gpu.device, wgpu::TextureFormat::Rgba16Float, fp))
         .collect();
     let mut worst = [Err::default(), Err::default()];
-    for px in [14.0f32, 24.0, 56.0, 120.0] {
+    // VO_TIMING_ONLY=1 skips the accuracy runs.
+    let sizes: &[f32] = if std::env::var_os("VO_TIMING_ONLY").is_some() { &[] } else { &[14.0, 24.0, 56.0, 120.0] };
+    for &px in sizes {
         for scale in [1.0f32, 1.25, 1.5, 2.0] {
             for deg in [0.0f32, 7.0, 45.0] {
                 let eff = px * scale;
@@ -479,7 +481,8 @@ fn main() {
     }
 
     println!("\nGPU time, 300 glyphs on 2100x1350 Rgba8Unorm, 400 frames after 200 warm-up:");
-    for &(fp, name) in &footprints {
+    // Two rounds in alternating order, so clock ramp-up cannot favour either.
+    for &(fp, name) in footprints.iter().chain(footprints.iter()) {
         let mut r8 = SlugRenderer::with_footprint(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, fp);
         for px in [14.0f32, 24.0, 56.0] {
             match time_glyphs(&gpu, &mut r8, &font, &mut atlas, px) {
