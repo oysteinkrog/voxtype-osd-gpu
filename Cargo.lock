@@ -926,6 +926,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-scene"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "wgpu"
 version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
