@@ -131,6 +131,34 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
   73 ms, because a new compositor answers the first configure more slowly. The GPU path there is 200
   to 216 ms.
 
+## Timeline and export notes (M2, 2026-10-26)
+
+- **Timeline API** (`vo_core::timeline`). Build a tree with `clip(name, dur)`, `marker(name)`,
+  `wait(secs)`, `all([..])`, `chain([..])`, `sequence(gap, [..])`, `stagger(gap, cap, [..])` and
+  `delay(by, item)`. `stagger` uses `stagger_fit`, so the last item starts by `cap`. `sequence` ends
+  when its longest-running item ends, not when the last one starts.
+- **Schedule.** `Timeline::schedule()` lays the tree out once into a flat table of named spans on
+  clip-local time. `progress`, `eased`, `spring`, `active` and `local` are closed form in `t`, so
+  frames can be sampled in any order. Two clips or two markers with one name panic, like an empty
+  `Track`.
+- **Bridge to the scene.** The scene has no expression channels yet, so `Schedule::cues(start)`
+  lists clip starts, ends and markers in time order, ends before markers before starts at equal
+  times. An app turns them into timers in `init` and moves each part between states, and the
+  scene's springs do the motion. `Schedule::spring` is the closed form for when expression channels
+  land.
+- **Export** (`vo::export`, feature `export`). Exactly `round(duration * fps)` frames at `n / fps`,
+  whether or not the app exits. The readback ring feeds a writer thread that hashes every frame,
+  pipes raw RGBA to an `ffmpeg` child and hands PNGs to up to 8 encoder threads. ffmpeg is checked
+  before the first frame, and a missing one gives an error that names the fix. `VO_FFMPEG`
+  overrides the program. Premultiplied frames with the alpha dropped are the same as compositing
+  over black.
+- **Reproducible files.** `Video::h264` passes `-map_metadata -1` and the bitexact flags, so two
+  renders give byte-identical mp4 files, not only identical frames.
+- **Measured** (title card, 1920x1080, 600 frames, release, NVIDIA desktop): 4.1 to 5.0 s with
+  H.264 (about 120 to 150 fps), 0.45 MB file, peak RSS 323 to 360 MB for the render process. Frames
+  only, no video: 0.9 s. With PNGs as well: 11.3 s, peak RSS 511 MB, 29 MB of PNGs. One PNG writer
+  thread took 85 s, because unpremultiply and deflate cost about 140 ms per 1080p frame.
+
 ## Crates
 
 | Crate | Contents |
