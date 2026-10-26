@@ -510,9 +510,9 @@ impl<M> Scene<M> {
                 self.remove_subtree(c);
             }
         }
+        self.changed |= old != order;
         let n = &mut self.nodes[id];
         let changed = n.flow != flow;
-        self.changed |= n.children != order;
         n.flow = flow;
         n.children = order;
         if changed {
