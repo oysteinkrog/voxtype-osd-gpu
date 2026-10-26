@@ -1,7 +1,8 @@
 //! Shared code for the GPU test binaries (`tests/gpu_*.rs`): a headless wgpu
 //! device, offscreen readback, and golden image comparison.
 //!
-//! Goldens live in `tests/goldens/<name>.png` (8-bit grayscale coverage).
+//! Goldens live in `tests/goldens/<name>.png`: 8-bit grayscale coverage, or 8-bit RGBA
+//! holding the renderer's premultiplied bytes as they are (`Image::channels` 1 or 4).
 //! `VO_GOLDEN_UPDATE=1` writes them instead of comparing (`just golden-update`).
 //! Every run writes the actual image, a diff and a contact sheet to
 //! [`OUT_DIR`] and prints the contact sheet path.
@@ -119,7 +120,28 @@ pub struct Image {
     pub name: String,
     pub w: u32,
     pub h: u32,
+    /// 1 for grayscale, 4 for premultiplied RGBA.
+    pub channels: u32,
     pub px: Vec<u8>,
+}
+
+impl Image {
+    fn color_type(&self) -> png::ColorType {
+        if self.channels == 4 {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Grayscale
+        }
+    }
+
+    /// One pixel as premultiplied RGBA (gray is white at that coverage).
+    fn rgba(px: &[u8], channels: u32, i: usize) -> [u8; 4] {
+        if channels == 4 {
+            [px[i * 4], px[i * 4 + 1], px[i * 4 + 2], px[i * 4 + 3]]
+        } else {
+            [px[i]; 4]
+        }
+    }
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -135,12 +157,12 @@ fn write_png(path: &Path, w: u32, h: u32, color: png::ColorType, data: &[u8]) {
     enc.write_header().unwrap().write_image_data(data).unwrap();
 }
 
-fn read_gray_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+fn read_png(path: &Path, color: png::ColorType) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = std::fs::read(path).ok()?;
     let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
-    assert_eq!(info.color_type, png::ColorType::Grayscale, "{} is not 8-bit grayscale", path.display());
+    assert_eq!(info.color_type, color, "{} is not 8-bit {color:?}", path.display());
     buf.truncate(info.buffer_size());
     Some((info.width, info.height, buf))
 }
@@ -151,14 +173,14 @@ fn read_gray_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
 pub fn check(img: &Image, tol: Tolerance) -> Result<(), String> {
     let golden = golden_path(&img.name);
     let out = Path::new(OUT_DIR);
-    write_png(&out.join(format!("{}.actual.png", img.name)), img.w, img.h, png::ColorType::Grayscale, &img.px);
+    write_png(&out.join(format!("{}.actual.png", img.name)), img.w, img.h, img.color_type(), &img.px);
     if std::env::var_os("VO_GOLDEN_UPDATE").is_some_and(|v| v == "1") {
-        write_png(&golden, img.w, img.h, png::ColorType::Grayscale, &img.px);
+        write_png(&golden, img.w, img.h, img.color_type(), &img.px);
         sheet_add(img, None);
         eprintln!("updated {}", golden.display());
         return Ok(());
     }
-    let Some((gw, gh, gpx)) = read_gray_png(&golden) else {
+    let Some((gw, gh, gpx)) = read_png(&golden, img.color_type()) else {
         sheet_add(img, None);
         return Err(format!("{}: no golden at {} (run `just golden-update`)", img.name, golden.display()));
     };
@@ -167,15 +189,16 @@ pub fn check(img: &Image, tol: Tolerance) -> Result<(), String> {
         return Err(format!("{}: size {}x{}, golden {gw}x{gh}", img.name, img.w, img.h));
     }
     let (mut bad, mut worst) = (0usize, 0u8);
-    for (a, b) in img.px.iter().zip(&gpx) {
-        let d = a.abs_diff(*b);
+    let c = img.channels as usize;
+    for (a, b) in img.px.chunks_exact(c).zip(gpx.chunks_exact(c)) {
+        let d = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
         worst = worst.max(d);
         if d > tol.per_pixel {
             bad += 1;
         }
     }
     sheet_add(img, Some(&gpx));
-    let frac = bad as f64 / img.px.len() as f64;
+    let frac = bad as f64 / (img.w * img.h) as f64;
     if frac > tol.max_fraction {
         return Err(format!(
             "{}: {bad} pixels ({:.3} %) differ by more than {}, worst {worst}; see {}",
@@ -200,18 +223,24 @@ fn sheet_add(img: &Image, golden: Option<&[u8]>) {
     let sw = w * 3 + gap * 2;
     let mut row = vec![[40u8, 40, 40]; (sw * h) as usize];
     let mut diff = vec![0u8; (w * h * 3) as usize];
+    // Premultiplied pixels shown over a dark gray backdrop.
+    let show = |p: [u8; 4]| -> [u8; 3] {
+        let k = 255 - p[3] as u32;
+        [0, 1, 2].map(|c| (p[c] as u32 + 40 * k / 255).min(255) as u8)
+    };
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) as usize;
-            let a = img.px[i];
-            let g = golden.map_or(0, |g| g[i]);
-            let d = a.abs_diff(g);
-            // Diff: gray actual, differences in red, amplified 8x.
-            let dc = if golden.is_some() && d > 0 { [d.saturating_mul(8).max(64), a / 4, a / 4] } else { [a / 4; 3] };
+            let a = Image::rgba(&img.px, img.channels, i);
+            let g = golden.map_or([0; 4], |g| Image::rgba(g, img.channels, i));
+            let d = (0..4).map(|c| a[c].abs_diff(g[c])).max().unwrap();
+            let lum = a[3] / 4;
+            // Diff: dim actual coverage, differences in red, amplified 8x.
+            let dc = if golden.is_some() && d > 0 { [d.saturating_mul(8).max(64), lum, lum] } else { [lum; 3] };
             diff[i * 3..i * 3 + 3].copy_from_slice(&dc);
             let base = (y * sw) as usize;
-            row[base + x as usize] = [g; 3];
-            row[base + (w + gap + x) as usize] = [a; 3];
+            row[base + x as usize] = show(g);
+            row[base + (w + gap + x) as usize] = show(a);
             row[base + (2 * (w + gap) + x) as usize] = dc;
         }
     }

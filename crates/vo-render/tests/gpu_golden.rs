@@ -48,7 +48,7 @@ fn render(gpu: &support::Gpu, font: &FontRef, name: &str, w: u32, h: u32, lines:
     r.set_uniforms(&gpu.queue, &Uniforms::pixels(w as f32, h as f32));
     r.set_instances(&gpu.device, &gpu.queue, &glyphs);
     let px = support::render_alpha(gpu, w, h, |pass| r.draw(pass));
-    Image { name: name.into(), w, h, px }
+    Image { name: name.into(), w, h, channels: 1, px }
 }
 
 #[test]
