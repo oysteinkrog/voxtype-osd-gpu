@@ -248,7 +248,8 @@ mod scene_tests {
         scene.apply(Element::column("root").child(Element::wave("w", wave).size(100.0, 20.0)), 1.0);
         assert_eq!(scene.next_wake(2.0), Some(2.0));
         assert_eq!(scene.next_wake(3.0), None);
-        assert_ne!(scene.sample(2.0), scene.sample(2.5));
+        assert_ne!(scene.sample(2.9), scene.sample(2.95));
+        assert!(!scene.sample(2.9).shapes.is_empty());
         assert_eq!(scene.sample(3.0), scene.sample(4.0));
     }
 }
