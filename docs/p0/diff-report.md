@@ -10,10 +10,11 @@ repo. [V] marks a measured result, [I] an inference, [G] a guess.
 1. **The live preview only appends.** In 2112 revisions, no word before the last one ever
    changed. Each revision adds 1.6 words on average (0 to 6), and the last word may grow
    or gain punctuation. [V]
-2. **The final swap from the Cohere engine is the only real revision.** 97.6 % of final
-   words keep a live word id, but 42 % of kept words shift sideways and 12 % change line,
-   because earlier words change length. `settle-to-final` must move words, not only
-   crossfade the changed ones. [V]
+2. **The final swap from the Cohere engine is the only real revision.** In a Cohere
+   replay of all 94 recordings, 97.0 % of final words keep a live word id, but 60 % of
+   them shift sideways and 19 % change line (48-column wrap), because earlier words
+   change length. `settle-to-final` must move words, not only crossfade the changed
+   ones. [V]
 3. **With today's config the final swap is empty.** `live_preview_final = "preview"`
    pastes the last preview text, so the final equals what is on screen in every
    recording where the replay matched the live run (63 of 63). [V]
@@ -22,8 +23,9 @@ repo. [V] marks a measured result, [I] an inference, [G] a guess.
    for speed. [V]
 5. **Per-word confidence works and means something.** With the parakeet-rs fork branch
    `voxtype-confidence`, all 3507 words carry a score. Median 0.991; 704 words (20 %)
-   are under 0.8. Words that the Cohere final later changed have a median of 0.793,
-   against 0.993 for words it kept, and 16 of the 31 changed words are under 0.8. [V]
+   are under 0.8. Words that the Cohere final changes have a median of 0.778, against
+   0.993 for words it keeps. Marking words under 0.8 would catch 56 % of the words
+   Cohere changes, but only 18 % of the marked words actually change. [V]
 
 ## Corpus
 
@@ -32,7 +34,7 @@ repo. [V] marks a measured result, [I] an inference, [G] a guess.
 | Recordings | 94 kept recordings from 2026-10-25 and 26 (target was 20) [V] |
 | Audio | 1687 s in total; per recording p50 9.0 s, p90 36.9 s, max 161 s [V] |
 | Preview model | Parakeet unified 0.6b, int8, CPU, parakeet-rs default streaming context [V] |
-| Final text | The text that was pasted at the time: Cohere engine in 14 recordings, the preview's own text in 80 [V] |
+| Final text | The text that was pasted at the time: Cohere engine in 14 recordings, the preview's own text in 80. Plus a Cohere replay of all 94 (see below) [V] |
 | Revisions | 2112 preview revisions [V] |
 | Replay check | The replayed preview equals the preview recorded live in 77 of 94. The other 17 differ by 1 to 5 words, all from the same evening. [V] Probably because the kept WAV is 16-bit and the live model saw 32-bit float samples. [G] |
 
@@ -104,6 +106,39 @@ Grouped into runs of changed words: 8 runs delete words outright (7 of them one 
 runs merge 2 or 3 live words into one final word, 6 runs swap one word for one or two, 1 run rewrites 7 words as 5,
 and 2 runs insert a word. [V]
 
+### Cohere replay of all 94 recordings
+
+Only 14 recordings had a live Cohere final, so voxtype's `replay_engine_final` example
+ran Cohere (q4f16, GPU, 5.5 GiB VRAM free at the start) over all 94 WAVs, in the same
+pause-split parts the live worker sends it, and diffed that final against the replayed
+preview. 2 recordings gave no Cohere text, so 92 count. It took 104 s for 1687 s of
+audio. On the 14 recordings that also had a live Cohere final, the replayed text is
+identical in 7 and differs in 5 % of words on average. [V]
+
+| Measure | Cohere replay, 92 recordings |
+|---|---|
+| Final identical to the last preview | 6 |
+| Live words, final words | 3507, 3470 |
+| Final words that keep a live id | 97.0 % |
+| kept, restyled, extended, substituted | 2920, 364, 28, 54 |
+| inserted, removed | 104, 141 |
+| Kept-id words that move, 48 columns | 2028 of 3366 (60 %) |
+| Kept-id words that change line, 48 columns | 630 (19 %) |
+| Kept-id words that move, 80 columns | 2132 (63 %) |
+| Kept-id words that change line, 80 columns | 222 (7 %) |
+| Share of words that move, per changed recording (p50, p90) | 44 %, 91 % |
+| Unchanged words before the first change, per changed recording (p50) | 12.5 % |
+
+Runs of changed words, by shape (old words to new words): 1 to 1: 53, 1 deleted: 43,
+1 to 2: 19, 1 inserted: 18, 2 to 1: 16, 2 deleted: 7, and 24 runs of other shapes. [V]
+
+Confidence against the Cohere changes: the 223 live words that Cohere changed have a
+median score of 0.778 (125 under 0.8); the 3284 it kept have 0.993 (579 under 0.8). [V]
+
+The 14-recording numbers in the table above understated the motion: with more data, the
+share of kept words that move went from 42 % to 60 %, and line changes from 12 % to
+19 %. [V]
+
 ### Synthetic examples
 
 Written for this report, not taken from the corpus.
@@ -122,12 +157,15 @@ Written for this report, not taken from the corpus.
   enters at the end, the last word grows in place, the last word gains punctuation. Mid
   paragraph substitution never happens with this recogniser, so it can use a simple
   fallback (crossfade) without tuning. [V for the data; I for the design]
-- **Final path: FLIP for everything.** With an engine final, plan for 40 % or more of
-  words to move sideways and about 1 in 8 to change line. `settle-to-final` should
+- **Final path: FLIP for everything.** With an engine final, plan for about 60 % of
+  words to move sideways and 1 in 5 to change line at a narrow width. `settle-to-final` should
   animate positions of all words by id, crossfade restyled words in place, and fade out
   removed ones. [V for the data; I for the design]
-- **Removed words need an exit motion.** 22 removals against 8 insertions in the engine
-  finals. [V]
+- **Removed words need an exit motion.** 141 removals against 104 insertions in the
+  Cohere replay. [V]
+- **Confidence styling is a hint, not a forecast.** Low scores point at words the final
+  will change, but most low-score words survive. A light style suits it better than a
+  strong warning. [V for the numbers; I for the design]
 - **The stability rule in TY06** (committed after about 600 ms or two unchanged
   hypotheses) can be simpler: with an append-only stream, every word but the last is
   committed as soon as the next word appears. [I]
@@ -140,6 +178,9 @@ Written for this report, not taken from the corpus.
 # Turn on the recorder in the daemon (off by default), or replay kept recordings:
 #   live_preview_revisions_dir = "<private dir>"          in config.toml
 cargo run --example replay_revisions --features parakeet -- <corpus dir> <private dir>
+# Optional: Cohere finals (needs the engine's CUDA build and free VRAM):
+cargo run --example replay_engine_final --features cohere-cuda,onnx-load-dynamic -- \
+    <private dir> <corpus dir> <private dir 2>
 
 # Then, in this repo:
 cargo run --release -p vo-core --example revdiff -- <private dir> 48
@@ -150,12 +191,12 @@ cargo run --release -p vo-core --example revdiff -- <private dir> 48
 ## Open problems
 
 1. **Confidence thresholds.** A word's score is the lowest softmax probability of its
-   tokens (voxtype commit 51ce290, parakeet-rs fork commit f250ecc). The 0.8 line above
-   is a first look, not a tuned threshold; only 31 changed words back it.
-2. **Few engine finals.** Only 14 recordings used Cohere, because the config switched to
-   preview finals on 2026-10-25. More engine data would firm up the move and removal
-   numbers. A second replay with Cohere on the same WAVs would give 94, at about 2.4 GiB
-   VRAM per run. [G for the VRAM]
+   tokens (voxtype commit 51ce290, parakeet-rs fork commit f250ecc). The 0.8 line is a
+   first look, not a tuned threshold.
+2. **Cohere replay fidelity.** The replayed Cohere text matches the live one exactly in
+   only 7 of 14 recordings (5 % of words differ on average). Same likely cause as item 4,
+   plus the q4f16 model on the GPU. It changes individual words, not the shape of the
+   numbers. [V for the match rate; G for the cause]
 3. **Simulated wall time.** The replay ran the preview model in a debug build (opt-level
    1) on a 4-CPU cap. Live latency can differ; the live recorder gives real times once it
    is turned on.
