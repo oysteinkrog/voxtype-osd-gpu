@@ -3,7 +3,7 @@
 //! - `math`, `camera`: `Vec3`, `Mat4`, an orbit camera with perspective or orthographic
 //!   projection.
 //! - `mesh`, `text3d`: meshes (torus, box, extruded paths) and extruded 3D text from glyph
-//!   outlines (D306).
+//!   outlines (D306), and [`TurningWord`], a word whose letters turn in on springs.
 //! - `frame`: [`Frame3d`], the value an app builds from `t`: camera, light, mesh draws, point
 //!   clouds (D302) and bokeh orbs (FX16).
 //! - `render`: [`Renderer3d`], one MSAA pass with a depth buffer that resolves into any
@@ -33,4 +33,5 @@ pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use render::{FieldBinding, Renderer3d};
 pub use stack::{Layers, Stack, TextPlane};
+pub use text3d::{extrude_text, GlyphMesh, TurningWord};
 pub use timer::GpuTimer;

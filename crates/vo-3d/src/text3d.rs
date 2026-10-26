@@ -12,8 +12,14 @@ use skrifa::prelude::{LocationRef, Size};
 use skrifa::{GlyphId, MetadataProvider};
 use vo_scene::font::Face;
 
-use crate::math::Vec3;
+use vo_core::channel::{Channel, Rest};
+use vo_core::hash::stagger_fit;
+use vo_core::spring::Spring;
+
+use crate::frame::{Material, MeshDraw, MeshId};
+use crate::math::{Mat4, Vec3};
 use crate::mesh::Mesh;
+use crate::render::Renderer3d;
 
 /// One extruded glyph.
 #[derive(Clone, Debug)]
@@ -80,6 +86,58 @@ pub fn extrude_text(face: &Face, text: &str, size: f32, depth: f32) -> Vec<Glyph
         g.center = c - word_center;
     }
     glyphs
+}
+
+/// An extruded word whose letters turn in and out on springs, one channel per letter. The
+/// channel runs from 0 (edge-on, lowered, small) to 1 (facing the camera, in place). Turns are
+/// events at a time, so sampling any `t` gives the same draws.
+pub struct TurningWord {
+    letters: Vec<(MeshId, Vec3)>,
+    turn: Vec<Channel>,
+}
+
+impl TurningWord {
+    /// Uploads the glyph meshes. Every letter starts turned away at `t`.
+    pub fn new(renderer: &mut Renderer3d, glyphs: &[GlyphMesh], t: f64, spring: Spring) -> TurningWord {
+        let letters = glyphs.iter().map(|g| (renderer.add_mesh(&g.mesh), g.center)).collect();
+        let turn = glyphs.iter().map(|_| Channel::new(t, 0.0, spring).with_rest(Rest::UNIT)).collect();
+        TurningWord { letters, turn }
+    }
+
+    /// Turns every letter to `target` (1 in, 0 out) from `t`, letter `i` starting
+    /// `stagger_fit(i, n, gap, cap)` later. Calls must come in time order.
+    pub fn turn(&mut self, t: f64, target: f64, gap: f64, cap: f64) {
+        let n = self.turn.len();
+        for (i, c) in self.turn.iter_mut().enumerate() {
+            c.retarget(t + stagger_fit(i, n, gap, cap), target);
+        }
+    }
+
+    /// Whether every letter is at rest at `t`.
+    pub fn is_settled(&self, t: f64) -> bool {
+        self.turn.iter().all(|c| c.is_settled(t))
+    }
+
+    /// The letters' draws at `t`, placed by `model` (word to world).
+    pub fn draws(&self, t: f64, model: &Mat4, material: Material) -> Vec<MeshDraw> {
+        self.letters
+            .iter()
+            .zip(&self.turn)
+            .filter_map(|(&(mesh, center), c)| {
+                let v = c.value(t) as f32;
+                if v <= 1e-3 {
+                    return None;
+                }
+                let away = 1.0 - v;
+                let letter = Mat4::uniform_scale(0.6 + 0.4 * v)
+                    .then(&Mat4::rotate_y(-away * std::f32::consts::FRAC_PI_2))
+                    .then(&Mat4::rotate_x(away * 0.6))
+                    .then(&Mat4::translation(center + Vec3::new(0.0, -0.35 * away, 0.0)))
+                    .then(model);
+                Some(MeshDraw { mesh, model: letter, material })
+            })
+            .collect()
+    }
 }
 
 /// Collects a skrifa outline into a lyon path, in world units.
