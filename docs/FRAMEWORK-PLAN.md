@@ -10,7 +10,9 @@ internals (Slug text, SDF shapes, effects, particles); this file overrides them 
 ## Scope
 
 - In: desktop overlays (layer-shell style popups, notifications, OSDs, HUDs), offline motion graphics
-  (the same scenes rendered to video or frames), Linux, macOS and Windows.
+  (the same scenes rendered to video or frames), on Linux only. macOS and Windows are out of scope
+  (decided 2026-10-26). The `Host` trait stays, so a port stays possible, but nothing is planned or
+  tested for them.
 - Out: full desktop apps (text fields, focus, screen readers). Node ids stay stable so accesskit can be
   added later.
 
@@ -50,8 +52,6 @@ internals (Slug text, SDF shapes, effects, particles); this file overrides them 
    callbacks. One wgpu device per process, many cheap surfaces.
    - Wayland: sctk layer-shell, plus an undecorated, non-activating `xdg_toplevel` surface as a host
      capability for compositors without layer-shell (GNOME). No X11 host.
-   - macOS: non-activating `NSPanel` with a `CAMetalLayer`, accessory activation policy.
-   - Windows: HWND with wgpu DX12 on DirectComposition (`DxgiFromVisual`) for alpha.
    - Offscreen: renders to a texture with a caller-driven clock, for goldens and export.
 10. **Export:** readback ring, PNG sequence in-process, video through an `ffmpeg` child process. Export
     code sits behind a feature so the live overlay does not pay for it.
@@ -101,7 +101,7 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 
 ## Host notes (M1, 2026-10-26)
 
-- The `Host` trait lives in its own small crate, `vo-host`, so the macOS and Windows hosts never depend on
+- The `Host` trait lives in its own small crate, `vo-host`, so another host would never depend on
   the Wayland crate. There is no separate offscreen host crate: `render_offline` uses vo-render's
   `Offscreen` directly.
 - The host presents. The frame callback and the input region must be set before the commit that present
@@ -175,8 +175,7 @@ The popup app and `osd-protocol` live in voxtype.
 ## Milestones
 
 - **M0, measure.** Finish phase 0 (wgpu trial, cold start, alpha, pacing, blur, CPU first frame).
-  Linux only for now (decided 2026-10-26). The two macOS and Windows checks (Slug's fragment-stage
-  storage buffer on DX12 and Metal, DirectComposition alpha with click-through) move to the start of M3.
+  Linux only (decided 2026-10-26).
   Until then the display list avoids anything those backends are known to lack.
 - **M1, core (Linux only, started 2026-10-26).** Time model, scene model, input model, the offscreen host with golden tests and a
   determinism check, the Wayland host. CI measures own heap (budget 15 MB) and cold start from the first
@@ -184,15 +183,12 @@ The popup app and `osd-protocol` live in voxtype.
 - **M2, three apps on one API** before the API counts as stable: the Swiss popup (design 12), a
   notification toast, and a 10 s title card exported to video. The popup must run in daily voxtype use
   for one week behind a flag.
-- **M3, macOS** host spike, then the host. One conformance scene checked on every host.
-- **M4,** the other design families, particles, glass and blur, the preview and scrub tool.
-- **M5, Windows** host, when a Windows app is wanted.
+- **M3, removed.** It was the macOS host; macOS and Windows are out of scope.
+- **M4,** started 2026-10-26 in parallel with M2: the other design families, particles, glass and blur, the preview and scrub tool.
+- **M5, removed.** It was the Windows host.
 
 ## Risks
 
 1. Framework scope delays the first shipped popup. The M2 gate is the guard.
 2. A `step(dt)` motion core ships in M1 and the event-time model becomes a rewrite.
-3. Windows click-through may break DirectComposition alpha.
-4. Slug's fragment-stage storage buffer is untested on DX12 and Metal.
-5. Cold start and memory on DX12 and Metal are unknown; there is no pipeline cache there.
-6. Key collisions or identity bugs reset springs.
+3. Key collisions or identity bugs reset springs.
