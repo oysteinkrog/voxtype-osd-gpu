@@ -211,9 +211,7 @@ fn main() {
                     let append_only = changes.iter().all(|c| match c.kind {
                         ChangeKind::Kept => true,
                         // The last word may grow or gain punctuation.
-                        ChangeKind::Extended | ChangeKind::Restyled => {
-                            c.old_index == Some(n_old.saturating_sub(1))
-                        }
+                        ChangeKind::Extended | ChangeKind::Restyled => c.old_index == Some(n_old.saturating_sub(1)),
                         ChangeKind::Inserted => c.new_index.unwrap_or(0) >= n_old.saturating_sub(1),
                         _ => false,
                     });
@@ -234,7 +232,8 @@ fn main() {
                     for c in &changes {
                         let (Some(ni), true) = (c.new_index, aligned) else { continue };
                         let w = &timed[ni];
-                        let (s, e) = (w["start"].as_f64().unwrap_or(0.0) * 1000.0, w["end"].as_f64().unwrap_or(0.0) * 1000.0);
+                        let (s, e) =
+                            (w["start"].as_f64().unwrap_or(0.0) * 1000.0, w["end"].as_f64().unwrap_or(0.0) * 1000.0);
                         if c.kind == ChangeKind::Inserted {
                             first.insert(c.id, t - s);
                         }
