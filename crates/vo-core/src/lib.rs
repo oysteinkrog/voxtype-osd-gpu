@@ -4,7 +4,9 @@
 //! reads a clock; `clippy.toml` in this crate bans `Instant::now` and `SystemTime::now`.
 //! Word model (phase 0): `words`.
 
+pub mod channel;
 pub mod hash;
 pub mod spring;
 pub mod time;
+pub mod track;
 pub mod words;
