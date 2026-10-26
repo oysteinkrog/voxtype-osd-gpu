@@ -7,6 +7,8 @@
 //!
 //!   cargo run --release -p vo --example title_card -- [--out DIR] [--check] [--png]
 //!
+//! `-- --preview` opens it in the preview and scrub tool instead (`vo::preview`).
+//!
 //! Writes `DIR/title_card.mp4` (default DIR `/var/tmp/claude/m2-titlecard`) and
 //! `DIR/contact-sheet.png` (8 frames). `--check` renders a second time without video and
 //! compares every frame's hash. `--png` also writes the frames as PNGs to `DIR/frames`.
@@ -242,7 +244,24 @@ fn peak_rss_mb() -> f64 {
         / 1024.0
 }
 
+fn fonts() -> FontRegistry {
+    let fonts = FontRegistry::new();
+    for path in ["/usr/share/fonts/noto/NotoSans-Black.ttf", "/usr/share/fonts/noto/NotoSans-Medium.ttf"] {
+        fonts.add_file(path.as_ref()).unwrap_or_else(|e| panic!("cannot load {path}: {e}"));
+    }
+    fonts
+}
+
 fn main() {
+    if vo::preview::wanted() {
+        let fonts = fonts();
+        let scenario = Scenario { size: Size::new(W, H), scale: 1.0, duration: DURATION, inputs: Vec::new() };
+        let options = move || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
+        let preview = vo::preview::Preview::new("title_card", TitleCard::new, options, scenario)
+            .fps(FPS)
+            .markers_from(&timeline().schedule());
+        std::process::exit(vo::preview::main(preview));
+    }
     let mut args = std::env::args().skip(1);
     let (mut out, mut check, mut png) = (PathBuf::from("/var/tmp/claude/m2-titlecard"), false, false);
     while let Some(a) = args.next() {
@@ -253,10 +272,7 @@ fn main() {
             _ => panic!("unknown option {a}"),
         }
     }
-    let fonts = FontRegistry::new();
-    for path in ["/usr/share/fonts/noto/NotoSans-Black.ttf", "/usr/share/fonts/noto/NotoSans-Medium.ttf"] {
-        fonts.add_file(path.as_ref()).unwrap_or_else(|e| panic!("cannot load {path}: {e}"));
-    }
+    let fonts = fonts();
     let options = || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
     let scenario = Scenario { size: Size::new(W, H), scale: 1.0, duration: DURATION, inputs: Vec::new() };
     let mp4 = out.join("title_card.mp4");

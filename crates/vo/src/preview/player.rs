@@ -125,8 +125,7 @@ impl<A: App> Player<A> {
             }
             self.pos = t;
         }
-        self.stats =
-            SeekStats { secs: started.elapsed().as_secs_f64(), events, replayed, replays: self.stats.replays };
+        self.stats = SeekStats { secs: started.elapsed().as_secs_f64(), events, replayed, replays: self.stats.replays };
     }
 
     /// Seeks to `t` and samples the scene there.

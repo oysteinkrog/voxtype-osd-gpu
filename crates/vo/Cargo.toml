@@ -13,7 +13,7 @@ wayland = ["dep:vo-host-wayland"]
 # Export to a PNG sequence or a video file through ffmpeg (plan decision 10).
 export = []
 # The preview and scrub tool: seek, a window with a timeline, live reload, contact sheets.
-preview = []
+preview = ["dep:serde", "dep:serde_json", "dep:toml", "dep:png", "dep:bytemuck"]
 
 [dependencies]
 vo-core = { path = "../vo-core" }
@@ -23,6 +23,18 @@ vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland", optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 pollster = "0.4"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+toml = { version = "0.8", default-features = false, features = ["parse"], optional = true }
+png = { version = "0.18", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+
+# The preview launcher: builds an example, runs it with `--preview`, rebuilds and replays to
+# the same time when Rust sources change.
+[[bin]]
+name = "vo-preview"
+path = "src/bin/vo-preview.rs"
+required-features = ["preview"]
 
 [dev-dependencies]
 # Tests and examples always see the export and preview code; the library only with the features.

@@ -6,6 +6,9 @@
 //! Offline, to PNG frames:
 //!   cargo run -p vo --example toast -- --offline /var/tmp/claude/toast-frames [--fps 30]
 //!
+//! In the preview and scrub tool, with the offline script:
+//!   cargo run -p vo --example toast -- --preview
+//!
 //! Options: `--dismiss-after S` (default 4), `--font PATH`, `--cpu-first-frame` (draw the first
 //! frames on the CPU while the GPU starts). `VO_DIAG_FRAMES=1` prints a line per frame.
 
@@ -169,7 +172,35 @@ fn targets(fonts: &FontRegistry, dismiss_after: f64) -> (Point, Point) {
     (centre(&["root", "toast"]), centre(&["root", "toast", "header", "close"]))
 }
 
+/// Hover at 1 s (holds the timer), click the close button at 2.5 s.
+fn scripted(toast_at: Point, close_at: Point) -> Scenario<Msg> {
+    Scenario {
+        size: SURFACE,
+        scale: 1.0,
+        duration: 6.0,
+        inputs: vec![
+            (1.0, Input::Pointer { pos: toast_at, kind: PointerKind::Enter }),
+            (1.0, Input::Pointer { pos: toast_at, kind: PointerKind::Motion }),
+            (2.4, Input::Pointer { pos: close_at, kind: PointerKind::Motion }),
+            (2.5, Input::Pointer { pos: close_at, kind: PointerKind::Down(vo::scene::input::Button::Primary) }),
+            (2.55, Input::Pointer { pos: close_at, kind: PointerKind::Up(vo::scene::input::Button::Primary) }),
+        ],
+    }
+}
+
 fn main() {
+    if vo::preview::wanted() {
+        let fonts = FontRegistry::new();
+        let font = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
+        fonts.add_file(font.as_ref()).unwrap_or_else(|e| panic!("cannot load {font}: {e}"));
+        let (toast_at, close_at) = targets(&fonts, 4.0);
+        let options = move || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
+        let make = || Toast { shown: true, dismiss_after: 4.0, deadline: 0.0, timer: None };
+        let preview = vo::preview::Preview::new("toast", make, options, scripted(toast_at, close_at))
+            .marker("hover", 1.0)
+            .marker("click", 2.5);
+        std::process::exit(vo::preview::main(preview));
+    }
     let mut args = std::env::args().skip(1);
     let (mut offline, mut fps, mut dismiss_after) = (None::<PathBuf>, 30.0, 4.0);
     let mut cpu_first_frame = false;
@@ -196,19 +227,7 @@ fn main() {
     let options = || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
 
     if let Some(dir) = offline {
-        // Hover at 1 s (holds the timer), click the close button at 2.5 s.
-        let scenario = Scenario {
-            size: SURFACE,
-            scale: 1.0,
-            duration: 6.0,
-            inputs: vec![
-                (1.0, Input::Pointer { pos: toast_at, kind: PointerKind::Enter }),
-                (1.0, Input::Pointer { pos: toast_at, kind: PointerKind::Motion }),
-                (2.4, Input::Pointer { pos: close_at, kind: PointerKind::Motion }),
-                (2.5, Input::Pointer { pos: close_at, kind: PointerKind::Down(vo::scene::input::Button::Primary) }),
-                (2.55, Input::Pointer { pos: close_at, kind: PointerKind::Up(vo::scene::input::Button::Primary) }),
-            ],
-        };
+        let scenario = scripted(toast_at, close_at);
         let n = vo::render_offline_with(app, &scenario, fps, &dir, options()).expect("offline render");
         eprintln!("toast: wrote {n} frames to {}", dir.display());
         eprintln!("toast: heap peak {:.2} MB", PEAK.load(Ordering::Relaxed) as f64 / 1048576.0);
