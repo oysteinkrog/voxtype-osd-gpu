@@ -197,6 +197,7 @@ fn main() {
             match line["kind"].as_str() {
                 Some("preview") => {
                     let before = positions(&model, width);
+                    #[allow(clippy::disallowed_methods, reason = "benchmark timing, not motion")]
                     let start = Instant::now();
                     let changes = model.update(text);
                     diff_us.push(start.elapsed().as_secs_f64() * 1e6);
