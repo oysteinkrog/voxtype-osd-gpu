@@ -7,7 +7,6 @@ struct Uniforms {
   viewport: vec2f,
   gamma: f32,
   stem_darkening: f32,
-  foreground: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -15,17 +14,23 @@ struct Uniforms {
 
 // One instance per glyph. `lin` is the em-to-object 2x2 matrix by columns
 // (col0.x, col0.y, col1.x, col1.y); object space is physical pixels, Y down.
+// `color` is linear and premultiplied, with any opacity already multiplied in.
+// `word` is the vo-core word id, carried for per-word effects.
 struct GlyphInstance {
   @location(0) ext: vec4f,
   @location(1) lin: vec4f,
   @location(2) offset: vec2f,
   @location(3) loc: u32,
+  @location(4) color: vec4f,
+  @location(5) word: u32,
 };
 
 struct VsOut {
   @builtin(position) clip: vec4f,
   @location(0) tc: vec2f,
   @location(1) @interpolate(flat) loc: u32,
+  @location(2) @interpolate(flat) color: vec4f,
+  @location(3) @interpolate(flat) word: u32,
 };
 
 @vertex fn vs_glyph (@builtin(vertex_index) vi: u32, g: GlyphInstance) -> VsOut {
@@ -46,6 +51,8 @@ struct VsOut {
   out.clip = u.mvp * vec4f (d[0], 0.0, 1.0);
   out.tc = d[1];
   out.loc = g.loc;
+  out.color = g.color;
+  out.word = g.word;
   return out;
 }
 
@@ -53,11 +60,11 @@ struct VsOut {
   let ppem = hb_gpu_ppem (in.tc, in.loc);
   var cov = hb_gpu_draw (in.tc, in.loc);
   if (u.stem_darkening > 0.0) {
-    let brightness = dot (u.foreground.rgb, vec3f (1.0 / 3.0)) / max (u.foreground.a, 1e-6);
+    let brightness = dot (in.color.rgb, vec3f (1.0 / 3.0)) / max (in.color.a, 1e-6);
     cov = hb_gpu_stem_darken (cov, brightness, ppem);
   }
   if (u.gamma != 1.0) {
     cov = pow (cov, u.gamma);
   }
-  return u.foreground * cov;
+  return in.color * cov;
 }

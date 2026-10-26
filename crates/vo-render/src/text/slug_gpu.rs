@@ -100,7 +100,6 @@ pub struct Uniforms {
     pub viewport: [f32; 2],
     pub gamma: f32,
     pub stem_darkening: f32,
-    pub foreground: [f32; 4],
 }
 
 impl Uniforms {
@@ -111,7 +110,6 @@ impl Uniforms {
             viewport: [w, h],
             gamma: 1.0,
             stem_darkening: 0.0,
-            foreground: [1.0; 4],
         }
     }
 }
@@ -126,18 +124,42 @@ pub struct GlyphInstance {
     /// Pixel position of the glyph origin.
     pub offset: [f32; 2],
     pub loc: u32,
-    pub _pad: u32,
+    /// The `vo-core` word id, or [`NO_WORD`].
+    pub word: u32,
+    /// Linear light, premultiplied alpha, opacity already multiplied in.
+    pub color: [f32; 4],
 }
 
+/// `GlyphInstance::word` for glyphs outside live text.
+pub const NO_WORD: u32 = u32::MAX;
+
 impl GlyphInstance {
-    /// A glyph at `origin` (pixels, Y down), `px_per_unit` pixels per font
+    /// A white glyph at `origin` (pixels, Y down), `px_per_unit` pixels per font
     /// unit, rotated by `angle` radians (counter-clockwise on screen).
     pub fn new(entry: &AtlasEntry, origin: [f32; 2], px_per_unit: f32, angle: f32) -> Self {
         let (s, c) = angle.sin_cos();
         let k = px_per_unit;
         // em (x right, y up) -> pixels (x right, y down), then rotate.
         let lin = [k * c, -k * s, -k * s, -k * c];
-        Self { ext: entry.extents, lin, offset: origin, loc: entry.loc, _pad: 0 }
+        Self::with_matrix(entry, lin, origin, [1.0; 4], NO_WORD)
+    }
+
+    /// A glyph with an explicit em-to-pixel matrix (by columns), premultiplied linear
+    /// `color` and word id.
+    pub fn with_matrix(entry: &AtlasEntry, lin: [f32; 4], offset: [f32; 2], color: [f32; 4], word: u32) -> Self {
+        Self { ext: entry.extents, lin, offset, loc: entry.loc, word, color }
+    }
+
+    /// The vertex buffer layout of the glyph shader's instance input.
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Uint32, 5 => Uint32, 4 => Float32x4
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GlyphInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
     }
 }
 
@@ -148,22 +170,34 @@ pub struct AtlasEntry {
 }
 
 /// CPU copy of the atlas: blobs widened from i16 to i32 for the storage buffer.
+/// It only grows, so an upload after new glyphs only sends the new texels.
 #[derive(Default)]
 pub struct Atlas {
     pub texels: Vec<[i32; 4]>,
-    pub entries: HashMap<GlyphId, Option<AtlasEntry>>,
+    /// Keyed by caller font id and glyph id.
+    pub entries: HashMap<(u32, GlyphId), Option<AtlasEntry>>,
     encoder: Encoder,
 }
 
 impl Atlas {
-    /// Returns the entry for `gid`, encoding it on first use. `None` for
-    /// glyphs with no ink.
+    /// Returns the entry for `gid` of a single-font atlas (font id 0).
     pub fn glyph(&mut self, font: &skrifa::FontRef, gid: GlyphId) -> Option<AtlasEntry> {
-        if let Some(e) = self.entries.get(&gid) {
+        self.glyph_in(0, || font.clone(), gid)
+    }
+
+    /// Returns the entry for `gid` in the font the caller calls `font_id`, encoding it on
+    /// first use. `font` is only called on a miss. `None` for glyphs with no ink.
+    pub fn glyph_in<'a>(
+        &mut self,
+        font_id: u32,
+        font: impl FnOnce() -> skrifa::FontRef<'a>,
+        gid: GlyphId,
+    ) -> Option<AtlasEntry> {
+        if let Some(e) = self.entries.get(&(font_id, gid)) {
             return *e;
         }
-        let entry = self.encoder.encode_glyph(font, gid).and_then(|g| self.push(&g));
-        self.entries.insert(gid, entry);
+        let entry = self.encoder.encode_glyph(&font(), gid).and_then(|g| self.push(&g));
+        self.entries.insert((font_id, gid), entry);
         entry
     }
 
@@ -181,26 +215,33 @@ impl Atlas {
     }
 }
 
-pub struct SlugRenderer {
-    pub pipeline: wgpu::RenderPipeline,
+/// Blend state for premultiplied "over".
+pub const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// The GPU side of the atlas: the uniform block and the atlas storage buffer, bound as
+/// group 0 of every glyph pipeline. Shared by [`SlugRenderer`] and `Renderer`.
+pub struct SlugAtlasGpu {
     layout: wgpu::BindGroupLayout,
     ubuf: wgpu::Buffer,
     atlas_buf: Option<wgpu::Buffer>,
     bind: Option<wgpu::BindGroup>,
-    instances: Option<wgpu::Buffer>,
-    count: u32,
+    /// Texels already in `atlas_buf`.
+    uploaded: usize,
 }
 
-impl SlugRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::with_footprint(device, format, Footprint::default())
-    }
-
-    pub fn with_footprint(device: &wgpu::Device, format: wgpu::TextureFormat, footprint: Footprint) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("slug-glyph"),
-            source: wgpu::ShaderSource::Wgsl(shader_source_with(footprint).into()),
-        });
+impl SlugAtlasGpu {
+    pub fn new(device: &wgpu::Device) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("slug"),
             entries: &[
@@ -226,68 +267,31 @@ impl SlugRenderer {
                 },
             ],
         });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("slug"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Uint32];
-        let blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("slug-glyph"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_glyph"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GlyphInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attrs,
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_glyph"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("slug-uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { pipeline, layout, ubuf, atlas_buf: None, bind: None, instances: None, count: 0 }
+        Self { layout, ubuf, atlas_buf: None, bind: None, uploaded: 0 }
+    }
+
+    pub fn layout(&self) -> &wgpu::BindGroupLayout {
+        &self.layout
+    }
+
+    /// `None` until the first [`Self::upload`].
+    pub fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.bind.as_ref()
     }
 
     pub fn set_uniforms(&self, queue: &wgpu::Queue, u: &Uniforms) {
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(u));
     }
 
-    /// Uploads the whole atlas, growing the buffer when needed.
-    pub fn upload_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) {
+    /// Uploads the texels added since the last upload, or the whole atlas when the buffer
+    /// has to grow.
+    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) {
         let size = (atlas.bytes().max(16) as u64).next_power_of_two();
         if self.atlas_buf.as_ref().is_none_or(|b| b.size() < size) {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -305,10 +309,74 @@ impl SlugRenderer {
                 ],
             }));
             self.atlas_buf = Some(buf);
+            self.uploaded = 0;
         }
-        if !atlas.texels.is_empty() {
-            queue.write_buffer(self.atlas_buf.as_ref().unwrap(), 0, bytemuck::cast_slice(&atlas.texels));
+        if atlas.texels.len() > self.uploaded {
+            let new = &atlas.texels[self.uploaded..];
+            queue.write_buffer(self.atlas_buf.as_ref().unwrap(), (self.uploaded * 16) as u64, bytemuck::cast_slice(new));
+            self.uploaded = atlas.texels.len();
         }
+    }
+}
+
+pub struct SlugRenderer {
+    pub pipeline: wgpu::RenderPipeline,
+    gpu: SlugAtlasGpu,
+    instances: Option<wgpu::Buffer>,
+    count: u32,
+}
+
+impl SlugRenderer {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_footprint(device, format, Footprint::default())
+    }
+
+    pub fn with_footprint(device: &wgpu::Device, format: wgpu::TextureFormat, footprint: Footprint) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("slug-glyph"),
+            source: wgpu::ShaderSource::Wgsl(shader_source_with(footprint).into()),
+        });
+        let gpu = SlugAtlasGpu::new(device);
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("slug"),
+            bind_group_layouts: &[Some(gpu.layout())],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("slug-glyph"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_glyph"),
+                compilation_options: Default::default(),
+                buffers: &[Some(GlyphInstance::layout())],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_glyph"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(PREMULTIPLIED_OVER),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline, gpu, instances: None, count: 0 }
+    }
+
+    pub fn set_uniforms(&self, queue: &wgpu::Queue, u: &Uniforms) {
+        self.gpu.set_uniforms(queue, u);
+    }
+
+    /// Uploads the atlas, growing the buffer when needed.
+    pub fn upload_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) {
+        self.gpu.upload(device, queue, atlas);
     }
 
     pub fn set_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, glyphs: &[GlyphInstance]) {
@@ -328,7 +396,7 @@ impl SlugRenderer {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let (Some(bind), Some(inst)) = (&self.bind, &self.instances) else { return };
+        let (Some(bind), Some(inst)) = (self.gpu.bind_group(), &self.instances) else { return };
         if self.count == 0 {
             return;
         }
