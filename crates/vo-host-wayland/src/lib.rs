@@ -137,6 +137,9 @@ pub(crate) struct Surf {
     pub(crate) dirty_config: bool,
     want_frame: bool,
     pub(crate) callback_pending: bool,
+    /// The frame callback of the last CPU frame, on the role surface. Kept apart so the first
+    /// GPU frame does not wait for it.
+    pub(crate) cpu_callback_pending: bool,
     frames: u64,
     /// `(on the GPU's sub-surface, frame number)` with present feedback still to come, oldest
     /// first.
@@ -474,10 +477,9 @@ impl State {
     }
 
     fn ready(&self, s: &Surf) -> bool {
-        s.want_frame
-            && s.configured
-            && !s.callback_pending
-            && (s.wgpu.is_some() || s.shm.as_ref().is_some_and(|m| !m.handed_over))
+        let gpu = s.wgpu.is_some() && !s.callback_pending;
+        let cpu = s.wgpu.is_none() && !s.cpu_callback_pending && s.shm.as_ref().is_some_and(|m| !m.handed_over);
+        s.want_frame && s.configured && (gpu || cpu)
     }
 
     /// A CPU frame into a `wl_shm` buffer on the role surface.
@@ -527,7 +529,7 @@ impl State {
         stage.buffer = Some(buffer);
         let s = &mut self.surfaces[i];
         s.shm = Some(stage);
-        s.callback_pending = true;
+        s.cpu_callback_pending = true;
         s.want_frame = false;
         s.frames += 1;
         if s.frames == 1 {
@@ -791,6 +793,7 @@ impl HostCtl for State {
             dirty_config: true,
             want_frame: false,
             callback_pending: false,
+            cpu_callback_pending: false,
             frames: 0,
             feedback: Default::default(),
             first_gpu: None,

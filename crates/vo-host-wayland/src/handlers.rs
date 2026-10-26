@@ -104,7 +104,12 @@ impl CompositorHandler for State {
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, _time: u32) {
         if let Some(i) = self.surface_index(wl) {
-            self.surfaces[i].callback_pending = false;
+            let s = &mut self.surfaces[i];
+            if s.child.is_some() && !s.is_child(wl) {
+                s.cpu_callback_pending = false;
+            } else {
+                s.callback_pending = false;
+            }
         }
     }
 
