@@ -352,7 +352,7 @@ fn cpu_matches_gpu() {
         let want = off.render_to_rgba(&list, [w, h], scale);
         let mut got = vec![0u8; (w * h * 4) as usize];
         cpu.draw_bgra(&list, scale, w, h, w as usize * 4, &mut got);
-        for px in got.chunks_exact_mut(4) {
+        for px in got.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         let diffs: Vec<u32> = want.iter().zip(&got).map(|(a, b)| a.abs_diff(*b) as u32).collect();

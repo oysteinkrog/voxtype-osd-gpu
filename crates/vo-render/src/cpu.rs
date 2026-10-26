@@ -87,7 +87,7 @@ impl CpuRenderer {
         for y in 0..height as usize {
             let row = &mut out[y * stride..y * stride + width as usize * 4];
             let src = &self.acc[y * width as usize..(y + 1) * width as usize];
-            for (px, c) in row.chunks_exact_mut(4).zip(src) {
+            for (px, c) in row.as_chunks_mut::<4>().0.iter_mut().zip(src) {
                 let a = c[3].clamp(0.0, 1.0);
                 let enc = |v: f32| (linear_to_srgb(v.clamp(0.0, a)) * 255.0 + 0.5) as u8;
                 px[0] = enc(c[2]);
