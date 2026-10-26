@@ -5,3 +5,15 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
+
+# Dev loop tuning, measured in docs/dev-loop.md. Dependencies (wgpu, naga,
+# skrifa, harfrust) build once at opt-level 1 without debug info: test
+# binaries link faster and the GPU tests start faster. vo-render runs at
+# opt-level 1 too, so the HarfBuzz encoder test takes 0.08 s, not 0.6 s.
+# vo-core stays at 0 because it rebuilds most often. Release is unchanged.
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+[profile.dev.package.vo-render]
+opt-level = 1
