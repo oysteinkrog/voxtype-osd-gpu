@@ -509,7 +509,7 @@ impl<M> Scene<M> {
         // Glass animates at its own capped rate (FX08), so it wakes at a time, not now.
         self.nodes
             .values()
-            .filter(|n| n.alive(t) && matches!(n.kind, Kind::Panel))
+            .filter(|n| n.alive(t) && !n.reduced && matches!(n.kind, Kind::Panel))
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
             .min_by(f64::total_cmp)
     }
@@ -937,7 +937,8 @@ impl<M> Scene<M> {
             out.hits.push(HitShape { node: id.to_bits(), transform, shape });
         }
         if let (Kind::Panel, Some(g)) = (&n.kind, &n.glass) {
-            let (sheen, orbit, orbit_strength) = g.motion(n.since, t);
+            // Reduced motion (MO09): the glass stays still.
+            let (sheen, orbit, orbit_strength) = if n.reduced { (None, None, 0.0) } else { g.motion(n.since, t) };
             push_item(items, ItemKind::Glass, out.glass.len() as u32);
             out.glass.push(GlassInstance {
                 rect: [m.e, m.f, size.w, size.h],

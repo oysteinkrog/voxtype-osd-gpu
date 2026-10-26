@@ -745,7 +745,12 @@ impl Renderer {
                         let [x0, y0, x1, y1] = GlassGpu::reach(g);
                         let r = vo_scene::geom::Rect::new(x0, y0, x1 - x0, y1 - y0);
                         grow(&mut b, bounds(&RRect::new(r, 0.0), &to_px));
-                        self.glass.push(GlassGpu::new(g, opacity));
+                        // The minimal tier draws no drop shadow, glass included.
+                        let mut g = *g;
+                        if self.quality == Quality::Minimal {
+                            g.glass.shadow[0] = 0.0;
+                        }
+                        self.glass.push(GlassGpu::new(&g, opacity));
                     }
                     grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                     self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);

@@ -235,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_keeps_glass_still() {
+        use crate::element::Element;
+        use crate::geom::Size;
+        use crate::scene::Scene;
+        let mut scene: Scene<()> = Scene::new().with_reduced_motion(true);
+        scene.set_viewport(0.0, Size::new(200.0, 100.0), 1.0);
+        let glass = Glass::dark().with_orbit(Color::WHITE);
+        scene.apply(Element::column("root").child(Element::panel("panel").size(120.0, 60.0).glass(glass)), 0.0);
+        let list = scene.sample(0.1);
+        assert_eq!((list.glass[0].sheen, list.glass[0].orbit), (None, None));
+        assert_eq!(scene.next_wake(2.0), None);
+    }
+
+    #[test]
     fn a_glass_panel_draws_one_item_and_wakes_at_30_fps() {
         use crate::display::ItemKind;
         use crate::element::Element;
