@@ -10,9 +10,10 @@ use vo_scene::geom::Color;
 use crate::camera::Camera;
 use crate::math::{Mat4, Vec3};
 
-/// A mesh uploaded with [`crate::Renderer3d::add_mesh`].
+/// A mesh uploaded with [`crate::Renderer3d::add_mesh`]. In a [`crate::Source3d`] frame,
+/// `MeshId(i)` names the `i`th mesh of the source's own list instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MeshId(pub(crate) u32);
+pub struct MeshId(pub u32);
 
 #[derive(Clone, Debug, Default)]
 pub struct Frame3d {

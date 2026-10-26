@@ -8,6 +8,7 @@
 //!   clouds (D302) and bokeh orbs (FX16).
 //! - `render`: [`Renderer3d`], one MSAA pass with a depth buffer that resolves into any
 //!   colour view (D301).
+//! - `item`: [`Source3d`] and [`ItemPainter`], 3D as an item at its place in a 2D scene.
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
 //! - `timer`: GPU time per stage from timestamp queries.
@@ -18,6 +19,7 @@
 pub mod camera;
 pub mod field;
 pub mod frame;
+pub mod item;
 pub mod math;
 pub mod mesh;
 pub mod readback;
@@ -29,6 +31,7 @@ pub mod timer;
 pub use camera::{Camera, Projection};
 pub use field::TextField;
 pub use frame::{Background, CloudShape, Focus, Frame3d, Light, Material, MeshDraw, MeshId, Orb, PointCloud};
+pub use item::{ItemPainter, ItemPlace, Source3d};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use render::{FieldBinding, Renderer3d};
