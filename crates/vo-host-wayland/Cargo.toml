@@ -1,0 +1,21 @@
+[package]
+name = "vo-host-wayland"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Wayland host: layer-shell overlays (toplevel fallback), one shared wgpu device, frame callbacks and present feedback"
+
+[dependencies]
+vo-host = { path = "../vo-host" }
+vo-scene = { path = "../vo-scene" }
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+smithay-client-toolkit = { version = "0.20.0", default-features = false, features = ["calloop"] }
+wayland-client = { version = "0.31", features = ["system"] }
+raw-window-handle = "0.6"
+pollster = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+# The fake_click example injects pointer input into a nested KWin through org_kde_kwin_fake_input.
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }

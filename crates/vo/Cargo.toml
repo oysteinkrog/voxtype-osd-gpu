@@ -1,0 +1,24 @@
+[package]
+name = "vo"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Facade: run an app as a live overlay or render it offline to frames"
+
+[features]
+default = ["wayland"]
+# The live overlay on Wayland. Without it only `render_offline` is available.
+wayland = ["dep:vo-host-wayland"]
+
+[dependencies]
+vo-core = { path = "../vo-core" }
+vo-scene = { path = "../vo-scene" }
+vo-render = { path = "../vo-render", features = ["png"] }
+vo-host = { path = "../vo-host" }
+vo-host-wayland = { path = "../vo-host-wayland", optional = true }
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+pollster = "0.4"
+
+[dev-dependencies]
+skrifa = "0.49"
