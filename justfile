@@ -57,8 +57,8 @@ budget:
 fmt:
     cargo fmt --all
 
-# The whole local gate: check, lint, CPU tests, doc tests, GPU tests.
-all: check lint test doctest test-gpu
+# The whole local gate: check, lint, CPU tests, doc tests, GPU tests, budget.
+all: check lint test doctest test-gpu budget
 
 # voxtype fork: type-check only the GTK overlay binary.
 osd-check:

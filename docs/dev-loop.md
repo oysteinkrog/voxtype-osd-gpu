@@ -14,6 +14,7 @@ call goes through `heavy-build`, so a step may wait in its queue when memory is 
 | Doc tests (nextest skips them) | `just doctest` | |
 | Phase 0 example in release | `just bench p0_slug` | 1 s build |
 | Clippy and rustfmt | `just lint` | |
+| Budget gate: heap, cold first frame, idle frames | `just budget` | 12 s (3 live runs in a nested KWin) |
 | Format | `just fmt` | |
 | All of the above | `just all` | |
 | voxtype fork: type-check the GTK overlay | `just osd-check` | 0.5 s (bin edit), 1.8 s (lib edit) |
@@ -144,3 +145,21 @@ contact sheet. There is no shader hot reload yet: the phase 0 examples render on
 exit, so there is nothing to reload into. When a windowed example exists, reading the
 shader files from disk at run time behind an environment variable would be the cheap
 way to add it.
+
+## Budget gate
+
+`just budget` (`scripts/budget.sh`) is the M1 budget check while there is no CI. It renders the
+toast offline twice and requires byte-identical frames, then runs it three times live, each in a
+fresh private `kwin_wayland --virtual` session, hovers it and clicks its close button with
+`fake_click`. It fails when:
+
+- the own heap peak (the toast's counting allocator) is over `VO_BUDGET_HEAP_MB`, default 15;
+- the median cold first frame on screen since exec is over `VO_BUDGET_FIRST_FRAME_MS`, default 300;
+- any run draws more than `VO_BUDGET_IDLE_FRAMES` frames while idle, default 0. A frame is idle when
+  it is the first after a settle, draws the same display list as before the settle, and the host did
+  not ask for it.
+
+`VO_BUDGET_RUNS` sets the number of live runs and `VO_BUDGET_ARGS` passes extra toast arguments,
+for example `--cpu-first-frame`. It needs `kwin_wayland` and a Vulkan GPU but no real display, and it
+takes about 12 s, so it is part of `just all`. A heavy build running at the same time can slow the
+cold start; the median of three runs absorbs one slow run.
