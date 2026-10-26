@@ -207,27 +207,37 @@ fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
     let tokens = path("--tokens", "VO_PREVIEW_TOKENS");
     load_tokens(&mut preview.player, tokens.as_ref())?;
     let mut state = State::default();
-    if let Some(resume) = path("--resume", "VO_PREVIEW_RESUME") {
-        if let Ok(text) = std::fs::read_to_string(&resume) {
-            state = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", resume.display()))?;
+    let resumed = match path("--resume", "VO_PREVIEW_RESUME").map(std::fs::read_to_string) {
+        Some(Ok(text)) => {
+            state = serde_json::from_str(&text).map_err(|e| format!("resume state: {e}"))?;
+            true
+        }
+        _ => false,
+    };
+    // A resumed state wins over the starting options, which the launcher passes again.
+    if !resumed {
+        if let Some(t) = a.num("--at")?.or_else(|| std::env::var("VO_PREVIEW_AT").ok()?.parse().ok()) {
+            state.t = t;
+        }
+        if a.has("--play") {
+            state.playing = true;
+        }
+        if let Some(s) = a.num("--speed")? {
+            state.speed = s;
         }
     }
-    if let Some(t) = a.num("--at")?.or_else(|| std::env::var("VO_PREVIEW_AT").ok()?.parse().ok()) {
-        state.t = t;
-    }
-    if a.has("--play") {
-        state.playing = true;
-    }
-    if let Some(s) = a.num("--speed")? {
-        state.speed = s;
-    }
-    for o in a.values("--overlay") {
+    for o in a.values("--overlay").into_iter().filter(|_| !resumed) {
         let o = control::parse_overlay(o).ok_or_else(|| format!("no overlay '{o}'"))?;
         if !state.overlays.contains(&o) {
             state.overlays.push(o);
         }
     }
     state.t = state.t.clamp(0.0, preview.player.scenario().duration);
+    let shaders = path("--shaders", "VO_SHADER_DIR");
+    if let Some(dir) = &shaders {
+        // vo-render reads shader files from here (`vo_render::hot`). Set before any thread starts.
+        std::env::set_var("VO_SHADER_DIR", dir);
+    }
     let setup = window::Setup {
         fps: preview.fps,
         markers: preview.markers,
@@ -235,7 +245,7 @@ fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
         control: path("--control", "VO_PREVIEW_CONTROL"),
         state_path: path("--state", "VO_PREVIEW_STATE"),
         tokens,
-        shaders: path("--shaders", "VO_SHADER_DIR"),
+        shaders,
         app_id: format!("vo-preview-{}", preview.name),
     };
     let mut win = window::Window::new(preview.player, setup);

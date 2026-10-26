@@ -315,9 +315,20 @@ impl<A: App> Window<A> {
     }
 
     fn reload_shaders(&mut self, changed: &[PathBuf]) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        let started = Instant::now();
         let names: Vec<String> =
             changed.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
-        self.status = format!("{} changed; shader reload is not wired into vo-render yet", names.join(", "));
+        self.status = match r.reload_shaders() {
+            Ok(n) => format!("{} reloaded: {n} shader modules in {:.1} ms", names.join(", "), ms(started)),
+            Err(e) => {
+                eprintln!("{e}");
+                format!(
+                    "shader error, old pipelines kept: {}",
+                    e.lines().find(|l| l.contains("error:")).or(e.lines().next()).unwrap_or("").trim()
+                )
+            }
+        };
         eprintln!("vo-preview: {}", self.status);
     }
 

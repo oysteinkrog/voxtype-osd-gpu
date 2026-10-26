@@ -13,7 +13,7 @@ const VECTORS_WGSL: &str = include_str!("wgsl/vectors.wgsl");
 
 /// The vector shader: `common.wgsl` and `vectors.wgsl`.
 pub fn vector_shader_source() -> String {
-    [COMMON_WGSL, VECTORS_WGSL].join("\n")
+    [crate::hot::wgsl("common.wgsl", COMMON_WGSL), crate::hot::wgsl("vectors.wgsl", VECTORS_WGSL)].join("\n")
 }
 
 /// One contour or blob as the shader reads it.

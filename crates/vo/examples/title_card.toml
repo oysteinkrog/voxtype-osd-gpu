@@ -1,0 +1,6 @@
+# Tokens for the title card. The preview reloads this file live:
+#   vo-preview run title_card -- --tokens crates/vo/examples/title_card.toml
+accent = "#ff5a36"
+
+[word]
+rise = 90

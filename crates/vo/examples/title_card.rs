@@ -146,7 +146,10 @@ impl App for TitleCard {
         }
     }
 
-    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
+    fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+        // Tokens the preview reloads live (`--tokens examples/title_card.toml`).
+        let accent = || tokens.color("accent", accent());
+        let rise = tokens.num("word.rise", 90.0);
         let kicker = Element::row("kicker")
             .gap(18.0)
             .child(Element::shape("bar", ShapeKind::Capsule).size(56.0, 10.0).fill(accent()))
@@ -159,7 +162,7 @@ impl App for TitleCard {
             let color = if i == WORDS.len() - 1 { accent() } else { Color::WHITE };
             let label =
                 Element::label(format!("w{i}"), *w).text_style(TextStyle::new(BLACK, 168.0, 196.0)).color(color);
-            self.motion(label, &format!("word.{i}"), 90.0, Spring::POP)
+            self.motion(label, &format!("word.{i}"), rise, Spring::POP)
         });
         let rule_w = if self.phase("rule") == Phase::In { RULE } else { 0.0 };
         let rule = Element::shape("rule", ShapeKind::RRect)

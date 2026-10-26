@@ -47,6 +47,7 @@ use vo_scene::path::PATH_FONT;
 
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
+use crate::hot::wgsl;
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
 use crate::vector::{vector_shader_source, GpuVector};
@@ -73,27 +74,27 @@ const BLOOM_MIX: f32 = 0.65;
 
 /// The shape shader: `common.wgsl` and `shapes.wgsl`.
 pub fn shape_shader_source() -> String {
-    [COMMON_WGSL, SHAPES_WGSL].join("\n")
+    [wgsl("common.wgsl", COMMON_WGSL), wgsl("shapes.wgsl", SHAPES_WGSL)].join("\n")
 }
 
 /// The display-list glyph shader: the Slug shader, `common.wgsl` and `glyphs.wgsl`.
 pub fn glyph_shader_source() -> String {
-    [slug_gpu::shader_source().as_str(), COMMON_WGSL, GLYPHS_WGSL].join("\n")
+    [slug_gpu::shader_source().into(), wgsl("common.wgsl", COMMON_WGSL), wgsl("glyphs.wgsl", GLYPHS_WGSL)].join("\n")
 }
 
 /// The offscreen layer composite shader: `common.wgsl` and `composite.wgsl`.
 pub fn composite_shader_source() -> String {
-    [COMMON_WGSL, COMPOSITE_WGSL].join("\n")
+    [wgsl("common.wgsl", COMMON_WGSL), wgsl("composite.wgsl", COMPOSITE_WGSL)].join("\n")
 }
 
 /// The dot shader: `common.wgsl` and `dots.wgsl`.
 pub fn dot_shader_source() -> String {
-    [COMMON_WGSL, DOTS_WGSL].join("\n")
+    [wgsl("common.wgsl", COMMON_WGSL), wgsl("dots.wgsl", DOTS_WGSL)].join("\n")
 }
 
 /// The bloom pyramid and the effect path's last pass.
 pub fn bloom_shader_source() -> String {
-    BLOOM_WGSL.to_string()
+    wgsl("bloom.wgsl", BLOOM_WGSL).into_owned()
 }
 
 /// A texture the renderer draws into: an offscreen texture, or later a swapchain image.
@@ -1113,6 +1114,46 @@ impl Renderer {
         &self.pipelines.iter().find(|(k, _)| *k == key).expect("created in upload").1
     }
 
+    /// The shader module for a module slot, from the current sources (see `hot`).
+    fn shader_module(&self, slot: usize) -> wgpu::ShaderModule {
+        let (label, source) = match slot {
+            0 => ("vo-shapes", shape_shader_source()),
+            1 => ("vo-glyphs", glyph_shader_source()),
+            2 => ("vo-composite", composite_shader_source()),
+            4 => ("vo-dots", dot_shader_source()),
+            5 => ("vo-vectors", vector_shader_source()),
+            _ => ("vo-bloom", bloom_shader_source()),
+        };
+        self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        })
+    }
+
+    /// Builds every shader module made so far again from the current sources (`hot`), inside
+    /// a validation error scope. On success the new modules replace the old ones and the
+    /// pipeline cache is cleared, so the next frame uses them; on error the old modules and
+    /// pipelines stay and the validation message comes back. Returns the number of modules.
+    pub fn reload_shaders(&mut self) -> Result<usize, String> {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let fresh: Vec<(usize, wgpu::ShaderModule)> = (0..self.modules.len())
+            .filter(|i| self.modules[*i].is_some())
+            .map(|i| (i, self.shader_module(i)))
+            .collect();
+        // Native wgpu reports the scope at once, as in `encode`.
+        let mut pop = std::pin::pin!(scope.pop());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        if let std::task::Poll::Ready(Some(e)) = std::future::Future::poll(pop.as_mut(), &mut cx) {
+            return Err(e.to_string());
+        }
+        let n = fresh.len();
+        for (i, m) in fresh {
+            self.modules[i] = Some(m);
+        }
+        self.pipelines.clear();
+        Ok(n)
+    }
+
     /// Creates the pipeline for `format`, `pipe` and `blend` on first use.
     fn pipeline(&mut self, format: wgpu::TextureFormat, pipe: Pipe, blend: BlendMode) {
         let key = (format, pipe, blend);
@@ -1128,18 +1169,7 @@ impl Renderer {
             Pipe::Vector => 5,
         };
         if self.modules[slot].is_none() {
-            let (label, source) = match slot {
-                0 => ("vo-shapes", shape_shader_source()),
-                1 => ("vo-glyphs", glyph_shader_source()),
-                2 => ("vo-composite", composite_shader_source()),
-                4 => ("vo-dots", dot_shader_source()),
-                5 => ("vo-vectors", vector_shader_source()),
-                _ => ("vo-bloom", bloom_shader_source()),
-            };
-            self.modules[slot] = Some(self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            }));
+            self.modules[slot] = Some(self.shader_module(slot));
         }
         let module = self.modules[slot].as_ref().unwrap();
         let fx = self.fx.as_ref();

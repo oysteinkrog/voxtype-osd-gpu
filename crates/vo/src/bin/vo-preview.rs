@@ -149,8 +149,9 @@ fn once(args: &[String], mode: &str) -> Result<u8, String> {
     Ok(status.code().unwrap_or(1) as u8)
 }
 
-/// Every `.rs` and `Cargo.toml` under `dir`, skipping `target` and hidden directories.
-fn sources(dir: &Path, out: &mut Vec<(PathBuf, Option<SystemTime>)>) {
+/// Every `.rs` and `Cargo.toml` under `dir`, and `.wgsl` when `wgsl` (shaders compiled in with
+/// `include_str!`), skipping `target` and hidden directories.
+fn sources(dir: &Path, wgsl: bool, out: &mut Vec<(PathBuf, Option<SystemTime>)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
@@ -158,20 +159,73 @@ fn sources(dir: &Path, out: &mut Vec<(PathBuf, Option<SystemTime>)>) {
         let name = name.to_string_lossy();
         if p.is_dir() {
             if name != "target" && !name.starts_with('.') {
-                sources(&p, out);
+                sources(&p, wgsl, out);
             }
-        } else if name.ends_with(".rs") || name == "Cargo.toml" {
+        } else if name.ends_with(".rs") || name == "Cargo.toml" || (wgsl && name.ends_with(".wgsl")) {
             let m = e.metadata().and_then(|m| m.modified()).ok();
             out.push((p, m));
         }
     }
 }
 
-fn snapshot(root: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
+/// `wgsl`: shader edits rebuild too, because the window does not reload them itself.
+fn snapshot(roots: &[PathBuf], wgsl: bool) -> Vec<(PathBuf, Option<SystemTime>)> {
     let mut v = Vec::new();
-    sources(root, &mut v);
+    for r in roots {
+        if r.is_dir() {
+            sources(r, wgsl, &mut v);
+        } else {
+            v.push((r.clone(), std::fs::metadata(r).and_then(|m| m.modified()).ok()));
+        }
+    }
     v.sort();
     v
+}
+
+/// What a rebuild of the example can depend on: the workspace manifest, and for the package
+/// and every path dependency under it, its manifest, `build.rs` and `src/`, plus the example's
+/// own file (or folder, for an example with several files). Other examples and unrelated
+/// crates in the workspace do not trigger a rebuild.
+fn watch_roots(root: &Path, t: &Target) -> Result<Vec<PathBuf>, String> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo metadata: {e}"))?;
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: {e}"))?;
+    let packages = meta["packages"].as_array().cloned().unwrap_or_default();
+    let by_name = |n: &str| packages.iter().find(|p| p["name"] == n);
+    let mut roots = vec![root.join("Cargo.toml")];
+    let mut todo = vec![t.package.clone()];
+    let mut done: Vec<String> = Vec::new();
+    while let Some(name) = todo.pop() {
+        if done.contains(&name) {
+            continue;
+        }
+        let Some(pkg) = by_name(&name) else { continue };
+        done.push(name.clone());
+        let dir = Path::new(pkg["manifest_path"].as_str().unwrap_or_default()).parent().unwrap_or(root).to_path_buf();
+        roots.extend([dir.join("Cargo.toml"), dir.join("build.rs"), dir.join("src")]);
+        if name == t.package {
+            let example = pkg["targets"].as_array().into_iter().flatten().find(|tg| {
+                tg["name"] == t.example.as_str()
+                    && tg["kind"].as_array().is_some_and(|k| k.iter().any(|k| k == "example"))
+            });
+            let src = example
+                .and_then(|e| e["src_path"].as_str())
+                .ok_or_else(|| format!("no example '{}' in {name}", t.example))?;
+            let src = PathBuf::from(src);
+            // An example in a folder of its own (`examples/name/main.rs`) watches the folder.
+            let folder = src.parent().filter(|p| p.file_name().is_some_and(|f| f != "examples"));
+            roots.push(folder.map(Path::to_path_buf).unwrap_or(src));
+        }
+        for dep in pkg["dependencies"].as_array().into_iter().flatten() {
+            if dep["path"].is_string() && dep["kind"].is_null() {
+                todo.extend(dep["name"].as_str().map(String::from));
+            }
+        }
+    }
+    Ok(roots)
 }
 
 struct Running {
@@ -223,6 +277,8 @@ fn stop(sock: &Path, r: &mut Running) {
 fn run(args: &[String]) -> Result<u8, String> {
     let t = target(args)?;
     let root = workspace_root()?;
+    let roots = watch_roots(&root, &t)?;
+    let wgsl = !t.rest.iter().any(|a| a == "--shaders") && std::env::var_os("VO_SHADER_DIR").is_none();
     let sock = socket();
     let state = sock.with_extension("state.json");
     let _ = std::fs::remove_file(&state);
@@ -233,7 +289,7 @@ fn run(args: &[String]) -> Result<u8, String> {
     if let Some(d) = win.as_mut().and_then(|w| wait_ready(&sock, w)) {
         eprintln!("vo-preview: window up {:.2} s after start; control socket {}", d.as_secs_f64(), sock.display());
     }
-    let mut seen = snapshot(&root);
+    let mut seen = snapshot(&roots, wgsl);
     loop {
         std::thread::sleep(Duration::from_millis(200));
         if let Some(w) = win.as_mut() {
@@ -246,7 +302,7 @@ fn run(args: &[String]) -> Result<u8, String> {
                 win = None;
             }
         }
-        let now = snapshot(&root);
+        let now = snapshot(&roots, wgsl);
         if now == seen {
             continue;
         }
