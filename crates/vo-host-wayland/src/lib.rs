@@ -167,26 +167,89 @@ struct GpuState {
     gpu: Gpu,
 }
 
+/// An sRGB format, premultiplied alpha when offered (else the first mode), `Fifo`. Also returns
+/// the alpha modes offered, for the setup note.
+fn swapchain_config(
+    surface: &wgpu::Surface<'_>,
+    adapter: &wgpu::Adapter,
+    w: u32,
+    h: u32,
+) -> (wgpu::SurfaceConfiguration, Vec<wgpu::CompositeAlphaMode>) {
+    let caps = surface.get_capabilities(adapter);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| matches!(f, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb))
+        .unwrap_or(caps.formats[0]);
+    let alpha = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
+        caps.alpha_modes[0]
+    };
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: w,
+        height: h,
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: alpha,
+        view_formats: vec![],
+        color_space: wgpu::SurfaceColorSpace::Auto,
+    };
+    (config, caps.alpha_modes)
+}
+
+fn swapchain_note(id: SurfaceId, c: &wgpu::SurfaceConfiguration, offered: &[wgpu::CompositeAlphaMode]) -> String {
+    format!(
+        "surface {id}: swapchain {}x{} format={:?} alpha={:?} (offered {offered:?}) present=Fifo",
+        c.width, c.height, c.format, c.alpha_mode
+    )
+}
+
+/// The first GPU surface, handed to the device thread: the `wl_surface` pointer and the size
+/// in physical pixels.
+struct BgTarget(usize, u32, u32);
+
 /// What the device thread sends back.
 struct BgGpu {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// The first GPU surface with its swapchain set up, and the alpha modes it offered.
+    surface: Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration, Vec<wgpu::CompositeAlphaMode>)>,
     /// Host clock times of "instance" and "adapter and device".
     stages: [f64; 2],
 }
 
-/// Makes the instance, adapter and device off the main thread. The adapter is picked without
-/// a surface to match, since the surface is made later on the main thread.
-fn make_gpu(display: DisplayHandle, origin: f64) -> Result<BgGpu, String> {
+/// Makes the instance, then waits for the first surface, then makes the adapter, the device
+/// and the swapchain, all off the main thread. Swapchain setup asks the compositor for
+/// buffer formats in several round trips, about 10 ms in a nested KWin, so it belongs here
+/// too. The Vulkan WSI uses its own event queue, so this is safe while the main thread
+/// dispatches.
+fn make_gpu(display: DisplayHandle, origin: f64, target: mpsc::Receiver<BgTarget>) -> Result<BgGpu, String> {
+    let raw_display = display.0;
     let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
     desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(desc);
     let t_instance = monotonic() - origin;
+    let surface = target.recv().ok().and_then(|BgTarget(ptr, w, h)| {
+        let window = RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(ptr as *mut std::ffi::c_void)?));
+        // SAFETY: the pointer is a live `wl_surface`. The host waits for this thread before it
+        // destroys any surface.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_display),
+                raw_window_handle: window,
+            })
+        };
+        surface.ok().map(|s| (s, w, h))
+    });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
+        compatible_surface: surface.as_ref().map(|s| &s.0),
         force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
@@ -195,7 +258,13 @@ fn make_gpu(display: DisplayHandle, origin: f64) -> Result<BgGpu, String> {
         adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-host-wayland"), ..Default::default() }),
     )
     .map_err(|e| e.to_string())?;
-    Ok(BgGpu { instance, adapter, device, queue, stages: [t_instance, monotonic() - origin] })
+    let t_device = monotonic() - origin;
+    let surface = surface.map(|(s, w, h)| {
+        let (config, offered) = swapchain_config(&s, &adapter, w, h);
+        s.configure(&device, &config);
+        (s, config, offered)
+    });
+    Ok(BgGpu { instance, adapter, device, queue, surface, stages: [t_instance, t_device] })
 }
 
 pub struct State {
@@ -217,6 +286,8 @@ pub struct State {
     gpu: Option<GpuState>,
     /// The device thread's answer, while it is being made.
     bg: Option<mpsc::Receiver<Result<BgGpu, String>>>,
+    /// Hands the first GPU surface to the device thread.
+    bg_target: Option<mpsc::Sender<BgTarget>>,
     gpu_failed: Option<String>,
     loop_handle: calloop::LoopHandle<'static, State>,
     pub(crate) surfaces: Vec<Surf>,
@@ -301,6 +372,7 @@ impl WaylandHost {
             instance: None,
             gpu: None,
             bg: None,
+            bg_target: None,
             gpu_failed: None,
             loop_handle: event_loop.handle(),
             surfaces: Vec::new(),
@@ -346,16 +418,27 @@ impl State {
             }
         };
         self.bg = None;
+        self.bg_target = None;
         match answer.and_then(|a| a) {
-            Ok(b) => {
+            Ok(mut b) => {
                 self.diag.stages.push(("instance", b.stages[0]));
                 self.diag.stages.push(("adapter and device", b.stages[1]));
+                if let Some((surface, config, offered)) = b.surface.take() {
+                    if let Some(s) = self.surfaces.iter_mut().find(|s| s.child.is_some() && s.wgpu.is_none()) {
+                        self.diag.notes.push(swapchain_note(s.id, &config, &offered));
+                        s.wgpu = Some(surface);
+                        s.config = Some(config);
+                    }
+                }
                 let name = b.adapter.get_info().name;
                 self.diag.notes.push(format!("adapter: {name}"));
                 self.instance = Some(b.instance);
                 self.gpu =
                     Some(GpuState { adapter: b.adapter, gpu: Gpu { device: b.device, queue: b.queue, adapter: name } });
                 for i in 0..self.surfaces.len() {
+                    if self.surfaces[i].wgpu.is_some() {
+                        continue;
+                    }
                     let wl = self.surfaces[i].gpu_wl().clone();
                     match self.wgpu_surface(&wl) {
                         Ok(surface) => self.surfaces[i].wgpu = Some(surface),
@@ -431,38 +514,18 @@ impl State {
         };
         let adapter = &self.gpu.as_ref().unwrap().adapter;
         let s = &mut self.surfaces[i];
-        let surface = s.wgpu.as_ref().expect("open surfaces have a wgpu surface");
-        let caps = surface.get_capabilities(adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| matches!(f, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb))
-            .unwrap_or(caps.formats[0]);
-        let alpha = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else {
-            caps.alpha_modes[0]
-        };
         let w = (s.size.w.round() as u32).max(1) * s.scale as u32;
         let h = (s.size.h.round() as u32).max(1) * s.scale as u32;
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: w,
-            height: h,
-            present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: alpha,
-            view_formats: vec![],
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
+        // Set up already at this size (the device thread does the first one).
+        if s.config.as_ref().is_some_and(|c| c.width == w && c.height == h) {
+            s.dirty_config = false;
+            return;
+        }
+        let surface = s.wgpu.as_ref().expect("open surfaces have a wgpu surface");
+        let (config, offered) = swapchain_config(surface, adapter, w, h);
         surface.configure(&gpu.device, &config);
         if s.config.is_none() {
-            let note = format!(
-                "surface {}: swapchain {w}x{h} format={format:?} alpha={alpha:?} (offered {:?}) present=Fifo",
-                s.id, caps.alpha_modes
-            );
+            let note = swapchain_note(s.id, &config, &offered);
             self.diag.notes.push(note);
         }
         let s = &mut self.surfaces[i];
@@ -694,15 +757,17 @@ impl HostCtl for State {
             return false;
         }
         let (tx, rx) = mpsc::channel();
+        let (target_tx, target_rx) = mpsc::channel();
         let (display, origin) = (self.display_handle(), self.origin);
         let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
-            let _ = tx.send(make_gpu(display, origin));
+            let _ = tx.send(make_gpu(display, origin, target_rx));
             ping.ping();
         });
         if spawned.is_err() {
             return false;
         }
         self.bg = Some(rx);
+        self.bg_target = Some(target_tx);
         self.stage("gpu thread started");
         true
     }
@@ -774,7 +839,13 @@ impl HostCtl for State {
             self.stage("surface committed");
         }
         let wgpu_surface = match &child {
-            Some(_) => None,
+            Some(c) => {
+                if let Some(tx) = self.bg_target.take() {
+                    let (pw, ph) = (w.max(1), h.max(1));
+                    let _ = tx.send(BgTarget(c.wl.id().as_ptr() as usize, pw, ph));
+                }
+                None
+            }
             None => Some(self.wgpu_surface(&role.wl().clone())?),
         };
         let id = self.next_id;
@@ -836,6 +907,9 @@ impl HostCtl for State {
     }
 
     fn close(&mut self, id: SurfaceId) {
+        // The device thread may be using the surface.
+        self.bg_target = None;
+        self.poll_gpu(true);
         if let Ok(i) = self.index(id) {
             self.remove(i);
         }
@@ -929,7 +1003,8 @@ impl Host for WaylandHost {
                 i += 1;
             }
         }
-        // A device thread still running holds the display pointer: wait for it.
+        // A device thread still running holds the display and surface pointers: wait for it.
+        state.bg_target = None;
         state.bg.take().map(|rx| rx.recv());
         // Surfaces before the device and the instance, all before the connection.
         state.surfaces.clear();
