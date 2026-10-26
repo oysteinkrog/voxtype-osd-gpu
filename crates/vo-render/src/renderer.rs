@@ -23,10 +23,11 @@
 //! - **Emitters** are not drawn (M4).
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use skrifa::raw::TableProvider;
-use skrifa::{FontRef, GlyphId};
+use skrifa::GlyphId;
+use vo_scene::font::{Face, FontRegistry};
 use vo_scene::display::{BlendMode, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget};
 use vo_scene::geom::{Affine, RRect};
 
@@ -166,18 +167,16 @@ struct LayerTex {
     bind: wgpu::BindGroup,
 }
 
-struct Font {
-    data: Vec<u8>,
-    index: u32,
-    upem: f32,
-}
 
 /// Draws display lists. Holds the pipelines, the glyph atlas and the per-frame buffers, all
 /// reused from frame to frame.
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    fonts: Vec<Font>,
+    /// The shared font table, and this renderer's own copy of it so drawing a glyph takes
+    /// no lock. The copy catches up when a glyph names a font it does not have yet.
+    fonts: FontRegistry,
+    faces: Vec<Arc<Face>>,
     atlas: Atlas,
     atlas_gpu: SlugAtlasGpu,
     layer_layout: wgpu::BindGroupLayout,
@@ -198,7 +197,15 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// A renderer with a font table of its own. Use [`Renderer::with_fonts`] to share the
+    /// scene's table.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Renderer {
+        Renderer::with_fonts(device, queue, FontRegistry::new())
+    }
+
+    /// A renderer that reads glyph font ids from `fonts`, the same table the scene's text
+    /// layout uses.
+    pub fn with_fonts(device: &wgpu::Device, queue: &wgpu::Queue, fonts: FontRegistry) -> Renderer {
         let uniform_stride = (std::mem::size_of::<LayerUniform>() as u32)
             .next_multiple_of(device.limits().min_uniform_buffer_offset_alignment);
         let layer_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -230,7 +237,8 @@ impl Renderer {
         Renderer {
             device: device.clone(),
             queue: queue.clone(),
-            fonts: Vec::new(),
+            fonts,
+            faces: Vec::new(),
             atlas: Atlas::default(),
             atlas_gpu: SlugAtlasGpu::new(device),
             layer_layout,
@@ -257,12 +265,16 @@ impl Renderer {
         &self.queue
     }
 
-    /// Registers a font file (face 0) and returns the id that `GlyphInstance::font` uses. Ids
-    /// count up from 0 in the order fonts are added.
+    /// Adds a font file (face 0) to the font table and returns the id that
+    /// `GlyphInstance::font` uses. Ids count up from 0 in the order fonts are added, across
+    /// everyone that shares the table.
     pub fn add_font(&mut self, data: Vec<u8>) -> Result<u32, skrifa::raw::ReadError> {
-        let upem = FontRef::new(&data)?.head()?.units_per_em() as f32;
-        self.fonts.push(Font { data, index: 0, upem });
-        Ok(self.fonts.len() as u32 - 1)
+        self.fonts.add(data)
+    }
+
+    /// The font table this renderer reads.
+    pub fn fonts(&self) -> &FontRegistry {
+        &self.fonts
     }
 
     /// Draws `list` into `target`, cleared to transparent first, at `list.scale` physical
@@ -394,13 +406,13 @@ impl Renderer {
         if color[3] <= 0.0 {
             return None;
         }
-        let font = self.fonts.get(g.font as usize)?;
-        let entry = self.atlas.glyph_in(
-            g.font,
-            || FontRef::from_index(&font.data, font.index).expect("font parsed in add_font"),
-            GlyphId::new(g.glyph),
-        )?;
-        let k = g.size / font.upem;
+        if g.font as usize >= self.faces.len() {
+            let more = self.fonts.faces_from(self.faces.len());
+            self.faces.extend(more);
+        }
+        let face = self.faces.get(g.font as usize)?;
+        let entry = self.atlas.glyph_in(g.font, || face.skrifa(), GlyphId::new(g.glyph))?;
+        let k = g.size / face.units_per_em() as f32;
         let m = &st.to_px;
         // Em space has y up; layer space has y down.
         let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];

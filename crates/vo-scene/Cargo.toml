@@ -11,6 +11,10 @@ serde = { version = "1", features = ["derive"] }
 vo-core = { path = "../vo-core" }
 slotmap = { version = "1.1", default-features = false }
 taffy = { version = "0.15.1", default-features = false, features = ["std", "flexbox", "block_layout"] }
+# Text: shaping, metrics and line breaks (plan decision 8). No GPU.
+harfrust = "0.15"
+skrifa = "0.49"
+unicode-linebreak = "0.1"
 
 [dev-dependencies]
 serde_json = "1"

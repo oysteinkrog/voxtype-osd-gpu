@@ -4,6 +4,7 @@
 //! - `scene`: the retained node arena. `apply(view, t)` reconciles by key path and retargets
 //!   channels at exactly `t`; `sample(t)` is pure; `next_wake(t)` is `None` when settled.
 //! - `layout`: taffy (flexbox and block) on the node arena through its low-level traits.
+//! - `font`: the font table that text layout and the renderer share.
 //! - `text`: text measurement behind a trait, with a width estimate for now.
 //! - `input`: hit testing at the event's time and pointer messages.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
@@ -11,6 +12,7 @@
 
 pub mod display;
 pub mod element;
+pub mod font;
 pub mod geom;
 pub mod input;
 mod layout;
@@ -18,5 +20,6 @@ pub mod scene;
 pub mod text;
 
 pub use display::DisplayList;
+pub use font::{FontId, FontRegistry};
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use scene::{NodeId, Presence, Scene};
