@@ -62,7 +62,7 @@ impl<M> LayoutView<'_, M> {
         let n = self.node(node_id);
         let content: Option<(String, TextStyle)> = match &n.kind {
             Kind::Label { text, style } => Some((text.clone(), *style)),
-            Kind::LiveText { words, style } => {
+            Kind::LiveText { words, style, .. } => {
                 Some((words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "), *style))
             }
             _ => None,

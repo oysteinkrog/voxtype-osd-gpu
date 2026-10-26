@@ -59,3 +59,39 @@ fn an_added_ellipsis_belongs_to_no_word() {
     assert_eq!(last.word, NO_WORD);
     assert!(list.glyphs.iter().rev().skip(1).all(|g| g.word != NO_WORD));
 }
+
+#[test]
+fn live_words_enter_and_change_with_their_own_motion() {
+    use vo_scene::Transition;
+    let fonts = fonts();
+    let mut s = scene(&fonts);
+    let view = |words: &[Word]| {
+        Element::column("root").child(
+            Element::live_text("live", words)
+                .word_enter(Transition::fade().offset(0.0, 6.0))
+                .word_change(Transition::NONE.opacity(0.5)),
+        )
+    };
+    let w = |id, t: &str| Word { id, text: t.into() };
+    s.apply(view(&[w(1, "open"), w(2, "the")]), 0.0);
+    s.apply(view(&[w(1, "open"), w(2, "the"), w(3, "confi")]), 1.0);
+    let alpha_of = |s: &Scene<()>, t: f64, id: u32| {
+        s.sample(t).glyphs.iter().filter(|g| g.word == id).map(|g| g.color.a).fold(f32::NAN, f32::min)
+    };
+    let y_of = |s: &Scene<()>, t: f64, id: u32| s.sample(t).glyphs.iter().find(|g| g.word == id).unwrap().pos.y;
+    // Word 3 just entered: transparent and lower; the others are at rest.
+    assert!(alpha_of(&s, 1.0, 3).is_nan(), "a transparent word draws no glyphs");
+    assert_eq!(alpha_of(&s, 1.0, 1), 1.0);
+    let mid = alpha_of(&s, 1.05, 3);
+    assert!(mid > 0.0 && mid < 1.0, "{mid}");
+    assert!(y_of(&s, 1.05, 3) > y_of(&s, 1.05, 2));
+    assert_eq!(s.next_wake(1.05), Some(1.05));
+    assert_eq!(alpha_of(&s, 3.0, 3), 1.0);
+    assert_eq!(y_of(&s, 3.0, 3), y_of(&s, 3.0, 2));
+    assert_eq!(s.next_wake(3.0), None);
+    // Same id, new text: the change transition; word 2 dropped.
+    s.apply(view(&[w(1, "open"), w(3, "configuration")]), 3.0);
+    assert_eq!(alpha_of(&s, 3.0, 3), 0.5);
+    assert_eq!(alpha_of(&s, 3.0, 1), 1.0);
+    assert!(s.sample(3.0).glyphs.iter().all(|g| g.word != 2));
+}

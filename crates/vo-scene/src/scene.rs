@@ -84,6 +84,23 @@ pub(crate) struct Node<M> {
     pub entered: f64,
     pub shaped: ShapedText,
     pub has_layout: bool,
+    /// Live text: each word's own motion, sorted by word id.
+    pub words: Vec<WordAnim>,
+}
+
+/// One live-text word's motion: opacity and an offset from its laid-out place.
+pub(crate) struct WordAnim {
+    pub id: u32,
+    pub text: String,
+    pub opacity: Channel,
+    pub dx: Channel,
+    pub dy: Channel,
+}
+
+impl WordAnim {
+    fn channels(&self) -> [&Channel; 3] {
+        [&self.opacity, &self.dx, &self.dy]
+    }
 }
 
 impl<M> Node<M> {
@@ -155,7 +172,83 @@ impl<M> Node<M> {
     }
 
     fn settled_at(&self) -> f64 {
-        self.chans.iter().map(|(_, c)| c.settled_at()).fold(f64::NEG_INFINITY, f64::max)
+        let words = self.words.iter().flat_map(|w| w.channels());
+        self.chans.iter().map(|(_, c)| c).chain(words).map(|c| c.settled_at()).fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// Live text: matches the word motions to `words` at `t`. A new id starts from `enter`, a
+    /// kept id with new text jumps to `change`, and both spring to rest (opacity 1, no
+    /// offset). Returns whether any motion started or a word went.
+    fn sync_words(&mut self, t: f64, retention: f64) -> bool {
+        let Kind::LiveText { words, enter, change, .. } = &self.kind else {
+            let had = !self.words.is_empty();
+            self.words.clear();
+            return had;
+        };
+        let spring = |prop: Prop| match self.motion.iter().find(|(p, _)| *p == prop).map_or(DEFAULT_MOTION, |m| m.1) {
+            Motion::Spring(s) => s,
+            Motion::Snap => Spring::SNAP,
+        };
+        let (fade, slide) = (spring(Prop::Opacity), spring(Prop::Offset));
+        let chan = |v: f64, s: Spring, rest: Rest| Channel::new(t, v, s).with_rest(rest).with_retention(retention);
+        let from = |tr: &Transition| {
+            let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
+            (tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64)
+        };
+        let mut changed = false;
+        let mut next = Vec::with_capacity(words.len());
+        for w in words {
+            let old = self.words.binary_search_by_key(&w.id, |a| a.id).ok();
+            let start = match old {
+                None => Some(from(enter)),
+                Some(i) if self.words[i].text != w.text && *change != Transition::NONE => Some(from(change)),
+                Some(_) => None,
+            };
+            let mut anim = match old {
+                Some(i) => {
+                    let a = &self.words[i];
+                    WordAnim {
+                        id: a.id,
+                        text: w.text.clone(),
+                        opacity: a.opacity.clone(),
+                        dx: a.dx.clone(),
+                        dy: a.dy.clone(),
+                    }
+                }
+                None => WordAnim {
+                    id: w.id,
+                    text: w.text.clone(),
+                    opacity: chan(1.0, fade, Rest::UNIT),
+                    dx: chan(0.0, slide, Rest::PIXELS),
+                    dy: chan(0.0, slide, Rest::PIXELS),
+                },
+            };
+            if let Some((o, x, y)) = start {
+                for (ch, v, rest) in [(&mut anim.opacity, o, 1.0), (&mut anim.dx, x, 0.0), (&mut anim.dy, y, 0.0)] {
+                    if v != rest {
+                        ch.snap(t, v);
+                        ch.retarget(t, rest);
+                        changed = true;
+                    }
+                }
+            }
+            next.push(anim);
+        }
+        next.sort_by_key(|a| a.id);
+        changed |= next.len() != self.words.len() || next.iter().zip(&self.words).any(|(a, b)| a.id != b.id);
+        self.words = next;
+        changed
+    }
+
+    /// Live text: a word's `(opacity, dx, dy)` at `t`.
+    fn word_motion(&self, id: u32, t: f64) -> (f32, f32, f32) {
+        match self.words.binary_search_by_key(&id, |a| a.id) {
+            Ok(i) => {
+                let a = &self.words[i];
+                (a.opacity.value(t).clamp(0.0, 1.0) as f32, a.dx.value(t) as f32, a.dy.value(t) as f32)
+            }
+            Err(_) => (1.0, 0.0, 0.0),
+        }
     }
 
     fn color(&self, slot: Slot, t: f64) -> Color {
@@ -339,6 +432,7 @@ impl<M> Scene<M> {
     pub fn next_wake(&self, t: f64) -> Option<f64> {
         let moving = self.nodes.values().any(|n| {
             n.chans.iter().any(|(_, c)| c.settled_at() > t)
+                || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
                 || (n.alive(t)
                     && match &n.kind {
                         Kind::Wave(w) => w.moving(t),
@@ -419,7 +513,9 @@ impl<M> Scene<M> {
             entered: t,
             shaped: ShapedText::default(),
             has_layout: false,
+            words: Vec::new(),
         };
+        node.sync_words(t, self.retention);
         let enter = presence.map_or(Transition::NONE, |(enter, _)| enter);
         for (slot, start) in enter.slots() {
             node.start_at(slot, start, t, self.retention);
@@ -458,6 +554,7 @@ impl<M> Scene<M> {
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
         }
+        changed |= n.sync_words(t, retention);
         // Visual slots the view no longer sets go back to their defaults.
         let unset: Vec<u8> = n
             .chans
@@ -769,7 +866,7 @@ impl<M> Scene<M> {
                 self.glyphs(n, style.font, style.size, origin, color, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style } => {
+            Kind::LiveText { words, style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 // Byte offset where each word starts in the joined text.
                 let mut starts = Vec::with_capacity(words.len());
@@ -789,7 +886,26 @@ impl<M> Scene<M> {
                         starts[i - 1].1
                     }
                 };
-                self.glyphs(n, style.font, style.size, origin, color, word_of, items, out);
+                if n.words.is_empty() || color.a <= 0.0 {
+                    self.glyphs(n, style.font, style.size, origin, color, word_of, items, out);
+                } else {
+                    for g in &n.shaped.glyphs {
+                        let word = word_of(g.cluster);
+                        let (k, dx, dy) = n.word_motion(word, t);
+                        if k <= 0.0 {
+                            continue;
+                        }
+                        push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
+                        out.glyphs.push(GlyphInstance {
+                            pos: Point::new(origin.x + g.pos.x + dx, origin.y + g.pos.y + dy),
+                            size: style.size,
+                            font: style.font,
+                            glyph: g.glyph,
+                            word,
+                            color: color.fade(k),
+                        });
+                    }
+                }
                 None
             }
             Kind::Wave(w) => {

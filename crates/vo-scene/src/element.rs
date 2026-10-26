@@ -235,11 +235,14 @@ pub(crate) enum Kind {
         clip: bool,
         offscreen: bool,
     },
-    /// Live dictation text. A stub for now: lays out the words like a label and tags each
-    /// glyph with its word id. Per-word motion comes later.
+    /// Live dictation text: lays out the words like a label, tags each glyph with its word
+    /// id, and moves each word by its own channels. A new id enters from `enter`; a kept id
+    /// whose text changed jumps to `change` and springs back.
     LiveText {
         words: Vec<Word>,
         style: TextStyle,
+        enter: Transition,
+        change: Transition,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -331,9 +334,15 @@ impl<M> Element<M> {
         e
     }
 
-    /// Live dictation words, with ids from `vo-core`'s word model.
+    /// Live dictation words, with ids from `vo-core`'s word model. Words have no motion of
+    /// their own until [`Element::word_enter`] or [`Element::word_change`] sets one.
     pub fn live_text(key: impl Into<Key>, words: &[Word]) -> Element<M> {
-        let kind = Kind::LiveText { words: words.to_vec(), style: TextStyle::default() };
+        let kind = Kind::LiveText {
+            words: words.to_vec(),
+            style: TextStyle::default(),
+            enter: Transition::NONE,
+            change: Transition::NONE,
+        };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
         e
@@ -549,6 +558,27 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::Label { style, .. } | Kind::LiveText { style, .. } => *style = s,
             _ => debug_assert!(false, "text_style on a node without text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: where a word with a new id starts from. Opacity and offset are used; scale
+    /// is ignored. The words move with this element's `Prop::Opacity` and `Prop::Offset`
+    /// motion.
+    pub fn word_enter(mut self, t: Transition) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { enter, .. } => *enter = t,
+            _ => debug_assert!(false, "word_enter on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: where a kept word whose text changed ("confi" to "configuration", "hello" to
+    /// "Hello,") jumps to before it springs back.
+    pub fn word_change(mut self, t: Transition) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { change, .. } => *change = t,
+            _ => debug_assert!(false, "word_change on a node that is not live text: {}", self.key),
         }
         self
     }
