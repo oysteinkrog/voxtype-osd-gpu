@@ -20,6 +20,11 @@ pub const ORBIT_SECS: f64 = 6.0;
 /// Frame rate of the ambient orbit (FX08 caps ambient loops at 30 fps).
 pub const ORBIT_FPS: f64 = 30.0;
 
+/// The blur region holds a panel only from this opacity up. The protocol has no blur
+/// strength, so a panel fading in would otherwise show full blur behind a faint tint; the
+/// blur appears halfway through the fade instead, where the tint already reads as a panel.
+pub const BLUR_MIN_ALPHA: f32 = 0.5;
+
 /// Light or dark glass: which way the edge line, the grain and the orbit go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum GlassKind {
@@ -162,6 +167,8 @@ pub struct GlassInstance {
     pub orbit_strength: f32,
     /// The panel's layer space to surface space, for the blur region.
     pub to_surface: Affine,
+    /// The panel's opacity on the surface: `alpha` times every enclosing layer's opacity.
+    pub surface_alpha: f32,
 }
 
 /// Rectangles covering a rounded rect, one band per pixel row of the corner radius, each
@@ -186,11 +193,11 @@ pub fn blur_rects(rect: [f32; 4], radius: f32, out: &mut Vec<IRect>) {
 
 impl DisplayList {
     /// The compositor blur region in surface logical pixels: the union of the glass panels
-    /// that ask for blur behind. Empty when there are none. A rotated layer gets its bounding
-    /// box.
+    /// that ask for blur behind and are at least [`BLUR_MIN_ALPHA`] opaque. Empty when there
+    /// are none. A rotated layer gets its bounding box.
     pub fn blur_region(&self) -> InputRegion {
         let mut rects = Vec::new();
-        for g in self.glass.iter().filter(|g| g.glass.blur_behind && g.alpha > 0.0) {
+        for g in self.glass.iter().filter(|g| g.glass.blur_behind && g.surface_alpha >= BLUR_MIN_ALPHA) {
             let m = g.to_surface;
             let [x, y, w, h] = g.rect;
             let p0 = m.apply(Point { x, y });
@@ -232,6 +239,22 @@ mod tests {
         let o = g.with_orbit(Color::WHITE);
         let next = o.next_frame(0.0, 2.0).expect("orbit keeps going");
         assert!((next - 2.0 - 1.0 / ORBIT_FPS).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_faint_panel_has_no_blur_yet() {
+        use crate::element::Element;
+        use crate::geom::Size;
+        use crate::scene::Scene;
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(200.0, 100.0), 1.0);
+        let panel = |o: f32| Element::panel("panel").size(120.0, 60.0).opacity(o).glass(Glass::dark());
+        scene.apply(Element::column("root").child(panel(0.3)), 0.0);
+        assert!(scene.sample(5.0).blur_region().rects.is_empty());
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(200.0, 100.0), 1.0);
+        scene.apply(Element::column("root").child(panel(0.8)), 0.0);
+        assert!(!scene.sample(5.0).blur_region().rects.is_empty());
     }
 
     #[test]

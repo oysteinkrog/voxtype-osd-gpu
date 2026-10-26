@@ -980,6 +980,7 @@ impl<M> Scene<M> {
                 orbit,
                 orbit_strength,
                 to_surface: out.layers[layer as usize].transform,
+                surface_alpha: alpha * layer_chain_opacity(&out.layers, layer),
             });
         }
         if let Kind::Canvas(c) = &n.kind {
@@ -1275,6 +1276,18 @@ fn local_transform<M>(n: &Node<M>, t: f64) -> (Affine, Size, f32) {
 
 /// Appends one instance at `index` to the item list, extending the last run when it is the
 /// same kind and adjacent.
+/// The product of the opacities of `layer` and every layer above it.
+fn layer_chain_opacity(layers: &[Layer], layer: u32) -> f32 {
+    let mut o = 1.0;
+    let mut li = Some(layer);
+    while let Some(i) = li {
+        let l = &layers[i as usize];
+        o *= l.opacity;
+        li = l.parent;
+    }
+    o
+}
+
 fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
     if let Some(last) = items.last_mut() {
         if last.kind == kind && last.start + last.len == index {

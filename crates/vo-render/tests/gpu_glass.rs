@@ -50,6 +50,7 @@ fn scene(t: f64) -> DisplayList {
             orbit,
             orbit_strength,
             to_surface: Affine::IDENTITY,
+            surface_alpha: 1.0,
         });
     }
     list.items.push(Item { kind: ItemKind::Glass, start: 0, len: 2 });
