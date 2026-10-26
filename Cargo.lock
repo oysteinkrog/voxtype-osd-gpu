@@ -1116,6 +1116,7 @@ name = "vo"
 version = "0.0.0"
 dependencies = [
  "pollster",
+ "vo",
  "vo-core",
  "vo-host",
  "vo-host-wayland",

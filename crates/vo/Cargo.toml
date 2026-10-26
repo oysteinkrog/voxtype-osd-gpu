@@ -10,6 +10,8 @@ description = "Facade: run an app as a live overlay or render it offline to fram
 default = ["wayland"]
 # The live overlay on Wayland. Without it only `render_offline` is available.
 wayland = ["dep:vo-host-wayland"]
+# Export to a PNG sequence or a video file through ffmpeg (plan decision 10).
+export = []
 
 [dependencies]
 vo-core = { path = "../vo-core" }
@@ -19,3 +21,7 @@ vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland", optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 pollster = "0.4"
+
+[dev-dependencies]
+# Tests and examples always see the export code; the library only with the feature.
+vo = { path = ".", default-features = false, features = ["export"] }

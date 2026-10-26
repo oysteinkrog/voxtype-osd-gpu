@@ -3,6 +3,8 @@
 //! - [`run_overlay`]: runs an [`App`] as a live overlay on the platform host (Wayland in M1).
 //! - [`render_offline`]: runs the same app through a scripted [`Scenario`] and writes frames
 //!   as PNGs.
+//! - `export` (feature `export`): the same render at a fixed frame count, to PNGs and to a video
+//!   file through ffmpeg.
 //! - [`Diagnostics`]: startup stages since exec, memory, frames and idle checks.
 //!
 //! An app is Elm-shaped: `update(msg, cx)` changes state, `view(&self, &Tokens)` describes it.
@@ -11,12 +13,16 @@
 
 mod app;
 mod diag;
+#[cfg(feature = "export")]
+mod export;
 #[cfg(feature = "wayland")]
 mod live;
 mod offline;
 
 pub use app::{channel, App, Cx, Inbox, Proxy, TimerId, Tokens};
 pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};
+#[cfg(feature = "export")]
+pub use export::{export, export_with, frame_hash, Export, ExportError, ExportReport, Video};
 #[cfg(feature = "wayland")]
 pub use live::run_overlay_with;
 pub use offline::{render_offline, render_offline_with, Input, OfflineError, Scenario};

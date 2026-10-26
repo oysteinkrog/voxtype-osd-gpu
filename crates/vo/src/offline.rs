@@ -90,9 +90,39 @@ pub fn render_offline_with<A: App>(
     scenario: &Scenario<A::Msg>,
     fps: f64,
     out_dir: &Path,
-    mut options: Options<A::Msg>,
+    options: Options<A::Msg>,
 ) -> Result<u64, OfflineError> {
     std::fs::create_dir_all(out_dir)?;
+    let mut written = 0u64;
+    let frames = Frames::UntilDone(scenario.duration);
+    drive(app, scenario, fps, frames, options, &mut |frame: Frame| -> Result<(), OfflineError> {
+        write_png(&out_dir.join(format!("frame_{written:05}.png")), frame.width, frame.height, &frame.rgba)?;
+        written += 1;
+        Ok(())
+    })?;
+    Ok(written)
+}
+
+/// Which frames [`drive`] renders.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Frames {
+    /// Every frame up to and including this time, or fewer once the app exits and settles.
+    UntilDone(f64),
+    /// Exactly this many frames, whatever the app does.
+    #[cfg_attr(not(feature = "export"), allow(dead_code))]
+    Count(u64),
+}
+
+/// Runs `app` through `scenario` and hands each frame to `sink`, in order. Returns the number
+/// of frames rendered.
+pub(crate) fn drive<A: App, E: From<OfflineError>>(
+    app: A,
+    scenario: &Scenario<A::Msg>,
+    fps: f64,
+    frames: Frames,
+    mut options: Options<A::Msg>,
+    sink: &mut dyn FnMut(Frame) -> Result<(), E>,
+) -> Result<u64, E> {
     let (device, queue) = headless_gpu()?;
     let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
     let mut scene = options.scene();
@@ -100,18 +130,15 @@ pub fn render_offline_with<A: App>(
     let mut driver = Driver::new(app, scene, options.tokens.clone(), 0.0);
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
 
-    let mut written = 0u64;
-    let mut write = |frame: Frame| -> Result<(), OfflineError> {
-        write_png(&out_dir.join(format!("frame_{written:05}.png")), frame.width, frame.height, &frame.rgba)?;
-        written += 1;
-        Ok(())
-    };
+    let mut rendered = 0u64;
     let mut inputs = scenario.inputs.iter().peekable();
     let mut list = Default::default();
     for n in 0.. {
         let ft = FrameTime::at_rate(n, fps);
-        if ft.t > scenario.duration {
-            break;
+        match frames {
+            Frames::UntilDone(end) if ft.t > end => break,
+            Frames::Count(c) if n >= c => break,
+            _ => {}
         }
         // Inputs and timers up to this frame, in time order.
         loop {
@@ -133,15 +160,16 @@ pub fn render_offline_with<A: App>(
             }
         }
         driver.scene.sample_into(ft.t, &mut list);
+        rendered += 1;
         if let Some(frame) = off.submit(&list, px, scenario.scale) {
-            write(frame)?;
+            sink(frame)?;
         }
-        if driver.done(ft.t) {
+        if matches!(frames, Frames::UntilDone(_)) && driver.done(ft.t) {
             break;
         }
     }
     for frame in off.finish() {
-        write(frame)?;
+        sink(frame)?;
     }
-    Ok(written)
+    Ok(rendered)
 }
