@@ -34,7 +34,7 @@ use vo_render::{Renderer, Target};
 const W: f32 = 1280.0;
 const H: f32 = 720.0;
 const FPS: f64 = 60.0;
-const DURATION: f64 = 12.0;
+const DURATION: f64 = 18.0;
 
 fn bg() -> Color {
     Color::hex(0x0e1015, 1.0)
@@ -88,6 +88,19 @@ fn timeline() -> Timeline {
         delay(9.6, clip("word.in", 0.4)),
         delay(10.6, clip("shrink", 0.8)),
         delay(11.6, clip("act4.out", 0.4)),
+        // Act 5: spinner and progress, decorations under words, widgets, a glyph morph.
+        delay(12.0, clip("act5.in", 0.4)),
+        delay(13.0, clip("prog.1", 0.6)),
+        delay(13.8, clip("prog.2", 0.6)),
+        delay(14.6, clip("prog.3", 0.6)),
+        delay(15.3, clip("done", 0.6)),
+        delay(12.6, clip("spark", 1.6)),
+        delay(13.2, clip("underline", 0.7)),
+        delay(13.9, clip("wavy", 0.5)),
+        delay(14.4, clip("chip", 0.5)),
+        delay(14.0, clip("glyph.1", 1.0)),
+        delay(15.8, clip("glyph.2", 1.0)),
+        delay(17.6, clip("act5.out", 0.4)),
         clip("all", DURATION),
     ])
 }
@@ -105,6 +118,10 @@ struct Assets {
     word: Vec<(u32, f32)>,
     word_width: f32,
     font: u32,
+    /// Act 5 sentence: glyphs as (id, pen x), and each word's x range, at `REF_SIZE`.
+    sentence: Vec<(u32, f32)>,
+    words: Vec<(f32, f32)>,
+    glyph_morph: Morph,
 }
 
 const REF_SIZE: f32 = 100.0;
@@ -142,6 +159,30 @@ impl Assets {
             })
             .collect();
         let (word, word_width) = shape_line(&layout, font, "Dictation");
+        let text = "trim draws every word";
+        let shaped = layout.layout(text, &TextStyle::new(font, REF_SIZE, REF_SIZE * 1.3), None);
+        let sentence = shaped.glyphs.iter().map(|g| (g.glyph, g.pos.x)).collect();
+        // Word x ranges from cluster offsets: a word runs from its first glyph to the pen
+        // position of the glyph after its last one.
+        let mut words = Vec::new();
+        let mut start = 0usize;
+        for w in text.split(' ') {
+            let end = start + w.len();
+            let xs: Vec<usize> =
+                (0..shaped.glyphs.len()).filter(|&i| (start..end).contains(&(shaped.glyphs[i].cluster as usize))).collect();
+            let x0 = shaped.glyphs[xs[0]].pos.x;
+            let after = xs.last().unwrap() + 1;
+            let x1 = shaped.glyphs.get(after).map_or(shaped.size.w, |g| g.pos.x);
+            // The pen position after a word includes its space; take the space's advance off.
+            let x1 = if after < shaped.glyphs.len() { x1 - 0.26 * REF_SIZE } else { x1 };
+            words.push((x0, x1));
+            start = end + 1;
+        }
+        let face = fonts.get(font).expect("font");
+        let gid = |c: &str| shape_line(&layout, font, c).0[0].0;
+        let ga = Outline::new(&vo::scene::path::glyph_path(&face, gid("a"), 260.0), 0.02);
+        let gg = Outline::new(&vo::scene::path::glyph_path(&face, gid("g"), 260.0), 0.02);
+        let glyph_morph = Morph::new(&ga, &gg, 220);
         Assets {
             sched: timeline().schedule(),
             icons,
@@ -154,6 +195,9 @@ impl Assets {
             word,
             word_width,
             font,
+            sentence,
+            words,
+            glyph_morph,
         }
     }
 }
@@ -170,8 +214,10 @@ fn paint(a: &Assets, t: f64, rect: Rect, p: &mut Painter) {
             act_panel(a, t, out("act2.out"), b);
         } else if t < 9.3 {
             act_morph(a, t, out("act3.out"), b);
-        } else {
+        } else if t < 12.0 {
             act_text(a, t, out("act4.out"), b);
+        } else {
+            act_widgets(a, t, out("act5.out"), b);
         }
     });
 }
@@ -348,6 +394,100 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
 }
 
 /// The demo as an app: one canvas element the size of the surface.
+fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
+    use vo::scene::path::make;
+    let s = &a.sched;
+    let inn = s.eased("act5.in", t, CubicBezier::OUT) as f32;
+    let soft = |n: &str| s.spring(n, t, Spring::SOFT, 0.0, 1.0) as f32;
+    let track = Color::hex(0x262a33, 1.0);
+    b.layer(Affine::IDENTITY, fade * inn, |b| {
+        // Spinner, then a determinate arc that springs to each value and never goes back,
+        // then the ring closes and a check draws in it.
+        let c = Point::new(200.0, 200.0);
+        b.stroke(&make::ring(c, 56.0), &StrokeStyle::solid(10.0, track));
+        let lt = s.local("act5.in", t);
+        let determinate = s.local("prog.1", t) > 0.0;
+        if !determinate {
+            b.stroke(&make::spinner(c, 56.0, lt.max(0.0)), &StrokeStyle::solid(10.0, cool()));
+        } else {
+            let v = 0.3 * soft("prog.1") + 0.35 * soft("prog.2") + 0.35 * soft("prog.3");
+            let done = soft("done");
+            let color = mix(cool(), accent(), done);
+            b.stroke(&make::progress(c, 56.0, v), &StrokeStyle::solid(10.0, color).glow(4.0 * done));
+            if done > 0.0 {
+                let check = a.icons[1].transform(&Affine::translate(-12.0, -12.0).then(&Affine::scale(3.2)).then(&Affine::translate(c.x, c.y)));
+                let len = check.length();
+                b.outline(&check.trim(0.0, done * len), &StrokeStyle::solid(9.0, accent()));
+            }
+        }
+        // A sentence with decorations tied to its words' measured bounds.
+        let size = 44.0;
+        let k = size / REF_SIZE;
+        let (x0, base) = (380.0, 210.0);
+        for &(g, x) in &a.sentence {
+            b.glyph(GlyphInstance { pos: Point::new(x0 + x * k, base), size, font: a.font, glyph: g, word: NO_WORD, color: ink() });
+        }
+        let word = |i: usize| (x0 + a.words[i].0 * k, x0 + a.words[i].1 * k);
+        // Highlight chip behind "every": grows from the left on a spring.
+        let chip = s.spring("chip", t, Spring::POP, 0.0, 1.0) as f32;
+        if chip > 0.0 {
+            let (w0, w1) = word(2);
+            let r = RRect::new(Rect::new(w0 - 6.0, base - 36.0, (w1 - w0 + 12.0) * chip, 48.0), 10.0);
+            b.shape(ShapeInstance::rrect(r, Paint::solid(Color::hex(0x7c3aed, 0.35))));
+        }
+        // Draw-on underline under "trim", from the left, with a gradient along it.
+        let (u0, u1) = word(0);
+        let under = make::underline(u0, u1, base + 10.0);
+        let f = soft("underline");
+        b.stroke(&under.trim(0.0, f * (u1 - u0)), &StrokeStyle::solid(4.0, accent()).ramp(0.0, cool(), u1 - u0, accent()));
+        // Wavy underline under "draws": draws on, then keeps flowing.
+        let (v0, v1) = word(1);
+        let flow = (s.local("wavy", t).max(0.0) * 6.0) as f32;
+        let wavy = make::wave(v0, v1, base + 12.0, 3.0, 14.0, -flow);
+        let wl = wavy.length();
+        b.stroke(&wavy.trim(0.0, soft("wavy") * wl), &StrokeStyle::solid(2.5, warm()));
+        // A sparkline that draws on, a dashed frame that marches, a conic rim that turns.
+        let values = [0.3, 0.45, 0.4, 0.7, 0.55, 0.8, 0.6, 0.9, 0.75, 0.95, 0.7, 1.0];
+        let spark = make::sparkline(&values, 980.0, 140.0, 200.0, 80.0);
+        let sl = spark.length();
+        b.stroke(&spark.trim(0.0, soft("spark") * sl), &StrokeStyle::solid(3.0, accent()).glow(3.0));
+        let march = (lt.max(0.0) * 30.0) as f32;
+        for d in make::panel(960.0, 120.0, 240.0, 120.0, 16.0).dash(&[10.0, 7.0], march) {
+            b.stroke(&d, &StrokeStyle::solid(2.0, Color::hex(0x6b7280, 1.0)));
+        }
+        let rc = Point::new(1080.0, 440.0);
+        let spin = (lt * 1.6) as f32;
+        b.stroke(&make::ring(rc, 70.0), &StrokeStyle::solid(6.0, Color::WHITE).conic(rc, spin, Color::hex(0x22d3ee, 1.0), Color::hex(0xa855f7, 1.0)).glow(5.0));
+        // A ribbon from two travelling sines, its width swelling along it.
+        let n = 90;
+        let pts: Vec<Point> = (0..=n)
+            .map(|i| {
+                let x = 60.0 + 760.0 * i as f32 / n as f32;
+                let ph = lt as f32 * 2.2;
+                Point::new(x, 560.0 + 30.0 * (x * 0.012 + ph).sin() + 14.0 * (x * 0.031 - ph * 1.7).sin())
+            })
+            .collect();
+        let widths: Vec<f32> =
+            (0..=n).map(|i| 0.15 + (std::f32::consts::PI * i as f32 / n as f32).sin() * (0.8 + 0.2 * (i as f32 * 0.3 + lt as f32 * 3.0).sin())).collect();
+        b.stroke(
+            &make::ribbon(&pts, &widths),
+            &StrokeStyle::solid(18.0, Color::WHITE)
+                .linear(Point::new(60.0, 0.0), Color::hex(0x60a5fa, 1.0), Point::new(820.0, 0.0), Color::hex(0xf472b6, 1.0))
+                .glow(6.0),
+        );
+        // A glyph morph as a fill with holes: a to g and back.
+        let m = s.spring("glyph.1", t, Spring::from_frequency(12.0, 0.65), 0.0, 1.0)
+            - s.spring("glyph.2", t, Spring::from_frequency(12.0, 0.65), 0.0, 1.0);
+        let at = Affine::translate(560.0, 480.0);
+        let parts: Vec<_> =
+            a.glyph_morph.sample(m as f32).into_iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&at)).collect();
+        b.fill(
+            &parts,
+            &StrokeStyle::solid(0.0, Color::WHITE).linear(Point::new(560.0, 300.0), cool(), Point::new(560.0, 560.0), ink()),
+        );
+    });
+}
+
 struct Demo {
     assets: Arc<Assets>,
     /// Scene time the demo starts at (the host clock's time at `init` when live).
@@ -516,7 +656,7 @@ fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
         mapped_at_creation: false,
     });
     let period = queue.get_timestamp_period() as f64;
-    let mut per_act: [Vec<f64>; 4] = Default::default();
+    let mut per_act: [Vec<f64>; 5] = Default::default();
     let mut cpu_build = Vec::new();
     for i in 0..frame_count() {
         let t = i as f64 / FPS;
@@ -541,8 +681,10 @@ fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
             1
         } else if t < 9.3 {
             2
-        } else {
+        } else if t < 12.0 {
             3
+        } else {
+            4
         };
         per_act[act].push(ms);
     }
@@ -551,7 +693,7 @@ fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
         let mean = v.iter().sum::<f64>() / v.len() as f64;
         (mean, v[v.len() / 2], v[(v.len() * 95) / 100], v[v.len() - 1])
     };
-    for (name, v) in ["icons draw-on", "panel, head, blobs", "icon morph", "text on path"].iter().zip(per_act.iter_mut()) {
+    for (name, v) in ["icons draw-on", "panel, head, blobs", "icon morph", "text on path", "widgets, fills"].iter().zip(per_act.iter_mut()) {
         let (mean, med, p95, max) = stats(v);
         println!("GPU per frame, {name}: mean {mean:.3} ms, median {med:.3}, p95 {p95:.3}, max {max:.3} (1280x720)");
     }

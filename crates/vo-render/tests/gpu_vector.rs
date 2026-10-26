@@ -203,3 +203,137 @@ fn element_path_golden() {
     let img = render(&mut off, "vec-element-path", &list, 2.0);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+fn dark(b: &mut Builder, w: f32, h: f32) {
+    b.shape(ShapeInstance::rrect(RRect::new(Rect::new(0.0, 0.0, w, h), 0.0), Paint::solid(Color::hex(0x111318, 1.0))));
+}
+
+/// Hairlines, dashes, a ribbon, linear and conic gradients, a sparkline, corner brackets and
+/// straight and wavy underlines.
+fn strokes_scene() -> DisplayList {
+    use vo_scene::path::make;
+    let mut b = Builder::new(360.0, 220.0);
+    dark(&mut b, 360.0, 220.0);
+    let ink = Color::hex(0xe8eaf0, 1.0);
+    b.stroke(&make::panel(10.0, 10.0, 160.0, 60.0, 12.0), &StrokeStyle::hairline(Color::hex(0x6b7280, 1.0)));
+    for d in make::panel(20.0, 20.0, 140.0, 40.0, 8.0).dash(&[8.0, 6.0], 3.0) {
+        b.stroke(&d, &StrokeStyle::solid(2.0, Color::hex(ACCENT, 1.0)));
+    }
+    let pts: Vec<Point> = (0..=40).map(|i| Point::new(190.0 + 4.0 * i as f32, 40.0 + 14.0 * (i as f32 * 0.35).sin())).collect();
+    let widths: Vec<f32> = (0..=40).map(|i| 0.2 + (std::f32::consts::PI * i as f32 / 40.0).sin()).collect();
+    b.stroke(
+        &make::ribbon(&pts, &widths),
+        &StrokeStyle::solid(10.0, white()).linear(
+            Point::new(190.0, 0.0),
+            Color::hex(0x60a5fa, 1.0),
+            Point::new(350.0, 0.0),
+            Color::hex(0xf472b6, 1.0),
+        ),
+    );
+    let ring = make::ring(Point::new(50.0, 130.0), 32.0);
+    b.stroke(&ring, &StrokeStyle::solid(8.0, white()).conic(Point::new(50.0, 130.0), 0.0, Color::hex(0x22d3ee, 1.0), Color::hex(0xa855f7, 1.0)));
+    let values = [0.2, 0.5, 0.35, 0.8, 0.6, 0.9, 0.4, 0.55, 0.3, 0.7, 0.65, 1.0];
+    b.stroke(&make::sparkline(&values, 100.0, 100.0, 110.0, 60.0), &StrokeStyle::solid(2.0, Color::hex(ACCENT, 1.0)));
+    for c in make::brackets(230.0, 95.0, 110.0, 70.0, 14.0) {
+        b.stroke(&c, &StrokeStyle::solid(2.5, ink));
+    }
+    b.stroke(&make::underline(20.0, 150.0, 195.0), &StrokeStyle::solid(2.0, ink));
+    b.stroke(&make::wave(190.0, 340.0, 195.0, 3.0, 12.0, 0.0), &StrokeStyle::solid(2.0, Color::hex(0xf87171, 1.0)));
+    b.finish()
+}
+
+/// Spinners at three times, progress arcs, and the newer icons.
+fn components_scene() -> DisplayList {
+    use vo_scene::path::make;
+    let mut b = Builder::new(380.0, 170.0);
+    dark(&mut b, 380.0, 170.0);
+    let track = Color::hex(0x2a2f3a, 1.0);
+    for (i, t) in [0.1, 0.5, 0.95].into_iter().enumerate() {
+        let c = Point::new(40.0 + 70.0 * i as f32, 45.0);
+        b.stroke(&make::ring(c, 22.0), &StrokeStyle::solid(5.0, track));
+        b.stroke(&make::spinner(c, 22.0, t), &StrokeStyle::solid(5.0, Color::hex(0x60a5fa, 1.0)));
+    }
+    for (i, f) in [0.25f32, 0.6, 1.0].into_iter().enumerate() {
+        let c = Point::new(250.0 + 45.0 * i as f32, 45.0);
+        b.stroke(&make::ring(c, 16.0), &StrokeStyle::solid(4.0, track));
+        b.stroke(&make::progress(c, 16.0, f), &StrokeStyle::solid(4.0, Color::hex(ACCENT, 1.0)));
+    }
+    for (i, icon) in [icons::x(), icons::timer(), icons::chip(), icons::gear()].iter().enumerate() {
+        for c in placed(icon, Point::new(20.0 + 90.0 * i as f32, 90.0), 2.6).contours {
+            b.stroke(&c, &StrokeStyle::solid(4.0, white()));
+        }
+    }
+    b.finish()
+}
+
+/// Fills that change every frame: a glyph morph "a" to "g" with holes, and a filled icon morph.
+fn fills_scene(fonts: &FontRegistry) -> DisplayList {
+    use vo_scene::path::push_fill;
+    let face = fonts.get(0).expect("font 0");
+    let gid = |c: char| {
+        use skrifa::MetadataProvider;
+        face.skrifa().charmap().map(c).expect("glyph").to_u32()
+    };
+    let a = Outline::new(&vo_scene::path::glyph_path(&face, gid('a'), 90.0), 0.02);
+    let g = Outline::new(&vo_scene::path::glyph_path(&face, gid('g'), 90.0), 0.02);
+    let m = Morph::new(&a, &g, 160);
+    let mut b = Builder::new(420.0, 120.0);
+    dark(&mut b, 420.0, 120.0);
+    for (i, t) in [0.0f32, 0.33, 0.66, 1.0].into_iter().enumerate() {
+        let at = Affine::translate(15.0 + 70.0 * i as f32, 80.0);
+        let parts: Vec<_> = m.sample(t).into_iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&at)).collect();
+        let item = push_fill(&mut b.list, &parts, &StrokeStyle::solid(0.0, Color::hex(0xe8eaf0, 1.0)));
+        b.item(item);
+    }
+    let stop = Outline::new(&icons::outline(&icons::stop(), 2.0), 0.01);
+    let at = Affine::scale(3.5).then(&Affine::translate(320.0, 18.0));
+    let item = push_fill(
+        &mut b.list,
+        &stop.transform(&at).contours,
+        &StrokeStyle::solid(0.0, white()).linear(
+            Point::new(320.0, 18.0),
+            Color::hex(0xf87171, 1.0),
+            Point::new(404.0, 102.0),
+            Color::hex(0xfbbf24, 1.0),
+        ),
+    );
+    b.item(item);
+    b.finish()
+}
+
+#[test]
+fn vector_feature_goldens() {
+    let gpu = support::gpu();
+    let fonts = FontRegistry::new();
+    fonts.add_file(&vo_scene::font::test_font_path()).unwrap();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let images = [
+        render(&mut off, "vec-strokes", &strokes_scene(), 1.0),
+        render(&mut off, "vec-strokes-2x", &strokes_scene(), 2.0),
+        render(&mut off, "vec-components", &components_scene(), 1.0),
+        render(&mut off, "vec-fills", &fills_scene(&fonts), 1.0),
+    ];
+    let failures: Vec<String> =
+        images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
+    assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}
+
+/// A hairline is one physical pixel wide at 1x and at 2x.
+#[test]
+fn vector_hairline_is_one_pixel() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let mut b = Builder::new(40.0, 40.0);
+    b.stroke(
+        &Contour::polyline(&[Point::new(2.0, 20.5), Point::new(38.0, 20.5)], false),
+        &StrokeStyle::hairline(white()),
+    );
+    let list = b.finish();
+    for scale in [1.0f32, 2.0] {
+        let n = (40.0 * scale) as u32;
+        let px = off.render_to_rgba(&list, [n, n], scale);
+        let col = n as usize / 2;
+        let lit: u32 = (0..n as usize).map(|y| px[(y * n as usize + col) * 4 + 3] as u32).sum();
+        assert!((240..=270).contains(&lit), "scale {scale}: column alpha sum {lit}");
+    }
+}

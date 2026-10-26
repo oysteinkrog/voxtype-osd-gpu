@@ -31,7 +31,8 @@ const ACCURACY: f64 = 1e-3;
 
 /// One stroke segment in layer space: a quadratic Bezier from `p0` through control `p1` to
 /// `p2`. A straight segment has `p1` at the midpoint. `s0` and `s1` are the arc lengths along
-/// the contour at its ends.
+/// the contour at its ends; `w` multiplies the stroke width at each end, mixed between, for
+/// ribbons whose width varies.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[repr(C)]
 pub struct VectorSeg {
@@ -40,6 +41,7 @@ pub struct VectorSeg {
     pub p2: Point,
     pub s0: f32,
     pub s1: f32,
+    pub w: [f32; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -51,7 +53,27 @@ pub enum VectorKind {
     /// The smooth-min union of circle `a` and circle `b` (`cx, cy, r, k`; `k` from `a` is the
     /// blend radius). Filled with `c0` at `a` and `c1` at `b`. No segments.
     Blob,
+    /// The inside of all the segments' contours by the nonzero winding rule, with holes where
+    /// contours wind the other way. For fills that change every frame (morphs); a fixed fill
+    /// is cheaper through the glyph path (`fill_glyph`).
+    Fill,
 }
+
+/// What the colour ramp of a vector instance runs along.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub enum VectorPaint {
+    /// Arc length along the contour, in logical units.
+    #[default]
+    Along,
+    /// 0 at `p0` to 1 at `p1`, measured along the line between them (layer space).
+    Linear { p0: Point, p1: Point },
+    /// The angle around `centre` as a fraction of a turn, 0 at `start` radians (clockwise on
+    /// screen). With `mirror` it goes 0, 1, 0 around the turn, so there is no seam.
+    Conic { centre: Point, start: f32, mirror: bool },
+}
+
+/// `VectorInstance::flags` bit: the stroke is one physical pixel wide at any scale.
+pub const VECTOR_HAIRLINE: u32 = 1;
 
 /// One contour stroke or one blob. Colours are straight sRGB like every display colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
@@ -64,10 +86,14 @@ pub struct VectorInstance {
     pub width: f32,
     /// Glow radius outside the stroke edge, logical units; 0 for none.
     pub glow: f32,
-    /// Colour `c0` up to arc length `ramp[0]`, `c1` from `ramp[1]`, mixed between.
+    /// Colour `c0` up to `ramp[0]`, `c1` from `ramp[1]`, mixed between in OKLab. The ramp
+    /// runs along `paint`.
     pub c0: Color,
     pub c1: Color,
     pub ramp: [f32; 2],
+    pub paint: VectorPaint,
+    /// `VECTOR_HAIRLINE`.
+    pub flags: u32,
     /// Blob circles, `cx, cy, r, k`.
     pub a: [f32; 4],
     pub b: [f32; 4],
@@ -81,19 +107,44 @@ pub struct StrokeStyle {
     pub c0: Color,
     pub c1: Color,
     pub ramp: [f32; 2],
+    pub paint: VectorPaint,
+    pub hairline: bool,
 }
 
 impl StrokeStyle {
     pub fn solid(width: f32, color: Color) -> StrokeStyle {
-        StrokeStyle { width, glow: 0.0, c0: color, c1: color, ramp: [0.0, 0.0] }
+        StrokeStyle {
+            width,
+            glow: 0.0,
+            c0: color,
+            c1: color,
+            ramp: [0.0, 0.0],
+            paint: VectorPaint::Along,
+            hairline: false,
+        }
     }
 
-    /// Colour `c0` at arc length `from`, `c1` at `to`.
+    /// One physical pixel wide at any scale.
+    pub fn hairline(color: Color) -> StrokeStyle {
+        StrokeStyle { hairline: true, ..StrokeStyle::solid(1.0, color) }
+    }
+
+    /// Colour `c0` at `from`, `c1` at `to`, along the paint (arc length unless set).
     pub fn ramp(mut self, from: f32, c0: Color, to: f32, c1: Color) -> StrokeStyle {
         self.c0 = c0;
         self.c1 = c1;
         self.ramp = [from, to];
         self
+    }
+
+    /// A linear gradient from `c0` at `p0` to `c1` at `p1`.
+    pub fn linear(self, p0: Point, c0: Color, p1: Point, c1: Color) -> StrokeStyle {
+        StrokeStyle { paint: VectorPaint::Linear { p0, p1 }, ..self.ramp(0.0, c0, 1.0, c1) }
+    }
+
+    /// A conic gradient around `centre`: `c0` at angle `start`, `c1` half a turn on, and back.
+    pub fn conic(self, centre: Point, start: f32, c0: Color, c1: Color) -> StrokeStyle {
+        StrokeStyle { paint: VectorPaint::Conic { centre, start, mirror: true }, ..self.ramp(0.0, c0, 1.0, c1) }
     }
 
     pub fn glow(mut self, radius: f32) -> StrokeStyle {
@@ -135,7 +186,32 @@ impl Contour {
             let t0 = if s.s0 < from { param_at(s, (from - s.s0) as f64) } else { 0.0 };
             let t1 = if s.s1 > to { param_at(s, (to - s.s0) as f64) } else { 1.0 };
             let sub = q.subsegment(t0..t1);
-            out.segs.push(seg(sub, s.s0.max(from), s.s1.min(to)));
+            let w = |t: f64| s.w[0] + (s.w[1] - s.w[0]) * t as f32;
+            out.segs.push(VectorSeg { w: [w(t0), w(t1)], ..seg(sub, s.s0.max(from), s.s1.min(to)) });
+        }
+        out
+    }
+
+    /// Dashes: `pattern` alternates dash and gap lengths, starting with a dash, shifted back by
+    /// `offset` (a growing offset makes the dashes march). Each dash is its own piece, with
+    /// round caps when stroked.
+    pub fn dash(&self, pattern: &[f32], offset: f32) -> Vec<Contour> {
+        let period: f32 = pattern.iter().sum();
+        let (Some(first), true) = (self.segs.first(), period > 0.0) else { return Vec::new() };
+        let (start, end) = (first.s0, self.length());
+        let mut out = Vec::new();
+        let mut at = start - offset.rem_euclid(period);
+        let mut i = 0;
+        while at < end {
+            let len = pattern[i % pattern.len()];
+            if i % 2 == 0 {
+                let piece = self.trim(at.max(start), (at + len).min(end));
+                if !piece.segs.is_empty() {
+                    out.push(piece);
+                }
+            }
+            at += len;
+            i += 1;
         }
         out
     }
@@ -147,7 +223,7 @@ impl Contour {
         let segs = self
             .segs
             .iter()
-            .map(|s| VectorSeg { p0: m.apply(s.p0), p1: m.apply(s.p1), p2: m.apply(s.p2), s0: s.s0 * k, s1: s.s1 * k })
+            .map(|s| VectorSeg { p0: m.apply(s.p0), p1: m.apply(s.p1), p2: m.apply(s.p2), s0: s.s0 * k, s1: s.s1 * k, ..*s })
             .collect();
         Contour { segs, closed: self.closed }
     }
@@ -339,7 +415,11 @@ impl Morph {
             let mut pa = a.resample(n);
             let mut pb = pb;
             if b.closed {
-                pb = best_rotation(&pa, &pb);
+                // Try both directions: a clockwise contour paired with a counter-clockwise
+                // one would turn inside out on the way.
+                let rev: Vec<Point> = pb.iter().rev().copied().collect();
+                let (fwd, back) = (best_rotation(&pa, &pb), best_rotation(&pa, &rev));
+                pb = if cost(&pa, &back) < cost(&pa, &fwd) { back } else { fwd };
             } else if a.closed {
                 pa = best_rotation(&pb, &pa);
             }
@@ -393,6 +473,45 @@ pub fn push_stroke(list: &mut DisplayList, contour: &Contour, style: &StrokeStyl
         c0: style.c0,
         c1: style.c1,
         ramp: style.ramp,
+        paint: style.paint,
+        flags: if style.hairline { VECTOR_HAIRLINE } else { 0 },
+        a: [0.0; 4],
+        b: [0.0; 4],
+    });
+    Some(Item { kind: ItemKind::Vectors, start: index, len: 1 })
+}
+
+/// Appends the inside of `contours` (nonzero winding, open contours closed by a straight
+/// line) and returns the item that draws it. `style.width` is not used; glow and paint are.
+pub fn push_fill<'a>(
+    list: &mut DisplayList,
+    contours: impl IntoIterator<Item = &'a Contour>,
+    style: &StrokeStyle,
+) -> Option<Item> {
+    let start = list.vector_segs.len() as u32;
+    for c in contours {
+        let (Some(first), Some(last)) = (c.segs.first(), c.segs.last()) else { continue };
+        let (a, b) = (first.p0, last.p2);
+        list.vector_segs.extend_from_slice(&c.segs);
+        if dist(a, b) > 1e-4 {
+            list.vector_segs.push(line(b, a, last.s1, last.s1 + dist(a, b)));
+        }
+    }
+    let count = list.vector_segs.len() as u32 - start;
+    if count == 0 {
+        return None;
+    }
+    let index = list.vectors.len() as u32;
+    list.vectors.push(VectorInstance {
+        kind: VectorKind::Fill,
+        segs: [start, count],
+        width: 0.0,
+        glow: style.glow,
+        c0: style.c0,
+        c1: style.c1,
+        ramp: style.ramp,
+        paint: style.paint,
+        flags: 0,
         a: [0.0; 4],
         b: [0.0; 4],
     });
@@ -419,10 +538,181 @@ pub fn fill_glyph(path: u32, pos: Point, scale: f32, color: Color) -> GlyphInsta
     GlyphInstance { pos, size: scale, font: PATH_FONT, glyph: path, word: NO_WORD, color }
 }
 
+/// Contours made from numbers: arcs, waves, sparklines, ribbons, and the closed-form motion of
+/// spinners and progress arcs. All in layer units, y down; angles in radians, clockwise on
+/// screen, 0 pointing right.
+pub mod make {
+    use super::{Contour, Outline, VectorSeg};
+    use crate::geom::Point;
+    use kurbo::{Arc, BezPath};
+
+    /// An arc of a circle, from `start` sweeping `sweep` (negative goes the other way).
+    pub fn arc(centre: Point, r: f32, start: f32, sweep: f32) -> Contour {
+        let mut p = BezPath::new();
+        let arc = Arc::new((centre.x as f64, centre.y as f64), (r as f64, r as f64), start as f64, sweep as f64, 0.0);
+        p.move_to(arc.center + kurbo::Vec2::from_angle(start as f64) * r as f64);
+        arc.to_cubic_beziers(0.01, |a, b, c| p.curve_to(a, b, c));
+        Outline::new(&p, 0.01).contours.into_iter().next().unwrap_or_default()
+    }
+
+    /// A whole circle starting at the top and running clockwise, so trimming it from 0 fills
+    /// it like a clock hand.
+    pub fn ring(centre: Point, r: f32) -> Contour {
+        let mut c = arc(centre, r, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU);
+        c.closed = true;
+        c
+    }
+
+    /// A determinate progress arc at `fraction` (0 to 1) of the ring.
+    pub fn progress(centre: Point, r: f32, fraction: f32) -> Contour {
+        let ring = ring(centre, r);
+        let len = ring.length();
+        ring.trim(0.0, fraction.clamp(0.0, 1.0) * len)
+    }
+
+    /// An indeterminate spinner at time `t`: an arc whose head and tail chase each other with
+    /// eased speeds, growing to 270 degrees and shrinking to 20, while the whole thing turns.
+    /// Closed form in `t`, one cycle every 1.4 s.
+    pub fn spinner(centre: Point, r: f32, t: f64) -> Contour {
+        const PERIOD: f64 = 1.4;
+        let ease = |x: f64| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let cycle = (t / PERIOD).floor();
+        let u = t / PERIOD - cycle;
+        let (min, max) = (20f64.to_radians(), 270f64.to_radians());
+        // Each cycle the head leads by (max - min); the tail catches up in the second half.
+        let head = ease(u * 2.0) * (max - min);
+        let tail = ease(u * 2.0 - 1.0) * (max - min);
+        let base = cycle * (max - min) + t * 2.0;
+        let start = (base + tail) as f32;
+        let sweep = (head - tail + min) as f32;
+        arc(centre, r, start, sweep)
+    }
+
+    /// A sine wave across `x0..x1` around the line `y`: amplitude `amp`, `wavelength`, moved
+    /// along by `phase` radians. For wavy underlines and ribbons.
+    pub fn wave(x0: f32, x1: f32, y: f32, amp: f32, wavelength: f32, phase: f32) -> Contour {
+        let steps = (((x1 - x0) / wavelength) * 16.0).ceil().max(2.0) as usize;
+        let pts: Vec<Point> = (0..=steps)
+            .map(|i| {
+                let x = x0 + (x1 - x0) * i as f32 / steps as f32;
+                Point::new(x, y + amp * (std::f32::consts::TAU * (x - x0) / wavelength + phase).sin())
+            })
+            .collect();
+        Contour::polyline(&pts, false)
+    }
+
+    /// A straight underline from `x0` to `x1` at `y`.
+    pub fn underline(x0: f32, x1: f32, y: f32) -> Contour {
+        Contour::polyline(&[Point::new(x0, y), Point::new(x1, y)], false)
+    }
+
+    /// A sparkline: `values` (0 at the bottom, 1 at the top) spread across `rect` (x, y, w, h).
+    pub fn sparkline(values: &[f32], x: f32, y: f32, w: f32, h: f32) -> Contour {
+        let n = values.len().max(2) - 1;
+        let pts: Vec<Point> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| Point::new(x + w * i as f32 / n as f32, y + h * (1.0 - v.clamp(0.0, 1.0))))
+            .collect();
+        Contour::polyline(&pts, false)
+    }
+
+    /// A ribbon: a polyline through `pts` whose width factor is `widths[i]` at point `i`
+    /// (multiplied by the stroke width).
+    pub fn ribbon(pts: &[Point], widths: &[f32]) -> Contour {
+        let mut c = Contour::polyline(pts, false);
+        // `polyline` skips zero-length steps, so match widths by segment end points.
+        let mut j = 0;
+        for s in &mut c.segs {
+            while j + 1 < pts.len() && pts[j] != s.p0 {
+                j += 1;
+            }
+            let w0 = widths.get(j).copied().unwrap_or(1.0);
+            let w1 = widths.get(j + 1).copied().unwrap_or(w0);
+            *s = VectorSeg { w: [w0, w1], ..*s };
+        }
+        c
+    }
+
+    /// Four corner brackets around `x, y, w, h`, each arm `arm` long.
+    pub fn brackets(x: f32, y: f32, w: f32, h: f32, arm: f32) -> Vec<Contour> {
+        let (r, b) = (x + w, y + h);
+        [
+            [Point::new(x, y + arm), Point::new(x, y), Point::new(x + arm, y)],
+            [Point::new(r - arm, y), Point::new(r, y), Point::new(r, y + arm)],
+            [Point::new(r, b - arm), Point::new(r, b), Point::new(r - arm, b)],
+            [Point::new(x + arm, b), Point::new(x, b), Point::new(x, b - arm)],
+        ]
+        .iter()
+        .map(|p| Contour::polyline(p, false))
+        .collect()
+    }
+
+    /// A rounded rect outline, starting at the middle of the top edge and running clockwise,
+    /// for a border that draws on from the top.
+    pub fn panel(x: f32, y: f32, w: f32, h: f32, r: f32) -> Contour {
+        use std::f64::consts::FRAC_PI_2;
+        let (x0, y0, x1, y1) = (x as f64, y as f64, (x + w) as f64, (y + h) as f64);
+        let r = (r.max(0.0) as f64).min(0.5 * (w.min(h)) as f64);
+        let mut p = BezPath::new();
+        p.move_to((0.5 * (x0 + x1), y0));
+        let corners = [
+            ((x1 - r, y0), (x1 - r, y0 + r), -FRAC_PI_2),
+            ((x1, y1 - r), (x1 - r, y1 - r), 0.0),
+            ((x0 + r, y1), (x0 + r, y1 - r), FRAC_PI_2),
+            ((x0, y0 + r), (x0 + r, y0 + r), 2.0 * FRAC_PI_2),
+        ];
+        for (line_end, centre, start) in corners {
+            p.line_to(line_end);
+            if r > 0.0 {
+                Arc::new(centre, (r, r), start, FRAC_PI_2, 0.0).to_cubic_beziers(0.01, |a, b, c| p.curve_to(a, b, c));
+            }
+        }
+        p.close_path();
+        Outline::new(&p, 0.02).contours.into_iter().next().unwrap_or_default()
+    }
+}
+
+/// A glyph's outline as a path in layer units at `size`, pen origin at 0, y down. For glyph
+/// morphs (TY21) and text drawn as strokes.
+pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::outline::{DrawSettings, OutlinePen};
+    use skrifa::MetadataProvider;
+    struct Pen(BezPath);
+    impl OutlinePen for Pen {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.0.move_to((x as f64, -y as f64));
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.0.line_to((x as f64, -y as f64));
+        }
+        fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+            self.0.quad_to((cx as f64, -cy as f64), (x as f64, -y as f64));
+        }
+        fn curve_to(&mut self, ax: f32, ay: f32, bx: f32, by: f32, x: f32, y: f32) {
+            self.0.curve_to((ax as f64, -ay as f64), (bx as f64, -by as f64), (x as f64, -y as f64));
+        }
+        fn close(&mut self) {
+            self.0.close_path();
+        }
+    }
+    let font = face.skrifa();
+    let mut pen = Pen(BezPath::new());
+    if let Some(g) = font.outline_glyphs().get(skrifa::GlyphId::new(glyph)) {
+        let _ = g.draw(DrawSettings::unhinted(Size::new(size), LocationRef::default()), &mut pen);
+    }
+    pen.0
+}
+
 /// A small line icon set on a 24 x 24 grid (y down), drawn to be stroked about 2 units wide.
 /// Fill one with [`icons::outline`], which strokes it to a closed outline for the glyph path.
 pub mod icons {
     use kurbo::{Arc, BezPath, Cap, Join, RoundedRect, Shape, Stroke, StrokeOpts};
+    pub use super::make::brackets;
 
     /// A microphone: the capsule, the holder arc and the stem. Three contours.
     pub fn mic() -> BezPath {
@@ -445,6 +735,57 @@ pub mod icons {
         p.move_to((4.5, 12.5));
         p.line_to((9.5, 17.5));
         p.line_to((19.5, 6.5));
+        p
+    }
+
+    /// An X, two strokes.
+    pub fn x() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((6.0, 6.0));
+        p.line_to((18.0, 18.0));
+        p.move_to((18.0, 6.0));
+        p.line_to((6.0, 18.0));
+        p
+    }
+
+    /// A timer: a dial, a hand and the button on top.
+    pub fn timer() -> BezPath {
+        let mut p = kurbo::Circle::new((12.0, 13.5), 8.0).to_path(0.01);
+        p.move_to((12.0, 13.5));
+        p.line_to((12.0, 9.0));
+        p.move_to((10.0, 2.5));
+        p.line_to((14.0, 2.5));
+        p
+    }
+
+    /// A chip: a rounded square with three pins on each side.
+    pub fn chip() -> BezPath {
+        let mut p = RoundedRect::new(6.0, 6.0, 18.0, 18.0, 2.0).to_path(0.01);
+        for k in [9.0, 12.0, 15.0] {
+            for (a, b) in [((k, 2.5), (k, 6.0)), ((k, 18.0), (k, 21.5)), ((2.5, k), (6.0, k)), ((18.0, k), (21.5, k))] {
+                p.move_to(a);
+                p.line_to(b);
+            }
+        }
+        p
+    }
+
+    /// A gear with eight teeth and a hub.
+    pub fn gear() -> BezPath {
+        let mut p = BezPath::new();
+        let (c, teeth) = (kurbo::Point::new(12.0, 12.0), 8);
+        for i in 0..teeth * 4 {
+            let a = std::f64::consts::TAU * (i as f64 - 0.5) / (teeth * 4) as f64;
+            let r = if (i / 2) % 2 == 0 { 9.5 } else { 7.0 };
+            let q = c + kurbo::Vec2::from_angle(a) * r;
+            if i == 0 {
+                p.move_to(q);
+            } else {
+                p.line_to(q);
+            }
+        }
+        p.close_path();
+        p.extend(kurbo::Circle::new(c, 3.0).to_path(0.01));
         p
     }
 
@@ -479,11 +820,11 @@ fn quad(s: &VectorSeg) -> QuadBez {
 
 fn seg(q: QuadBez, s0: f32, s1: f32) -> VectorSeg {
     let p = |p: kurbo::Point| Point::new(p.x as f32, p.y as f32);
-    VectorSeg { p0: p(q.p0), p1: p(q.p1), p2: p(q.p2), s0, s1 }
+    VectorSeg { p0: p(q.p0), p1: p(q.p1), p2: p(q.p2), s0, s1, w: [1.0; 2] }
 }
 
 fn line(a: Point, b: Point, s0: f32, s1: f32) -> VectorSeg {
-    VectorSeg { p0: a, p1: Point::new(0.5 * (a.x + b.x), 0.5 * (a.y + b.y)), p2: b, s0, s1 }
+    VectorSeg { p0: a, p1: Point::new(0.5 * (a.x + b.x), 0.5 * (a.y + b.y)), p2: b, s0, s1, w: [1.0; 2] }
 }
 
 fn push_quad(c: &mut Contour, q: QuadBez, s: &mut f32) {
@@ -592,6 +933,41 @@ mod tests {
         assert!(o.contours[0].resample(33).iter().all(|p| p.x.is_finite() && p.y.is_finite()));
         let t = &o.trim(2.0, 9.0).contours[0];
         assert!((t.segs[0].s0 - 2.0).abs() < 1e-4 && (t.length() - 9.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dashes_cover_their_share() {
+        let c = &square().contours[0];
+        let dashes = c.dash(&[3.0, 2.0], 0.0);
+        assert_eq!(dashes.len(), 8);
+        let inked: f32 = dashes.iter().map(|d| d.length() - d.segs[0].s0).sum();
+        assert!((inked - 24.0).abs() < 1e-3, "{inked}");
+    }
+
+    #[test]
+    fn panel_starts_at_the_top_middle_and_closes() {
+        let c = make::panel(0.0, 0.0, 100.0, 40.0, 10.0);
+        let (p, _) = c.at(0.0).unwrap();
+        assert!((p.x - 50.0).abs() < 1e-3 && p.y.abs() < 1e-3);
+        let perimeter = 2.0 * (80.0 + 20.0) + std::f32::consts::TAU * 10.0;
+        assert!((c.length() - perimeter).abs() < 0.05, "{}", c.length());
+    }
+
+    #[test]
+    fn spinner_stays_between_20_and_270_degrees() {
+        for i in 0..200 {
+            let c = make::spinner(Point::ZERO, 10.0, i as f64 * 0.013);
+            let deg = c.length() / 10.0 * 180.0 / std::f32::consts::PI;
+            assert!((19.0..=271.0).contains(&deg), "{deg}");
+        }
+    }
+
+    #[test]
+    fn ribbon_widths_follow_points() {
+        let pts = [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(20.0, 0.0)];
+        let r = make::ribbon(&pts, &[0.0, 1.0, 0.5]);
+        assert_eq!(r.segs[0].w, [0.0, 1.0]);
+        assert_eq!(r.segs[1].w, [1.0, 0.5]);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::display::{DisplayList, GlyphInstance, Item, ItemKind, Layer, ShapeInstance};
 use crate::geom::{Affine, Color, Point, Rect};
-use crate::path::{push_blob, push_stroke, Contour, Outline, StrokeStyle};
+use crate::path::{push_blob, push_fill, push_stroke, Contour, Outline, StrokeStyle};
 
 /// The draw function of a canvas element.
 pub type DrawFn = dyn Fn(f64, Rect, &mut Painter) + Send + Sync;
@@ -92,6 +92,14 @@ impl Painter<'_> {
     pub fn stroke(&mut self, c: &Contour, style: &StrokeStyle) {
         let style = StrokeStyle { c0: style.c0.fade(self.alpha), c1: style.c1.fade(self.alpha), ..*style };
         if let Some(item) = push_stroke(self.list, c, &style) {
+            self.push(item);
+        }
+    }
+
+    /// The inside of `contours` by the nonzero rule (`path::push_fill`).
+    pub fn fill<'c>(&mut self, contours: impl IntoIterator<Item = &'c Contour>, style: &StrokeStyle) {
+        let style = StrokeStyle { c0: style.c0.fade(self.alpha), c1: style.c1.fade(self.alpha), ..*style };
+        if let Some(item) = push_fill(self.list, contours, &style) {
             self.push(item);
         }
     }
