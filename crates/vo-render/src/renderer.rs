@@ -47,6 +47,7 @@ use vo_scene::path::PATH_FONT;
 
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
+use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::hot::wgsl;
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
@@ -238,6 +239,7 @@ enum Pipe {
     Composite,
     Dot,
     Vector,
+    Glass,
     CompositeBloom,
     Down,
     Up,
@@ -331,7 +333,7 @@ pub struct Renderer {
     composite_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
-    modules: [Option<wgpu::ShaderModule>; 7],
+    modules: [Option<wgpu::ShaderModule>; 8],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
@@ -351,6 +353,8 @@ pub struct Renderer {
     shape_buf: Option<wgpu::Buffer>,
     glyph_buf: Option<wgpu::Buffer>,
     dot_buf: Option<wgpu::Buffer>,
+    glass: Vec<GlassGpu>,
+    glass_buf: Option<wgpu::Buffer>,
     vector_buf: Option<wgpu::Buffer>,
     vector_layout: wgpu::BindGroupLayout,
     vector_segs_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
@@ -408,7 +412,7 @@ impl Renderer {
             layer_layout,
             composite_layout,
             fx: None,
-            modules: [None, None, None, None, None, None, None],
+            modules: [None, None, None, None, None, None, None, None],
             pipelines: Vec::new(),
             uniform_stride,
             shapes: Vec::new(),
@@ -424,6 +428,8 @@ impl Renderer {
             shape_buf: None,
             glyph_buf: None,
             dot_buf: None,
+            glass: Vec::new(),
+            glass_buf: None,
             vector_buf: None,
             vector_layout: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("vo-vector-segs"),
@@ -522,6 +528,7 @@ impl Renderer {
         self.shapes.clear();
         self.glyphs.clear();
         self.dots.clear();
+        self.glass.clear();
         self.vectors.clear();
         self.vector_segs.clear();
         self.uniforms.clear();
@@ -703,6 +710,18 @@ impl Renderer {
                     }
                     grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                     self.push_cmd(draw_surface, Pipe::Dot, start..self.dots.len() as u32, uniform, blend, scissor);
+                }
+                ItemKind::Glass => {
+                    let start = self.glass.len() as u32;
+                    let mut b = EMPTY;
+                    for g in &f.list.glass[range] {
+                        let [x0, y0, x1, y1] = GlassGpu::reach(g);
+                        let r = vo_scene::geom::Rect::new(x0, y0, x1 - x0, y1 - y0);
+                        grow(&mut b, bounds(&RRect::new(r, 0.0), &to_px));
+                        self.glass.push(GlassGpu::new(g, opacity));
+                    }
+                    grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                    self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);
                 }
                 ItemKind::Layer => self.visit(f, item.start, &state, draw_surface),
             }
@@ -1005,6 +1024,14 @@ impl Renderer {
         write_grow(
             device,
             queue,
+            &mut self.glass_buf,
+            "vo-glass",
+            wgpu::BufferUsages::VERTEX,
+            bytemuck::cast_slice(&self.glass),
+        );
+        write_grow(
+            device,
+            queue,
             &mut self.vector_buf,
             "vo-vectors",
             wgpu::BufferUsages::VERTEX,
@@ -1183,6 +1210,10 @@ impl Renderer {
                     pass.set_vertex_buffer(0, self.dot_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
+                Pipe::Glass => {
+                    pass.set_vertex_buffer(0, self.glass_buf.as_ref().unwrap().slice(..));
+                    pass.draw(0..4, c.range.clone());
+                }
                 Pipe::Vector => {
                     pass.set_bind_group(0, &self.vector_segs_buf.as_ref().unwrap().1, &[]);
                     pass.set_vertex_buffer(0, self.vector_buf.as_ref().unwrap().slice(..));
@@ -1225,6 +1256,7 @@ impl Renderer {
             2 => ("vo-composite", composite_shader_source()),
             4 => ("vo-dots", dot_shader_source()),
             5 => ("vo-vectors", vector_shader_source()),
+            7 => ("vo-glass", glass_layer_shader_source()),
             _ => ("vo-bloom", bloom_shader_source()),
         };
         self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1269,6 +1301,7 @@ impl Renderer {
             Pipe::Down | Pipe::Up | Pipe::Final => 3,
             Pipe::Dot => 4,
             Pipe::Vector => 5,
+            Pipe::Glass => 7,
         };
         if self.modules[slot].is_none() {
             self.modules[slot] = Some(self.shader_module(slot));
@@ -1277,7 +1310,7 @@ impl Renderer {
         let fx = self.fx.as_ref();
         let groups: [Option<&wgpu::BindGroupLayout>; 2] = match pipe {
             Pipe::Shape => [None, Some(&self.layer_layout)],
-            Pipe::Dot => [None, Some(&self.layer_layout)],
+            Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
             Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
             Pipe::Composite => [Some(&self.composite_layout), Some(&self.layer_layout)],
@@ -1294,6 +1327,7 @@ impl Renderer {
             Pipe::Glyph => ("vs_dl_glyph", "fs_dl_glyph", vec![Some(GlyphInstance::layout())]),
             Pipe::Composite => ("vs_composite", "fs_composite", vec![]),
             Pipe::Dot => ("vs_dot", "fs_dot", vec![Some(GpuDot::layout())]),
+            Pipe::Glass => ("vs_glass", "fs_glass", vec![Some(GlassGpu::layout())]),
             Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
             Pipe::CompositeBloom => ("vs_composite", "fs_composite_bloom", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
@@ -1325,7 +1359,9 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: match pipe {
-                    Pipe::Shape | Pipe::Glyph | Pipe::Dot | Pipe::Vector => wgpu::PrimitiveTopology::TriangleStrip,
+                    Pipe::Shape | Pipe::Glyph | Pipe::Dot | Pipe::Vector | Pipe::Glass => {
+                        wgpu::PrimitiveTopology::TriangleStrip
+                    }
                     _ => wgpu::PrimitiveTopology::TriangleList,
                 },
                 ..Default::default()

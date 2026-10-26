@@ -21,6 +21,7 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
 use crate::geom::{Color, Rect};
+use crate::glass::Glass;
 use crate::timed::{Progress, Wave};
 
 /// A node's key among its siblings.
@@ -335,6 +336,8 @@ pub struct Element<M = ()> {
     /// The stroke lies inside the box, as a CSS border does, rather than centred on its
     /// edge.
     pub(crate) inside: bool,
+    /// Drawn as a glass panel under the content (FX06).
+    pub(crate) glass: Option<Glass>,
     pub(crate) motion: Vec<(Prop, Motion)>,
     pub(crate) presence: Option<(Transition, Transition)>,
     pub(crate) handlers: Handlers<M>,
@@ -351,6 +354,7 @@ impl<M> Element<M> {
             gradient: false,
             hairline: false,
             inside: false,
+            glass: None,
             motion: Vec::new(),
             presence: None,
             handlers: Handlers::default(),
@@ -612,6 +616,15 @@ impl<M> Element<M> {
 
     pub fn radius(mut self, r: f32) -> Element<M> {
         self.set(Slot::Radius as u8, r);
+        self
+    }
+
+    /// Draws this panel as glass (FX06) under its content, with the sheen on show and, when
+    /// `Glass::orbit` is set, the orbiting rim (FX08). Use it instead of a fill. With
+    /// `Glass::blur_behind` the live host asks the compositor to blur the desktop under the
+    /// panel (FX07) where it can. Only panels draw glass.
+    pub fn glass(mut self, g: Glass) -> Element<M> {
+        self.glass = Some(g);
         self
     }
 

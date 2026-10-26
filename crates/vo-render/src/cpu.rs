@@ -167,6 +167,18 @@ impl CpuRenderer {
                         }
                     }
                 }
+                // The first frame draws glass as its interior tint, which already meets the
+                // contrast bar; the GPU adds the bevel, rim and sheen.
+                ItemKind::Glass => {
+                    for g in &list.glass[range] {
+                        let [x, y, w, h] = g.rect;
+                        let rect = vo_scene::geom::RRect::new(vo_scene::geom::Rect::new(x, y, w, h), g.radius);
+                        let s = ShapeInstance::rrect(rect, Paint::solid(g.glass.tint).fade(g.alpha));
+                        if let Some(gs) = GpuShape::new(&s, &to_px, ppu, opacity) {
+                            self.shape(&gs, &st);
+                        }
+                    }
+                }
                 ItemKind::Layer => self.visit(list, scale, item.start, &st),
             }
         }

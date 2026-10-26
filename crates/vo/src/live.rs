@@ -35,6 +35,8 @@ struct Live<A: App> {
     list: DisplayList,
     /// The last region sent to the host, for `InputMode::Regions` specs.
     region: Option<InputRegion>,
+    /// The last compositor blur region sent, from the glass panels in the list (FX07).
+    blur: Option<InputRegion>,
     frames: u64,
     startup_logged: bool,
     finished: bool,
@@ -120,6 +122,14 @@ impl<A: App> Live<A> {
                 self.region = Some(region);
             }
         }
+        if host.caps().backdrop_blur {
+            let blur = list.blur_region();
+            if self.blur.as_ref() != Some(&blur) {
+                let change = if blur.rects.is_empty() { None } else { Some(blur.clone()) };
+                let _ = host.update(id, SurfaceChange::Blur(change));
+                self.blur = Some(blur);
+            }
+        }
         self.list = list;
     }
 
@@ -142,7 +152,15 @@ impl<A: App> Live<A> {
             d.frame(n, t, &host_diag);
         }
         if moving {
-            host.request_frame(id);
+            // Glass animates at a capped rate (FX08): a wake time after `t` is a timer, not
+            // the next vblank.
+            match self.driver().scene.next_wake(t) {
+                Some(w) if w > t => {
+                    let timer = self.driver().timers.next_at();
+                    host.wake_at(Some(timer.map_or(w, |x| x.min(w))));
+                }
+                _ => host.request_frame(id),
+            }
         } else {
             // The last frame until the next event: what follows is idle.
             if self.diag().is_some() {
@@ -265,6 +283,7 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
         surface: 0,
         list: DisplayList::default(),
         region: None,
+        blur: None,
         frames: 0,
         startup_logged: false,
         finished: false,

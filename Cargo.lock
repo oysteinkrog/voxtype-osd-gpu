@@ -1253,6 +1253,7 @@ dependencies = [
  "png",
  "pollster",
  "skrifa",
+ "vo",
  "vo-core",
  "vo-host",
  "vo-host-wayland",

@@ -1,111 +1,20 @@
 //! Glass panels (FX06), their animated rim (FX08) and the compositor blur region (FX07).
 //!
-//! [`Glass`] is the material: tint, alphas, accent and light settings, with a dark and a
-//! light preset. [`GlassDraw`] is one panel at one instant. [`GlassPass`] draws a batch of
+//! [`Glass`] is the material (defined in `vo_scene::glass`, so elements can ask for it):
+//! tint, alphas, accent and light settings, with a dark and a light preset. [`GlassDraw`] is one panel at one instant. [`GlassPass`] draws a batch of
 //! them as instanced quads into a target, either before the panel content ([`GlassBlend::Over`])
 //! or after it, landing behind it ([`GlassBlend::Behind`]).
 //!
 //! A client cannot read the desktop behind it. Without compositor blur the panel is a tint
 //! with a bevel; with it, the compositor blurs the desktop under [`blur_region`]. Either way
-//! the interior tint must keep text readable over any backdrop, so [`Glass::contrast`]
-//! checks text against the tint composited over pure white and pure black, in linear and in
-//! sRGB blending (compositors differ), and takes the worst (AX01).
+//! the interior tint must keep text readable over any backdrop; [`Glass::contrast`] is the
+//! AX01 check.
 
-use vo_scene::display::{IRect, InputRegion};
+use vo_scene::display::InputRegion;
 use vo_scene::geom::Color;
+pub use vo_scene::glass::{blur_rects, Glass, GlassInstance, GlassKind};
 
 use crate::color::srgb_to_linear;
-
-/// Light or dark glass: which way the edge line and the grain go.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GlassKind {
-    Light,
-    Dark,
-}
-
-/// The glass material. Lengths are logical pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Glass {
-    pub kind: GlassKind,
-    /// Interior tint, sRGB. Its alpha is the interior opacity the contrast gate checks.
-    pub tint: Color,
-    /// Tint alpha right at the edge, rising to the interior alpha over 12 logical pixels.
-    pub edge_alpha: f32,
-    /// Colour of the orbiting rim segment, sRGB.
-    pub accent: Color,
-    /// Bevel width.
-    pub bevel: f32,
-    /// Rim light, Fresnel and edge line strength, 0 to about 1.5.
-    pub rim: f32,
-    /// Grain amount, relative to the tint.
-    pub grain: f32,
-    /// Offset between colour channels in the rim light.
-    pub dispersion: f32,
-    /// Drop shadow alpha, blur and downward offset. Alpha 0 turns it off.
-    pub shadow: [f32; 3],
-}
-
-impl Glass {
-    /// Dark smoked glass for light text. The interior tint keeps white text at 4.5:1 or more
-    /// over pure white.
-    pub const fn dark() -> Glass {
-        Glass {
-            kind: GlassKind::Dark,
-            tint: Color::rgba(0.055, 0.063, 0.082, 0.92),
-            edge_alpha: 0.42,
-            accent: Color::rgba(0.45, 0.70, 1.0, 1.0),
-            bevel: 12.0,
-            rim: 1.0,
-            grain: 0.14,
-            dispersion: 0.9,
-            shadow: [0.30, 14.0, 6.0],
-        }
-    }
-
-    /// Light frosted glass for dark text.
-    pub const fn light() -> Glass {
-        Glass {
-            kind: GlassKind::Light,
-            tint: Color::rgba(0.965, 0.97, 0.98, 0.78),
-            edge_alpha: 0.40,
-            accent: Color::rgba(0.20, 0.50, 1.0, 1.0),
-            bevel: 12.0,
-            rim: 1.0,
-            grain: 0.5,
-            dispersion: 0.9,
-            shadow: [0.22, 16.0, 7.0],
-        }
-    }
-
-    /// The lowest contrast ratio of `text` against the panel interior, over pure white and
-    /// pure black backdrops, blended in linear light and in sRGB. `light_margin` is the most
-    /// luminance the glass's own light (rim, Fresnel, grain) adds in the interior.
-    pub fn contrast(&self, text: Color, light_margin: f32) -> f32 {
-        let text_l = luminance([text.r, text.g, text.b].map(srgb_to_linear));
-        let tint = [self.tint.r, self.tint.g, self.tint.b];
-        let a = self.tint.a;
-        let mut worst = f32::INFINITY;
-        for back in [0.0f32, 1.0] {
-            let linear = tint.map(|c| srgb_to_linear(c) * a + back * (1.0 - a));
-            let srgb = tint.map(|c| srgb_to_linear(c * a + back * (1.0 - a)));
-            for panel in [linear, srgb] {
-                let l = luminance(panel);
-                // The margin moves the panel towards the text's own luminance: the worse way.
-                let l = if text_l > l { l + light_margin } else { (l - light_margin).max(0.0) };
-                worst = worst.min(ratio(text_l, l));
-            }
-        }
-        worst
-    }
-}
-
-fn luminance(rgb: [f32; 3]) -> f32 {
-    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-}
-
-fn ratio(a: f32, b: f32) -> f32 {
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
-}
 
 /// One glass panel at one instant. `rect` and `radius` are logical pixels in target space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +34,25 @@ pub struct GlassDraw {
     pub blur_behind: bool,
 }
 
+impl GlassDraw {
+    /// The draw for a display list item whose layer maps its space to target logical units
+    /// by a scale `k` and an offset `(dx, dy)`. Glass is drawn axis-aligned; rotation in the
+    /// layer transform is not supported.
+    pub fn from_instance(g: &GlassInstance, k: f32, dx: f32, dy: f32, opacity: f32, blur_behind: bool) -> GlassDraw {
+        GlassDraw {
+            rect: [g.rect[0] * k + dx, g.rect[1] * k + dy, g.rect[2] * k, g.rect[3] * k],
+            radius: g.radius * k,
+            glass: g.glass,
+            time: g.age,
+            orbit: g.orbit,
+            orbit_strength: g.orbit_strength,
+            sheen: g.sheen,
+            opacity: g.alpha * opacity,
+            blur_behind,
+        }
+    }
+}
+
 /// How the pass blends into what the target already holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlassBlend {
@@ -134,25 +62,65 @@ pub enum GlassBlend {
     Behind,
 }
 
-/// Rectangles covering a rounded rect, one band per pixel row of the corner radius, each
-/// rounded outward to whole logical pixels, for `SurfaceChange::Blur`. Coarser bands leave
-/// visible blur steps outside the corner (the stair-step test in the `blur_probe` example).
+/// The blur region for one rounded rect, for `SurfaceChange::Blur`; see
+/// [`vo_scene::glass::blur_rects`].
 pub fn blur_region(rect: [f32; 4], radius: f32) -> InputRegion {
-    let (x0, y0) = (rect[0].floor() as i32, rect[1].floor() as i32);
-    let (x1, y1) = ((rect[0] + rect[2]).ceil() as i32, (rect[1] + rect[3]).ceil() as i32);
-    let r = radius.min(rect[2] / 2.0).min(rect[3] / 2.0).max(0.0);
-    let ri = r.ceil() as i32;
-    let mut rects = Vec::with_capacity(2 * ri as usize + 1);
-    for row in 0..ri {
-        // The row's edge nearest the straight side has the smallest inset in the row.
-        let dy = (r - (row + 1) as f32).max(0.0);
-        let inset = (r - (r * r - dy * dy).sqrt()).floor() as i32;
-        let w = x1 - x0 - 2 * inset;
-        rects.push(IRect { x: x0 + inset, y: y0 + row, w, h: 1 });
-        rects.push(IRect { x: x0 + inset, y: y1 - row - 1, w, h: 1 });
-    }
-    rects.push(IRect { x: x0, y: y0 + ri, w: x1 - x0, h: (y1 - y0 - 2 * ri).max(0) });
+    let mut rects = Vec::new();
+    blur_rects(rect, radius, &mut rects);
     InputRegion { rects }
+}
+
+pub(crate) const GLASS_WGSL: &str = include_str!("wgsl/glass.wgsl");
+const GLASS_VIEW_WGSL: &str = include_str!("wgsl/glass_view.wgsl");
+pub(crate) const GLASS_LAYER_WGSL: &str = include_str!("wgsl/glass_layer.wgsl");
+
+/// The shader of [`GlassPass`]: `glass_view.wgsl` and `glass.wgsl`.
+pub fn glass_view_shader_source() -> String {
+    [GLASS_VIEW_WGSL, GLASS_WGSL].join("\n")
+}
+
+/// The shader inside the renderer's display list pass: `common.wgsl`, `glass_layer.wgsl` and
+/// `glass.wgsl`. Uses the renderer's `wgsl` sources so live reload sees edits.
+pub fn glass_layer_shader_source() -> String {
+    use crate::hot::wgsl;
+    [
+        wgsl("common.wgsl", include_str!("wgsl/common.wgsl")),
+        wgsl("glass_layer.wgsl", GLASS_LAYER_WGSL),
+        wgsl("glass.wgsl", GLASS_WGSL),
+    ]
+    .join("\n")
+}
+
+/// One glass panel as the renderer's display list pass reads it: the instance layout of
+/// [`GlassPass`] in layer units, with the layer block doing the mapping to pixels.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GlassGpu([f32; 28]);
+
+impl GlassGpu {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
+            6 => Float32x4
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: INSTANCE,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+
+    /// `g` with `opacity` (the layer's) multiplied into its alpha.
+    pub fn new(g: &GlassInstance, opacity: f32) -> GlassGpu {
+        GlassGpu(instance(&GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind), 1.0))
+    }
+
+    /// Layer-space bounds of what the panel draws, shadow included: x0, y0, x1, y1.
+    pub fn reach(g: &GlassInstance) -> [f32; 4] {
+        let [x, y, w, h] = g.rect;
+        let m = (2.5 * g.glass.shadow[1] + g.glass.shadow[2].abs()).max(0.0) + 2.0;
+        [x - m, y - m, x + w + m, y + h + m]
+    }
 }
 
 /// Bytes per instance: seven vec4.
@@ -171,7 +139,7 @@ impl GlassPass {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, blend: GlassBlend) -> GlassPass {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vo-glass"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("wgsl/glass.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(glass_view_shader_source().into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vo-glass"),
@@ -369,6 +337,19 @@ mod tests {
             let c = light.contrast(text, 0.02);
             assert!(c >= 4.5, "light glass: {text:?} at {c:.2}:1");
         }
+    }
+
+    fn validate(src: &str) {
+        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn shaders_validate_in_naga() {
+        validate(&glass_view_shader_source());
+        validate(&[include_str!("wgsl/common.wgsl"), GLASS_LAYER_WGSL, GLASS_WGSL].join("\n"));
     }
 
     #[test]

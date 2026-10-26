@@ -9,7 +9,12 @@
 //! Live, on Wayland (only inside a nested compositor when run by an agent), with the blur
 //! region sent through the host when the compositor offers `ext-background-effect-v1`:
 //!   cargo run --release -p vo --example glass_demo -- --live [--secs S] [--no-blur] [--light]
+//!
+//! The element path, `Element::panel(..).glass(..)` in a plain vo App, offline or live:
+//!   glass_demo --app-offline DIR [--light]
+//!   glass_demo --app-live [--secs S] [--light]
 
+mod app;
 mod live;
 
 use std::path::{Path, PathBuf};
@@ -71,7 +76,9 @@ pub const LIGHT: Look = Look {
 
 /// The swiss popup layout with no panel fill: the glass pass draws the panel under it.
 /// `slide` moves the panel up from its rest position, for the show animation.
-pub fn view(look: &Look, t: f64, slide: f32) -> Element<()> {
+/// `glass` puts the material on the panel element (the element path); without it the panel
+/// has no fill and the caller draws the glass.
+pub fn view<M>(look: &Look, t: f64, slide: f32, glass: Option<Glass>) -> Element<M> {
     let mono = |px: f32| TextStyle::new(MONO, px, (px * 1.3).round());
     let caption = |key: &'static str, text: &str, px: f32, tracking: f32| {
         Element::label(key, text).text_style(mono(px).tracking(tracking)).color(look.inactive)
@@ -138,7 +145,11 @@ pub fn view(look: &Look, t: f64, slide: f32) -> Element<()> {
                 .text_style(mono(12.0).clamp_lines(1))
                 .color(look.inactive),
         );
-    let panel = Element::panel("panel")
+    let mut panel = Element::panel("panel");
+    if let Some(g) = glass {
+        panel = panel.glass(g);
+    }
+    let panel = panel
         .width(PANEL_W)
         .pad_edges(17.0, 23.0, 13.0, 23.0)
         .radius(RADIUS)
@@ -167,7 +178,7 @@ pub fn load_fonts() -> FontRegistry {
 pub fn layout(fonts: &FontRegistry, look: &Look) -> (Scene<()>, Size, [f32; 4]) {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, Size::new(PANEL_W + 2.0 * MARGIN, 1000.0), 1.0);
-    scene.apply(view(look, 0.0, 0.0), 0.0);
+    scene.apply(view(look, 0.0, 0.0, None), 0.0);
     let id = scene.find(&["root", "panel"]).expect("panel");
     let s = scene.sampled(id, 0.0).expect("panel drawn");
     let o = s.transform.apply(Point::new(0.0, 0.0));
@@ -296,7 +307,7 @@ impl Offline {
         // instead of animating from the last frame.
         let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(self.fonts.clone())));
         scene.set_viewport(t, self.size, 1.0);
-        scene.apply(view(look, t, 0.0), t);
+        scene.apply(view(look, t, 0.0, None), t);
         scene.sample_into(t, &mut self.list);
         if glass_only {
             self.list.clear();
@@ -654,8 +665,18 @@ fn main() {
         let secs = val("--secs").and_then(|s| s.parse().ok()).unwrap_or(8.0);
         let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
         live::run(look, secs, !args.iter().any(|a| a == "--no-blur"));
+    } else if let Some(dir) = val("--app-offline") {
+        let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
+        app::offline(look, 4.0, &PathBuf::from(dir));
+    } else if args.iter().any(|a| a == "--app-live") {
+        let secs = val("--secs").and_then(|s| s.parse().ok()).unwrap_or(8.0);
+        let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
+        app::live(look, secs);
     } else {
-        eprintln!("usage: glass_demo --offline DIR | --live [--secs S] [--no-blur] [--light]");
+        eprintln!(
+            "usage: glass_demo --offline DIR | --live [--secs S] [--no-blur] [--light] \
+             | --app-offline DIR [--light] | --app-live [--secs S] [--light]"
+        );
         std::process::exit(2);
     }
 }

@@ -13,6 +13,7 @@
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
+//! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod display;
@@ -20,6 +21,7 @@ pub mod dots;
 pub mod element;
 pub mod font;
 pub mod geom;
+pub mod glass;
 pub mod input;
 pub mod inspect;
 mod layout;

@@ -20,6 +20,7 @@ use std::ops::Range;
 use serde::Serialize;
 
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
+use crate::glass::GlassInstance;
 use crate::path::{VectorInstance, VectorSeg};
 
 /// Index of a layer in `DisplayList::layers`.
@@ -42,6 +43,8 @@ pub struct DisplayList {
     pub vectors: Vec<VectorInstance>,
     /// The segments that `vectors` point into.
     pub vector_segs: Vec<VectorSeg>,
+    /// Glass panels (`crate::glass`), each drawn under its panel's content.
+    pub glass: Vec<GlassInstance>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -142,6 +145,7 @@ pub enum ItemKind {
     Layer,
     Dots,
     Vectors,
+    Glass,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -432,6 +436,7 @@ impl DisplayList {
         self.dots.clear();
         self.vectors.clear();
         self.vector_segs.clear();
+        self.glass.clear();
         self.hits.clear();
     }
 

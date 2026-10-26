@@ -1,16 +1,10 @@
 // Glass panel material (FX06) with its animated rim (FX08) and a soft drop shadow. One
-// instanced quad per panel. Units are physical pixels; colours are linear light,
-// premultiplied; `finish` encodes sRGB only when the target is a plain UNORM format.
+// instanced quad per panel. Fragment units are physical pixels; colours are linear light,
+// premultiplied.
 //
-// The pass blends either plain "over" (the glass is drawn before the panel's content) or
-// "destination over" (drawn after the content, landing behind it); see `glass.rs`.
-
-struct View {
-  // Target width and height; z is 1 when the shader must encode sRGB itself.
-  size: vec4f,
-};
-
-@group(0) @binding(0) var<uniform> view: View;
+// A prelude goes in front of this file and defines `vs_glass`, `finish` and `glass_clip`:
+// `glass_view.wgsl` for `GlassPass` on its own, or `common.wgsl` plus `glass_layer.wgsl`
+// inside the renderer's display list pass.
 
 struct GlassIn {
   // Panel rect x, y, w, h.
@@ -41,26 +35,6 @@ struct GlassOut {
   @location(6) @interpolate(flat) fx: vec4f,
   @location(7) @interpolate(flat) shadow: vec4f,
 };
-
-@vertex fn vs_glass (@builtin(vertex_index) vi: u32, g: GlassIn) -> GlassOut {
-  let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
-  let k = g.shape.y;
-  // Room for the shadow below and around, and one pixel for antialiasing.
-  let m = max (2.5 * g.shadow.y + abs (g.shadow.z), 0.0) * k + 2.0;
-  let p = mix (g.rect.xy - m, g.rect.xy + g.rect.zw + m, c);
-  let n = p / view.size.xy * 2.0 - 1.0;
-  var o: GlassOut;
-  o.clip = vec4f (n.x, -n.y, 0.0, 1.0);
-  o.p = p;
-  o.rect = g.rect;
-  o.shape = g.shape;
-  o.tint = g.tint;
-  o.accent = g.accent;
-  o.anim = g.anim;
-  o.fx = g.fx;
-  o.shadow = g.shadow;
-  return o;
-}
 
 fn sd_box (q: vec2f, half: vec2f, r: f32) -> f32 {
   let d = abs (q) - half + vec2f (r);
@@ -120,20 +94,6 @@ fn hash21 (p: vec2f) -> f32 {
   var q = fract (p * vec2f (123.34, 456.21));
   q += dot (q, q + 45.32);
   return fract (q.x * q.y);
-}
-
-fn srgb_encode (c: vec3f) -> vec3f {
-  let lo = c * 12.92;
-  let hi = 1.055 * pow (max (c, vec3f (0.0)), vec3f (1.0 / 2.4)) - 0.055;
-  return select (hi, lo, c <= vec3f (0.0031308));
-}
-
-fn finish (c: vec4f) -> vec4f {
-  if (view.size.z == 0.0 || c.a <= 0.0) {
-    return c;
-  }
-  let straight = clamp (c.rgb / c.a, vec3f (0.0), vec3f (1.0));
-  return vec4f (srgb_encode (straight) * c.a, c.a);
 }
 
 // Slope of the bevel at `t` (0 on the edge, 1 where the flat top starts): a quarter circle.
@@ -253,5 +213,5 @@ fn bevel_slope (t: f32) -> f32 {
   panel = mix (panel, vec4f (in.accent.rgb, 1.0), paint * 0.9) * cover;
   // The shadow goes under the panel's antialiased edge.
   panel = panel + vec4f (0.0, 0.0, 0.0, shadow) * (1.0 - panel.a);
-  return finish (panel * opacity);
+  return finish (panel * opacity * glass_clip (in.clip.xy));
 }

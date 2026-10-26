@@ -23,6 +23,7 @@ use crate::display::{
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
+use crate::glass::{Glass, GlassInstance};
 use crate::input::PointerState;
 use crate::layout::LayoutView;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
@@ -76,6 +77,7 @@ pub(crate) struct Node<M> {
     pub gradient: bool,
     pub hairline: bool,
     pub inside: bool,
+    pub glass: Option<Glass>,
     pub handlers: Handlers<M>,
     pub born: f64,
     /// `(since, until)`.
@@ -486,7 +488,15 @@ impl<M> Scene<M> {
                         _ => false,
                     })
         });
-        moving.then_some(t)
+        if moving {
+            return Some(t);
+        }
+        // Glass animates at its own capped rate (FX08), so it wakes at a time, not now.
+        self.nodes
+            .values()
+            .filter(|n| n.alive(t) && matches!(n.kind, Kind::Panel))
+            .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
+            .min_by(f64::total_cmp)
     }
 
     /// The display list at `t`. Pure: the same scene gives the same list for the same `t`.
@@ -535,8 +545,20 @@ impl<M> Scene<M> {
     // Reconcile.
 
     fn create(&mut self, parent: Option<NodeId>, el: Element<M>, t: f64) -> NodeId {
-        let Element { key, kind, style, targets, gradient, hairline, inside, motion, presence, handlers, children } =
-            el;
+        let Element {
+            key,
+            kind,
+            style,
+            targets,
+            gradient,
+            hairline,
+            inside,
+            glass,
+            motion,
+            presence,
+            handlers,
+            children,
+        } = el;
         self.changed = true;
         let mut node = Node {
             key,
@@ -554,6 +576,7 @@ impl<M> Scene<M> {
             gradient,
             hairline,
             inside,
+            glass,
             handlers,
             born: t,
             leaving: None,
@@ -589,12 +612,25 @@ impl<M> Scene<M> {
     }
 
     fn update(&mut self, id: NodeId, el: Element<M>, t: f64) {
-        let Element { key: _, kind, style, targets, gradient, hairline, inside, motion, presence, handlers, children } =
-            el;
+        let Element {
+            key: _,
+            kind,
+            style,
+            targets,
+            gradient,
+            hairline,
+            inside,
+            glass,
+            motion,
+            presence,
+            handlers,
+            children,
+        } = el;
         let retention = self.retention;
         let n = &mut self.nodes[id];
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
+        changed |= n.glass != glass;
         changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
@@ -603,6 +639,7 @@ impl<M> Scene<M> {
         n.gradient = gradient;
         n.hairline = hairline;
         n.inside = inside;
+        n.glass = glass;
         n.handlers = handlers;
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
@@ -878,6 +915,21 @@ impl<M> Scene<M> {
             let transform = m.then(&out.layers[layer as usize].transform);
             let shape = RRect::new(Rect::from_size(size), radius(n, t));
             out.hits.push(HitShape { node: id.to_bits(), transform, shape });
+        }
+        if let (Kind::Panel, Some(g)) = (&n.kind, &n.glass) {
+            let (sheen, orbit, orbit_strength) = g.motion(n.since, t);
+            push_item(items, ItemKind::Glass, out.glass.len() as u32);
+            out.glass.push(GlassInstance {
+                rect: [m.e, m.f, size.w, size.h],
+                radius: radius(n, t),
+                glass: *g,
+                alpha,
+                age: (t - n.since) as f32,
+                sheen,
+                orbit,
+                orbit_strength,
+                to_surface: out.layers[layer as usize].transform,
+            });
         }
         if let Kind::Canvas(c) = &n.kind {
             let mut painter = crate::canvas::Painter { list: out, items, alpha, layer };
