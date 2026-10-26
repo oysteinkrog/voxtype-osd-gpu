@@ -325,3 +325,41 @@ fn rendering_is_deterministic() {
     assert_eq!(frames.len(), 5);
     assert!(frames.iter().all(|f| f.rgba == one));
 }
+
+/// The CPU renderer, which draws the first frame while the GPU starts, matches the GPU path:
+/// shapes to within rounding, text to within anti-aliasing differences.
+#[cfg(feature = "cpu")]
+#[test]
+fn cpu_matches_gpu() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let fonts = vo_scene::font::FontRegistry::new();
+    fonts.add(data.clone()).unwrap();
+    let mut cpu = vo_render::cpu::CpuRenderer::new(fonts);
+    // (scene, scale, largest channel difference allowed, mean difference allowed)
+    let cases = [
+        ("shapes", shapes_scene(), 1.0, 2, 0.05),
+        ("shapes-1.5x", shapes_scene(), 1.5, 2, 0.05),
+        ("hairlines", hairline_scene(), 1.0, 2, 0.05),
+        ("gradient", gradient_scene(), 1.0, 3, 0.2),
+        ("text", text_scene(&font), 1.0, 96, 1.0),
+    ];
+    let mut report = Vec::new();
+    for (name, list, scale, max_ok, mean_ok) in cases {
+        let [w, h] = size_at(&list, scale);
+        let want = off.render_to_rgba(&list, [w, h], scale);
+        let mut got = vec![0u8; (w * h * 4) as usize];
+        cpu.draw_bgra(&list, scale, w, h, w as usize * 4, &mut got);
+        for px in got.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let diffs: Vec<u32> = want.iter().zip(&got).map(|(a, b)| a.abs_diff(*b) as u32).collect();
+        let max = *diffs.iter().max().unwrap();
+        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+        report.push(format!("{name}: max {max}, mean {mean:.3}"));
+        assert!(max <= max_ok && mean <= mean_ok, "{name}: CPU differs from GPU: max {max}, mean {mean:.3}");
+    }
+    eprintln!("cpu vs gpu: {}", report.join("; "));
+}
