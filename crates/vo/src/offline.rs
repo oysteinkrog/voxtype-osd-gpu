@@ -55,7 +55,7 @@ impl From<std::io::Error> for OfflineError {
     }
 }
 
-fn headless_gpu() -> Result<(wgpu::Device, wgpu::Queue), OfflineError> {
+pub(crate) fn headless_gpu() -> Result<(wgpu::Device, wgpu::Queue), OfflineError> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(desc);
@@ -103,6 +103,53 @@ pub fn render_offline_with<A: App>(
     Ok(written)
 }
 
+/// The driver and scene a scenario starts with: the view applied at t = 0 on a viewport of
+/// the scenario's size.
+pub(crate) fn start<A: App>(app: A, scenario: &Scenario<A::Msg>, options: &mut Options<A::Msg>) -> Driver<A> {
+    let mut scene = options.scene();
+    scene.set_viewport(0.0, scenario.size, scenario.scale);
+    Driver::new(app, scene, options.tokens.clone(), 0.0)
+}
+
+/// Applies the scenario inputs from `inputs[*next..]` and the app's timers up to and including
+/// `t`, in time order. Returns how many events it applied and the time of the last one.
+pub(crate) fn advance<A: App>(
+    driver: &mut Driver<A>,
+    inputs: &[(f64, Input<A::Msg>)],
+    next: &mut usize,
+    t: f64,
+) -> (usize, Option<f64>) {
+    let (mut applied, mut last) = (0, None);
+    loop {
+        let input_t = inputs.get(*next).map(|(t, _)| *t).filter(|it| *it <= t);
+        let timer_t = driver.timers.next_at().filter(|tm| *tm <= t);
+        let at = match (input_t, timer_t) {
+            (Some(i), Some(tm)) if tm <= i => {
+                driver.fire_timer(tm);
+                tm
+            }
+            (Some(_), _) => {
+                let (at, input) = &inputs[*next];
+                *next += 1;
+                match input {
+                    Input::Msg(m) => driver.dispatch(m.clone(), *at),
+                    Input::Pointer { pos, kind } => {
+                        driver.pointer(&PointerEvent { surface: 1, t: *at, pos: *pos, kind: *kind })
+                    }
+                }
+                *at
+            }
+            (None, Some(tm)) => {
+                driver.fire_timer(tm);
+                tm
+            }
+            (None, None) => return (applied, last),
+        };
+        applied += 1;
+        last = Some(at);
+    }
+}
+
 /// Which frames [`drive`] renders.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Frames {
@@ -125,13 +172,11 @@ pub(crate) fn drive<A: App, E: From<OfflineError>>(
 ) -> Result<u64, E> {
     let (device, queue) = headless_gpu()?;
     let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
-    let mut scene = options.scene();
-    scene.set_viewport(0.0, scenario.size, scenario.scale);
-    let mut driver = Driver::new(app, scene, options.tokens.clone(), 0.0);
+    let mut driver = start(app, scenario, &mut options);
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
 
     let mut rendered = 0u64;
-    let mut inputs = scenario.inputs.iter().peekable();
+    let mut next_input = 0;
     let mut list = Default::default();
     for n in 0.. {
         let ft = FrameTime::at_rate(n, fps);
@@ -140,25 +185,7 @@ pub(crate) fn drive<A: App, E: From<OfflineError>>(
             Frames::Count(c) if n >= c => break,
             _ => {}
         }
-        // Inputs and timers up to this frame, in time order.
-        loop {
-            let input_t = inputs.peek().map(|(t, _)| *t).filter(|t| *t <= ft.t);
-            let timer_t = driver.timers.next_at().filter(|t| *t <= ft.t);
-            match (input_t, timer_t) {
-                (Some(i), Some(tm)) if tm <= i => driver.fire_timers(tm),
-                (Some(_), _) => {
-                    let (t, input) = inputs.next().unwrap();
-                    match input {
-                        Input::Msg(m) => driver.dispatch(m.clone(), *t),
-                        Input::Pointer { pos, kind } => {
-                            driver.pointer(&PointerEvent { surface: 1, t: *t, pos: *pos, kind: *kind })
-                        }
-                    }
-                }
-                (None, Some(tm)) => driver.fire_timers(tm),
-                (None, None) => break,
-            }
-        }
+        advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
         driver.scene.sample_into(ft.t, &mut list);
         rendered += 1;
         if let Some(frame) = off.submit(&list, px, scenario.scale) {

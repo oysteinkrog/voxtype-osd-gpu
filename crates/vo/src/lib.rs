@@ -6,6 +6,7 @@
 //! - `export` (feature `export`): the same render at a fixed frame count, to PNGs and to a video
 //!   file through ffmpeg.
 //! - [`Diagnostics`]: startup stages since exec, memory, frames and idle checks.
+//! - `preview` (feature `preview`): the preview and scrub tool.
 //!
 //! An app is Elm-shaped: `update(msg, cx)` changes state, `view(&self, &Tokens)` describes it.
 //! Every message is applied at its own timestamp from the host clock, and the scene samples
@@ -18,6 +19,8 @@ mod export;
 #[cfg(feature = "wayland")]
 mod live;
 mod offline;
+#[cfg(feature = "preview")]
+pub mod preview;
 
 pub use app::{channel, App, Cx, Inbox, Proxy, TimerId, Tokens};
 pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};

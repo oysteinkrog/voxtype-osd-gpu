@@ -191,6 +191,17 @@ impl<A: App> Driver<A> {
         self.dirty |= self.scene.apply(view, t);
     }
 
+    /// Fires the earliest timer if it is due at or before `t`. Returns whether one fired.
+    pub(crate) fn fire_timer(&mut self, t: f64) -> bool {
+        match self.timers.pop_due(t) {
+            Some((at, msg)) => {
+                self.dispatch(msg, at);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Fires every timer due at or before `t`, each at its own time.
     pub(crate) fn fire_timers(&mut self, t: f64) {
         while let Some((at, msg)) = self.timers.pop_due(t) {

@@ -12,6 +12,8 @@ default = ["wayland"]
 wayland = ["dep:vo-host-wayland"]
 # Export to a PNG sequence or a video file through ffmpeg (plan decision 10).
 export = []
+# The preview and scrub tool: seek, a window with a timeline, live reload, contact sheets.
+preview = []
 
 [dependencies]
 vo-core = { path = "../vo-core" }
@@ -23,5 +25,5 @@ wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 pollster = "0.4"
 
 [dev-dependencies]
-# Tests and examples always see the export code; the library only with the feature.
-vo = { path = ".", default-features = false, features = ["export"] }
+# Tests and examples always see the export and preview code; the library only with the features.
+vo = { path = ".", default-features = false, features = ["export", "preview"] }
