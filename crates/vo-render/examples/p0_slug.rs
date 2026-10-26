@@ -19,7 +19,7 @@ use skrifa::prelude::{LocationRef, Size};
 use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use vo_render::text::slug_encode::Encoder;
-use vo_render::text::slug_gpu::{Atlas, GlyphInstance, SlugRenderer, Uniforms};
+use vo_render::text::slug_gpu::{Atlas, Footprint, GlyphInstance, SlugRenderer, Uniforms};
 
 const TEXTS: [&str; 4] = [
     "Hamburgefonstiv ÆØÅ æøå",
@@ -349,7 +349,7 @@ fn time_glyphs(gpu: &Gpu, r: &mut SlugRenderer, font: &FontRef, atlas: &mut Atla
     r.upload_atlas(d, q, atlas);
     r.set_uniforms(q, &Uniforms::pixels(w as f32, h as f32));
     r.set_instances(d, q, &glyphs);
-    let frames = 300u32;
+    let frames = 600u32;
     let set = d.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 4 });
     let resolve = d.create_buffer(&wgpu::BufferDescriptor {
         label: None,
@@ -388,8 +388,8 @@ fn time_glyphs(gpu: &Gpu, r: &mut SlugRenderer, font: &FontRef, atlas: &mut Atla
     let data = rb.slice(..).get_mapped_range().expect("map");
     let ts: &[u64] = bytemuck::cast_slice(&data);
     let (mut clear, mut glyph) = (Vec::new(), Vec::new());
-    // Skip the first 20 frames (clock ramp).
-    for f in 20..frames as usize {
+    // Skip the first 200 frames so the GPU clock can ramp up from idle.
+    for f in 200..frames as usize {
         let t = &ts[f * 4..f * 4 + 4];
         clear.push((t[1] - t[0]) as f64 * period / 1e6);
         glyph.push((t[3] - t[2]) as f64 * period / 1e6);
@@ -411,7 +411,7 @@ fn main() {
     println!("adapter {} ({:?}, driver {})", info.name, info.backend, info.driver_info);
     let gpu = Gpu { device, queue };
     let t = Instant::now();
-    let mut r = SlugRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba16Float);
+    let _ = SlugRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba16Float);
     println!("pipeline create {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
 
     // Encode cost: every glyph the texts use, cold.
@@ -436,47 +436,58 @@ fn main() {
     );
 
     println!("\nreference 64x64 samples/px | 16x16 point samples/px");
-    println!("size_px scale rot_deg ink_px max_err p99_err mean_err_ink mean_err_edge share_over_0.1 | max_err mean_err_edge");
+    println!("footprint size_px scale rot_deg ink_px max_err p99_err mean_err_ink mean_err_edge share_over_0.1 | max_err mean_err_edge");
     let mut atlas = Atlas::default();
-    let mut worst = Err::default();
+    let footprints = [(Footprint::Fwidth, "fwidth"), (Footprint::AxisLength, "axis")];
+    let mut rs: Vec<SlugRenderer> = footprints
+        .iter()
+        .map(|&(fp, _)| SlugRenderer::with_footprint(&gpu.device, wgpu::TextureFormat::Rgba16Float, fp))
+        .collect();
+    let mut worst = [Err::default(), Err::default()];
     for px in [14.0f32, 24.0, 56.0, 120.0] {
         for scale in [1.0f32, 1.25, 1.5, 2.0] {
             for deg in [0.0f32, 7.0, 45.0] {
                 let eff = px * scale;
                 let (glyphs, w, h) = layout(&font, &mut atlas, eff, deg, 1800.0, &TEXTS);
-                let g = render_coverage(&gpu, &mut r, &atlas, &glyphs, w, h);
-                let coarse = compare(&g, &reference(&font, &glyphs, w, h, false));
+                let coarse_ref = reference(&font, &glyphs, w, h, false);
                 let rf = reference(&font, &glyphs, w, h, true);
-                let e = compare(&g, &rf);
-                println!(
-                    "{px:>5} {scale:>5} {deg:>4} {:>8} {:.4} {:.4} {:.5} {:.5} {:.4} | {:.4} {:.5}",
-                    e.ink_px, e.max, e.p99_ink, e.mean_ink, e.mean_edge, e.over_10, coarse.max, coarse.mean_edge
-                );
-                if scale == 1.0 {
-                    let zoom = if px <= 14.0 { 4 } else if px <= 24.0 { 2 } else { 1 };
-                    contact_sheet(&format!("{OUT_DIR}/slug-{px}px-rot{deg}.png"), &g, &rf, w, h, zoom);
+                for (i, (_, name)) in footprints.iter().enumerate() {
+                    let g = render_coverage(&gpu, &mut rs[i], &atlas, &glyphs, w, h);
+                    let coarse = compare(&g, &coarse_ref);
+                    let e = compare(&g, &rf);
+                    println!(
+                        "{name:<6} {px:>5} {scale:>5} {deg:>4} {:>8} {:.4} {:.4} {:.5} {:.5} {:.4} | {:.4} {:.5}",
+                        e.ink_px, e.max, e.p99_ink, e.mean_ink, e.mean_edge, e.over_10, coarse.max, coarse.mean_edge
+                    );
+                    if scale == 1.0 {
+                        let zoom = if px <= 14.0 { 4 } else if px <= 24.0 { 2 } else { 1 };
+                        contact_sheet(&format!("{OUT_DIR}/slug-{px}px-rot{deg}-{name}.png"), &g, &rf, w, h, zoom);
+                    }
+                    let wst = &mut worst[i];
+                    wst.max = wst.max.max(e.max);
+                    wst.mean_ink = wst.mean_ink.max(e.mean_ink);
+                    wst.mean_edge = wst.mean_edge.max(e.mean_edge);
                 }
-                if e.max > worst.max {
-                    worst.max = e.max;
-                }
-                worst.mean_ink = worst.mean_ink.max(e.mean_ink);
-                worst.mean_edge = worst.mean_edge.max(e.mean_edge);
             }
         }
     }
-    println!(
-        "\nworst over all runs: max {:.4}, mean (ink) {:.5}, mean (edge) {:.5}",
-        worst.max, worst.mean_ink, worst.mean_edge
-    );
+    for ((_, name), wst) in footprints.iter().zip(&worst) {
+        println!(
+            "\nworst over all runs, {name}: max {:.4}, mean (ink) {:.5}, mean (edge) {:.5}",
+            wst.max, wst.mean_ink, wst.mean_edge
+        );
+    }
 
-    println!("\nGPU time, 300 glyphs on 2100x1350 Rgba8Unorm, 280 frames after 20 warm-up:");
-    let mut r8 = SlugRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
-    for px in [14.0f32, 24.0, 56.0] {
-        match time_glyphs(&gpu, &mut r8, &font, &mut atlas, px) {
-            Some((n, clear, p50, p99)) => println!(
-                "{px:>5} px: {n} glyphs, clear-only pass p50 {clear:.3} ms, clear+glyphs p50 {p50:.3} ms p99 {p99:.3} ms"
-            ),
-            None => println!("no TIMESTAMP_QUERY on this adapter"),
+    println!("\nGPU time, 300 glyphs on 2100x1350 Rgba8Unorm, 400 frames after 200 warm-up:");
+    for &(fp, name) in &footprints {
+        let mut r8 = SlugRenderer::with_footprint(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, fp);
+        for px in [14.0f32, 24.0, 56.0] {
+            match time_glyphs(&gpu, &mut r8, &font, &mut atlas, px) {
+                Some((n, clear, p50, p99)) => println!(
+                    "{name:<6} {px:>5} px: {n} glyphs, clear-only pass p50 {clear:.3} ms, clear+glyphs p50 {p50:.3} ms p99 {p99:.3} ms"
+                ),
+                None => println!("no TIMESTAMP_QUERY on this adapter"),
+            }
         }
     }
     println!("atlas {} glyphs, {} KiB", atlas.entries.len(), atlas.bytes() / 1024);
