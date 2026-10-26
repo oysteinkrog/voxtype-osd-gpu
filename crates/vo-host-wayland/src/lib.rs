@@ -7,6 +7,10 @@
 //!   surface is committed, so the compositor's configure round trip overlaps device creation.
 //! - Swapchain: an sRGB format, premultiplied alpha when the driver offers it (else the first
 //!   mode it lists, the spike's rule), `Fifo`.
+//! - Scale: with `wp_fractional_scale_v1` and `wp_viewporter`, buffers are drawn at the
+//!   compositor's preferred scale (1.25 draws 1.25 times the logical size) with buffer scale
+//!   1, and a viewport maps them back to the logical size. Without them, the integer scale
+//!   from `wl_surface` and `buffer_scale`.
 //! - Timing: a frame callback paces every frame. `wp_presentation` feedback gives the last
 //!   present time and the refresh period, and `Frame::t` is the next vblank after now. Without
 //!   feedback, `Frame::t` is the time the frame is drawn, which is right after the callback.
@@ -23,6 +27,7 @@
 //!   sub-surface goes desynchronized and runs on its own. Input regions live on the GPU
 //!   surface, so the overlay is click-through until the first GPU frame.
 
+mod blur;
 mod handlers;
 
 use std::ptr::NonNull;
@@ -34,6 +39,10 @@ use smithay_client_toolkit::compositor::{CompositorState, Region};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::presentation_time::PresentationTimeState;
 use smithay_client_toolkit::reexports::calloop::{self, EventLoop};
+use smithay_client_toolkit::reexports::protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
@@ -45,7 +54,7 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
-    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode,
+    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode, InputRegion,
     Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId, SurfaceKind, Waker,
 };
 use wayland_client::globals::registry_queue_init;
@@ -53,6 +62,12 @@ use wayland_client::protocol::wl_shm::Format;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::{wl_pointer::WlPointer, wl_surface::WlSurface};
 use wayland_client::{Connection, Proxy, QueueHandle};
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+
+use smithay_client_toolkit::reexports::protocols as wayland_protocols;
 
 /// `CLOCK_MONOTONIC` in seconds: the clock Wayland present times use.
 pub fn monotonic() -> f64 {
@@ -73,6 +88,12 @@ pub fn since_exec() -> f64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9 - start_ticks / hz
+}
+
+/// A logical length (whole units, at least 1) in physical pixels at scale `k`, rounded to
+/// the nearest pixel as the fractional scale protocol asks.
+fn to_px(logical: f32, k: f64) -> u32 {
+    ((logical.round().max(1.0) as f64) * k).round().max(1.0) as u32
 }
 
 /// The first vblank after `now`, from the last present time and the refresh period. Without
@@ -103,12 +124,30 @@ impl Role {
 pub(crate) struct Child {
     sub: WlSubsurface,
     pub(crate) wl: WlSurface,
+    viewport: Option<WpViewport>,
 }
 
 impl Drop for Child {
     fn drop(&mut self) {
+        if let Some(v) = &self.viewport {
+            v.destroy();
+        }
         self.sub.destroy();
         self.wl.destroy();
+    }
+}
+
+/// Fractional scale objects of one surface: the scale listener on the role surface and the
+/// viewport that maps its buffers to the logical size.
+pub(crate) struct Fractional {
+    scale: WpFractionalScaleV1,
+    viewport: WpViewport,
+}
+
+impl Drop for Fractional {
+    fn drop(&mut self) {
+        self.viewport.destroy();
+        self.scale.destroy();
     }
 }
 
@@ -126,13 +165,17 @@ pub(crate) struct Surf {
     // Field order matters: the wgpu surface must drop before the Wayland surfaces, and the
     // sub-surface before its parent.
     wgpu: Option<wgpu::Surface<'static>>,
+    fractional: Option<Fractional>,
     pub(crate) child: Option<Child>,
     shm: Option<ShmStage>,
     pub(crate) role: Role,
     config: Option<wgpu::SurfaceConfiguration>,
     /// Logical size from the last configure.
     pub(crate) size: Size,
+    /// Integer scale from `wl_surface`, used without fractional scale.
     pub(crate) scale: i32,
+    /// The compositor's preferred fractional scale, once it sent one.
+    pub(crate) frac: Option<f64>,
     pub(crate) configured: bool,
     pub(crate) dirty_config: bool,
     want_frame: bool,
@@ -149,6 +192,10 @@ pub(crate) struct Surf {
     pub(crate) last_present: Option<f64>,
     pub(crate) refresh: f64,
     pending_input: Option<InputMode>,
+    /// The compositor blur object, made on the first blur change, and a region waiting for
+    /// the frame's commit (`Some(None)` turns the blur off).
+    blur: Option<ExtBackgroundEffectSurfaceV1>,
+    pending_blur: Option<Option<InputRegion>>,
 }
 
 impl Surf {
@@ -159,6 +206,35 @@ impl Surf {
 
     pub(crate) fn is_child(&self, wl: &WlSurface) -> bool {
         self.child.as_ref().is_some_and(|c| &c.wl == wl)
+    }
+
+    /// Physical pixels per logical unit.
+    pub(crate) fn px_scale(&self) -> f64 {
+        match &self.fractional {
+            Some(_) => self.frac.unwrap_or(1.0),
+            None => self.scale as f64,
+        }
+    }
+
+    pub(crate) fn px_scale_is_fractional(&self) -> bool {
+        self.fractional.is_some()
+    }
+
+    /// The buffer size in physical pixels.
+    pub(crate) fn px_size(&self) -> (u32, u32) {
+        let k = self.px_scale();
+        (to_px(self.size.w, k), to_px(self.size.h, k))
+    }
+
+    /// With fractional scale: the viewports show the buffers at the logical size. Applies on
+    /// each surface's next commit.
+    pub(crate) fn set_viewports(&self) {
+        let Some(f) = &self.fractional else { return };
+        let (w, h) = (self.size.w.round().max(1.0) as i32, self.size.h.round().max(1.0) as i32);
+        f.viewport.set_destination(w, h);
+        if let Some(v) = self.child.as_ref().and_then(|c| c.viewport.as_ref()) {
+            v.set_destination(w, h);
+        }
     }
 }
 
@@ -278,6 +354,10 @@ pub struct State {
     pub(crate) shm: Option<Shm>,
     layer_shell: Option<LayerShell>,
     xdg: Option<XdgShell>,
+    /// Both or neither: fractional scale needs the viewport to map buffers back.
+    fractional: Option<(WpFractionalScaleManagerV1, WpViewporter)>,
+    /// `ext-background-effect-v1`; `caps.backdrop_blur` follows its capabilities event.
+    blur: Option<ExtBackgroundEffectManagerV1>,
     pub(crate) presentation: PresentationTimeState,
     caps: HostCaps,
     pub(crate) diag: HostDiag,
@@ -323,19 +403,27 @@ impl WaylandHost {
             return Err(HostError::Connect("the compositor has neither a layer shell nor xdg_shell".into()));
         }
         let has = |name: &str| globals.contents().with_list(|l| l.iter().any(|g| g.interface == name));
+        let fractional = match (
+            globals.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ()),
+            globals.bind::<WpViewporter, _, _>(&qh, 1..=1, ()),
+        ) {
+            (Ok(m), Ok(v)) => Some((m, v)),
+            _ => None,
+        };
         let caps = HostCaps {
             per_pixel_alpha: true,
             click_through: ClickThrough::Regions,
             no_activate: layer_shell.is_some(),
             layer_shell: layer_shell.is_some(),
             exclusive_zone: layer_shell.is_some(),
-            // The blur protocols are bound by the spike, not yet by this host.
+            // Set by the manager's capabilities event, which the first roundtrip brings.
             backdrop_blur: false,
-            fractional_scale: false,
+            fractional_scale: fractional.is_some(),
             present_feedback: has("wp_presentation"),
             cpu_first_frame: subcompositor.is_some() && shm.is_some(),
         };
         let presentation = PresentationTimeState::bind(&globals, &qh);
+        let blur = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()).ok();
 
         let event_loop: EventLoop<'static, State> =
             EventLoop::try_new().map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
@@ -362,6 +450,8 @@ impl WaylandHost {
             shm,
             layer_shell,
             xdg,
+            fractional,
+            blur,
             presentation,
             caps,
             diag,
@@ -522,8 +612,20 @@ impl State {
         }
     }
 
+    /// Sets the blur region on the surface the GPU draws into, for its next commit.
+    fn apply_blur(&mut self, i: usize, region: Option<&InputRegion>) {
+        let (Some(manager), true) = (&self.blur, self.caps.backdrop_blur) else { return };
+        let s = &mut self.surfaces[i];
+        let wl = s.gpu_wl().clone();
+        let effect = s.blur.get_or_insert_with(|| manager.get_background_effect(&wl, &self.qh, ()));
+        blur::set_region(&self.compositor, effect, region);
+    }
+
     pub(crate) fn remove(&mut self, i: usize) {
         let s = self.surfaces.remove(i);
+        if let Some(effect) = &s.blur {
+            effect.destroy();
+        }
         drop(s);
         let _ = self.conn.flush();
     }
@@ -536,8 +638,7 @@ impl State {
         };
         let adapter = &self.gpu.as_ref().unwrap().adapter;
         let s = &mut self.surfaces[i];
-        let w = (s.size.w.round() as u32).max(1) * s.scale as u32;
-        let h = (s.size.h.round() as u32).max(1) * s.scale as u32;
+        let (w, h) = s.px_size();
         // Set up already at this size (the device thread does the first one).
         if s.config.as_ref().is_some_and(|c| c.width == w && c.height == h) {
             s.dirty_config = false;
@@ -571,9 +672,8 @@ impl State {
     fn draw_cpu(&mut self, i: usize, app: &mut dyn HostApp) {
         let Some(mut stage) = self.surfaces[i].shm.take() else { return };
         let s = &self.surfaces[i];
-        let (id, frame, scale, role) = (s.id, s.frames, s.scale, s.role.wl().clone());
-        let w = (s.size.w.round() as u32).max(1) * scale as u32;
-        let h = (s.size.h.round() as u32).max(1) * scale as u32;
+        let (id, frame, scale, role) = (s.id, s.frames, s.px_scale(), s.role.wl().clone());
+        let (w, h) = s.px_size();
         let stride = w as usize * 4;
         let t = self.predict(s, self.now());
         let (buffer, canvas) = match stage.pool.create_buffer(w as i32, h as i32, stride as i32, Format::Argb8888) {
@@ -591,9 +691,15 @@ impl State {
         let drawn = app.cpu_frame(self, &mut cpu);
         self.in_frame = None;
         let Ok(i) = self.index(id) else { return };
-        if let Some(mode) = self.surfaces[i].pending_input.take() {
+        let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
+        if pending.0.is_some() || pending.1.is_some() {
             let gpu_wl = self.surfaces[i].gpu_wl().clone();
-            self.apply_input(&gpu_wl, &mode);
+            if let Some(mode) = pending.0 {
+                self.apply_input(&gpu_wl, &mode);
+            }
+            if let Some(region) = pending.1 {
+                self.apply_blur(i, region.as_ref());
+            }
             gpu_wl.commit();
         }
         if !drawn {
@@ -626,14 +732,14 @@ impl State {
     /// the GPU frame waiting in the synchronized sub-surface's cache.
     fn hand_over(&mut self, i: usize) {
         let s = &mut self.surfaces[i];
+        let (w, h) = s.px_size();
+        let (w, h) = (w as i32, h as i32);
         let (Some(stage), Some(child)) = (s.shm.as_mut(), s.child.as_ref()) else { return };
         if stage.handed_over {
             return;
         }
         stage.handed_over = true;
         let role = s.role.wl();
-        let w = (s.size.w.round() as i32).max(1) * s.scale;
-        let h = (s.size.h.round() as i32).max(1) * s.scale;
         if let Ok((clear, canvas)) = stage.pool.create_buffer(w, h, w * 4, Format::Argb8888) {
             canvas.fill(0);
             let _ = clear.attach_to(role);
@@ -669,7 +775,7 @@ impl State {
         let now = self.now();
         let (id, wl, frame, scale, t, on_child) = {
             let s = &self.surfaces[i];
-            (s.id, s.gpu_wl().clone(), s.frames, s.scale as f32, self.predict(s, now), s.child.is_some())
+            (s.id, s.gpu_wl().clone(), s.frames, s.px_scale() as f32, self.predict(s, now), s.child.is_some())
         };
         wl.frame(&self.qh, wl.clone());
         if self.caps.present_feedback && self.presentation.feedback(&wl, &self.qh).is_ok() {
@@ -684,6 +790,9 @@ impl State {
         let Ok(i) = self.index(id) else { return };
         if let Some(mode) = self.surfaces[i].pending_input.take() {
             self.apply_input(&wl, &mode);
+        }
+        if let Some(region) = self.surfaces[i].pending_blur.take() {
+            self.apply_blur(i, region.as_ref());
         }
         let queue = self.gpu.as_ref().unwrap().gpu.queue.clone();
         queue.present(tex);
@@ -851,10 +960,16 @@ impl HostCtl for State {
                 sub.set_position(0, 0);
                 let pool = SlotPool::new((w * h * 4) as usize * 2, shm)
                     .map_err(|e| HostError::Io(std::io::Error::other(e)))?;
-                (Some(Child { sub, wl }), Some(ShmStage { pool, buffer: None, handed_over: false }))
+                let viewport = self.fractional.as_ref().map(|(_, vp)| vp.get_viewport(&wl, &self.qh, ()));
+                (Some(Child { sub, wl, viewport }), Some(ShmStage { pool, buffer: None, handed_over: false }))
             }
             _ => (None, None),
         };
+        // The preferred scale comes with the first configure; it is sent for the role surface.
+        let fractional = self.fractional.as_ref().map(|(m, vp)| Fractional {
+            scale: m.get_fractional_scale(role.wl(), &self.qh, role.wl().clone()),
+            viewport: vp.get_viewport(role.wl(), &self.qh, ()),
+        });
         match &child {
             Some(c) => {
                 self.apply_input(role.wl(), &InputMode::None);
@@ -884,12 +999,14 @@ impl HostCtl for State {
             id,
             spec: spec.clone(),
             wgpu: wgpu_surface,
+            fractional,
             child,
             shm,
             role,
             config: None,
             size: spec.size,
             scale: 1,
+            frac: None,
             configured: false,
             dirty_config: true,
             want_frame: false,
@@ -901,6 +1018,8 @@ impl HostCtl for State {
             last_present: None,
             refresh: 0.0,
             pending_input: None,
+            blur: None,
+            pending_blur: None,
         });
         Ok(id)
     }
@@ -915,6 +1034,15 @@ impl HostCtl for State {
                     let wl = self.surfaces[i].gpu_wl().clone();
                     self.apply_input(&wl, &mode);
                     wl.commit();
+                    let _ = self.conn.flush();
+                }
+            }
+            SurfaceChange::Blur(region) => {
+                if self.in_frame == Some(id) {
+                    self.surfaces[i].pending_blur = Some(region);
+                } else {
+                    self.apply_blur(i, region.as_ref());
+                    self.surfaces[i].gpu_wl().commit();
                     let _ = self.conn.flush();
                 }
             }
@@ -1047,7 +1175,17 @@ impl Host for WaylandHost {
 
 #[cfg(test)]
 mod tests {
-    use super::next_present;
+    use super::{next_present, to_px};
+
+    #[test]
+    fn buffer_sizes_at_fractional_scales() {
+        assert_eq!(to_px(600.0, 1.0), 600);
+        assert_eq!(to_px(600.0, 1.25), 750);
+        assert_eq!(to_px(313.0, 1.25), 391);
+        assert_eq!(to_px(187.0, 1.5), 281);
+        assert_eq!(to_px(0.2, 1.25), 1);
+        assert_eq!(to_px(100.0, 2.0), 200);
+    }
 
     #[test]
     fn predicts_the_next_vblank() {

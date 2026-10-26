@@ -26,6 +26,12 @@ use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::
 
 use smithay_client_toolkit::reexports::protocols as wayland_protocols;
 
+use wayland_client::Dispatch;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{self, WpFractionalScaleV1};
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+
 use crate::{Role, State, Surf};
 
 impl Surf {
@@ -53,7 +59,8 @@ impl State {
         }
         s.configured = true;
         s.dirty_config = true;
-        let (id, size, scale) = (s.id, s.size, s.scale as f32);
+        s.set_viewports();
+        let (id, size, scale) = (s.id, s.size, s.px_scale() as f32);
         if first {
             self.stage("configured");
         }
@@ -75,15 +82,15 @@ impl CompositorHandler for State {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, factor: i32) {
         let Some(i) = self.surface_index(wl) else { return };
         let s = &mut self.surfaces[i];
-        // The role surface sets the scale for both.
-        if s.scale == factor || factor < 1 || s.is_child(wl) {
+        // The role surface sets the scale for both. With fractional scale the buffer scale
+        // stays 1 and the viewport does the mapping.
+        if s.scale == factor || factor < 1 || s.is_child(wl) || s.px_scale_is_fractional() {
             return;
         }
         s.scale = factor;
         if let Some(c) = &s.child {
             c.wl.set_buffer_scale(factor);
         }
-        // Integer scale only: fractional-scale-v1 is not bound yet (HostCaps::fractional_scale).
         let _ = match &s.role {
             Role::Layer(l) => l.set_buffer_scale(factor as u32),
             Role::Window(w) => w.set_buffer_scale(factor as u32),
@@ -306,3 +313,31 @@ delegate_presentation_time!(State);
 delegate_registry!(State);
 delegate_shm!(State);
 delegate_subcompositor!(State);
+
+impl Dispatch<WpFractionalScaleV1, wl_surface::WlSurface> for State {
+    fn event(
+        state: &mut State,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        wl: &wl_surface::WlSurface,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        let wp_fractional_scale_v1::Event::PreferredScale { scale } = event else { return };
+        let Some(i) = state.surface_index(wl) else { return };
+        let s = &mut state.surfaces[i];
+        // In 120ths, by the protocol.
+        let k = scale as f64 / 120.0;
+        if s.frac == Some(k) || k <= 0.0 {
+            return;
+        }
+        s.frac = Some(k);
+        if s.configured {
+            state.configured(&wl.clone(), None);
+        }
+    }
+}
+
+wayland_client::delegate_noop!(State: ignore WpFractionalScaleManagerV1);
+wayland_client::delegate_noop!(State: ignore WpViewporter);
+wayland_client::delegate_noop!(State: ignore WpViewport);
