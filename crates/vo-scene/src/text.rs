@@ -152,7 +152,7 @@ impl TextLayout for ShapedLayout {
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let run = shape(&shaper, text);
         let (infos, pos) = (run.glyph_infos(), run.glyph_positions());
-        let segments = segments(text, infos, pos, k);
+        let segments = segments(text, infos, pos, k, style.tracking);
         let mut lines = fit(&segments, max_width);
         let max_lines = style.max_lines as usize;
         let dropped = max_lines > 0 && lines.len() > max_lines;
@@ -173,7 +173,7 @@ impl TextLayout for ShapedLayout {
             ends.clear();
             let (mut x, mut width) = (0.0f32, 0.0f32);
             for (info, p) in infos[range.clone()].iter().zip(&pos[range]) {
-                let advance = p.x_advance as f32 * k;
+                let advance = p.x_advance as f32 * k + style.tracking;
                 if !is_space(text, info.cluster) {
                     let at = Point::new(x + p.x_offset as f32 * k, baseline - p.y_offset as f32 * k);
                     out.glyphs.push(PlacedGlyph { glyph: info.glyph_id, pos: at, cluster: info.cluster });
@@ -242,14 +242,14 @@ fn is_space(text: &str, cluster: u32) -> bool {
 
 /// Splits the shaped glyphs at the text's break opportunities. Clusters rise through the
 /// buffer because the text is shaped left to right.
-fn segments(text: &str, infos: &[GlyphInfo], pos: &[GlyphPosition], k: f32) -> Vec<Segment> {
+fn segments(text: &str, infos: &[GlyphInfo], pos: &[GlyphPosition], k: f32, tracking: f32) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut g = 0;
     for (end, op) in linebreaks(text) {
         let start = g;
         let (mut width, mut trailing) = (0.0, 0.0);
         while g < infos.len() && (infos[g].cluster as usize) < end {
-            let advance = pos[g].x_advance as f32 * k;
+            let advance = pos[g].x_advance as f32 * k + tracking;
             width += advance;
             trailing = if is_space(text, infos[g].cluster) { trailing + advance } else { 0.0 };
             g += 1;
@@ -314,7 +314,8 @@ mod tests {
         ShapedLayout::new(fonts)
     }
 
-    const STYLE: TextStyle = TextStyle { font: 0, size: 20.0, line_height: 26.0, max_lines: 0, ellipsis: false };
+    const STYLE: TextStyle =
+        TextStyle { font: 0, size: 20.0, line_height: 26.0, max_lines: 0, ellipsis: false, tracking: 0.0 };
 
     fn gid(t: &ShapedLayout, c: char) -> u32 {
         let face = t.fonts().get(0).unwrap();
@@ -434,5 +435,14 @@ mod tests {
         let s = EstimateText::default().layout("ab cd", &style, Some(20.0));
         assert_eq!(s.size.h, 12.0);
         assert_eq!(s.glyphs.len(), 2);
+    }
+
+    #[test]
+    fn tracking_adds_space_after_every_character() {
+        let t = shaped();
+        let plain = t.layout("ab cd", &STYLE, None);
+        let wide = t.layout("ab cd", &STYLE.tracking(2.0), None);
+        assert!((wide.size.w - plain.size.w - 10.0).abs() < 1e-3, "{} vs {}", wide.size.w, plain.size.w);
+        assert!((wide.glyphs[3].pos.x - plain.glyphs[3].pos.x - 8.0).abs() < 1e-3);
     }
 }

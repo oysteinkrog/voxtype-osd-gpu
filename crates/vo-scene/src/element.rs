@@ -199,11 +199,19 @@ pub struct TextStyle {
     /// End the last line with an ellipsis when text was dropped, either lines past
     /// `max_lines` or the end of a word too wide for its line.
     pub ellipsis: bool,
+    /// Extra space after every character in logical units, as CSS `letter-spacing`. Negative
+    /// tightens.
+    pub tracking: f32,
 }
 
 impl TextStyle {
     pub fn new(font: u32, size: f32, line_height: f32) -> TextStyle {
-        TextStyle { font, size, line_height, max_lines: 0, ellipsis: false }
+        TextStyle { font, size, line_height, max_lines: 0, ellipsis: false, tracking: 0.0 }
+    }
+
+    /// With `tracking` logical units of extra space after every character.
+    pub fn tracking(self, tracking: f32) -> TextStyle {
+        TextStyle { tracking, ..self }
     }
 
     /// At most `n` lines, the last one ending in an ellipsis when text was cut.
