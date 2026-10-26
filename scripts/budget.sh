@@ -66,7 +66,7 @@ pid=$!
 for _ in $(seq 50); do grep -q 'close button centre' "$out" 2>/dev/null && break; sleep 0.02; done
 # Surface: 352 wide, anchored top right with a 16 px margin.
 read -r tx ty cx cy < <(grep -oP 'toast centre \(\K[0-9.]+, [0-9.]+\), close button centre \([0-9.]+, [0-9.]+' "$out" \
-    | tr -d '(),' | awk -v ox=$((w - 16 - 352)) '{ printf "%d %d %d %d\n", ox+$1, 16+$2, ox+$4, 16+$5 }')
+    | tr -d '(),' | awk -v ox=$((w - 16 - 352)) '{ printf "%d %d %d %d\n", ox+$1, 16+$2, ox+$6, 16+$7 }')
 sleep 1.2
 "$bin/fake_click" move "$tx" "$ty"
 sleep 0.8
