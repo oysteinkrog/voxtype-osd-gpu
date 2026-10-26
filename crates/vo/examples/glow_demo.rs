@@ -96,8 +96,8 @@ fn view(size: Size, level: f32, effects: bool) -> Element<Msg> {
         .size(420.0 * k, 64.0 * k)
         .radius(16.0 * k)
         .fill(Color::hex(0x1d2233, 1.0))
-        .align_items(AlignItems::Center)
-        .justify(JustifyContent::Center)
+        .align_items(AlignItems::CENTER)
+        .justify(JustifyContent::CENTER)
         .child(
             Element::label("caption", "glow, bloom and a soft shadow")
                 .text_style(TextStyle::new(0, 22.0 * k, 28.0 * k))
@@ -111,10 +111,10 @@ fn view(size: Size, level: f32, effects: bool) -> Element<Msg> {
     Element::panel("root")
         .size(size.w, size.h)
         .fill_gradient(Color::hex(0x0b0d14, 1.0), Color::hex(0x141826, 1.0))
-        .align_items(AlignItems::Center)
-        .justify(JustifyContent::Center)
+        .align_items(AlignItems::CENTER)
+        .justify(JustifyContent::CENTER)
         .gap(36.0 * k)
-        .child(Element::row("stage").gap(40.0 * k).align_items(AlignItems::Center).child(mic).child(word))
+        .child(Element::row("stage").gap(40.0 * k).align_items(AlignItems::CENTER).child(mic).child(word))
         .child(card)
 }
 
@@ -245,11 +245,8 @@ fn bench() {
     let (device, queue) = gpu(true);
     let period = queue.get_timestamp_period() as f64;
     let mut renderer = Renderer::with_fonts(&device, &queue, fonts.clone());
-    let qs = device.create_query_set(&wgpu::QuerySetDescriptor {
-        label: None,
-        ty: wgpu::QueryType::Timestamp,
-        count: 2,
-    });
+    let qs =
+        device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
     let resolve = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: 16,

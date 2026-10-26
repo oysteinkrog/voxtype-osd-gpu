@@ -188,7 +188,7 @@ fn render(off: &mut Offscreen, name: &str, list: &DisplayList, scale: f32) -> Im
 
 /// Colour may not exceed alpha in linear light: the output stays valid premultiplied.
 fn assert_premultiplied(img: &Image) {
-    for (i, p) in img.px.chunks_exact(4).enumerate() {
+    for (i, p) in img.px.as_chunks::<4>().0.iter().enumerate() {
         let a = p[3] as f32 / 255.0;
         for c in &p[..3] {
             let lin = srgb_to_linear(*c as f32 / 255.0);

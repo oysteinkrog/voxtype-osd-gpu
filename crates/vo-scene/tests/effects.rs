@@ -35,11 +35,8 @@ fn shadow_and_glow_draw_under_the_shape_in_that_order() {
 #[test]
 fn a_glow_at_zero_strength_draws_nothing() {
     let mut scene = Scene::new();
-    let pill = Element::shape("pill", ShapeKind::Capsule).size(80.0, 20.0).fill(Color::WHITE).glow(
-        Color::WHITE,
-        8.0,
-        0.0,
-    );
+    let pill =
+        Element::shape("pill", ShapeKind::Capsule).size(80.0, 20.0).fill(Color::WHITE).glow(Color::WHITE, 8.0, 0.0);
     scene.apply(root(vec![pill]), 0.0);
     assert_eq!(scene.sample(10.0).shapes.len(), 1);
 }
@@ -47,9 +44,10 @@ fn a_glow_at_zero_strength_draws_nothing() {
 #[test]
 fn bloom_makes_an_offscreen_layer_with_its_values() {
     let mut scene = Scene::new();
-    let layer = Element::layer("glow").size(100.0, 40.0).bloom(1.5, 12.0).child(
-        Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE),
-    );
+    let layer = Element::layer("glow")
+        .size(100.0, 40.0)
+        .bloom(1.5, 12.0)
+        .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE));
     scene.apply(root(vec![layer]), 0.0);
     let list = scene.sample(10.0);
     let bloom = list.layers.iter().find_map(|l| match l.target {
