@@ -82,11 +82,7 @@ fn main() {
     let target = Target::new(&g.device, w, h, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut renderer = Renderer::new(&g.device, &g.queue);
     let qs = g.timestamps.then(|| {
-        g.device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: None,
-            ty: wgpu::QueryType::Timestamp,
-            count: 2,
-        })
+        g.device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 })
     });
     let resolve = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
