@@ -34,7 +34,7 @@ pub use frame::{Background, CloudShape, Focus, Frame3d, Light, Material, MeshDra
 pub use item::{ItemPainter, ItemPlace, Source3d};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
-pub use render::{FieldBinding, Renderer3d};
+pub use render::{ExtraDraw, FieldBinding, Output, PassInfo, Renderer3d};
 pub use stack::{Layers, Stack, TextPlane};
 pub use text3d::{extrude_text, GlyphMesh, TurningWord};
 pub use timer::GpuTimer;

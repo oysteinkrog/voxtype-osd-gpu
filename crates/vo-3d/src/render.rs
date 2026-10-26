@@ -99,6 +99,31 @@ struct Pipelines {
     orbs: wgpu::RenderPipeline,
 }
 
+/// Where [`Renderer3d::encode_with`] resolves to.
+#[derive(Clone, Copy)]
+pub struct Output<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub size: [u32; 2],
+    pub format: wgpu::TextureFormat,
+}
+
+/// What a draw inside the 3D pass needs to match it.
+#[derive(Clone, Copy, Debug)]
+pub struct PassInfo {
+    /// Column-major, right-handed, clip z 0 to 1.
+    pub view_proj: crate::math::Mat4,
+    /// Pixels per world unit at view depth 1.
+    pub focal_px: f32,
+    pub size: [u32; 2],
+    pub format: wgpu::TextureFormat,
+    /// Test against it; never write it (D304).
+    pub depth: wgpu::TextureFormat,
+    pub samples: u32,
+}
+
+/// A draw run inside the 3D pass, after the clouds and before the orbs.
+pub type ExtraDraw<'a> = &'a mut dyn FnMut(&mut wgpu::RenderPass<'_>, &PassInfo);
+
 /// The text field the clouds react to, or none.
 pub struct FieldBinding<'a> {
     pub view: &'a wgpu::TextureView,
@@ -333,6 +358,21 @@ impl Renderer3d {
         frame: &Frame3d,
         field: Option<FieldBinding<'_>>,
     ) {
+        self.encode_with(enc, Output { view: target, size, format }, frame, field, None);
+    }
+
+    /// [`Renderer3d::encode`] with `extra` called inside the pass after the meshes and point
+    /// clouds and before the orbs, so another system (the particle engine) can draw with this
+    /// pass's depth test. It may change any pass state; the orbs set theirs again.
+    pub fn encode_with(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        out: Output<'_>,
+        frame: &Frame3d,
+        field: Option<FieldBinding<'_>>,
+        extra: Option<ExtraDraw<'_>>,
+    ) {
+        let Output { view: target, size, format } = out;
         self.prepare(format);
         self.attachments(size, format);
         let [w, h] = size.map(|v| v as f32);
@@ -509,6 +549,19 @@ impl Renderer3d {
             pass.set_bind_group(1, draws, &[slot * SLOT as u32]);
             pass.draw(0..4, 0..c.count);
             slot += 1;
+        }
+        if let Some(extra) = extra {
+            let info = PassInfo {
+                view_proj: cam.view_proj(w / h),
+                focal_px: cam.focal_px(h),
+                size,
+                format,
+                depth: DEPTH_FORMAT,
+                samples: SAMPLES,
+            };
+            extra(&mut pass, &info);
+            pass.set_bind_group(0, &globals_bind, &[]);
+            pass.set_bind_group(1, draws, &[0]);
         }
         if let (false, Some(buf)) = (orbs.is_empty(), &self.orbs) {
             pass.set_pipeline(&p.orbs);
