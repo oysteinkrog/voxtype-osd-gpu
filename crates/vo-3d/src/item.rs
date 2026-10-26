@@ -148,7 +148,9 @@ impl ItemPainter {
         }
         self.ensure_scratch(size, format);
         let scratch = self.scratch.as_ref().unwrap();
-        self.scene.encode(enc, &scratch.view, size, format, &frame, None);
+        let scale = if at.size.w > 0.0 { w / at.size.w } else { 1.0 };
+        let out = crate::render::Output { view: &scratch.view, size, format, scale };
+        self.scene.encode_with(enc, out, &frame, None, None);
 
         let u = ItemUniform {
             rect: [x0, y0, size[0] as f32, size[1] as f32],

@@ -16,7 +16,8 @@ struct Globals {
   viewport: vec4f,
   // Focus distance, range, largest blur in pixels, 1 when a text field is bound.
   focus: vec4f,
-  // Fog start and end view distance, 1 when fog is on.
+  // Fog start and end view distance, 1 when fog is on, then physical pixels per logical
+  // pixel: every pixel size in a frame (blur, minimum sprite size, field reach) is logical.
   fog: vec4f,
   // Background gradient, linear and premultiplied.
   bg_top: vec4f,
@@ -71,7 +72,7 @@ fn fog_at (d: f32) -> f32 {
 
 // Blur disc diameter in pixels for something at view distance `d`.
 fn coc_px (d: f32) -> f32 {
-  return g.focus.z * clamp (abs (d - g.focus.x) / max (g.focus.y, 1e-4), 0.0, 1.0);
+  return g.focus.z * g.fog.w * clamp (abs (d - g.focus.x) / max (g.focus.y, 1e-4), 0.0, 1.0);
 }
 
 // The field at a target pixel position: signed distance, direction away from ink, coverage.

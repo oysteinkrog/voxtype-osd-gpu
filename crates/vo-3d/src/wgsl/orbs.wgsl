@@ -22,12 +22,12 @@ struct OrbOut {
   let w = vec4f (o.pos.xyz, 1.0);
   let clip = g.view_proj * w;
   let depth = max (-(g.view * w).z, 1e-3);
-  let own = max (2.0 * o.pos.w * g.viewport.z / depth, 2.0);
+  let own = max (2.0 * o.pos.w * g.viewport.z / depth, 2.0 * g.fog.w);
   let blur = coc_px (depth);
   let dia = max (own, blur);
   let defocus = clamp ((dia - own) / max (dia, 1e-3), 0.0, 1.0);
   // Never let a tiny light vanish entirely: count at least a 6 px core.
-  let k = max (own, 6.0) / dia;
+  let k = max (own, 6.0 * g.fog.w) / dia;
   let energy = min (k * k, 1.0);
   let radius = 0.5 * dia;
   let soft = max (1.0, radius * mix (0.5, 0.12, defocus));

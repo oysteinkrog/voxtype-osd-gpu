@@ -65,22 +65,22 @@ fn cloud_point (i: u32) -> vec3f {
   var clip = g.view_proj * w;
   let depth = max (-(g.view * w).z, 1e-3);
 
-  var size = max (c.shape.w * g.viewport.z / depth, c.react.w);
+  var size = max (c.shape.w * g.viewport.z / depth, c.react.w * g.fog.w);
   var energy = 1.0;
   var soft = 1.0;
   if (c.ids.z != 0u) {
     let blur = coc_px (depth);
     let dia = max (size, blur);
     energy = (size / dia) * (size / dia);
-    soft = max (1.0, 0.25 * dia * clamp (blur / max (g.focus.z, 1e-3), 0.0, 1.0));
+    soft = max (1.0, 0.25 * dia * clamp (blur / max (g.focus.z * g.fog.w, 1e-3), 0.0, 1.0));
     size = dia;
   }
 
   var glow = 1.0;
   if (c.react.x > 0.0) {
     let f = field_at (clip_to_px (clip));
-    let k = 1.0 - smoothstep (0.0, c.react.x, f.r);
-    clip = clip_offset_px (clip, f.gb * (c.react.y * k));
+    let k = 1.0 - smoothstep (0.0, c.react.x * g.fog.w, f.r);
+    clip = clip_offset_px (clip, f.gb * (c.react.y * g.fog.w * k));
     glow = 1.0 + c.react.z * k;
   }
 

@@ -105,6 +105,8 @@ pub struct Output<'a> {
     pub view: &'a wgpu::TextureView,
     pub size: [u32; 2],
     pub format: wgpu::TextureFormat,
+    /// Physical pixels per logical pixel. Pixel sizes in a frame are logical.
+    pub scale: f32,
 }
 
 /// What a draw inside the 3D pass needs to match it.
@@ -348,7 +350,8 @@ impl Renderer3d {
     }
 
     /// Records the 3D pass into `enc`, resolving into `target` (a single-sample view of
-    /// `size` and `format`). With `field`, clouds with a reach react to the text field.
+    /// `size` and `format`) at scale 1. With `field`, clouds with a reach react to the text
+    /// field.
     pub fn encode(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
@@ -358,7 +361,7 @@ impl Renderer3d {
         frame: &Frame3d,
         field: Option<FieldBinding<'_>>,
     ) {
-        self.encode_with(enc, Output { view: target, size, format }, frame, field, None);
+        self.encode_with(enc, Output { view: target, size, format, scale: 1.0 }, frame, field, None);
     }
 
     /// [`Renderer3d::encode`] with `extra` called inside the pass after the meshes and point
@@ -372,7 +375,7 @@ impl Renderer3d {
         field: Option<FieldBinding<'_>>,
         extra: Option<ExtraDraw<'_>>,
     ) {
-        let Output { view: target, size, format } = out;
+        let Output { view: target, size, format, scale } = out;
         self.prepare(format);
         self.attachments(size, format);
         let [w, h] = size.map(|v| v as f32);
@@ -390,7 +393,7 @@ impl Renderer3d {
         let to_light = (-l.dir).normalize();
         let lc = lin(l.color);
         let eye = cam.eye();
-        let fog = frame.fog.map_or([0.0; 4], |(a, b)| [a, b, 1.0, 0.0]);
+        let fog = frame.fog.map_or([0.0, 0.0, 0.0, scale], |(a, b)| [a, b, 1.0, scale]);
         let globals = Globals {
             view_proj: cam.view_proj(w / h).cols,
             view: cam.view().cols,

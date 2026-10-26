@@ -2,6 +2,9 @@
 //! (usually by sampling `vo_core` channels and tracks), so sampling the same `t` twice gives
 //! the same frame, at any frame rate and in any order.
 //!
+//! Pixel sizes (blur, minimum sprite size, text field reach and push) are logical pixels;
+//! the renderer multiplies them by the target's scale.
+//!
 //! Colours are `vo_scene::geom::Color`: straight alpha, sRGB encoded. The renderer
 //! linearises and premultiplies them.
 

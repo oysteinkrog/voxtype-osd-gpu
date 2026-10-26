@@ -139,7 +139,8 @@ impl Stack {
         match layers.scene {
             Some(frame) => {
                 let binding = if field { self.field.binding() } else { None };
-                self.scene.encode(&mut enc, &view, size, format, frame, binding);
+                let out = crate::render::Output { view: &view, size, format, scale };
+                self.scene.encode_with(&mut enc, out, frame, binding, None);
             }
             None => clear(&mut enc, &view),
         }
