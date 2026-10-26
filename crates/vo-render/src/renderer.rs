@@ -367,7 +367,15 @@ impl Renderer {
     }
 
     /// Adds a draw, or extends the previous one when it continues the same run.
-    fn push_cmd(&mut self, surface: usize, pipe: Pipe, range: Range<u32>, uniform: u32, blend: BlendMode, scissor: [f32; 4]) {
+    fn push_cmd(
+        &mut self,
+        surface: usize,
+        pipe: Pipe,
+        range: Range<u32>,
+        uniform: u32,
+        blend: BlendMode,
+        scissor: [f32; 4],
+    ) {
         if range.is_empty() {
             return;
         }
@@ -426,8 +434,22 @@ impl Renderer {
         let (device, queue) = (&self.device, &self.queue);
         self.atlas_gpu.upload(device, queue, &self.atlas);
         self.atlas_gpu.set_uniforms(queue, &Uniforms::pixels(w as f32, h as f32));
-        write_grow(device, queue, &mut self.shape_buf, "vo-shapes", wgpu::BufferUsages::VERTEX, bytemuck::cast_slice(&self.shapes));
-        write_grow(device, queue, &mut self.glyph_buf, "vo-glyphs", wgpu::BufferUsages::VERTEX, bytemuck::cast_slice(&self.glyphs));
+        write_grow(
+            device,
+            queue,
+            &mut self.shape_buf,
+            "vo-shapes",
+            wgpu::BufferUsages::VERTEX,
+            bytemuck::cast_slice(&self.shapes),
+        );
+        write_grow(
+            device,
+            queue,
+            &mut self.glyph_buf,
+            "vo-glyphs",
+            wgpu::BufferUsages::VERTEX,
+            bytemuck::cast_slice(&self.glyphs),
+        );
         let need = self.uniforms.len().max(self.uniform_stride as usize) as u64;
         if self.uniform_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -456,9 +478,10 @@ impl Renderer {
         // One texture per offscreen layer, the size and format of the target.
         let layers = self.surfaces.len() - 1;
         for i in 0..layers {
-            let fits = self.layer_texs.get(i).is_some_and(|t| {
-                t.texture.width() == w && t.texture.height() == h && t.texture.format() == format
-            });
+            let fits = self
+                .layer_texs
+                .get(i)
+                .is_some_and(|t| t.texture.width() == w && t.texture.height() == h && t.texture.format() == format);
             if !fits {
                 let tex = self.layer_texture(w, h, format);
                 if i < self.layer_texs.len() {
@@ -511,7 +534,10 @@ impl Renderer {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(if i == 0 { "vo-target" } else { "vo-layer" }),
@@ -643,7 +669,8 @@ struct Frame<'a> {
 /// Fixed-function blend states for premultiplied colours. See the module notes on `Multiply`.
 fn blend_state(mode: BlendMode) -> wgpu::BlendState {
     use wgpu::BlendFactor::*;
-    let comp = |src_factor, dst_factor| wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add };
+    let comp =
+        |src_factor, dst_factor| wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add };
     let alpha = comp(One, OneMinusSrcAlpha);
     match mode {
         BlendMode::Normal => PREMULTIPLIED_OVER,

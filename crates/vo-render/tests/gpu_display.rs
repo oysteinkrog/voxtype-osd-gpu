@@ -88,8 +88,7 @@ fn rr(x: f32, y: f32, w: f32, h: f32, r: [f32; 4]) -> RRect {
 fn shapes_scene() -> DisplayList {
     L::new(vec![C::Shapes(vec![
         ShapeInstance::rrect(rr(8.0, 8.0, 70.0, 44.0, [0.0, 6.0, 18.0, 30.0]), solid(0x3b82f6)),
-        ShapeInstance::rrect(rr(88.0, 8.0, 70.0, 44.0, [12.0; 4]), solid(0x111827))
-            .with_stroke(solid(0xf59e0b), 3.0),
+        ShapeInstance::rrect(rr(88.0, 8.0, 70.0, 44.0, [12.0; 4]), solid(0x111827)).with_stroke(solid(0xf59e0b), 3.0),
         ShapeInstance::rrect(rr(168.0, 8.0, 64.0, 44.0, [4.0, 22.0, 4.0, 22.0]), Paint::NONE)
             .with_stroke(solid(0x10b981), 1.5),
         ShapeInstance::circle(Point::new(30.0, 86.0), 22.0, solid(0xef4444)),
@@ -99,7 +98,12 @@ fn shapes_scene() -> DisplayList {
         ShapeInstance::capsule(Rect::new(174.0, 64.0, 16.0, 48.0), solid(0xec4899)),
         ShapeInstance::line(Point::new(198.0, 66.0), Point::new(232.0, 110.0), 3.0, solid(0xfacc15)),
         ShapeInstance::line(Point::new(108.0, 104.0), Point::new(168.0, 104.0), 0.6, solid(0xffffff)),
-        ShapeInstance::line(Point::new(108.0, 112.0), Point::new(168.0, 112.0), 4.0, Paint::solid(Color::hex(0x38bdf8, 0.7))),
+        ShapeInstance::line(
+            Point::new(108.0, 112.0),
+            Point::new(168.0, 112.0),
+            4.0,
+            Paint::solid(Color::hex(0x38bdf8, 0.7)),
+        ),
     ])])
     .list(240.0, 120.0)
 }
@@ -128,12 +132,22 @@ fn gradient_scene() -> DisplayList {
         ),
         ShapeInstance::rrect(
             rr(8.0, 56.0, 224.0, 24.0, [12.0; 4]),
-            Paint::linear(Point::new(8.0, 0.0), Color::hex(0xffffff, 1.0), Point::new(232.0, 0.0), Color::hex(0xffffff, 0.0)),
+            Paint::linear(
+                Point::new(8.0, 0.0),
+                Color::hex(0xffffff, 1.0),
+                Point::new(232.0, 0.0),
+                Color::hex(0xffffff, 0.0),
+            ),
         ),
         ShapeInstance::circle(
             Point::new(40.0, 100.0),
             16.0,
-            Paint::linear(Point::new(40.0, 84.0), Color::hex(0xfde047, 1.0), Point::new(40.0, 116.0), Color::hex(0x7c3aed, 1.0)),
+            Paint::linear(
+                Point::new(40.0, 84.0),
+                Color::hex(0xfde047, 1.0),
+                Point::new(40.0, 116.0),
+                Color::hex(0x7c3aed, 1.0),
+            ),
         )
         .with_stroke(Paint::linear(Point::new(24.0, 0.0), blue, Point::new(56.0, 0.0), red), 2.0),
     ])])

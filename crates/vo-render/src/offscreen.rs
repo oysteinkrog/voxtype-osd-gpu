@@ -50,7 +50,13 @@ pub struct Offscreen {
 
 impl Offscreen {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Offscreen {
-        Offscreen { renderer: Renderer::new(device, queue), target: None, slots: Vec::new(), pending: VecDeque::new(), next: 0 }
+        Offscreen {
+            renderer: Renderer::new(device, queue),
+            target: None,
+            slots: Vec::new(),
+            pending: VecDeque::new(),
+            next: 0,
+        }
     }
 
     /// Draws `list` at `scale` into a `size` (physical pixels) image and returns its pixels.

@@ -177,13 +177,15 @@ mod tests {
         let s = ShapeInstance::circle(Point::new(5.0, 5.0), 3.0, Paint::solid(Color::WHITE));
         assert_eq!(GpuShape::new(&s, &Affine::IDENTITY, 1.0, 0.0), None);
         // A stroke paint with zero width and no hairline flag draws nothing.
-        let s = ShapeInstance::circle(Point::new(5.0, 5.0), 3.0, Paint::NONE).with_stroke(Paint::solid(Color::WHITE), 0.0);
+        let s =
+            ShapeInstance::circle(Point::new(5.0, 5.0), 3.0, Paint::NONE).with_stroke(Paint::solid(Color::WHITE), 0.0);
         assert_eq!(GpuShape::new(&s, &Affine::IDENTITY, 1.0, 1.0), None);
     }
 
     #[test]
     fn opacity_goes_into_alpha_and_kinds_are_packed() {
-        let s = ShapeInstance::line(Point::ZERO, Point::new(10.0, 0.0), 2.0, Paint::solid(Color::rgba(1.0, 0.0, 0.0, 0.8)));
+        let s =
+            ShapeInstance::line(Point::ZERO, Point::new(10.0, 0.0), 2.0, Paint::solid(Color::rgba(1.0, 0.0, 0.0, 0.8)));
         let g = GpuShape::new(&s, &Affine::IDENTITY, 1.0, 0.5).unwrap();
         assert!((g.stroke.c0[3] - 0.4).abs() < 1e-6);
         assert_eq!(g.kinds, ShapeKind::Line as u32 | (PaintKind::Solid as u32) << 16);

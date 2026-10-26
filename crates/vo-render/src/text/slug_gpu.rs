@@ -313,7 +313,11 @@ impl SlugAtlasGpu {
         }
         if atlas.texels.len() > self.uploaded {
             let new = &atlas.texels[self.uploaded..];
-            queue.write_buffer(self.atlas_buf.as_ref().unwrap(), (self.uploaded * 16) as u64, bytemuck::cast_slice(new));
+            queue.write_buffer(
+                self.atlas_buf.as_ref().unwrap(),
+                (self.uploaded * 16) as u64,
+                bytemuck::cast_slice(new),
+            );
             self.uploaded = atlas.texels.len();
         }
     }
