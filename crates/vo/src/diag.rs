@@ -22,6 +22,12 @@ pub trait Diagnostics {
         let _ = (t, host);
     }
 
+    /// An event changed the scene at `t` (host clock), so frames may follow. A frame after
+    /// `settled` with no `changed` in between is a frame drawn while idle.
+    fn changed(&mut self, t: f64) {
+        let _ = t;
+    }
+
     /// The run ended.
     fn exit(&mut self, host: &HostDiag) {
         let _ = host;
@@ -42,6 +48,10 @@ pub struct LogDiagnostics {
     frames: Vec<(f64, u64)>,
     /// `(t, frames before, loop wakeups)` per settle.
     settles: Vec<(f64, usize, u64)>,
+    /// Settled, and no event has changed the scene since.
+    idle: bool,
+    /// Frames drawn while idle. Should stay 0.
+    idle_frames: u64,
 }
 
 impl LogDiagnostics {
@@ -72,6 +82,9 @@ impl Diagnostics for LogDiagnostics {
     }
 
     fn frame(&mut self, n: u64, t: f64, host: &HostDiag) {
+        if self.idle {
+            self.idle_frames += 1;
+        }
         self.frames.push((t, host.loop_wakeups));
         if self.every_frame {
             eprintln!("vo: frame {n} t={t:.4}");
@@ -80,7 +93,12 @@ impl Diagnostics for LogDiagnostics {
 
     fn settled(&mut self, t: f64, host: &HostDiag) {
         self.settles.push((t, self.frames.len(), host.loop_wakeups));
+        self.idle = true;
         eprintln!("vo: settled t={t:.3} frames={} {}", self.frames.len(), self.memory());
+    }
+
+    fn changed(&mut self, _t: f64) {
+        self.idle = false;
     }
 
     fn exit(&mut self, host: &HostDiag) {
@@ -94,6 +112,7 @@ impl Diagnostics for LogDiagnostics {
                 woke_next - woke
             );
         }
+        eprintln!("vo: idle frames: {} (drawn after a settle with no scene change since)", self.idle_frames);
         eprintln!("vo: exit: frames={} loop_wakeups={} {}", self.frames.len(), host.loop_wakeups, self.memory());
     }
 }

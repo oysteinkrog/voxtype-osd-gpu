@@ -149,6 +149,7 @@ impl<A: App> HostApp for Live<A> {
     }
 
     fn event(&mut self, host: &mut dyn HostCtl, event: HostEvent) {
+        let was_dirty = self.driver.as_ref().is_none_or(|d| d.dirty);
         match event {
             HostEvent::Configured { id, t, size, scale } if id == self.surface => {
                 self.driver().scene.set_viewport(t, size, scale);
@@ -188,6 +189,12 @@ impl<A: App> HostApp for Live<A> {
                 return;
             }
             _ => {}
+        }
+        if !was_dirty && self.driver.as_ref().is_some_and(|d| d.dirty) {
+            let t = host.now();
+            if let Some(d) = self.diag() {
+                d.changed(t);
+            }
         }
         self.after_change(host);
     }

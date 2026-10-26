@@ -27,13 +27,19 @@ use vo_core::spring::Spring;
 struct Counting;
 
 static HEAP: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+fn grow(by: usize) {
+    let now = HEAP.fetch_add(by, Ordering::Relaxed) + by;
+    PEAK.fetch_max(now, Ordering::Relaxed);
+}
 
 // SAFETY: forwards to the system allocator and only adds bookkeeping.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
-            HEAP.fetch_add(layout.size(), Ordering::Relaxed);
+            grow(layout.size());
         }
         p
     }
@@ -45,7 +51,7 @@ unsafe impl GlobalAlloc for Counting {
         let p = unsafe { System.realloc(ptr, layout, new) };
         if !p.is_null() {
             HEAP.fetch_sub(layout.size(), Ordering::Relaxed);
-            HEAP.fetch_add(new, Ordering::Relaxed);
+            grow(new);
         }
         p
     }
@@ -205,6 +211,7 @@ fn main() {
         };
         let n = vo::render_offline_with(app, &scenario, fps, &dir, options()).expect("offline render");
         eprintln!("toast: wrote {n} frames to {}", dir.display());
+        eprintln!("toast: heap peak {:.2} MB", PEAK.load(Ordering::Relaxed) as f64 / 1048576.0);
         return;
     }
 
@@ -218,7 +225,9 @@ fn main() {
     let mut options = options();
     options.diagnostics = Some(Box::new(LogDiagnostics::new(Some(heap))));
     options.cpu_first_frame = cpu_first_frame;
-    if let Err(e) = vo::run_overlay_with(app, spec, options) {
+    let result = vo::run_overlay_with(app, spec, options);
+    eprintln!("toast: heap peak {:.2} MB", PEAK.load(Ordering::Relaxed) as f64 / 1048576.0);
+    if let Err(e) = result {
         eprintln!("toast: {e}");
         std::process::exit(1);
     }

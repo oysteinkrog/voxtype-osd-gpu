@@ -47,6 +47,12 @@ lint:
     {{hb}} cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
 
+# Budget gate: own heap, cold first frame and frames while idle, offline and live in a private
+# nested KWin. Limits and options are env vars, listed at the top of scripts/budget.sh.
+budget:
+    {{hb}} cargo build --release -p vo --example toast -p vo-host-wayland --example fake_click
+    scripts/budget.sh
+
 # Format the workspace.
 fmt:
     cargo fmt --all
