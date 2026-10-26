@@ -17,6 +17,7 @@ png = { version = "0.18", optional = true }
 png = ["dep:png"]
 
 [dev-dependencies]
+vo-core = { path = "../vo-core" }
 pollster = "0.4"
 naga = { version = "30", features = ["wgsl-in"] }
 png = "0.18"

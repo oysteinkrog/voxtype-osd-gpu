@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use vo_scene::display::DisplayList;
+use vo_scene::font::FontRegistry;
 
 use crate::renderer::{Renderer, Target};
 
@@ -50,8 +51,13 @@ pub struct Offscreen {
 
 impl Offscreen {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Offscreen {
+        Offscreen::with_fonts(device, queue, FontRegistry::new())
+    }
+
+    /// An offscreen renderer that reads glyph font ids from `fonts`, the scene's table.
+    pub fn with_fonts(device: &wgpu::Device, queue: &wgpu::Queue, fonts: FontRegistry) -> Offscreen {
         Offscreen {
-            renderer: Renderer::new(device, queue),
+            renderer: Renderer::with_fonts(device, queue, fonts),
             target: None,
             slots: Vec::new(),
             pending: VecDeque::new(),
