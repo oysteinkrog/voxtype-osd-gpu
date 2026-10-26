@@ -937,9 +937,9 @@ impl<M> Scene<M> {
                     radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
                 });
                 let target = if offscreen { LayerTarget::Offscreen { bloom } } else { LayerTarget::Direct };
-                (blend, clip, fade, target, alpha * opacity, 1.0)
+                (blend, clip, target, alpha * opacity, 1.0)
             }
-            _ => (BlendMode::Normal, None, [0.0; 4], LayerTarget::Direct, 1.0, alpha * opacity),
+            _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
         };
         out.layers.push(Layer {
             parent: Some(layer),

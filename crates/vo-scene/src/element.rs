@@ -350,8 +350,6 @@ pub(crate) enum Kind {
     Path { id: u32, view: Rect },
     /// App drawing code run from the frame time (`crate::canvas`).
     Canvas(CanvasDraw),
-}
-
     /// A stroked outline fitted to the box, trimmed by the trim channels.
     StrokePath(StrokeArt),
     /// A stroked morph fitted to the box at the morph channel's progress.
@@ -396,6 +394,8 @@ impl PartialEq for MorphArt {
     fn eq(&self, o: &MorphArt) -> bool {
         std::sync::Arc::ptr_eq(&self.morph, &o.morph) && self.view == o.view && self.style == o.style && self.filled == o.filled
     }
+}
+
 impl Kind {
     /// Same variant, so a node can be updated in place rather than replaced.
     pub(crate) fn same_variant(&self, other: &Kind) -> bool {
