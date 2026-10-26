@@ -10,9 +10,11 @@
 //! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
+//! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod display;
+pub mod dots;
 pub mod element;
 pub mod font;
 pub mod geom;

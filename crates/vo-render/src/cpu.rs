@@ -17,7 +17,7 @@ use std::sync::Arc;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
-use vo_scene::display::{BlendMode, DisplayList, GlyphInstance, ItemKind};
+use vo_scene::display::{BlendMode, DisplayList, GlyphInstance, ItemKind, Paint, ShapeInstance};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 
@@ -157,6 +157,15 @@ impl CpuRenderer {
                     }
                 }
                 ItemKind::Emitters => {}
+                ItemKind::Dots => {
+                    for d in &list.dots[range] {
+                        let centre = crate::dots::snap(d.centre, d.radius, d.snap, &to_px, ppu);
+                        let s = ShapeInstance::circle(centre, d.radius, Paint::solid(d.color));
+                        if let Some(g) = GpuShape::new(&s, &to_px, ppu, opacity) {
+                            self.shape(&g, &st);
+                        }
+                    }
+                }
                 ItemKind::Layer => self.visit(list, scale, item.start, &st),
             }
         }

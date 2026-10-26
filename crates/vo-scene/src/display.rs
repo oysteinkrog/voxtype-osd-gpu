@@ -35,6 +35,8 @@ pub struct DisplayList {
     pub shapes: Vec<ShapeInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub emitters: Vec<EmitterInstance>,
+    /// Round dots, for dot grids (`crate::dots`).
+    pub dots: Vec<DotInstance>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -128,6 +130,7 @@ pub enum ItemKind {
     Glyphs,
     Emitters,
     Layer,
+    Dots,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -346,6 +349,19 @@ pub struct GlyphInstance {
 /// `GlyphInstance::word` for glyphs outside live text.
 pub const NO_WORD: u32 = u32::MAX;
 
+/// One round dot, in layer space. Many thousands per frame are fine: the renderer draws them
+/// with a small instance of their own, not as shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[repr(C)]
+pub struct DotInstance {
+    pub centre: Point,
+    pub radius: f32,
+    /// How far the renderer moves the centre toward the nearest physical pixel centre, 0 to
+    /// 1, when the layer maps axes to axes. 1 for dots at rest, 0 for dots in flight.
+    pub snap: f32,
+    pub color: Color,
+}
+
 /// Placeholder for particle emitters (M4). Only identity and origin for now.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[repr(C)]
@@ -396,6 +412,7 @@ impl DisplayList {
         self.shapes.clear();
         self.glyphs.clear();
         self.emitters.clear();
+        self.dots.clear();
         self.hits.clear();
     }
 

@@ -2,6 +2,7 @@
 //!
 //! - `renderer`: [`Renderer`] and [`Target`], the display list to texture path.
 //! - `shapes`: the CPU side of the SDF shape uber-shader.
+//! - `dots`: the CPU side of the dot pipeline.
 //! - `text`: the Slug glyph path.
 //! - `particles`: GPU particles, free ones at a fixed tick and words that form from them.
 //! - `glyph_points`: points sampled from glyph outlines, for text made of particles.
@@ -12,6 +13,7 @@
 pub mod color;
 #[cfg(feature = "cpu")]
 pub mod cpu;
+pub mod dots;
 pub mod glyph_points;
 pub mod offscreen;
 pub mod particles;

@@ -1211,6 +1211,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-dots"
+version = "0.0.0"
+dependencies = [
+ "png",
+ "pollster",
+ "vo-core",
+ "vo-render",
+ "vo-scene",
+ "wgpu",
+]
+
+[[package]]
 name = "vo-host"
 version = "0.0.0"
 dependencies = [

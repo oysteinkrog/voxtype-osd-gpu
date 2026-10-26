@@ -1,0 +1,17 @@
+[package]
+name = "vo-dots"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Dot-matrix design family: a spring-driven dot field, dot fonts, dot waveforms and dot particles. No GPU"
+
+[dependencies]
+vo-core = { path = "../vo-core" }
+vo-scene = { path = "../vo-scene" }
+
+[dev-dependencies]
+vo-render = { path = "../vo-render", features = ["png"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+pollster = "0.4"
+png = "0.18"

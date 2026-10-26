@@ -17,9 +17,10 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
 use crate::display::{
-    BlendMode, Bloom, DisplayList, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint, ShapeInstance,
-    ShapeKind, NO_WORD,
+    BlendMode, Bloom, DisplayList, DotInstance, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint,
+    ShapeInstance, ShapeKind, NO_WORD,
 };
+use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::input::PointerState;
@@ -450,6 +451,7 @@ impl<M> Scene<M> {
                     && match &n.kind {
                         Kind::Wave(w) => w.moving(t),
                         Kind::Progress(p) => p.moving(),
+                        Kind::Dots(d) => d.source.moving(t),
                         _ => false,
                     })
         });
@@ -954,6 +956,10 @@ impl<M> Scene<M> {
                 self.timed_shapes(items, out, |v| p.shapes(rect, t, alpha, v));
                 None
             }
+            Kind::Dots(d) => {
+                self.dots(d, rect, t, alpha, items, out);
+                None
+            }
             Kind::Stack => None,
         };
         if let Some(s) = shape.map(stroked) {
@@ -988,6 +994,24 @@ impl<M> Scene<M> {
         f(&mut out.shapes);
         for i in start..out.shapes.len() {
             push_item(items, ItemKind::Shapes, i as u32);
+        }
+    }
+
+    /// A dot grid's dots in `rect`, one run of `ItemKind::Dots`.
+    fn dots(&self, d: &Dots, rect: Rect, t: f64, alpha: f32, items: &mut Vec<Item>, out: &mut DisplayList) {
+        let pitch = d.snapped_pitch(self.scale);
+        let (ox, oy) = (rect.x + d.origin.0 * pitch, rect.y + d.origin.1 * pitch);
+        let mut cells = Vec::new();
+        d.source.dots(t, &mut cells);
+        let start = out.dots.len();
+        out.dots.extend(cells.iter().filter(|c| c.color.a * alpha > 0.0 && c.size > 0.0).map(|c| DotInstance {
+            centre: Point::new(ox + c.x * pitch, oy + c.y * pitch),
+            radius: 0.5 * c.size * pitch,
+            snap: c.snap.clamp(0.0, 1.0),
+            color: c.color.fade(alpha),
+        }));
+        for i in start..out.dots.len() {
+            push_item(items, ItemKind::Dots, i as u32);
         }
     }
 

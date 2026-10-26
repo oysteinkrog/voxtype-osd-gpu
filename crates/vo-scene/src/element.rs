@@ -18,6 +18,7 @@ use vo_core::spring::Spring;
 use vo_core::words::Word;
 
 use crate::display::{BlendMode, ShapeKind};
+use crate::dots::Dots;
 use crate::geom::Color;
 use crate::timed::{Progress, Wave};
 
@@ -277,6 +278,8 @@ pub(crate) enum Kind {
     Wave(Wave),
     /// A progress bar filling the box.
     Progress(Progress),
+    /// A dot grid filling the box.
+    Dots(Dots),
 }
 
 impl Kind {
@@ -396,6 +399,11 @@ impl<M> Element<M> {
     /// fraction is unknown.
     pub fn progress(key: impl Into<Key>, progress: Progress) -> Element<M> {
         Element::new(key, Kind::Progress(progress), taffy::Style::default())
+    }
+
+    /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
+    pub fn dots(key: impl Into<Key>, dots: Dots) -> Element<M> {
+        Element::new(key, Kind::Dots(dots), taffy::Style::default())
     }
 
     /// A container drawn as its own layer: group transform, blend mode, optional clip to
