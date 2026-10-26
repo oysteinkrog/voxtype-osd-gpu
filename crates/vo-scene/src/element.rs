@@ -184,7 +184,8 @@ impl Transition {
     }
 }
 
-/// Font and size for a label. `font` is an id the renderer's font table defines.
+/// Font, size and line limits for a label. `font` is an id in the shared
+/// [`FontRegistry`](crate::font::FontRegistry).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
     pub font: u32,
@@ -192,11 +193,27 @@ pub struct TextStyle {
     pub size: f32,
     /// Line height in logical units.
     pub line_height: f32,
+    /// Most lines shown; 0 means no limit. Lines past the limit are dropped.
+    pub max_lines: u32,
+    /// End the last line with an ellipsis when text was dropped, either lines past
+    /// `max_lines` or the end of a word too wide for its line.
+    pub ellipsis: bool,
+}
+
+impl TextStyle {
+    pub fn new(font: u32, size: f32, line_height: f32) -> TextStyle {
+        TextStyle { font, size, line_height, max_lines: 0, ellipsis: false }
+    }
+
+    /// At most `n` lines, the last one ending in an ellipsis when text was cut.
+    pub fn clamp_lines(self, n: u32) -> TextStyle {
+        TextStyle { max_lines: n, ellipsis: true, ..self }
+    }
 }
 
 impl Default for TextStyle {
     fn default() -> TextStyle {
-        TextStyle { font: 0, size: 14.0, line_height: 18.0 }
+        TextStyle::new(0, 14.0, 18.0)
     }
 }
 

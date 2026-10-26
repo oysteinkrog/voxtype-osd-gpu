@@ -24,7 +24,7 @@ use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transitio
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::input::PointerState;
 use crate::layout::LayoutView;
-use crate::text::{EstimateText, ShapedText, TextLayout};
+use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
 
 new_key_type! {
     /// A retained node. Stable for as long as its key path stays in the view.
@@ -743,6 +743,9 @@ impl<M> Scene<M> {
                     at += w.text.len() as u32 + 1;
                 }
                 let word_of = |cluster: u32| {
+                    if cluster == ELLIPSIS_CLUSTER {
+                        return NO_WORD;
+                    }
                     let i = starts.partition_point(|(s, _)| *s <= cluster);
                     if i == 0 {
                         NO_WORD
