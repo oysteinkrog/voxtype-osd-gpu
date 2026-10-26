@@ -170,3 +170,23 @@ pub fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -
     let mut w = enc.write_header().map_err(std::io::Error::other)?;
     w.write_image_data(&straight).map_err(std::io::Error::other)
 }
+
+#[cfg(all(test, feature = "png"))]
+mod tests {
+    #[test]
+    fn png_has_straight_alpha() {
+        let dir = std::path::Path::new("/var/tmp/claude/vo-render-test");
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("straight.png");
+        // Opaque red, then sRGB 128 gray at half alpha as an sRGB target stores it.
+        let half =
+            (crate::color::linear_to_srgb(crate::color::srgb_to_linear(128.0 / 255.0) * 0.5) * 255.0).round() as u8;
+        super::write_png(&path, 2, 1, &[255, 0, 0, 255, half, half, half, 128]).unwrap();
+        let mut reader =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        assert_eq!(&buf[..4], &[255, 0, 0, 255]);
+        assert!(buf[4].abs_diff(128) <= 1 && buf[7] == 128, "{:?}", &buf[4..8]);
+    }
+}
