@@ -5,6 +5,8 @@
 //!   `Element::dots`.
 //! - `font`: [`DotFont`], 5x7 and 7x9 dot fonts as data (TY16).
 //! - `text`: [`DotText`], a string as dots that assembles, dissolves and morphs (TY16).
+//! - `particles`: dots that peel off and fly away, and dots that assemble into a shape such
+//!   as the check (PA09); [`DotStack`] to draw several sources on one grid.
 //! - `wave`: [`DotWave`], [`DotMeter`] and [`DotTicker`]: level visuals and a ticker as dots.
 //!
 //! Nothing here touches the GPU. The renderer draws the dots with an instanced pipeline of
@@ -13,11 +15,13 @@
 pub mod field;
 pub mod font;
 mod font_data;
+pub mod particles;
 pub mod text;
 pub mod wave;
 
 pub use field::{DotField, Look, Springs};
 pub use font::DotFont;
+pub use particles::{assemble, check_cells, peel_off, DotStack, Peel};
 pub use text::{Change, DotText, TextStyle};
 pub use vo_scene::dots::{Dot, DotSource, Dots};
 pub use wave::{DotMeter, DotTicker, DotWave};
