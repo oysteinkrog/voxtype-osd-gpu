@@ -530,6 +530,7 @@ impl<M> Scene<M> {
                             t < n.words.iter().map(|w| w.since).fold(n.words_at, f64::max) + WORD_PARTICLES_BUSY
                         }
                         Kind::Canvas(c) => c.moving(t),
+                        Kind::StrokePath(a) => a.head.is_some(),
                         _ => false,
                     })
         });
@@ -936,9 +937,9 @@ impl<M> Scene<M> {
                     radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
                 });
                 let target = if offscreen { LayerTarget::Offscreen { bloom } } else { LayerTarget::Direct };
-                (blend, clip, target, alpha * opacity, 1.0)
+                (blend, clip, fade, target, alpha * opacity, 1.0)
             }
-            _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
+            _ => (BlendMode::Normal, None, [0.0; 4], LayerTarget::Direct, 1.0, alpha * opacity),
         };
         out.layers.push(Layer {
             parent: Some(layer),
@@ -1147,6 +1148,32 @@ impl<M> Scene<M> {
                 None
             }
             // Drawn by `emit_body`, which knows the layer.
+            Kind::StrokePath(art) => {
+                self.stroke_path(art, n, t, origin, size, alpha, items, out);
+                None
+            }
+            Kind::Morph(art) => {
+                let fit = fit_view(art.view, origin, size);
+                let v = n.value(Slot::Morph as u8, t) as f32;
+                let parts = art.morph.sample(v);
+                if art.filled {
+                    let shapes: Vec<_> =
+                        parts.iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&fit)).collect();
+                    let style = faded(&art.style, alpha);
+                    if let Some(item) = crate::path::push_fill(out, &shapes, &style) {
+                        push_item(items, ItemKind::Vectors, item.start);
+                    }
+                } else {
+                    for p in &parts {
+                        let mut style = faded(&art.style, alpha * p.weight.sqrt());
+                        style.width *= p.weight;
+                        if let Some(item) = crate::path::push_stroke(out, &p.contour.transform(&fit), &style) {
+                            push_item(items, ItemKind::Vectors, item.start);
+                        }
+                    }
+                }
+                None
+            }
             Kind::Canvas(_) | Kind::Emitter(_) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
@@ -1219,6 +1246,49 @@ impl<M> Scene<M> {
     }
 
     /// Shapes from a timed element, appended in order.
+    /// A stroked outline: optional fill, the trimmed stroke, and the light head.
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_path(
+        &self,
+        art: &crate::element::StrokeArt,
+        n: &Node<M>,
+        t: f64,
+        origin: Point,
+        size: Size,
+        alpha: f32,
+        items: &mut Vec<Item>,
+        out: &mut DisplayList,
+    ) {
+        use crate::path::{push_fill, push_stroke, StrokeStyle};
+        let o = art.outline.transform(&fit_view(art.view, origin, size));
+        let len = o.length();
+        if let Some(c) = art.fill {
+            if let Some(item) = push_fill(out, &o.contours, &StrokeStyle::solid(0.0, c.fade(alpha))) {
+                push_item(items, ItemKind::Vectors, item.start);
+            }
+        }
+        let start = n.value(Slot::TrimStart as u8, t).clamp(0.0, 1.0) as f32;
+        let end = n.value(Slot::TrimEnd as u8, t).clamp(0.0, 1.0) as f32;
+        let style = faded(&art.style, alpha);
+        for c in &o.trim(start * len, end * len).contours {
+            if let Some(item) = push_stroke(out, c, &style) {
+                push_item(items, ItemKind::Vectors, item.start);
+            }
+        }
+        if let (Some((tail, laps, color, glow)), Some(first)) = (art.head, o.contours.first()) {
+            let l0 = first.length();
+            if first.closed && l0 > 0.0 {
+                let head = (t * laps as f64).fract() as f32 * l0;
+                let tail = tail.clamp(0.0, 1.0) * l0;
+                let c = color.fade(alpha);
+                let s = StrokeStyle::solid(art.style.width, c).ramp(head - tail, c.fade(0.0), head, c).glow(glow);
+                if let Some(item) = push_stroke(out, &o.window(0, head, tail), &s) {
+                    push_item(items, ItemKind::Vectors, item.start);
+                }
+            }
+        }
+    }
+
     fn timed_shapes(&self, items: &mut Vec<Item>, out: &mut DisplayList, f: impl FnOnce(&mut Vec<ShapeInstance>)) {
         let start = out.shapes.len();
         f(&mut out.shapes);
@@ -1300,6 +1370,23 @@ fn local_transform<M>(n: &Node<M>, t: f64) -> (Affine, Size, f32) {
 /// Appends one instance at `index` to the item list, extending the last run when it is the
 /// same kind and adjacent.
 /// The product of the opacities of `layer` and every layer above it.
+/// The transform that fits `view` into the box at `origin`, centred, keeping its aspect.
+fn fit_view(view: Rect, origin: Point, size: Size) -> Affine {
+    if view.w <= 0.0 || view.h <= 0.0 {
+        return Affine::translate(origin.x, origin.y);
+    }
+    let k = (size.w / view.w).min(size.h / view.h);
+    Affine::scale(k).then(&Affine::translate(
+        origin.x + 0.5 * (size.w - view.w * k) - view.x * k,
+        origin.y + 0.5 * (size.h - view.h * k) - view.y * k,
+    ))
+}
+
+/// `style` with `alpha` multiplied into both colours.
+fn faded(style: &crate::path::StrokeStyle, alpha: f32) -> crate::path::StrokeStyle {
+    crate::path::StrokeStyle { c0: style.c0.fade(alpha), c1: style.c1.fade(alpha), ..*style }
+}
+
 fn layer_chain_opacity(layers: &[Layer], layer: u32) -> f32 {
     let mut o = 1.0;
     let mut li = Some(layer);

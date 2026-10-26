@@ -337,3 +337,56 @@ fn vector_hairline_is_one_pixel() {
         assert!((240..=270).contains(&lit), "scale {scale}: column alpha sum {lit}");
     }
 }
+
+/// `Element::stroke_path` drawing on through its enter transition, with a light head and a
+/// fill, and `Element::morph` part way from mic to check, through a `Scene`.
+#[test]
+fn element_stroke_and_morph_goldens() {
+    use std::sync::Arc;
+    use vo_core::spring::Spring;
+    use vo_scene::element::Element;
+    use vo_scene::path::make;
+    use vo_scene::{Prop, Scene, Transition};
+    let border = Arc::new(Outline { contours: vec![make::panel(0.0, 0.0, 200.0, 60.0, 16.0)] });
+    let mic = Outline::new(&icons::mic(), 0.01);
+    let morph = Arc::new(Morph::new(&mic, &Outline::new(&icons::check(), 0.01), 96));
+    let view = |m: f32| {
+        Element::<()>::panel("bg")
+            .pad(10.0)
+            .gap(10.0)
+            .direction_row()
+            .fill(Color::hex(0x111318, 1.0))
+            .child(
+                Element::stroke_path("border", border.clone(), Rect::new(-2.0, -2.0, 204.0, 64.0), StrokeStyle::solid(2.0, Color::hex(0x6b7280, 1.0)))
+                    .size(204.0, 64.0)
+                    .path_fill(Color::hex(0x1c1f26, 1.0))
+                    .light_head(0.3, 0.5, Color::hex(0x7dd3fc, 1.0), 5.0)
+                    .motion(Prop::Trim, Spring::critical_to_98(0.8))
+                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::NONE.trim(1.0, 1.0)),
+            )
+            .child(
+                Element::morph("icon", morph.clone(), Rect::new(0.0, 0.0, 24.0, 24.0), StrokeStyle::solid(4.0, Color::hex(ACCENT, 1.0)))
+                    .size(64.0, 64.0)
+                    .motion(Prop::Morph, Spring::SOFT)
+                    .morph_to(m),
+            )
+    };
+    let mut scene: Scene<()> = Scene::new();
+    scene.set_viewport(0.0, Size::new(310.0, 84.0), 1.0);
+    scene.apply(view(0.0), 0.0);
+    let mid_enter = scene.sample(0.25);
+    scene.apply(view(1.0), 2.0);
+    let mid_morph = scene.sample(2.1);
+    // The light head keeps the scene awake; without it everything settles.
+    assert!(scene.next_wake(10.0).is_some());
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let images = [
+        render(&mut off, "vec-el-enter", &mid_enter, 1.0),
+        render(&mut off, "vec-el-morph", &mid_morph, 1.0),
+        render(&mut off, "vec-el-settled", &scene.sample(4.3), 1.0),
+    ];
+    let failures: Vec<String> =
+        images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
+    assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}

@@ -18,6 +18,7 @@ use vo_core::spring::Spring;
 use vo_core::words::Word;
 
 use crate::canvas::{CanvasDraw, Painter};
+use crate::path::{Morph, Outline, StrokeStyle};
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
@@ -93,6 +94,11 @@ pub(crate) enum Slot {
     /// Sheen (FX08): colour and the seconds one sweep takes.
     SheenColor = 52,
     SheenSecs = 56,
+    /// Path trim (`Element::stroke_path`): start and end as fractions of the length.
+    TrimStart = 57,
+    TrimEnd = 58,
+    /// Morph progress (`Element::morph`), 0 to 1.
+    Morph = 59,
 }
 
 impl Slot {
@@ -123,7 +129,9 @@ impl Slot {
             s if s < Slot::Shutter as u8 => Prop::Bloom,
             s if s < Slot::RimColor as u8 => Prop::MotionBlur,
             s if s < Slot::SheenColor as u8 => Prop::Rim,
-            _ => Prop::Sheen,
+            s if s < Slot::TrimStart as u8 => Prop::Sheen,
+            s if s <= Slot::TrimEnd as u8 => Prop::Trim,
+            _ => Prop::Morph,
         }
     }
 
@@ -172,6 +180,10 @@ pub enum Prop {
     Rim,
     /// Sheen colour and sweep time.
     Sheen,
+    /// A path's trim start and end (`Element::stroke_path`).
+    Trim,
+    /// A morph's progress (`Element::morph`).
+    Morph,
 }
 
 /// How a property moves to a new target.
@@ -197,10 +209,15 @@ pub struct Transition {
     pub opacity: Option<f32>,
     pub offset: Option<(f32, f32)>,
     pub scale: Option<f32>,
+    /// A stroked path's trim start and end: `(0, 0)` on enter draws it on, `(1, 1)` on exit
+    /// draws it off from the start.
+    pub trim: Option<(f32, f32)>,
+    /// A morph's progress.
+    pub morph: Option<f32>,
 }
 
 impl Transition {
-    pub const NONE: Transition = Transition { opacity: None, offset: None, scale: None };
+    pub const NONE: Transition = Transition { opacity: None, offset: None, scale: None, trim: None, morph: None };
 
     pub fn fade() -> Transition {
         Transition { opacity: Some(0.0), ..Transition::NONE }
@@ -208,6 +225,18 @@ impl Transition {
 
     pub fn opacity(mut self, v: f32) -> Transition {
         self.opacity = Some(v);
+        self
+    }
+
+    /// Enter from (or exit to) this trim: `trim(0.0, 0.0)` draws a path on.
+    pub fn trim(mut self, start: f32, end: f32) -> Transition {
+        self.trim = Some((start, end));
+        self
+    }
+
+    /// Enter from (or exit to) this morph progress.
+    pub fn morph(mut self, v: f32) -> Transition {
+        self.morph = Some(v);
         self
     }
 
@@ -232,7 +261,10 @@ impl Transition {
         let x = self.offset.map(|(x, _)| (Slot::OffsetX as u8, x as f64));
         let y = self.offset.map(|(_, y)| (Slot::OffsetY as u8, y as f64));
         let s = self.scale.map(|v| (Slot::Scale as u8, v as f64));
-        [o, x, y, s].into_iter().flatten()
+        let t0 = self.trim.map(|(a, _)| (Slot::TrimStart as u8, a as f64));
+        let t1 = self.trim.map(|(_, b)| (Slot::TrimEnd as u8, b as f64));
+        let m = self.morph.map(|v| (Slot::Morph as u8, v as f64));
+        [o, x, y, s, t0, t1, m].into_iter().flatten()
     }
 }
 
@@ -320,6 +352,50 @@ pub(crate) enum Kind {
     Canvas(CanvasDraw),
 }
 
+    /// A stroked outline fitted to the box, trimmed by the trim channels.
+    StrokePath(StrokeArt),
+    /// A stroked morph fitted to the box at the morph channel's progress.
+    Morph(MorphArt),
+}
+
+/// What `Element::stroke_path` draws. Compared by identity of the outline.
+#[derive(Clone, Debug)]
+pub struct StrokeArt {
+    pub outline: std::sync::Arc<Outline>,
+    /// The outline's own box, fitted to the element's box, centred, aspect kept.
+    pub view: Rect,
+    pub style: StrokeStyle,
+    /// A light head running around the first contour: its tail length as a fraction of the
+    /// contour, laps per second, colour and glow radius.
+    pub head: Option<(f32, f32, Color, f32)>,
+    /// With `fill`, the inside of the outline is filled in this colour under the stroke.
+    pub fill: Option<Color>,
+}
+
+impl PartialEq for StrokeArt {
+    fn eq(&self, o: &StrokeArt) -> bool {
+        std::sync::Arc::ptr_eq(&self.outline, &o.outline)
+            && self.view == o.view
+            && self.style == o.style
+            && self.head == o.head
+            && self.fill == o.fill
+    }
+}
+
+/// What `Element::morph` draws. Compared by identity of the morph.
+#[derive(Clone, Debug)]
+pub struct MorphArt {
+    pub morph: std::sync::Arc<Morph>,
+    pub view: Rect,
+    pub style: StrokeStyle,
+    /// Fill the shape instead of stroking it.
+    pub filled: bool,
+}
+
+impl PartialEq for MorphArt {
+    fn eq(&self, o: &MorphArt) -> bool {
+        std::sync::Arc::ptr_eq(&self.morph, &o.morph) && self.view == o.view && self.style == o.style && self.filled == o.filled
+    }
 impl Kind {
     /// Same variant, so a node can be updated in place rather than replaced.
     pub(crate) fn same_variant(&self, other: &Kind) -> bool {
@@ -471,6 +547,62 @@ impl<M> Element<M> {
 
     /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
     pub fn dots(key: impl Into<Key>, dots: Dots) -> Element<M> {
+    /// A stroked outline fitted to the box (`view` is its own box). Its trim is two animated
+    /// fractions, 0 to 1 by default: `.trim(start, end)` moves them on the `Prop::Trim`
+    /// motion, and `Transition::trim(0.0, 0.0)` in `.presence` draws it on as it enters.
+    /// Stroke width is in logical units, not scaled with the fit.
+    pub fn stroke_path(key: impl Into<Key>, outline: std::sync::Arc<Outline>, view: Rect, style: StrokeStyle) -> Element<M> {
+        let art = StrokeArt { outline, view, style, head: None, fill: None };
+        let mut e = Element::new(key, Kind::StrokePath(art), taffy::Style::default());
+        e.set(Slot::TrimEnd as u8, 1.0);
+        e
+    }
+
+    /// A stroked (or with `.morph_filled()`, filled) morph fitted to the box. Its progress is
+    /// animated: `.morph_to(v)` moves it on the `Prop::Morph` motion. 0 shows `from`, 1 `to`;
+    /// an underdamped spring overshoots past the shape.
+    pub fn morph(key: impl Into<Key>, morph: std::sync::Arc<Morph>, view: Rect, style: StrokeStyle) -> Element<M> {
+        Element::new(key, Kind::Morph(MorphArt { morph, view, style, filled: false }), taffy::Style::default())
+    }
+
+    /// The trim targets of a `stroke_path`, fractions of its whole length.
+    pub fn trim(mut self, start: f32, end: f32) -> Element<M> {
+        self.set(Slot::TrimStart as u8, [start, end]);
+        self
+    }
+
+    /// The progress target of a `morph`.
+    pub fn morph_to(mut self, v: f32) -> Element<M> {
+        self.set(Slot::Morph as u8, v);
+        self
+    }
+
+    /// Fills a `morph` instead of stroking it.
+    pub fn morph_filled(mut self) -> Element<M> {
+        if let Kind::Morph(m) = &mut self.kind {
+            m.filled = true;
+        }
+        self
+    }
+
+    /// A light head on a `stroke_path`: a stretch `tail` (fraction of the first contour)
+    /// long, fading out behind, running `laps` times a second, with a glow. The node then
+    /// keeps the scene awake.
+    pub fn light_head(mut self, tail: f32, laps: f32, color: Color, glow: f32) -> Element<M> {
+        if let Kind::StrokePath(a) = &mut self.kind {
+            a.head = Some((tail, laps, color, glow));
+        }
+        self
+    }
+
+    /// Fills a `stroke_path`'s inside under its stroke.
+    pub fn path_fill(mut self, color: Color) -> Element<M> {
+        if let Kind::StrokePath(a) = &mut self.kind {
+            a.fill = Some(color);
+        }
+        self
+    }
+
         Element::new(key, Kind::Dots(dots), taffy::Style::default())
     }
 
