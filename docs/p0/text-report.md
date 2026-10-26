@@ -12,7 +12,7 @@ All runs are release builds. Raw output is in `/var/tmp/claude/vo-p0/*.txt`.
 
 | Question | Answer |
 |---|---|
-| Q6: Slug port error and speed | The Rust encoder makes the same blobs as HarfBuzz for all 3884 glyphs of Noto Sans. Against a 64 x 64 sample reference, mean error on edge pixels is 0.019 to 0.030 upright, 0.026 to 0.050 at 7 degrees and 0.065 to 0.149 at 45 degrees. 300 glyphs on the 2100 x 1350 surface take 0.018 to 0.048 ms of GPU time at full clock. Text path confirmed. |
+| Q6: Slug port error and speed | The Rust encoder makes the same blobs as HarfBuzz for all 3884 glyphs of Noto Sans. Against a 64 x 64 sample reference, mean error on edge pixels is 0.019 to 0.030 upright, 0.019 to 0.028 at 7 degrees and 0.030 to 0.036 at 45 degrees, with our footprint patch to the HarfBuzz shader. 300 glyphs on the 2100 x 1350 surface take 0.017 to 0.048 ms of GPU time (p50). Text path confirmed. |
 | Q8: shaping and fitting cold cost | A fresh process reads the font, shapes a 40-word line with harfrust and fits it in 0.46 ms (p50), 0.55 ms (p95). A fontique fallback lookup costs 18 ms to build the system collection plus 1 ms for the query. |
 | Q12: hinted small text against KDE | skrifa's light autohinter matches KDE's ink within 0.2% at 9, 10, 11 and 12 px, and looks the same on the contact sheet. Use light autohint for TY26. Oystein's eye check is still open. |
 
@@ -70,8 +70,11 @@ with 16 x 16 point samples (the 256 samples the roadmap names) gave edge errors
 0.002 to 0.004 higher, because it resolves an upright edge only in steps
 of 1/16.
 
-All 48 runs (4 sizes, 4 scales, 3 rotations) are in
-`/var/tmp/claude/vo-p0/slug-run2.txt`. Scale 1 rows:
+Every case is rendered twice: with HarfBuzz's shader as shipped (`fwidth`
+footprint) and with our footprint patch (axis length, the default in
+vo-render; see "Rotated text" below). All 96 runs (4 sizes, 4 scales, 3
+rotations, 2 footprints) are in `/var/tmp/claude/vo-p0/slug-run3.txt`. Scale 1
+rows with the `fwidth` footprint:
 
 | Size | Rotation | Max | p99 | Mean, all ink pixels | Mean, edge pixels | Pixels over 0.1 |
 |---|---|---|---|---|---|---|
@@ -88,7 +91,7 @@ All 48 runs (4 sizes, 4 scales, 3 rotations) are in
 | 120 px | 7 | 0.453 | 0.056 | 0.006 | 0.027 | 0.1% |
 | 120 px | 45 | 0.384 | 0.125 | 0.016 | 0.065 | 7.5% |
 
-Worst over all 48 runs: max 0.468, mean on edge pixels 0.149 (14 px, scale 1,
+Worst over all 48 `fwidth` runs: max 0.468, mean on edge pixels 0.149 (14 px, scale 1,
 45 degrees).
 
 What the numbers show:
@@ -99,44 +102,78 @@ What the numbers show:
 - The max is always a single pixel at a sharp inner corner, for example where
   the bowl of "u" meets its stem. This is the known weak spot of casting one
   horizontal and one vertical ray. It does not grow with size.
-- At 45 degrees the edge error is about 0.065 at every size, and much worse at
-  14 px. My reading, not tested: `hb_gpu_draw` takes pixels per em from
-  `fwidth`, which is `|dx| + |dy|` and overstates the footprint by up to 1.41x
-  when the glyph is rotated 45 degrees. Edges then ramp over a wider band than
-  one pixel, so rotated text is softer. Below 16 ppem the 4-sample blend uses
-  the same footprint and softens it further.
+- With the shader as shipped, the edge error at 45 degrees is about 0.065 at
+  every size and 0.149 at 14 px. The cause is the footprint, fixed below.
 
-Proposed gate for roadmap 3.4 (to confirm in P0-16): at 0 and 7 degrees, mean
-edge error at most 0.035 for 24 px and up, at most 0.055 for 14 px; at 45
-degrees, at most 0.075 for 24 px and up; max error at most 0.5. A regression is
-a rise of more than 0.005 in any mean.
+### Rotated text
 
-Contact sheets, three panels each (GPU, reference, error in red at 4x gain),
-black on white, zoomed 4x at 14 px and 2x at 24 px:
+`hb_gpu_draw` takes pixels per em from `fwidth`, which is `|dpdx| + |dpdy|`.
+On a glyph rotated by `a` that overstates the footprint by `|cos a| + |sin a|`,
+up to 1.41 at 45 degrees, so every coverage ramp is wider than one pixel. Our
+patch uses the length of each em axis gradient instead,
+`sqrt(dpdx^2 + dpdy^2)`, which equals `fwidth` upright and does not change
+under rotation. It is applied as text when the shader loads, like the naga
+patch; the HarfBuzz files stay unchanged. Mean error on edge pixels, before and
+after:
 
-- `/var/tmp/claude/vo-p0/slug-14px-rot0.png`, `slug-14px-rot7.png`, `slug-14px-rot45.png`
-- `/var/tmp/claude/vo-p0/slug-24px-rot0.png`, `slug-24px-rot7.png`, `slug-24px-rot45.png`
-- `/var/tmp/claude/vo-p0/slug-56px-rot0.png`, `slug-56px-rot7.png`, `slug-56px-rot45.png`
-- `/var/tmp/claude/vo-p0/slug-120px-rot0.png`, `slug-120px-rot7.png`, `slug-120px-rot45.png`
+| Size (scale 1) | 7 degrees, `fwidth` | 7 degrees, axis length | 45 degrees, `fwidth` | 45 degrees, axis length |
+|---|---|---|---|---|
+| 14 px | 0.050 | 0.028 | 0.149 | 0.033 |
+| 24 px | 0.031 | 0.024 | 0.067 | 0.033 |
+| 56 px | 0.028 | 0.021 | 0.065 | 0.031 |
+| 120 px | 0.027 | 0.019 | 0.065 | 0.031 |
+
+Over all scales the 45 degree range goes from 0.064 to 0.149 down to 0.030 to
+0.036, and the worst mean over all ink pixels from 0.135 to 0.034. Upright
+results do not change. GPU time does not change either (measured in
+alternating order). It is the default now (`Footprint::AxisLength`);
+`Footprint::Fwidth` keeps HarfBuzz's behaviour. The write-up for HarfBuzz is
+`docs/p0/hb-gpu-footprint.md`.
+
+### Proposed gate
+
+For roadmap 3.4, to confirm in P0-16, with the axis-length footprint: mean edge
+error at most 0.035 at 0 and 7 degrees and at most 0.040 at 45 degrees, for
+every size from 14 px; max error at most 0.5 (sharp inner corners). A
+regression is a rise of more than 0.005 in any mean.
+
+### Contact sheets
+
+Three panels each (GPU, reference, error in red at 4x gain), black on white,
+zoomed 4x at 14 px and 2x at 24 px, one sheet per footprint:
+
+- `/var/tmp/claude/vo-p0/slug-14px-rot{0,7,45}-{fwidth,axis}.png`
+- `/var/tmp/claude/vo-p0/slug-24px-rot{0,7,45}-{fwidth,axis}.png`
+- `/var/tmp/claude/vo-p0/slug-56px-rot{0,7,45}-{fwidth,axis}.png`
+- `/var/tmp/claude/vo-p0/slug-120px-rot{0,7,45}-{fwidth,axis}.png`
+
+`slug-14px-rot45-fwidth.png` against `slug-14px-rot45-axis.png` shows the
+difference best.
 
 ### GPU time for 300 glyphs
 
 300 glyph instances in rows on a 2100 x 1350 `Rgba8Unorm` target (the phase 1
 card surface), one render pass with clear, timestamp queries around the pass,
-280 frames after 20 warm-up frames. The clear-only pass costs 0.002 ms and is
-included.
+400 frames after 200 warm-up frames. The clear-only pass costs 0.001 to 0.002
+ms and is included. Two timing-only processes, each timing both footprints
+twice in alternating order (`VO_TIMING_ONLY=1`, output in
+`/var/tmp/claude/vo-p0/timing-footprint.txt`). Both footprints gave the same
+numbers:
 
 | Size | p50 | p99 |
 |---|---|---|
-| 14 px | 0.048 ms | 0.051 ms |
-| 24 px | 0.018 ms | 0.019 ms |
-| 56 px | 0.046 ms | 0.048 ms |
+| 14 px | 0.044 to 0.048 ms | 0.048 to 0.054 ms |
+| 24 px | 0.017 to 0.018 ms | 0.018 to 0.019 ms |
+| 56 px | 0.043 to 0.046 ms | 0.044 to 0.047 ms |
 
-The GPU was in P2 at 1770 MHz for this run (logged with `nvidia-smi`). One
-earlier run gave 0.156, 0.045 and 0.110 ms p50. I did not log clocks then; my
-guess is the GPU was still ramping up from idle, since 20 frames is short.
-Either way it is under a fifth of the 1.0 ms phase 1 frame budget. 14 px costs
+That is under a twentieth of the 1.0 ms phase 1 frame budget. 14 px costs
 more than 24 px because HarfBuzz evaluates 5 samples per pixel below 16 ppem.
+
+Timing at the end of a full accuracy run was less stable: up to 0.156 ms p50
+at 14 px in one run, even with 200 warm-up frames, while the same binary gave
+0.044 ms in a timing-only run. I do not know the cause. One run logged with
+`nvidia-smi` stayed in P2 at 1770 MHz the whole time. The phase 1 bench should
+time in its own process and log the P-state.
 
 ### Memory
 
@@ -223,19 +260,13 @@ Oystein's eye.
 
 ## Open problems
 
-1. Rotated text is soft. At 45 degrees the edge error is three times the
-   upright error, and at 14 px it is poor (60% of ink pixels off by more than
-   0.1). The likely cause is the `fwidth` footprint (see above). A fix would
-   take pixels per em from the length of each screen derivative instead. That
-   means changing HarfBuzz's shader code, so it needs a decision.
-2. The 7 degree run at 14 px is also softer (mean edge error 0.050 against
-   0.027 upright), probably for the same reason plus the 4-sample blend.
-3. Timing variance from GPU clocks. The phase 1 bench should log
-   `nvidia-smi` P-state with each run and warm up longer than 20 frames.
-4. The KDE check ran at scale 1, light background, Qt Quick only. Scale 1.25
+1. The footprint patch changes HarfBuzz's shader behaviour. It is applied at
+   load time and covered by a unit test, but it should go upstream so we can
+   drop it. Draft: `docs/p0/hb-gpu-footprint.md`. Not sent.
+2. GPU timing was unstable at the end of long runs (see above). Cause unknown.
+3. The KDE check ran at scale 1, light background, Qt Quick only. Scale 1.25
    and 1.5 and a dark panel still need a capture.
-5. Contrast tuning (gamma, stem darkening, luminance-keyed contrast) is not
+4. Contrast tuning (gamma, stem darkening, luminance-keyed contrast) is not
    measured yet. It needs the on-screen check in phase 1.
-6. P0-12 (particle formation look) is not done. It needs a build of
-   `~/work/voxtype-osd-spike`, which another agent owns, and that tree has no
-   release binary now. I did not build in it.
+5. P0-12 (particle formation look) is not done. It waits until the spike in
+   `~/work/voxtype-osd-spike` has been built by its owner.

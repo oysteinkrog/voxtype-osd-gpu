@@ -10,7 +10,7 @@ section 8. Measured numbers are in `docs/p0/text-report.md`.
 |---|---|
 | Where the glyph data lives | One storage buffer of `array<vec4<i32>>`, exactly the layout `hb-gpu`'s WGSL reads. The 16-bit blob is widened to 32 bits on upload. |
 | Encoder | Rust port of `hb_gpu_draw_encode` (14.6.0), fed by skrifa outlines. Output equals HarfBuzz's byte for byte, checked by a test. No C library at run time. |
-| Shader | `hb-gpu-vertex.wgsl`, `hb-gpu-fragment.wgsl` and `hb-gpu-draw-fragment.wgsl` copied unchanged, plus our own entry points in `slug-glyph.wgsl`. A text patch at load time removes the storage pointer parameters, because naga rejects them. |
+| Shader | `hb-gpu-vertex.wgsl`, `hb-gpu-fragment.wgsl` and `hb-gpu-draw-fragment.wgsl` copied unchanged, plus our own entry points in `slug-glyph.wgsl`. Two text patches at load time: one removes the storage pointer parameters, because naga rejects them; one replaces the `fwidth` footprint so rotated text stays sharp. |
 | Dilation | `hb_gpu_dilate` as shipped, with the full MVP and viewport. Each glyph instance carries an em-to-pixel 2x2 matrix and an offset; the vertex shader builds the inverse for the texture coordinate. Rotation and perspective work with no change. |
 | Contrast | Raw coverage from the shader, then two uniforms: `gamma` and `stem_darkening` (HarfBuzz's `hb_gpu_stem_darken`). Both are off for the accuracy test. Tuning waits for the phase 1 on-screen check. |
 | Small static text | Hinted CPU raster below about 14 px (P0-14), not this path. |
@@ -108,6 +108,12 @@ rotation or perspective. For 3D later, the per-layer 4x4 transform goes into
 
 `hb_gpu_draw` returns coverage in 0 to 1, computed by casting one horizontal
 and one vertical ray and blending the two by how close each crossing is.
+The width of each coverage ramp comes from the pixel footprint in em space.
+HarfBuzz measures it with `fwidth`, which grows by up to 1.41 when a glyph is
+rotated. We replace that at load time with the length of each em axis
+gradient (`Footprint::AxisLength`, the default), which halves the error on
+rotated text and costs nothing measurable. Details and numbers:
+`docs/p0/hb-gpu-footprint.md`.
 Below 16 pixels per em it fades in a 4-sample supersample (5 evaluations per
 pixel at 8 ppem and below). That makes small text slower, which is one more
 reason static text under 14 px goes to the hinted path.
