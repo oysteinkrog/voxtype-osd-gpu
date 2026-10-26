@@ -45,10 +45,15 @@ impl NodeId {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Presence {
     /// Created at `since`; its enter motion is still running.
-    Entering { since: f64 },
+    Entering {
+        since: f64,
+    },
     Present,
     /// Dropped from the view at `since`; drawn until `until`, then removed.
-    Leaving { since: f64, until: f64 },
+    Leaving {
+        since: f64,
+        until: f64,
+    },
 }
 
 pub(crate) struct Node<M> {
@@ -287,7 +292,11 @@ impl<M> Scene<M> {
 
     /// Applies a new view at `t`. Events must come in time order.
     pub fn apply(&mut self, view: Element<M>, t: f64) {
-        debug_assert!(t >= self.last_t, "scene event at t = {t} after one at {}; events must be in time order", self.last_t);
+        debug_assert!(
+            t >= self.last_t,
+            "scene event at t = {t} after one at {}; events must be in time order",
+            self.last_t
+        );
         self.last_t = self.last_t.max(t);
         self.drop_gone(t);
         match self.root {
@@ -523,8 +532,12 @@ impl<M> Scene<M> {
 
     /// Removes leaving nodes whose exit has settled by `t`.
     fn drop_gone(&mut self, t: f64) {
-        let gone: Vec<NodeId> =
-            self.nodes.iter().filter(|(_, n)| n.leaving.is_some_and(|(_, until)| until <= t)).map(|(id, _)| id).collect();
+        let gone: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.leaving.is_some_and(|(_, until)| until <= t))
+            .map(|(id, _)| id)
+            .collect();
         for id in gone {
             if !self.nodes.contains_key(id) {
                 continue;
@@ -574,12 +587,8 @@ impl<M> Scene<M> {
         while let Some(id) = stack.pop() {
             let n = &mut self.nodes[id];
             let l = n.layout;
-            let boxes = [
-                (Slot::X, l.location.x),
-                (Slot::Y, l.location.y),
-                (Slot::W, l.size.width),
-                (Slot::H, l.size.height),
-            ];
+            let boxes =
+                [(Slot::X, l.location.x), (Slot::Y, l.location.y), (Slot::W, l.size.width), (Slot::H, l.size.height)];
             for (slot, v) in boxes {
                 if n.has_layout {
                     n.set_target(slot as u8, v as f64, t, retention);
@@ -671,7 +680,16 @@ impl<M> Scene<M> {
 
     /// The node's own visuals at `origin` in the current layer.
     #[allow(clippy::too_many_arguments)]
-    fn draw(&self, n: &Node<M>, t: f64, origin: Point, size: Size, alpha: f32, items: &mut Vec<Item>, out: &mut DisplayList) {
+    fn draw(
+        &self,
+        n: &Node<M>,
+        t: f64,
+        origin: Point,
+        size: Size,
+        alpha: f32,
+        items: &mut Vec<Item>,
+        out: &mut DisplayList,
+    ) {
         let rect = Rect::new(origin.x, origin.y, size.w, size.h);
         let fill = || {
             if !n.has(Slot::Fill0 as u8) {
@@ -706,7 +724,9 @@ impl<M> Scene<M> {
                     ShapeInstance::circle(centre, 0.5 * size.w.min(size.h), fill())
                 }
                 ShapeKind::Capsule => ShapeInstance::capsule(rect, fill()),
-                ShapeKind::Line => ShapeInstance::line(origin, Point::new(rect.right(), rect.bottom()), 0.0, Paint::NONE),
+                ShapeKind::Line => {
+                    ShapeInstance::line(origin, Point::new(rect.right(), rect.bottom()), 0.0, Paint::NONE)
+                }
             }),
             Kind::Label { style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);

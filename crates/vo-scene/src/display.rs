@@ -364,8 +364,8 @@ fn hit_rects(hit: &HitShape, out: &mut Vec<IRect>) {
     let m = hit.transform;
     let r = hit.shape.rect;
     if !m.is_axis_aligned() {
-        let corners =
-            [(r.x, r.y), (r.right(), r.y), (r.right(), r.bottom()), (r.x, r.bottom())].map(|(x, y)| m.apply(Point { x, y }));
+        let corners = [(r.x, r.y), (r.right(), r.y), (r.right(), r.bottom()), (r.x, r.bottom())]
+            .map(|(x, y)| m.apply(Point { x, y }));
         let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
         let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
         let max_x = corners.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
@@ -420,16 +420,15 @@ mod tests {
     #[test]
     fn rounded_box_covers_every_inside_point() {
         let shape = RRect::new(Rect::new(3.3, 7.1, 120.0, 40.0), 20.0);
-        let list = DisplayList {
-            hits: vec![HitShape { node: 1, transform: Affine::IDENTITY, shape }],
-            ..Default::default()
-        };
+        let list =
+            DisplayList { hits: vec![HitShape { node: 1, transform: Affine::IDENTITY, shape }], ..Default::default() };
         let region = list.input_region();
         assert!(region.rects.len() > 1);
         let covered = |p: Point| {
-            region.rects.iter().any(|r| {
-                p.x >= r.x as f32 && p.y >= r.y as f32 && p.x < (r.x + r.w) as f32 && p.y < (r.y + r.h) as f32
-            })
+            region
+                .rects
+                .iter()
+                .any(|r| p.x >= r.x as f32 && p.y >= r.y as f32 && p.x < (r.x + r.w) as f32 && p.y < (r.y + r.h) as f32)
         };
         let (mut corner_miss, mut corners) = (0, 0);
         for i in 0..400 {

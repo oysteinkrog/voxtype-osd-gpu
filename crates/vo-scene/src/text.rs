@@ -83,12 +83,13 @@ impl TextLayout for EstimateText {
 
 /// Words split on ASCII spaces, with their byte offsets.
 fn words(text: &str) -> impl Iterator<Item = (usize, &str)> {
-    text.split(' ').scan(0usize, |offset, w| {
-        let start = *offset;
-        *offset += w.len() + 1;
-        Some((start, w))
-    })
-    .filter(|(_, w)| !w.is_empty())
+    text.split(' ')
+        .scan(0usize, |offset, w| {
+            let start = *offset;
+            *offset += w.len() + 1;
+            Some((start, w))
+        })
+        .filter(|(_, w)| !w.is_empty())
 }
 
 #[cfg(test)]

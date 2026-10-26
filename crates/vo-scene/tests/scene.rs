@@ -262,7 +262,8 @@ fn label_is_a_measure_leaf_and_wraps() {
 
 #[test]
 fn hit_test_follows_a_moving_spring() {
-    let button = |x: f32| Element::<Msg>::shape("button", ShapeKind::RRect).size(40.0, 20.0).offset(x, 0.0).on_click(Msg::Click);
+    let button =
+        |x: f32| Element::<Msg>::shape("button", ShapeKind::RRect).size(40.0, 20.0).offset(x, 0.0).on_click(Msg::Click);
     let mut scene = Scene::new();
     scene.apply(root(vec![button(0.0)]), 0.0);
     scene.apply(root(vec![button(200.0)]), 1.0);

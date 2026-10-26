@@ -30,7 +30,12 @@ impl<M> LayoutView<'_, M> {
         &mut self.nodes[NodeId::from(id)]
     }
 
-    fn compute(&mut self, node_id: taffy::NodeId, inputs: LayoutInput, block: Option<&mut BlockContext<'_>>) -> LayoutOutput {
+    fn compute(
+        &mut self,
+        node_id: taffy::NodeId,
+        inputs: LayoutInput,
+        block: Option<&mut BlockContext<'_>>,
+    ) -> LayoutOutput {
         if inputs.run_mode == RunMode::PerformHiddenLayout {
             return compute_hidden_layout(self, node_id);
         }
@@ -63,21 +68,24 @@ impl<M> LayoutView<'_, M> {
             _ => None,
         };
         let mut shaped: Option<ShapedText> = None;
-        let out = compute_leaf_layout(inputs, &n.style, |_, _| 0.0, |known, available| {
-            let Some((text, style)) = &content else { return taffy::Size::ZERO };
-            let max = known.width.or(match available.width {
-                AvailableSpace::Definite(w) => Some(w),
-                AvailableSpace::MinContent => Some(0.0),
-                AvailableSpace::MaxContent => None,
-            });
-            let s = text_layout.layout(text, style, max);
-            let size = taffy::Size {
-                width: known.width.unwrap_or(s.size.w),
-                height: known.height.unwrap_or(s.size.h),
-            };
-            shaped = Some(s);
-            size
-        });
+        let out = compute_leaf_layout(
+            inputs,
+            &n.style,
+            |_, _| 0.0,
+            |known, available| {
+                let Some((text, style)) = &content else { return taffy::Size::ZERO };
+                let max = known.width.or(match available.width {
+                    AvailableSpace::Definite(w) => Some(w),
+                    AvailableSpace::MinContent => Some(0.0),
+                    AvailableSpace::MaxContent => None,
+                });
+                let s = text_layout.layout(text, style, max);
+                let size =
+                    taffy::Size { width: known.width.unwrap_or(s.size.w), height: known.height.unwrap_or(s.size.h) };
+                shaped = Some(s);
+                size
+            },
+        );
         if inputs.run_mode == RunMode::PerformLayout {
             if let Some((text, style)) = &content {
                 // The measure function did not run when the style fixes both sides.

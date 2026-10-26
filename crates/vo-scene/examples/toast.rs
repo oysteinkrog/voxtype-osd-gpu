@@ -24,9 +24,7 @@ fn toast(title: &str, body: &str) -> Element<Msg> {
         .gap(8.0)
         .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::hex(0x4cc38a, 1.0)))
         .child(
-            Element::label("title", title)
-                .text_style(TextStyle { font: 0, size: 15.0, line_height: 19.0 })
-                .grow(1.0),
+            Element::label("title", title).text_style(TextStyle { font: 0, size: 15.0, line_height: 19.0 }).grow(1.0),
         )
         .child(close);
     Element::panel("toast")

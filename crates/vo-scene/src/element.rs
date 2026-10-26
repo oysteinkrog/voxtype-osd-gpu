@@ -71,7 +71,6 @@ pub(crate) enum Slot {
 }
 
 impl Slot {
-
     /// Value of a slot no element has set.
     pub(crate) fn default_value(slot: u8) -> f64 {
         if slot == Slot::Opacity as u8 || slot == Slot::Scale as u8 {
@@ -207,13 +206,23 @@ pub(crate) enum Kind {
     Panel,
     /// A container that draws nothing itself.
     Stack,
-    Label { text: String, style: TextStyle },
+    Label {
+        text: String,
+        style: TextStyle,
+    },
     Shape(ShapeKind),
     /// A container drawn as its own display-list layer.
-    Layer { blend: BlendMode, clip: bool, offscreen: bool },
+    Layer {
+        blend: BlendMode,
+        clip: bool,
+        offscreen: bool,
+    },
     /// Live dictation text. A stub for now: lays out the words like a label and tags each
     /// glyph with its word id. Per-word motion comes later.
-    LiveText { words: Vec<Word>, style: TextStyle },
+    LiveText {
+        words: Vec<Word>,
+        style: TextStyle,
+    },
 }
 
 impl Kind {
