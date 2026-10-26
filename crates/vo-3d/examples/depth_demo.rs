@@ -13,6 +13,7 @@
 //!
 //!   cargo run --release -p vo-3d --example depth_demo -- [--out DIR]
 //!   cargo run --release -p vo-3d --example depth_demo -- --live [--seconds S]
+//!   cargo run --release -p vo-3d --example depth_demo -- --preview   (the scrub tool)
 //!
 //! Offline it writes `DIR/depth_demo.mp4` (1280x720, 60 fps) and `DIR/contact-sheet.png`
 //! (default DIR `/var/tmp/claude/m4-3d`), then prints cold-start and per-stage GPU times and
@@ -27,6 +28,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use vo::preview::Preview;
 use vo_3d::*;
 use vo_core::channel::{Channel, Rest};
 use vo_core::hash::rand_f32;
@@ -248,7 +250,8 @@ fn lists(d: &Demo, t: f64) -> Lists {
     Lists { vector: d.vector.sample(t), text: d.text.sample(t), label: d.label.sample(t) }
 }
 
-fn draw(stack: &mut Stack, d: &Demo, t: f64, target: &Target) {
+/// Draws frame `t`. The scene is laid out at `W` x `H`; `scale` maps it to the target.
+fn draw(stack: &mut Stack, d: &Demo, t: f64, target: &Target, scale: f32) {
     let l = lists(d, t);
     let frame = d.frame(t);
     let plane = TextPlane { list: &l.label, model: Demo::plane_model(t), units_per_px: 0.0042, opacity: 1.0 };
@@ -260,7 +263,7 @@ fn draw(stack: &mut Stack, d: &Demo, t: f64, target: &Target) {
         field_from_text: true,
         planes: &planes,
     };
-    stack.render(&layers, target, 1.0, None);
+    stack.render(&layers, target, scale, None);
 }
 
 fn fonts() -> FontRegistry {
@@ -279,6 +282,21 @@ fn frame_hash(px: &[u8]) -> u64 {
 }
 
 fn main() {
+    if vo::preview::wanted() {
+        let preview = Preview::custom("depth_demo", Size::new(W as f32, H as f32), DURATION, |device, queue| {
+            let fonts = fonts();
+            let mut stack = Stack::new(device, queue, fonts.clone());
+            let mut demo = Demo::new(&fonts, &mut stack.scene);
+            move |t: f64, target: &Target| {
+                demo.advance(t);
+                draw(&mut stack, &demo, t, target, target.width() as f32 / W as f32);
+            }
+        })
+        .marker("words", word_time(0))
+        .marker("quiet", 6.2)
+        .marker("turn out", 6.9);
+        std::process::exit(vo::preview::main(preview));
+    }
     let mut args = std::env::args().skip(1);
     let (mut out, mut live, mut seconds) = (PathBuf::from("/var/tmp/claude/m4-3d"), false, DURATION);
     while let Some(a) = args.next() {
@@ -330,7 +348,7 @@ fn offline(out: &std::path::Path) {
     let target = Target::new(&device, W, H, format);
     let t2 = Instant::now();
     demo.advance(0.0);
-    draw(&mut stack, &demo, 0.0, &target);
+    draw(&mut stack, &demo, 0.0, &target, 1.0);
     let first = vo_3d::readback::read_rgba(&device, &queue, target.texture());
     let t_first = t2.elapsed();
     let t_stack = t0.elapsed();
@@ -358,7 +376,7 @@ fn offline(out: &std::path::Path) {
         let t = n as f64 / FPS;
         let f0 = Instant::now();
         demo.advance(t);
-        draw(&mut stack, &demo, t, &target);
+        draw(&mut stack, &demo, t, &target, 1.0);
         for (stage, ms) in stack.stage_times() {
             stages.entry(stage).or_default().push(ms);
         }
@@ -378,7 +396,7 @@ fn offline(out: &std::path::Path) {
     let mut mismatches = Vec::new();
     for &n in sheet_frames.iter().rev() {
         let t = n as f64 / FPS;
-        draw(&mut stack, &demo, t, &target);
+        draw(&mut stack, &demo, t, &target, 1.0);
         let px = vo_3d::readback::read_rgba(&device, &queue, target.texture());
         if hashes[&n] != frame_hash(&px) {
             mismatches.push(n);
@@ -532,7 +550,7 @@ mod live {
             demo.advance(t);
             let target = Target::from_texture(frame.texture.clone());
             // The scene is laid out at 1280 x 720; the overlay shows it at its own size.
-            draw(stack, demo, t, &target);
+            draw(stack, demo, t, &target, 1.0);
         }
     }
 

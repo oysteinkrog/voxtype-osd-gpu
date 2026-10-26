@@ -24,3 +24,5 @@ png = "0.18"
 vo-render = { path = "../vo-render", features = ["png"] }
 vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland" }
+# depth_demo in the preview and scrub tool (`-- --preview`).
+vo = { path = "../vo", features = ["preview"] }
