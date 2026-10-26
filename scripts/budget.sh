@@ -79,8 +79,11 @@ chmod +x "$work/inner.sh"
 firsts=()
 for i in $(seq "$runs"); do
     log=$work/live-$i.log
+    # A private config folder: a nested KWin otherwise reads and writes the user's own
+    # kwinoutputconfig.json, so a scale set in one nested session leaks into every later run.
+    mkdir -p "$work/xdg-config"
     # shellcheck disable=SC2086
-    KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 WAYLAND_DISPLAY=no-such-wl DISPLAY= \
+    XDG_CONFIG_HOME=$work/xdg-config KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 WAYLAND_DISPLAY=no-such-wl DISPLAY= \
         timeout 30 dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
         --socket "vo-budget-$$-$i" --width "$width" --height "$height" \
         --exit-with-session "$work/inner.sh $log $bin $width $args" > "$work/kwin-$i.log" 2>&1 || true
