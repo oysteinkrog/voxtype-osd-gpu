@@ -11,8 +11,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::{ReadError, TableProvider};
-use skrifa::FontRef;
+use skrifa::{FontRef, MetadataProvider};
 
 /// Index of a font in a `FontRegistry`.
 pub type FontId = u32;
@@ -62,6 +63,16 @@ impl Face {
     pub fn shaping(&self) -> &harfrust::Font {
         &self.shaping
     }
+
+    /// The font's own line height at `size`: ascent plus descent, without the line gap,
+    /// rounded up to a whole unit. This is the height Pango gives a line of this font, so
+    /// text set with it takes the room it takes in GTK. skrifa reads the ascent and descent
+    /// from `hhea`, or from `OS/2` when the font asks for its typo metrics, as HarfBuzz does.
+    pub fn line_height(&self, size: f32) -> f32 {
+        let m = self.skrifa().metrics(Size::new(size), LocationRef::default());
+        // The tolerance keeps a height that is whole up to float error from rounding up.
+        (m.ascent - m.descent - 1e-3).ceil()
+    }
 }
 
 /// The shared font table. Cloning is cheap and gives a handle to the same table.
@@ -97,6 +108,11 @@ impl FontRegistry {
 
     pub fn get(&self, id: FontId) -> Option<Arc<Face>> {
         self.faces.read().expect("font table lock").get(id as usize).cloned()
+    }
+
+    /// `Face::line_height` of font `id` at `size`, or `None` when there is no such font.
+    pub fn line_height(&self, id: FontId, size: f32) -> Option<f32> {
+        self.get(id).map(|face| face.line_height(size))
     }
 
     pub fn len(&self) -> usize {
@@ -181,6 +197,18 @@ mod tests {
         assert!(fonts.get(2).is_none());
         assert_eq!(fonts.faces_from(1).len(), 1);
         assert!(fonts.faces_from(5).is_empty());
+    }
+
+    #[test]
+    fn line_height_is_ascent_plus_descent_rounded_up() {
+        let fonts = FontRegistry::new();
+        fonts.add_file(&test_font_path()).unwrap();
+        // Noto Sans: ascent 1069, descent 293 per 1000 units, no line gap.
+        assert_eq!(fonts.line_height(0, 17.0 * 4.0 / 3.0), Some(31.0));
+        assert_eq!(fonts.line_height(0, 10.0), Some(14.0));
+        // 1362 units at 1000 / 1362 * 50 px make exactly 50 px: no rounding up.
+        assert_eq!(fonts.line_height(0, 50_000.0 / 1362.0), Some(50.0));
+        assert_eq!(fonts.line_height(1, 10.0), None);
     }
 
     #[test]
