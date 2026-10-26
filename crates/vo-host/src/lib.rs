@@ -156,6 +156,10 @@ pub enum SurfaceChange {
     Size(Size),
     /// New input region. Asked for while drawing a frame, it rides on that frame's commit.
     Input(InputMode),
+    /// New compositor blur region behind the surface, in logical pixels; `None` turns the
+    /// blur off. Asked for while drawing a frame, it rides on that frame's commit. Ignored
+    /// unless [`HostCaps::backdrop_blur`].
+    Blur(Option<InputRegion>),
 }
 
 /// Something the host tells the app. Every variant that happened at a time carries it on the
