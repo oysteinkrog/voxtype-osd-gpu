@@ -77,10 +77,11 @@ The popup app and `osd-protocol` live in voxtype.
 
 ## Milestones
 
-- **M0, measure.** Finish phase 0 (wgpu trial, cold start, alpha, pacing, blur, CPU first frame). Add two
-  one-day checks, because they could change the display-list format: Slug's storage buffer in the
-  fragment stage on DX12 and Metal through wgpu, and DirectComposition alpha with click-through.
-- **M1, core.** Time model, scene model, input model, the offscreen host with golden tests and a
+- **M0, measure.** Finish phase 0 (wgpu trial, cold start, alpha, pacing, blur, CPU first frame).
+  Linux only for now (decided 2026-10-26). The two macOS and Windows checks (Slug's fragment-stage
+  storage buffer on DX12 and Metal, DirectComposition alpha with click-through) move to the start of M3.
+  Until then the display list avoids anything those backends are known to lack.
+- **M1, core (Linux only, started 2026-10-26).** Time model, scene model, input model, the offscreen host with golden tests and a
   determinism check, the Wayland host. CI measures own heap (budget 15 MB) and cold start from the first
   commit.
 - **M2, three apps on one API** before the API counts as stable: the Swiss popup (design 12), a
