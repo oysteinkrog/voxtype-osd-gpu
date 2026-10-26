@@ -210,7 +210,10 @@ fn main() {
                     let n_old = changes.iter().filter(|c| c.old_index.is_some()).count();
                     let append_only = changes.iter().all(|c| match c.kind {
                         ChangeKind::Kept => true,
-                        ChangeKind::Extended => c.old_index == Some(n_old.saturating_sub(1)),
+                        // The last word may grow or gain punctuation.
+                        ChangeKind::Extended | ChangeKind::Restyled => {
+                            c.old_index == Some(n_old.saturating_sub(1))
+                        }
                         ChangeKind::Inserted => c.new_index.unwrap_or(0) >= n_old.saturating_sub(1),
                         _ => false,
                     });
