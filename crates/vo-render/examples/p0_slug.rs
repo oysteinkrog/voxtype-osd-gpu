@@ -2,9 +2,9 @@
 //! time for 300 glyphs.
 //!
 //! Renders a fixed text set offscreen at 14, 24, 56 and 120 px, scales 1,
-//! 1.25, 1.5 and 2, rotations 0, 7 and 45 degrees. The reference is a 16 x 16
-//! point-sampled raster per pixel (tiny-skia without anti-aliasing at 16x,
-//! box-filtered down). Both sides composite glyphs with premultiplied "over"
+//! 1.25, 1.5 and 2, rotations 0, 7 and 45 degrees. The reference is tiny-skia
+//! at 16x, box-filtered down: with its 4 x 4 anti-aliasing (64 x 64 samples
+//! per pixel, the main number) and without (16 x 16 point samples). Both sides composite glyphs with premultiplied "over"
 //! and are compared as raw coverage, with no gamma. Contact sheets for scale 1
 //! go to /var/tmp/claude/vo-p0/.
 //!
@@ -120,8 +120,11 @@ fn glyph_path(font: &FontRef, gid: GlyphId) -> Option<tiny_skia::Path> {
     pen.0.finish()
 }
 
-/// 256-sample reference coverage, composited with premultiplied "over".
-fn reference(font: &FontRef, glyphs: &[Placed], w: u32, h: u32) -> Vec<f32> {
+/// Reference coverage, composited with premultiplied "over". Without `fine`
+/// it is 16 x 16 point samples per pixel, which resolves an axis-aligned edge
+/// only in steps of 1/16. With `fine`, tiny-skia's own 4 x 4 anti-aliasing
+/// runs on the 16x raster, so 64 x 64 samples per pixel.
+fn reference(font: &FontRef, glyphs: &[Placed], w: u32, h: u32, fine: bool) -> Vec<f32> {
     let mut img = vec![0f32; (w * h) as usize];
     let mut cache = std::collections::HashMap::new();
     for p in glyphs {
@@ -138,14 +141,14 @@ fn reference(font: &FontRef, glyphs: &[Placed], w: u32, h: u32) -> Vec<f32> {
         let t = tiny_skia::Transform::from_row(l[0], l[1], l[2], l[3], p.inst.offset[0], p.inst.offset[1])
             .post_translate(-bx as f32, -by as f32)
             .post_scale(SS as f32, SS as f32);
-        mask.fill_path(path, tiny_skia::FillRule::Winding, false, t);
+        mask.fill_path(path, tiny_skia::FillRule::Winding, fine, t);
         let data = mask.data();
         for y in 0..bh {
             for x in 0..bw {
                 let mut n = 0u32;
                 for sy in 0..SS {
                     let row = ((y * SS + sy) * bw * SS + x * SS) as usize;
-                    n += data[row..row + SS as usize].iter().filter(|&&v| v != 0).count() as u32;
+                    n += data[row..row + SS as usize].iter().map(|&v| v as u32).sum::<u32>();
                 }
                 if n == 0 {
                     continue;
@@ -154,7 +157,7 @@ fn reference(font: &FontRef, glyphs: &[Placed], w: u32, h: u32) -> Vec<f32> {
                 if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
                     continue;
                 }
-                let a = n as f32 / (SS * SS) as f32;
+                let a = n as f32 / (SS * SS * 255) as f32;
                 let d = &mut img[(py as u32 * w + px as u32) as usize];
                 *d = a + *d * (1.0 - a);
             }
@@ -432,7 +435,8 @@ fn main() {
         bytes * 2 / 1024
     );
 
-    println!("\nsize_px scale rot_deg ink_px max_err p99_err mean_err_ink mean_err_edge share_over_0.1");
+    println!("\nreference 64x64 samples/px | 16x16 point samples/px");
+    println!("size_px scale rot_deg ink_px max_err p99_err mean_err_ink mean_err_edge share_over_0.1 | max_err mean_err_edge");
     let mut atlas = Atlas::default();
     let mut worst = Err::default();
     for px in [14.0f32, 24.0, 56.0, 120.0] {
@@ -441,11 +445,12 @@ fn main() {
                 let eff = px * scale;
                 let (glyphs, w, h) = layout(&font, &mut atlas, eff, deg, 1800.0, &TEXTS);
                 let g = render_coverage(&gpu, &mut r, &atlas, &glyphs, w, h);
-                let rf = reference(&font, &glyphs, w, h);
+                let coarse = compare(&g, &reference(&font, &glyphs, w, h, false));
+                let rf = reference(&font, &glyphs, w, h, true);
                 let e = compare(&g, &rf);
                 println!(
-                    "{px:>5} {scale:>5} {deg:>4} {:>8} {:.4} {:.4} {:.5} {:.5} {:.4}",
-                    e.ink_px, e.max, e.p99_ink, e.mean_ink, e.mean_edge, e.over_10
+                    "{px:>5} {scale:>5} {deg:>4} {:>8} {:.4} {:.4} {:.5} {:.5} {:.4} | {:.4} {:.5}",
+                    e.ink_px, e.max, e.p99_ink, e.mean_ink, e.mean_edge, e.over_10, coarse.max, coarse.mean_edge
                 );
                 if scale == 1.0 {
                     let zoom = if px <= 14.0 { 4 } else if px <= 24.0 { 2 } else { 1 };
