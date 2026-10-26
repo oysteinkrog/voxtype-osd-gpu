@@ -1,0 +1,22 @@
+[package]
+name = "vo-3d"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "3D layer: perspective camera, depth buffer, lit meshes, point clouds, bokeh, text distance field, depth-ordered stack"
+
+[dependencies]
+vo-core = { path = "../vo-core" }
+vo-scene = { path = "../vo-scene" }
+vo-render = { path = "../vo-render" }
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "vulkan"] }
+bytemuck = { version = "1", features = ["derive"] }
+skrifa = "0.49"
+harfrust = "0.15"
+lyon_tessellation = "1.0.23"
+
+[dev-dependencies]
+pollster = "0.4"
+naga = { version = "30", features = ["wgsl-in"] }
+png = "0.18"
