@@ -113,6 +113,20 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 - Measured on NVIDIA in a nested KWin: cold first frame about 200 to 220 ms, about 60 % of it creating
   the Vulkan instance. Own heap 1.35 MB. PSS about 70 MB, almost all driver. Zero frames while idle. So
   the own-heap budget is easy, and the CPU-drawn first frame is still worth building.
+- **CPU first frame** (`Options::cpu_first_frame`, off by default; `toast --cpu-first-frame`). A thread
+  makes the instance, adapter, device and the first swapchain while the main thread draws CPU frames
+  (`vo_render::cpu`) into `wl_shm` buffers on the role surface. The GPU draws into a sub-surface. It
+  starts synchronized, so the first GPU frame and a clear buffer on the role surface land in one
+  commit (checked with `WAYLAND_DEBUG`: the NVIDIA WSI commits inside `vkQueuePresentKHR`, before the
+  host's commit). CPU shapes run the shape shader's maths and match the GPU to 2/255; text is
+  tiny-skia fills of unhinted outlines, up to 90/255 apart on single edge pixels, 0.85/255 on average.
+- Measured in a nested KWin on NVIDIA, 10 cold runs per mode: first pixels on screen 14 to 23 ms since
+  exec (mean of two batches) against 174 to 202 ms without; the first GPU frame comes 10 to 30 ms
+  later than without. Three causes: the first acquire on the sub-surface's swapchain takes about
+  11 ms (about 0 on the role surface), the synchronized hand-over shows one refresh later than a
+  desynchronized one would, and the last CPU frame stays on screen meanwhile, so the entrance motion
+  holds for 2 to 3 refreshes. The overlay is click-through until the first GPU frame, because the input
+  region lives on the GPU's sub-surface.
 
 ## Crates
 
