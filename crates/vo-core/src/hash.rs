@@ -1,4 +1,5 @@
-//! Stateless randomness and stagger.
+//! Stateless randomness and stagger. For start delays use `stagger_fit`; `stagger` only
+//! clamps.
 //!
 //! Every random number is a hash of a seed and up to three counters, for example
 //! `(seed, emitter, slot, spawn_tick)`. A particle's numbers then do not depend on how many
@@ -28,14 +29,16 @@ pub fn rand_f64(seed: u32, a: u32, b: u32, c: u32) -> f64 {
     rand(seed, a, b, c) as f64 * (1.0 / 4_294_967_296.0)
 }
 
-/// Start delay of item `i` in a stagger of `gap` seconds per item, never later than `cap`.
-/// Items past the cap all start at `cap`.
+/// Clamp-only helper: start delay of item `i` at `gap` seconds per item, never later than
+/// `cap`. Items past the cap all start together at `cap`. Use [`stagger_fit`] unless that
+/// pile-up is wanted.
 pub fn stagger(i: usize, gap: f64, cap: f64) -> f64 {
     (i as f64 * gap).min(cap)
 }
 
-/// Start delay of item `i` of `n`, with the gap shrunk so the last item starts at `cap` at
-/// the latest. Keeps an even rhythm when many items arrive at once.
+/// The default stagger: start delay of item `i` of `n`, `gap` seconds apart, with the gap
+/// shrunk so the last item starts at `cap` at the latest. The rhythm stays even when many
+/// items arrive at once, as in `word-arrive` ("30 to 35 ms, total capped at 200 ms").
 pub fn stagger_fit(i: usize, n: usize, gap: f64, cap: f64) -> f64 {
     if n < 2 {
         return 0.0;
