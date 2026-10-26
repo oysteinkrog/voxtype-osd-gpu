@@ -7,6 +7,7 @@
 //! - `font`: the font table that text layout and the renderer share.
 //! - `text`: text measurement behind a trait, with a width estimate for now.
 //! - `input`: hit testing at the event's time and pointer messages.
+//! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
@@ -16,6 +17,7 @@ pub mod element;
 pub mod font;
 pub mod geom;
 pub mod input;
+pub mod inspect;
 mod layout;
 pub mod scene;
 pub mod text;
