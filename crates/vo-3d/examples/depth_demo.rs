@@ -127,7 +127,7 @@ impl Demo {
         let words = WORDS.iter().enumerate().map(|(i, w)| {
             let on = i < self.shown;
             Element::label(format!("w{i}"), *w)
-                .text_style(TextStyle::new(0, 54.0, 64.0))
+                .text_style(TextStyle::new(0, 44.0, 54.0))
                 .color(Color::WHITE)
                 .motion(Prop::Opacity, Spring::SOFT)
                 .motion(Prop::Offset, Spring::POP)
@@ -154,14 +154,14 @@ impl Demo {
     }
 
     fn ring_model(t: f64) -> Mat4 {
-        Mat4::rotate_x(FRAC_PI_2 - 0.42).then(&Mat4::rotate_z(0.08 * (t * 0.5).sin() as f32))
+        Mat4::rotate_x(0.62).then(&Mat4::rotate_z(0.08 * (t * 0.5).sin() as f32))
     }
 
     fn frame(&self, t: f64) -> Frame3d {
         let tf = t as f32;
         let lv = level(t);
         let ring = Demo::ring_model(t);
-        let react = |c: PointCloud| PointCloud { reach_px: 46.0, push_px: 20.0, glow: 2.2, ..c };
+        let react = |c: PointCloud| PointCloud { reach_px: 40.0, push_px: 18.0, glow: 1.0, ..c };
         let clouds = vec![
             react(PointCloud {
                 shape: CloudShape::Torus { major: 1.25, minor: 0.15 },
@@ -212,7 +212,7 @@ impl Demo {
             material: Material { color: Color::hex(0x9fc8ff, 1.0), emissive: 0.6 + lv, specular: 0.9, shininess: 64.0 },
         };
         let mut meshes = vec![hoop];
-        let word_model = Mat4::translation(Vec3::new(0.0, 1.32, -0.2));
+        let word_model = Mat4::translation(Vec3::new(0.0, 1.0, -0.6));
         let ink = Material { color: Color::hex(0xeef2fa, 1.0), specular: 0.7, emissive: 0.05, ..Default::default() };
         meshes.extend(self.word.draws(t, &word_model, ink));
         Frame3d {
@@ -232,9 +232,9 @@ impl Demo {
         }
     }
 
-    /// The label lying in the ring's plane, just outside its front edge.
+    /// The label lying in the ring's plane, inside the front half of the hole.
     fn plane_model(t: f64) -> Mat4 {
-        Mat4::rotate_x(-FRAC_PI_2).then(&Mat4::translation(Vec3::new(-1.05, 0.0, 1.62))).then(&Demo::ring_model(t))
+        Mat4::rotate_x(-FRAC_PI_2).then(&Mat4::translation(Vec3::new(-0.88, 0.0, 0.62))).then(&Demo::ring_model(t))
     }
 }
 
