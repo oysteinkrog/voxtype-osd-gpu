@@ -73,6 +73,8 @@ pub(crate) struct Node<M> {
     pub born: f64,
     /// `(since, until)`.
     pub leaving: Option<(f64, f64)>,
+    /// When the node last entered: created, or brought back while leaving.
+    pub since: f64,
     /// When the enter motion settles.
     pub entered: f64,
     pub shaped: ShapedText,
@@ -271,7 +273,7 @@ impl<M> Scene<M> {
         let n = &self.nodes[id];
         match n.leaving {
             Some((since, until)) if t >= since => Presence::Leaving { since, until },
-            _ if t < n.entered => Presence::Entering { since: n.born },
+            _ if t < n.entered => Presence::Entering { since: n.since },
             _ => Presence::Present,
         }
     }
@@ -379,6 +381,7 @@ impl<M> Scene<M> {
             handlers,
             born: t,
             leaving: None,
+            since: t,
             entered: t,
             shaped: ShapedText::default(),
             has_layout: false,
@@ -446,8 +449,13 @@ impl<M> Scene<M> {
                 Some(i) => {
                     used[i] = true;
                     let c = old[i];
-                    self.revive(c);
+                    let revived = self.revive(c);
                     self.update(c, el, t);
+                    if revived {
+                        let n = &mut self.nodes[c];
+                        n.since = t;
+                        n.entered = n.settled_at().max(t);
+                    }
                     c
                 }
                 None => self.create(Some(id), el, t),
@@ -480,12 +488,10 @@ impl<M> Scene<M> {
         }
     }
 
-    /// A leaving node whose key is back in the view becomes present again.
-    fn revive(&mut self, id: NodeId) {
-        let n = &mut self.nodes[id];
-        if n.leaving.take().is_some() {
-            n.entered = f64::NEG_INFINITY;
-        }
+    /// A leaving node whose key is back in the view enters again from where it is.
+    /// Returns whether it was leaving.
+    fn revive(&mut self, id: NodeId) -> bool {
+        self.nodes[id].leaving.take().is_some()
     }
 
     /// Starts the exit motion. Returns false when the node should go at once.

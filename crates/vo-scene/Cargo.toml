@@ -11,3 +11,6 @@ serde = { version = "1", features = ["derive"] }
 vo-core = { path = "../vo-core" }
 slotmap = { version = "1.1", default-features = false }
 taffy = { version = "0.15.1", default-features = false, features = ["std", "flexbox", "block_layout"] }
+
+[dev-dependencies]
+serde_json = "1"

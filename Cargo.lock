@@ -955,6 +955,7 @@ name = "vo-scene"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "slotmap",
  "taffy",
  "vo-core",
