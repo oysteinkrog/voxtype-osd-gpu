@@ -83,6 +83,22 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 - **Stagger.** `stagger_fit(i, n, gap, cap)` is the default: it shrinks the gap so the last item starts
   by `cap`. `stagger(i, gap, cap)` only clamps, so items past the cap start together.
 
+## Scene and renderer notes (M1, 2026-10-26)
+
+- **Seek.** Nodes that finish leaving are dropped, so sampling an earlier time does not bring them back.
+  Export plays forward and is unaffected. The preview scrubber replays from the event log, with
+  snapshots for long pieces. The live overlay keeps a short channel history (`with_retention`).
+- **Group opacity.** Opacity on a direct layer is folded into each shape and glyph, which is wrong where
+  children overlap. Exact group opacity needs an offscreen layer.
+- **Scale and rotation** open a direct layer, because shape instances are axis aligned. Direct layers must
+  stay cheap.
+- **Generic over Msg.** Click and hover handlers make `Element` and `Scene` generic over the app's message
+  type. Accepted as the one exception to "mostly non-generic".
+- **Layout triggers** are structural, text, style and viewport changes, not structure alone.
+- **Blend.** Normal, Add and Screen are exact. Multiply is exact only over an opaque destination.
+- **Clips.** Only the nearest clip is rounded; outer clips act through their bounding-box scissor.
+- taffy is 0.15.1, not the 0.13 the lane reports cite.
+
 ## Crates
 
 | Crate | Contents |
