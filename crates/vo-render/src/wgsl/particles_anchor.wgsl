@@ -31,7 +31,14 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
     p.goal = tg.pos;
     p.reveal_t0 = tg.reveal_t0;
     p.reveal_delay = tg.reveal_delay;
-    if (!was_active) {
+    let persist = select (0u, W_PERSIST, (tg.flags & T_PERSIST) != 0u);
+    if ((tg.flags & T_START) != 0u) {
+      // A start given from outside: a dot peeling off the grid, a point leaving a shape.
+      p.start = tg.start;
+      p.v0 = vec2f (0.0);
+      p.delay = tg.reveal_delay;
+      p.flags = W_ACTIVE | persist;
+    } else if (!was_active) {
       // Fresh: start in a loose cloud around the target, a little low and to the left.
       let a = h1 * 2.0 * PI;
       let r = sqrt (h2) * 0.6 * s;
@@ -39,7 +46,7 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
       p.v0 = vec2f (0.0);
       // The glyph's sweep delay, so a word forms left to right.
       p.delay = tg.reveal_delay;
-      p.flags = W_ACTIVE | W_FRESH;
+      p.flags = W_ACTIVE | W_FRESH | persist;
     } else if ((tg.flags & T_CHANGED) != 0u) {
       // A changed glyph: scatter from where the particle is, then form the new glyph.
       let a = h1 * 2.0 * PI;
@@ -47,13 +54,13 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
       p.start = old.x;
       p.v0 = old.v + out * anchor.scatter * s * (0.6 + 0.8 * h2);
       p.delay = 0.0;
-      p.flags = W_ACTIVE;
+      p.flags = W_ACTIVE | persist;
     } else {
       // Unchanged glyph: slide to its (maybe moved) place, no impulse, stays hidden.
       p.start = old.x;
       p.v0 = old.v;
       p.delay = 0.0;
-      p.flags = W_ACTIVE;
+      p.flags = W_ACTIVE | persist;
     }
   } else if (was_active) {
     // The glyph went away: scatter and fade out.

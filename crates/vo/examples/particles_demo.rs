@@ -71,14 +71,14 @@ fn envelope(t: f64) -> f32 {
 
 fn ring_sim(_: u32, t: f64) -> EmitterSim {
     let l = envelope(t);
+    let r = 62.0 + 46.0 * l;
     EmitterSim {
-        radius: 62.0 + 46.0 * l,
         swirl: 0.9 + 4.5 * l,
         level: l,
         noise: 160.0 + 900.0 * l,
+        noise_scale: 0.025,
         life: 1.1,
-        spread: 0.12 + 0.25 * l,
-        scale: 0.025,
+        ..EmitterSim::ring(r, 0.12 + 0.25 * l)
     }
 }
 
@@ -91,6 +91,7 @@ fn ring_look(t: f64) -> EmitterLook {
         size: 1.3 + 0.9 * l,
         brightness: (0.1 + 0.32 * l) * words,
         ramp: [Color::hex(0x9fe8ff, 1.0), Color::hex(0x4f7dff, 0.8), Color::hex(0xa04cff, 0.0)],
+        ..Default::default()
     }
 }
 
@@ -207,6 +208,7 @@ impl Demo {
                 origin: o.unwrap_or(Point::ZERO),
                 color: Color::hex(0x9fd8ff, 1.0),
                 visible: o.is_some(),
+                ..SlotLook::new(Point::ZERO, Color::WHITE)
             })
             .collect();
         let params = FrameParams {
@@ -217,6 +219,9 @@ impl Demo {
             height: target.height(),
             format: target.format(),
             stretch: 1.0 / 50.0,
+            camera: None,
+            blend: Default::default(),
+            depth: None,
         };
         self.particles.prepare(&params, &|_| ring_look(t), &looks);
         let list = self.display_list(t, &origins);

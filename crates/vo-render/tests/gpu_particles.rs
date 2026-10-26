@@ -7,7 +7,8 @@ mod support;
 
 use support::{Image, Tolerance};
 use vo_render::particles::{
-    EmitterLook, EmitterSim, FrameParams, GlyphState, ParticleConfig, Particles, SlotLook, WordGlyph,
+    tilt_x, Camera, EmitterLook, EmitterSim, EmitterSpec, FrameParams, GlyphState, MaskField, ParticleConfig,
+    Particles, PointForm, Shape, Shock, SlotLook, SpriteStyle, WordGlyph,
 };
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, GlyphInstance, Item, ItemKind, Layer};
@@ -54,6 +55,9 @@ impl Rig {
             height: self.h,
             format: FORMAT,
             stretch: 1.0 / 60.0,
+            camera: None,
+            blend: Default::default(),
+            depth: None,
         }
     }
 
@@ -102,14 +106,14 @@ fn level(t: f64) -> f32 {
 
 fn ring_sim(_: u32, t: f64) -> EmitterSim {
     let l = level(t);
+    let r = 70.0 + 40.0 * l;
     EmitterSim {
-        radius: 70.0 + 40.0 * l,
         swirl: 1.2 + 4.0 * l,
         level: l,
         noise: 900.0 + 3000.0 * l,
+        noise_scale: 0.02,
         life: 1.2,
-        spread: 0.25,
-        scale: 0.02,
+        ..EmitterSim::ring(r, 0.25)
     }
 }
 
@@ -119,6 +123,7 @@ fn ring_look(t: f64) -> EmitterLook {
         size: 2.2,
         brightness: 0.35 + 0.65 * level(t),
         ramp: [Color::hex(0xa8e6ff, 0.9), Color::hex(0x5b8cff, 0.7), Color::hex(0xb04cff, 0.0)],
+        ..Default::default()
     }
 }
 
@@ -213,7 +218,7 @@ fn word_list(rig: &Rig, parts: &Particles, word: &Word, t: f64, solid_only: bool
 }
 
 fn word_frame(rig: &mut Rig, parts: &mut Particles, word: &Word, t: f64) -> Vec<u8> {
-    let look = SlotLook { origin: word.origin, color: Color::hex(0xcfe0ff, 0.9), visible: true };
+    let look = SlotLook::new(word.origin, Color::hex(0xcfe0ff, 0.9));
     parts.prepare(&rig.params(t), &|_| ring_look(t), &[look]);
     let list = word_list(rig, parts, word, t, false);
     rig.frame(&list, parts)
@@ -339,4 +344,173 @@ fn word_frames_do_not_depend_on_when_frames_happen() {
     let b = render(&mut rig, &at_144);
     assert!(a.chunks(4).filter(|p| p[3] > 0).count() > 100);
     assert!(a == b, "word frames depend on frame pacing");
+}
+
+/// Every free-particle feature in one scene: a ring with ribbons, a burst and a shockwave;
+/// a tilted 3D torus with depth of field; a disc of particles hugging the edges of a word's
+/// mask; and dots that assemble into a check mark.
+struct Features {
+    word_points: Vec<[f32; 2]>,
+}
+
+const TEXT_AT: Point = Point { x: 420.0, y: 150.0 };
+const DISC_AT: Point = Point { x: 470.0, y: 140.0 };
+
+fn feature_sim(e: u32, t: f64) -> EmitterSim {
+    match e {
+        0 => {
+            let burst = (t >= 1.0) as u32;
+            let shock =
+                (t >= 1.2).then_some(Shock { age: (t - 1.2) as f32, speed: 160.0, width: 18.0, strength: 2500.0 });
+            EmitterSim {
+                swirl: 2.5,
+                noise: 400.0,
+                life: 1.4,
+                spawn_speed: if (1.0..1.05).contains(&t) { 220.0 } else { 0.0 },
+                epoch: burst,
+                shock,
+                ..EmitterSim::ring(55.0, 0.15)
+            }
+        }
+        1 => EmitterSim { swirl: 1.6, noise: 120.0, noise_scale: 0.03, life: 2.0, ..EmitterSim::torus(70.0, 10.0) },
+        _ => EmitterSim {
+            shape: Shape::Disc { radius: 90.0 },
+            noise: 60.0,
+            noise_scale: 0.04,
+            life: 2.5,
+            drag: 3.0,
+            mask: -4000.0,
+            ..Default::default()
+        },
+    }
+}
+
+fn feature_look(e: u32) -> EmitterLook {
+    match e {
+        0 => EmitterLook {
+            origin: Point::new(110.0, 130.0),
+            size: 1.8,
+            brightness: 0.5,
+            ramp: [Color::hex(0xffe9a8, 1.0), Color::hex(0xff8a3d, 0.8), Color::hex(0xff3d6e, 0.0)],
+            trail_width: 0.7,
+            trail_alpha: 0.8,
+            ..Default::default()
+        },
+        1 => EmitterLook {
+            origin: Point::new(270.0, 130.0),
+            rotation: tilt_x(1.1),
+            size: 2.0,
+            brightness: 0.45,
+            ramp: [Color::hex(0xa8e6ff, 1.0), Color::hex(0x6a8cff, 0.8), Color::hex(0x9b5cff, 0.0)],
+            style: SpriteStyle::Bokeh { focus: 1.0, aperture: 40.0 },
+            ..Default::default()
+        },
+        _ => EmitterLook {
+            origin: DISC_AT,
+            size: 1.2,
+            brightness: 0.6,
+            ramp: [Color::hex(0xb8ffcf, 1.0), Color::hex(0x3ddc84, 0.8), Color::hex(0x1b8f5a, 0.0)],
+            ..Default::default()
+        },
+    }
+}
+
+impl Features {
+    fn new(rig: &Rig, fonts: &FontRegistry) -> (Features, Particles) {
+        let cfg = ParticleConfig { free_capacity: 12_288, word_slots: 2, slot_capacity: 512, ..Default::default() };
+        let mut p = rig.particles(fonts, cfg);
+        p.add_emitter(EmitterSpec { trails: 96, warmup: 0.6, ..EmitterSpec::new(2048, 3) });
+        p.add_emitter(EmitterSpec { three_d: true, warmup: 0.6, ..EmitterSpec::new(4096, 5) });
+        p.add_emitter(EmitterSpec { warmup: 0.6, ..EmitterSpec::new(6144, 7) });
+        // The disc hugs the outline of a word laid out (but not drawn) at TEXT_AT.
+        let word = shape(fonts, "edges", 40.0, TEXT_AT);
+        p.set_word(1, 0.0, &word.glyphs, 1.0);
+        let off = [word.origin.x - DISC_AT.x, word.origin.y - DISC_AT.y];
+        let pts: Vec<[f32; 2]> = p.slot_points(1).iter().map(|q| [q[0] + off[0], q[1] + off[1]]).collect();
+        p.set_word(1, 0.0, &[], 1.0);
+        let mask = MaskField::from_points(&pts, [-100.0, -80.0, 200.0, 140.0], 2.0, 2);
+        p.set_mask(0.0, &mask);
+        (Features { word_points: pts }, p)
+    }
+
+    fn check_mark() -> Vec<Point> {
+        let mut pts = Vec::new();
+        let seg = |a: Point, b: Point, n: usize, pts: &mut Vec<Point>| {
+            for i in 0..n {
+                let k = i as f32 / (n - 1) as f32;
+                pts.push(Point::new(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k));
+            }
+        };
+        seg(Point::new(0.0, 20.0), Point::new(16.0, 36.0), 7, &mut pts);
+        seg(Point::new(20.0, 32.0), Point::new(52.0, 0.0), 12, &mut pts);
+        pts
+    }
+
+    fn frame(&self, rig: &mut Rig, p: &mut Particles, events: &mut usize, t: f64) -> Vec<u8> {
+        if *events == 0 && t >= 0.5 {
+            let pts = Features::check_mark();
+            let starts: Vec<Point> =
+                (0..pts.len()).map(|i| Point::new((i % 6) as f32 * 9.0, 70.0 + (i / 6) as f32 * 9.0)).collect();
+            p.set_points(
+                0,
+                0.5,
+                &PointForm {
+                    points: &pts,
+                    starts: Some(&starts),
+                    size: 30.0,
+                    persist: true,
+                    sweep: 0.08,
+                    scatter: false,
+                },
+            );
+            *events = 1;
+        }
+        p.advance(t, &feature_sim);
+        let mut params = rig.params(t);
+        params.camera = Some(Camera::overlay(rig.w as f32, rig.h as f32, 400.0, 1.0));
+        let dots = SlotLook {
+            size: 2.4,
+            style: SpriteStyle::Dot { pitch: 0.0 },
+            ..SlotLook::new(Point::new(560.0, 100.0), Color::hex(0xffffff, 0.95))
+        };
+        p.prepare(&params, &feature_look, &[dots]);
+        let _ = &self.word_points;
+        rig.frame(&empty_list(rig.w, rig.h), p)
+    }
+}
+
+#[test]
+fn every_feature_is_the_same_at_any_frame_rate() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let mut rig = Rig::new(&fonts, 640, 240);
+    let run = |rig: &mut Rig, fps: f64, end: f64, keep: &[f64]| {
+        let (f, mut p) = Features::new(rig, &fonts);
+        let mut events = 0;
+        let mut kept = Vec::new();
+        let n = (end * fps).round() as u64;
+        for i in 0..=n {
+            let t = i as f64 / fps;
+            let px = f.frame(rig, &mut p, &mut events, t);
+            if keep.iter().any(|k| (k * fps).round() as u64 == i) {
+                kept.push(px);
+            }
+        }
+        kept
+    };
+    let times = [0.25, 0.75, 1.0 + 1.0 / 12.0, 1.5, 2.0];
+    let a = run(&mut rig, 60.0, 2.0, &times);
+    let b = run(&mut rig, 144.0, 2.0, &times);
+    assert_eq!(a.len(), times.len());
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(x == y, "frame at {} s differs between 60 fps and 144 Hz", times[i]);
+    }
+    let img = Image {
+        name: "particles-features".into(),
+        w: rig.w,
+        h: rig.h * times.len() as u32,
+        channels: 4,
+        px: a.concat(),
+    };
+    support::check(&img, Tolerance { per_pixel: 4, max_fraction: 0.002 }).unwrap();
 }

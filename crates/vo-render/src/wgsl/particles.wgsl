@@ -1,19 +1,37 @@
-// GPU particles (CAPABILITIES PA01, PA03, PA04, PA06, PA07). The CPU side is `particles.rs`.
+// GPU particles (CAPABILITIES PA01 to PA09, D302, FX16). The CPU side is `particles.rs`.
 //
 // Two pools share this file:
-// - Free particles live in fixed-slot pools per emitter. `cs_step` advances all of them by one
-//   fixed tick. Every random number is `rand (seed, emitter, slot, spawn)`, so a particle's
-//   numbers depend only on its own counters, never on what ran before it.
-// - Word particles do not step. Each one holds an anchor (start, start velocity, target, t0)
-//   and its position at any time is a closed-form critically damped spring, evaluated at the
-//   frame time in `vs_word`. `cs_anchor` re-anchors one word slot when its text changes, by
+// - Free particles live in fixed-slot pools, one per emitter. `cs_step` advances all of them by
+//   one fixed tick. Every random number is `rand (seed, emitter, slot, counter)`, so a particle's
+//   numbers depend only on its own counters, never on what ran before it. Positions are 3D in the
+//   emitter's own space; a 2D emitter keeps z at 0.
+// - Word and point particles do not step. Each holds an anchor (start, start velocity, goal,
+//   t0) and its position at any time is a closed-form critically damped spring, evaluated at
+//   the frame time in `vs_word`. `cs_anchor` re-anchors one slot when its targets change, by
 //   evaluating the old spring exactly at the change time.
 //
-// Positions are in the emitter's or the word's own space (logical units); the draw adds the
-// origin and maps to pixels with `frame.m` and `frame.t`, as a layer block does.
+// Positions are logical units. The draw adds the origin and maps to pixels with the frame's 2D
+// affine (`frame.m`, `frame.t`, as a layer block lays it out) or, for 3D emitters, with
+// `frame.view_proj`.
 
 const PI: f32 = 3.14159265;
 const WG: u32 = 64u;
+// Ticks of history per hero particle, for ribbons (PA07).
+const TRAIL: u32 = 16u;
+
+// Free particle flags (`Free::info.w`).
+const F_ALIVE: u32 = 1u;
+
+// Emitter shapes (`EmitStep::spawn.x`).
+const S_POINT: u32 = 0u;
+const S_RING: u32 = 1u;
+const S_DISC: u32 = 2u;
+const S_LINE: u32 = 3u;
+const S_BOX: u32 = 4u;
+const S_TORUS: u32 = 5u;
+
+// Emitter flags (`EmitStep::spawn.w`, `EmitDraw::pool.w` high bits).
+const E_3D: u32 = 1u;
 
 // Word particle flags.
 const W_ACTIVE: u32 = 1u;
@@ -21,9 +39,19 @@ const W_ACTIVE: u32 = 1u;
 const W_FRESH: u32 = 2u;
 // Leaving: a target that went away; fades out where the scatter takes it.
 const W_DYING: u32 = 4u;
-// Target flags, set by the CPU per revision.
+// Stays visible once formed: point shapes and dots, which have no solid text to hand over to.
+const W_PERSIST: u32 = 8u;
+// Target flags, set by the CPU per change.
 const T_ACTIVE: u32 = 1u;
 const T_CHANGED: u32 = 2u;
+const T_PERSIST: u32 = 4u;
+// The particle starts at `Target::start` instead of a cloud around its goal.
+const T_START: u32 = 8u;
+
+// Sprite styles.
+const ST_SOFT: u32 = 0u;
+const ST_DOT: u32 = 1u;
+const ST_BOKEH: u32 = 2u;
 
 // --- hashing (vo_core::hash, the same functions bit for bit) ---
 
@@ -68,35 +96,58 @@ fn curl (p: vec2f, t: f32) -> vec2f {
   return vec2f (dy, -dx) / (2.0 * e);
 }
 
+// Divergence-free 3D flow: the curl of three noise potentials, drifting with time.
+fn curl3 (p: vec3f, t: f32) -> vec3f {
+  let e = 0.05;
+  let q1 = p + vec3f (0.0, 0.0, t);
+  let q2 = p + vec3f (31.4, 0.0, -t);
+  let q3 = p + vec3f (0.0, 47.2, t);
+  let dx = vec3f (e, 0.0, 0.0);
+  let dy = vec3f (0.0, e, 0.0);
+  let dz = vec3f (0.0, 0.0, e);
+  let p3y = noise3 (q3 + dy) - noise3 (q3 - dy);
+  let p2z = noise3 (q2 + dz) - noise3 (q2 - dz);
+  let p1z = noise3 (q1 + dz) - noise3 (q1 - dz);
+  let p3x = noise3 (q3 + dx) - noise3 (q3 - dx);
+  let p2x = noise3 (q2 + dx) - noise3 (q2 - dx);
+  let p1y = noise3 (q1 + dy) - noise3 (q1 - dy);
+  return vec3f (p3y - p2z, p1z - p3x, p2x - p1y) / (2.0 * e);
+}
+
 // --- free particles ---
 
 struct Free {
-  pos: vec2f,
-  // Position one tick earlier, for interpolation between ticks at draw time.
-  prev: vec2f,
-  vel: vec2f,
-  // Seconds since spawn; negative before the first spawn.
-  age: f32,
-  life: f32,
-  spawn: u32,
-  emitter: u32,
-  // Per-life random in [0, 1) for size and colour variety.
-  r: f32,
-  _pad: f32,
+  // xyz position, w seconds since spawn (negative before the first spawn).
+  pos: vec4f,
+  // xyz position one tick earlier, for interpolation at draw time; w life in seconds.
+  prev: vec4f,
+  // xyz velocity; w a per-life random in [0, 1) for size and colour variety.
+  vel: vec4f,
+  // x spawn count, y emitter, z burst epoch seen, w flags.
+  info: vec4u,
 };
 
-// One emitter's simulation inputs at one tick.
+// One emitter's simulation inputs at one tick (`EmitterSim` in particles.rs).
 struct EmitStep {
-  // Ring radius, swirl in radians per second, level 0 to 1, curl noise strength.
-  radius: f32,
-  swirl: f32,
-  level: f32,
-  noise: f32,
-  // Mean life in seconds, radial spread as a fraction of the radius, noise scale, seed.
-  life: f32,
-  spread: f32,
-  scale: f32,
-  seed: u32,
+  // x shape, y seed, z burst epoch, w flags.
+  spawn: vec4u,
+  // Shape parameters: ring (radius, spread), disc (radius), line (half length, angle),
+  // box (half x, y, z), torus (major radius, minor radius).
+  shape: vec4f,
+  // x mean life, y life jitter (fraction), z share of deaths that respawn, w spawn speed.
+  life: vec4f,
+  // x swirl in rad/s about z, y ring pull, z ring pull radius, w drag per second.
+  swirl: vec4f,
+  // x curl strength, y curl scale, z curl time speed, w unused.
+  noise: vec4f,
+  // xyz attractor, w its strength (negative repels).
+  attract: vec4f,
+  // xyz gravity plus wind, w mask strength (PA08: positive avoids text, negative hugs edges).
+  gravity: vec4f,
+  // x seconds since a shockwave (negative: none), y front speed, z front width, w strength.
+  shock: vec4f,
+  // x pool base, y pool capacity, z trail base, w trail count.
+  pool: vec4u,
 };
 
 struct Step {
@@ -104,13 +155,19 @@ struct Step {
   index: u32,
   count: u32,
   emitters: u32,
-  _pad: u32,
+  // The tick being computed: the state after it is the state at (tick + 1) * dt.
+  tick: u32,
   t: f32,
   dt: f32,
-  _pad2: vec2f,
+  // Ticks before this one sample mask A, the rest mask B.
+  mask_switch: u32,
+  _pad: u32,
+  // Mask rectangles in emitter space: x, y, w, h.
+  rect_a: vec4f,
+  rect_b: vec4f,
 };
 
-// --- word particles ---
+// --- word and point particles ---
 
 struct Word {
   start: vec2f,
@@ -137,7 +194,8 @@ struct Target {
   glyph: u32,
   reveal_t0: f32,
   reveal_delay: f32,
-  _pad: vec2f,
+  // Where the particle starts when `T_START` is set.
+  start: vec2f,
 };
 
 struct Anchor {
@@ -146,19 +204,18 @@ struct Anchor {
   gen: u32,
   seed: u32,
   t: f32,
-  // Font size of the word and the spring rate.
+  // Size of the shape (font size for words) and the spring rate.
   size: f32,
   w: f32,
   _pad: f32,
-  // Word box in word space: x0, width; and the scatter speed in sizes per second.
+  // Box in slot space: x0, width; the scatter speed in sizes per second; the stroke.
   x0: f32,
   width: f32,
   scatter: f32,
   stroke: f32,
 };
 
-// Closed-form critically damped spring from (start, v0) at t0 + delay to `target`.
-// Returns position and velocity.
+// Closed-form critically damped spring from (start, v0) at t0 + delay to `goal`.
 struct Eval {
   x: vec2f,
   v: vec2f,
@@ -189,32 +246,51 @@ struct Frame {
   // Target size in pixels; z: 1 to encode sRGB in the shader.
   viewport: vec4f,
   // Frame time, interpolation factor between the last two ticks, the stretch in seconds of
-  // motion, and the reveal window start.
+  // motion, and the spring rate of the slowest word particle (for the reveal).
   time: f32,
   alpha: f32,
   stretch: f32,
+  w_min: f32,
   reveal0: f32,
   reveal1: f32,
-  // Spring rate of the slowest particle, for the reveal.
-  w_min: f32,
-  _pad: vec2f,
+  // Ticks run so far, and the ribbon length in ticks.
+  tick: u32,
+  trail_len: u32,
+  // World (layer units, z towards the viewer) to clip space, for 3D emitters.
+  view_proj: mat4x4f,
+  // x: 1 when 3D is on, y: focal length in pixels (sprite size at depth), z: 1 for alpha-over
+  // blending (colours are drawn opaque-ish instead of as light).
+  cam: vec4f,
 };
 
-// One emitter's look at the frame time.
+// One emitter's look at the frame time (`EmitterLook`).
 struct EmitDraw {
-  origin: vec2f,
-  size: f32,
-  brightness: f32,
+  // xyz origin, w sprite radius in logical units.
+  origin: vec4f,
+  // Rotation rows applied to emitter space; w: brightness, unused, unused.
+  rot0: vec4f,
+  rot1: vec4f,
+  rot2: vec4f,
   // Colour at birth, in the middle of life and at death: linear, straight alpha.
   c0: vec4f,
   c1: vec4f,
   c2: vec4f,
+  // x style, y dot pitch in pixels, z focus depth (clip w), w aperture (blur pixels per unit
+  // of depth away from focus).
+  look: vec4f,
+  // x ribbon width as a share of the sprite, y ribbon opacity.
+  trail: vec4f,
+  // x pool base, y capacity, z trail base, w flags.
+  pool: vec4u,
 };
 
 struct SlotDraw {
   origin: vec2f,
   // 1 shows the slot, 0 hides it.
   visible: f32,
-  _pad: f32,
+  // Sprite radius in logical units; 0 for one from the stroke.
+  size: f32,
   color: vec4f,
+  // x style, y dot pitch in pixels.
+  look: vec4f,
 };

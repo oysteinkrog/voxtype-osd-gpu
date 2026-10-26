@@ -19,14 +19,14 @@ const H: u32 = 400;
 
 fn sim(_: u32, t: f64) -> EmitterSim {
     let l = (0.5 + 0.5 * (t * 3.0).sin()) as f32;
+    let r = 120.0 + 50.0 * l;
     EmitterSim {
-        radius: 120.0 + 50.0 * l,
         swirl: 1.5 + 3.0 * l,
         level: l,
         noise: 1500.0 + 2500.0 * l,
+        noise_scale: 0.015,
         life: 1.4,
-        spread: 0.3,
-        scale: 0.015,
+        ..EmitterSim::ring(r, 0.3)
     }
 }
 
@@ -36,6 +36,7 @@ fn look(_: u32) -> EmitterLook {
         size: 1.6,
         brightness: 0.8,
         ramp: [Color::hex(0xa8e6ff, 0.9), Color::hex(0x5b8cff, 0.7), Color::hex(0xb04cff, 0.0)],
+        ..Default::default()
     }
 }
 
@@ -150,6 +151,9 @@ fn main() {
         height: H,
         format: FORMAT,
         stretch: 1.0 / 60.0,
+        camera: None,
+        blend: Default::default(),
+        depth: None,
     };
 
     println!();
@@ -284,6 +288,7 @@ fn main() {
             origin: Point::new(40.0 + 150.0 * (i % 8) as f32, 200.0),
             color: Color::WHITE,
             visible: true,
+            ..SlotLook::new(Point::ZERO, Color::WHITE)
         });
     }
     let timer = Timer::new(&d, &q);
