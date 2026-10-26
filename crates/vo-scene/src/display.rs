@@ -20,6 +20,7 @@ use std::ops::Range;
 use serde::Serialize;
 
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
+use crate::path::{VectorInstance, VectorSeg};
 
 /// Index of a layer in `DisplayList::layers`.
 pub type LayerIndex = u32;
@@ -37,6 +38,10 @@ pub struct DisplayList {
     pub emitters: Vec<EmitterInstance>,
     /// Round dots, for dot grids (`crate::dots`).
     pub dots: Vec<DotInstance>,
+    /// Path strokes and blobs (`crate::path`).
+    pub vectors: Vec<VectorInstance>,
+    /// The segments that `vectors` point into.
+    pub vector_segs: Vec<VectorSeg>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -92,7 +97,7 @@ pub enum BlendMode {
     Screen,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub enum LayerTarget {
     /// Drawn straight into the parent's target with the layer's transform and clip.
     #[default]
@@ -131,6 +136,7 @@ pub enum ItemKind {
     Emitters,
     Layer,
     Dots,
+    Vectors,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -206,7 +212,13 @@ impl Paint {
     /// drawn under it. A stroke width on that copy makes it the glow of the stroke: it falls
     /// off on both sides of the stroke, so an outline glows inside as well.
     pub fn glow(c: Color, radius: f32, strength: f32) -> Paint {
-        Paint { kind: PaintKind::Glow, c0: c, c1: c, p0: Point::new(radius.max(0.0), strength.max(0.0)), p1: Point::ZERO }
+        Paint {
+            kind: PaintKind::Glow,
+            c0: c,
+            c1: c,
+            p0: Point::new(radius.max(0.0), strength.max(0.0)),
+            p1: Point::ZERO,
+        }
     }
 
     /// A drop shadow paint: moved by `offset`, blurred with standard deviation `blur` and
@@ -413,6 +425,8 @@ impl DisplayList {
         self.glyphs.clear();
         self.emitters.clear();
         self.dots.clear();
+        self.vectors.clear();
+        self.vector_segs.clear();
         self.hits.clear();
     }
 

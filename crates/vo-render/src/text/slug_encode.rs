@@ -155,6 +155,17 @@ impl Encoder {
         self.encode()
     }
 
+    /// Encodes whatever `draw` feeds through the [`OutlinePen`] methods, in font units with
+    /// `scale` units per em. For paths that are not glyphs.
+    pub fn encode_with(&mut self, scale: i32, draw: impl FnOnce(&mut Self)) -> Option<EncodedGlyph> {
+        self.x_scale = scale;
+        self.y_scale = scale;
+        self.clear();
+        draw(self);
+        self.acc_close_path();
+        self.encode()
+    }
+
     fn clear(&mut self) {
         let (xs, ys) = (self.x_scale, self.y_scale);
         *self = Self { x_scale: xs, y_scale: ys, curves: std::mem::take(&mut self.curves), ..Self::default() };

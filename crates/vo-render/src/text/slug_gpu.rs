@@ -163,6 +163,10 @@ impl GlyphInstance {
     }
 }
 
+/// Atlas units per path unit for filled paths ([`Atlas::path_in`]). The blob holds
+/// coordinates up to about +-8000 atlas units, so paths stay within +-1000 path units.
+pub const PATH_UNITS: f64 = 8.0;
+
 #[derive(Clone, Copy, Debug)]
 pub struct AtlasEntry {
     pub loc: u32,
@@ -198,6 +202,48 @@ impl Atlas {
         }
         let entry = self.encoder.encode_glyph(&font(), gid).and_then(|g| self.push(&g));
         self.entries.insert((font_id, gid), entry);
+        entry
+    }
+
+    /// The entry for a filled path, encoded on first use and keyed by `(font_id, id)`. The
+    /// path is y down in path units; it is stored y up, times [`PATH_UNITS`], so the glyph
+    /// matrix of a size `k / PATH_UNITS` draws it at `k` pixels per path unit.
+    pub fn path_in(
+        &mut self,
+        font_id: u32,
+        id: u32,
+        path: impl FnOnce() -> Option<std::sync::Arc<vo_scene::path::kurbo::BezPath>>,
+    ) -> Option<AtlasEntry> {
+        if let Some(e) = self.entries.get(&(font_id, GlyphId::new(id))) {
+            return *e;
+        }
+        let entry = path().and_then(|p| {
+            use skrifa::outline::OutlinePen;
+            use vo_scene::path::kurbo::PathEl;
+            let k = PATH_UNITS;
+            let g = self.encoder.encode_with(1000, |pen| {
+                for el in p.elements() {
+                    match *el {
+                        PathEl::MoveTo(a) => pen.move_to((a.x * k) as f32, (-a.y * k) as f32),
+                        PathEl::LineTo(a) => pen.line_to((a.x * k) as f32, (-a.y * k) as f32),
+                        PathEl::QuadTo(c, a) => {
+                            pen.quad_to((c.x * k) as f32, (-c.y * k) as f32, (a.x * k) as f32, (-a.y * k) as f32)
+                        }
+                        PathEl::CurveTo(c, d, a) => pen.curve_to(
+                            (c.x * k) as f32,
+                            (-c.y * k) as f32,
+                            (d.x * k) as f32,
+                            (-d.y * k) as f32,
+                            (a.x * k) as f32,
+                            (-a.y * k) as f32,
+                        ),
+                        PathEl::ClosePath => pen.close(),
+                    }
+                }
+            })?;
+            self.push(&g)
+        });
+        self.entries.insert((font_id, GlyphId::new(id)), entry);
         entry
     }
 

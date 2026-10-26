@@ -79,6 +79,8 @@ impl Face {
 #[derive(Clone, Default)]
 pub struct FontRegistry {
     faces: Arc<RwLock<Vec<Arc<Face>>>>,
+    /// Filled paths, drawn as glyphs of `path::PATH_FONT` (`add_path`).
+    paths: Arc<RwLock<Vec<Arc<kurbo::BezPath>>>>,
 }
 
 impl FontRegistry {
@@ -126,6 +128,19 @@ impl FontRegistry {
     /// The faces from `from` on, for a reader that keeps its own copy of the table.
     pub fn faces_from(&self, from: usize) -> Vec<Arc<Face>> {
         self.faces.read().expect("font table lock").get(from..).unwrap_or_default().to_vec()
+    }
+
+    /// Adds a path to fill through the glyph shader and returns its id, the `glyph` of a
+    /// `GlyphInstance` with font `path::PATH_FONT`. Path units are y down; keep coordinates
+    /// within +-1000 units.
+    pub fn add_path(&self, path: kurbo::BezPath) -> u32 {
+        let mut paths = self.paths.write().expect("path table lock");
+        paths.push(Arc::new(path));
+        paths.len() as u32 - 1
+    }
+
+    pub fn path(&self, id: u32) -> Option<Arc<kurbo::BezPath>> {
+        self.paths.read().expect("path table lock").get(id as usize).cloned()
     }
 
     /// Whether two handles point at the same table.

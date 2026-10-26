@@ -4,8 +4,8 @@
 //! - `shapes`: the CPU side of the SDF shape uber-shader.
 //! - `dots`: the CPU side of the dot pipeline.
 //! - `text`: the Slug glyph path.
-//! - `particles`: GPU particles, free ones at a fixed tick and words that form from them.
-//! - `glyph_points`: points sampled from glyph outlines, for text made of particles.
+//! - `vector`: the CPU side of the vector stroke and blob pipeline.
+//! - `particles`: GPU particles, free and word-forming; `glyph_points` samples glyphs for them.
 //! - `offscreen`: readback to CPU memory for goldens and export.
 //! - `color`: sRGB, linear and OKLab conversions.
 //! - `cpu` (feature `cpu`): the same display list drawn on the CPU, for the first frame.
@@ -20,6 +20,7 @@ pub mod particles;
 pub mod renderer;
 pub mod shapes;
 pub mod text;
+pub mod vector;
 
 pub use offscreen::Offscreen;
 pub use renderer::{Renderer, Target};

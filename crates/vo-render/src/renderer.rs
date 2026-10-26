@@ -43,11 +43,13 @@ use skrifa::GlyphId;
 use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
+use vo_scene::path::PATH_FONT;
 
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
+use crate::vector::{vector_shader_source, GpuVector};
 
 const COMMON_WGSL: &str = include_str!("wgsl/common.wgsl");
 const SHAPES_WGSL: &str = include_str!("wgsl/shapes.wgsl");
@@ -194,6 +196,7 @@ enum Pipe {
     Glyph,
     Composite,
     Dot,
+    Vector,
     CompositeBloom,
     Down,
     Up,
@@ -287,13 +290,16 @@ pub struct Renderer {
     composite_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
-    modules: [Option<wgpu::ShaderModule>; 6],
+    modules: [Option<wgpu::ShaderModule>; 7],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
     shapes: Vec<GpuShape>,
     glyphs: Vec<GlyphInstance>,
     dots: Vec<GpuDot>,
+    vectors: Vec<GpuVector>,
+    /// Vector segments, two texels each, in target pixels.
+    vector_segs: Vec<[f32; 4]>,
     uniforms: Vec<u8>,
     fx_uniforms: Vec<u8>,
     surfaces: Vec<Surface>,
@@ -304,6 +310,9 @@ pub struct Renderer {
     shape_buf: Option<wgpu::Buffer>,
     glyph_buf: Option<wgpu::Buffer>,
     dot_buf: Option<wgpu::Buffer>,
+    vector_buf: Option<wgpu::Buffer>,
+    vector_layout: wgpu::BindGroupLayout,
+    vector_segs_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     uniform_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     fx_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     pool: Vec<PoolTex>,
@@ -355,12 +364,14 @@ impl Renderer {
             layer_layout,
             composite_layout,
             fx: None,
-            modules: [None, None, None, None, None, None],
+            modules: [None, None, None, None, None, None, None],
             pipelines: Vec::new(),
             uniform_stride,
             shapes: Vec::new(),
             glyphs: Vec::new(),
             dots: Vec::new(),
+            vectors: Vec::new(),
+            vector_segs: Vec::new(),
             uniforms: Vec::new(),
             fx_uniforms: Vec::new(),
             surfaces: Vec::new(),
@@ -369,6 +380,21 @@ impl Renderer {
             shape_buf: None,
             glyph_buf: None,
             dot_buf: None,
+            vector_buf: None,
+            vector_layout: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("vo-vector-segs"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            }),
+            vector_segs_buf: None,
             uniform_buf: None,
             fx_buf: None,
             pool: Vec::new(),
@@ -435,6 +461,8 @@ impl Renderer {
         self.shapes.clear();
         self.glyphs.clear();
         self.dots.clear();
+        self.vectors.clear();
+        self.vector_segs.clear();
         self.uniforms.clear();
         self.fx_uniforms.clear();
         self.surfaces.clear();
@@ -522,7 +550,10 @@ impl Renderer {
                                 g.clamp_glow();
                             }
                             let q = g.quad(ppu);
-                            let b = bounds(&RRect::new(vo_scene::geom::Rect::new(q[0], q[1], q[2] - q[0], q[3] - q[1]), 0.0), &to_px);
+                            let b = bounds(
+                                &RRect::new(vo_scene::geom::Rect::new(q[0], q[1], q[2] - q[0], q[3] - q[1]), 0.0),
+                                &to_px,
+                            );
                             grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                             self.shapes.push(g);
                         }
@@ -539,8 +570,25 @@ impl Renderer {
                     }
                     self.push_cmd(draw_surface, Pipe::Glyph, start..self.glyphs.len() as u32, uniform, blend, scissor);
                 }
+                ItemKind::Vectors => {
+                    let start = self.vectors.len() as u32;
+                    for v in &f.list.vectors[range] {
+                        if let Some(g) = GpuVector::new(f.list, v, &to_px, ppu, opacity, &mut self.vector_segs) {
+                            grow(&mut self.surfaces[draw_surface].bounds, intersect(g.bbox, scissor));
+                            self.vectors.push(g);
+                        }
+                    }
+                    self.push_cmd(
+                        draw_surface,
+                        Pipe::Vector,
+                        start..self.vectors.len() as u32,
+                        uniform,
+                        blend,
+                        scissor,
+                    );
+                }
                 // Drawn by their own lanes' pipelines, not wired in here yet.
-                ItemKind::Emitters | ItemKind::Vectors => {}
+                ItemKind::Emitters => {}
                 ItemKind::Dots => {
                     let start = self.dots.len() as u32;
                     let mut b = EMPTY;
@@ -548,7 +596,13 @@ impl Renderer {
                         if let Some(g) = GpuDot::new(d, &to_px, ppu, opacity) {
                             let r = g.radius + 1.0 / ppu;
                             let [x, y] = g.centre;
-                            grow(&mut b, bounds(&RRect::new(vo_scene::geom::Rect::new(x - r, y - r, 2.0 * r, 2.0 * r), 0.0), &to_px));
+                            grow(
+                                &mut b,
+                                bounds(
+                                    &RRect::new(vo_scene::geom::Rect::new(x - r, y - r, 2.0 * r, 2.0 * r), 0.0),
+                                    &to_px,
+                                ),
+                            );
                             self.dots.push(g);
                         }
                     }
@@ -620,6 +674,15 @@ impl Renderer {
         if color[3] <= 0.0 {
             return None;
         }
+        if g.font == PATH_FONT {
+            let fonts = &self.fonts;
+            let entry = self.atlas.path_in(g.font, g.glyph, || fonts.path(g.glyph))?;
+            let k = g.size / slug_gpu::PATH_UNITS as f32;
+            let m = &st.to_px;
+            let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];
+            let o = m.apply(g.pos);
+            return Some(GlyphInstance::with_matrix(&entry, lin, [o.x, o.y], color, g.word));
+        }
         if g.font as usize >= self.faces.len() {
             let more = self.fonts.faces_from(self.faces.len());
             self.faces.extend(more);
@@ -674,7 +737,12 @@ impl Renderer {
                     let child = &self.surfaces[c.range.start as usize];
                     u.origin[2] = child.origin[0] as f32;
                     u.origin[3] = child.origin[1] as f32;
-                    u.src = [child.size[0] as f32, child.size[1] as f32, child.bloom.as_ref().map_or(0.0, |b| b.strength), 0.0];
+                    u.src = [
+                        child.size[0] as f32,
+                        child.size[1] as f32,
+                        child.bloom.as_ref().map_or(0.0, |b| b.strength),
+                        0.0,
+                    ];
                 }
                 self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
             }
@@ -734,9 +802,11 @@ impl Renderer {
     fn acquire(&mut self, w: u32, h: u32, format: wgpu::TextureFormat) -> usize {
         let (w, h) = (w.max(1), h.max(1));
         let frame = self.frame;
-        if let Some(i) = self.pool.iter().position(|p| {
-            !p.used && p.texture.width() == w && p.texture.height() == h && p.texture.format() == format
-        }) {
+        if let Some(i) = self
+            .pool
+            .iter()
+            .position(|p| !p.used && p.texture.width() == w && p.texture.height() == h && p.texture.format() == format)
+        {
             (self.pool[i].used, self.pool[i].last_used) = (true, frame);
             return i;
         }
@@ -828,6 +898,32 @@ impl Renderer {
             wgpu::BufferUsages::VERTEX,
             bytemuck::cast_slice(&self.dots),
         );
+        write_grow(
+            device,
+            queue,
+            &mut self.vector_buf,
+            "vo-vectors",
+            wgpu::BufferUsages::VERTEX,
+            bytemuck::cast_slice(&self.vectors),
+        );
+        let need = (self.vector_segs.len() * 16).max(256) as u64;
+        if self.vector_segs_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo-vector-segs"),
+                size: need.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-vector-segs"),
+                layout: &self.vector_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+            });
+            self.vector_segs_buf = Some((buf, bind));
+        }
+        if !self.vector_segs.is_empty() {
+            queue.write_buffer(&self.vector_segs_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.vector_segs));
+        }
         write_uniforms(
             device,
             queue,
@@ -956,7 +1052,8 @@ impl Renderer {
         let layers = &self.uniform_buf.as_ref().expect("uploaded").1;
         for c in &surface.cmds {
             let mut sc = c.scissor;
-            let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom).then(|| &self.surfaces[c.range.start as usize]);
+            let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom)
+                .then(|| &self.surfaces[c.range.start as usize]);
             if let Some(child) = child {
                 if child.size[0] == 0 {
                     continue;
@@ -980,6 +1077,11 @@ impl Renderer {
                 }
                 Pipe::Dot => {
                     pass.set_vertex_buffer(0, self.dot_buf.as_ref().unwrap().slice(..));
+                    pass.draw(0..4, c.range.clone());
+                }
+                Pipe::Vector => {
+                    pass.set_bind_group(0, &self.vector_segs_buf.as_ref().unwrap().1, &[]);
+                    pass.set_vertex_buffer(0, self.vector_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
                 Pipe::Glyph => {
@@ -1023,6 +1125,7 @@ impl Renderer {
             Pipe::Composite | Pipe::CompositeBloom => 2,
             Pipe::Down | Pipe::Up | Pipe::Final => 3,
             Pipe::Dot => 4,
+            Pipe::Vector => 5,
         };
         if self.modules[slot].is_none() {
             let (label, source) = match slot {
@@ -1030,6 +1133,7 @@ impl Renderer {
                 1 => ("vo-glyphs", glyph_shader_source()),
                 2 => ("vo-composite", composite_shader_source()),
                 4 => ("vo-dots", dot_shader_source()),
+                5 => ("vo-vectors", vector_shader_source()),
                 _ => ("vo-bloom", bloom_shader_source()),
             };
             self.modules[slot] = Some(self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1042,6 +1146,7 @@ impl Renderer {
         let groups: [Option<&wgpu::BindGroupLayout>; 2] = match pipe {
             Pipe::Shape => [None, Some(&self.layer_layout)],
             Pipe::Dot => [None, Some(&self.layer_layout)],
+            Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
             Pipe::Composite => [Some(&self.composite_layout), Some(&self.layer_layout)],
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
@@ -1057,6 +1162,7 @@ impl Renderer {
             Pipe::Glyph => ("vs_dl_glyph", "fs_dl_glyph", vec![Some(GlyphInstance::layout())]),
             Pipe::Composite => ("vs_composite", "fs_composite", vec![]),
             Pipe::Dot => ("vs_dot", "fs_dot", vec![Some(GpuDot::layout())]),
+            Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
             Pipe::CompositeBloom => ("vs_composite", "fs_composite_bloom", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
@@ -1079,11 +1185,15 @@ impl Renderer {
                 module,
                 entry_point: Some(fs),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: blend_state, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: blend_state,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: match pipe {
-                    Pipe::Shape | Pipe::Glyph | Pipe::Dot => wgpu::PrimitiveTopology::TriangleStrip,
+                    Pipe::Shape | Pipe::Glyph | Pipe::Dot | Pipe::Vector => wgpu::PrimitiveTopology::TriangleStrip,
                     _ => wgpu::PrimitiveTopology::TriangleList,
                 },
                 ..Default::default()
@@ -1172,7 +1282,10 @@ fn blend_state(mode: BlendMode) -> wgpu::BlendState {
 /// Bounding box in physical pixels of `r` mapped through `m`.
 fn bounds(r: &RRect, m: &Affine) -> [f32; 4] {
     let r = r.rect;
-    corners_box([(r.x, r.y), (r.right(), r.y), (r.right(), r.bottom()), (r.x, r.bottom())].map(|(x, y)| m.apply(Point::new(x, y))))
+    corners_box(
+        [(r.x, r.y), (r.right(), r.y), (r.right(), r.bottom()), (r.x, r.bottom())]
+            .map(|(x, y)| m.apply(Point::new(x, y))),
+    )
 }
 
 fn corners_box(pts: [Point; 4]) -> [f32; 4] {

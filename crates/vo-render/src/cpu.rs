@@ -156,7 +156,8 @@ impl CpuRenderer {
                         self.glyph(g, &st);
                     }
                 }
-                ItemKind::Emitters => {}
+                // The CPU first frame draws no vectors or emitters.
+                ItemKind::Emitters | ItemKind::Vectors => {}
                 ItemKind::Dots => {
                     for d in &list.dots[range] {
                         let centre = crate::dots::snap(d.centre, d.radius, d.snap, &to_px, ppu);

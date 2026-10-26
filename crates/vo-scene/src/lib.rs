@@ -8,6 +8,7 @@
 //! - `text`: text measurement behind a trait, with a width estimate for now.
 //! - `input`: hit testing at the event's time and pointer messages.
 //! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
+//! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
@@ -21,6 +22,7 @@ pub mod geom;
 pub mod input;
 pub mod inspect;
 mod layout;
+pub mod path;
 pub mod scene;
 pub mod text;
 pub mod timed;
