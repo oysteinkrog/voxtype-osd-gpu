@@ -191,7 +191,7 @@ impl App for TitleCard {
 }
 
 /// Frames for the contact sheet: entry, hold and exit.
-const SHEET_AT: [f64; 8] = [0.5, 0.8, 1.2, 1.7, 2.6, 8.3, 8.8, 9.4];
+const SHEET_AT: [f64; 8] = [0.5, 0.8, 1.2, 1.7, 2.6, 8.3, 8.8, 9.1];
 const THUMB: u32 = 4;
 
 /// A 1/4 size thumbnail by box filter.
@@ -235,7 +235,9 @@ fn contact_sheet(thumbs: &[Frame]) -> Frame {
 fn peak_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok()))
+        .and_then(|s| {
+            s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+        })
         .unwrap_or(0.0)
         / 1024.0
 }

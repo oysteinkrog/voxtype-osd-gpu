@@ -209,7 +209,47 @@ impl Ffmpeg {
 fn write_frames(
     spec: &Export,
     rx: mpsc::Receiver<Frame>,
+    on_frame: impl FnMut(u64, &Frame),
+) -> Result<ExportReport, ExportError> {
+    let Some(dir) = &spec.png_dir else {
+        return feed(spec, rx, on_frame, |_, _| Ok(()));
+    };
+    // PNG encoding (unpremultiply and deflate) takes about 140 ms per 1080p frame on one core,
+    // so a few workers encode frames in parallel. Each holds one frame.
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 8));
+    let (png_tx, png_rx) = mpsc::sync_channel::<(u64, Frame)>(workers);
+    let png_rx = std::sync::Mutex::new(png_rx);
+    std::thread::scope(|s| {
+        let pool: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| -> Result<(), ExportError> {
+                    loop {
+                        let job = png_rx.lock().unwrap().recv();
+                        let Ok((n, frame)) = job else { return Ok(()) };
+                        write_png(&dir.join(format!("frame_{n:05}.png")), frame.width, frame.height, &frame.rgba)?;
+                    }
+                })
+            })
+            .collect();
+        let fed = feed(spec, rx, on_frame, |n, frame| png_tx.send((n, frame)).map_err(|_| ExportError::Writer));
+        drop(png_tx);
+        let mut result = fed;
+        for w in pool {
+            let done = w.join().map_err(|_| ExportError::Writer).and_then(|r| r);
+            if let (Ok(_), Err(e)) = (&result, done) {
+                result = Err(e);
+            }
+        }
+        result
+    })
+}
+
+/// Hashes each frame, shows it to `on_frame`, pipes it to ffmpeg, then hands it to `png`.
+fn feed(
+    spec: &Export,
+    rx: mpsc::Receiver<Frame>,
     mut on_frame: impl FnMut(u64, &Frame),
+    mut png: impl FnMut(u64, Frame) -> Result<(), ExportError>,
 ) -> Result<ExportReport, ExportError> {
     let mut report = ExportReport { frames: 0, width: 0, height: 0, frame_hashes: Vec::new() };
     let mut ffmpeg: Option<Ffmpeg> = None;
@@ -223,9 +263,6 @@ fn write_frames(
         }
         report.frame_hashes.push(frame_hash(&frame.rgba));
         on_frame(n, &frame);
-        if let Some(dir) = &spec.png_dir {
-            write_png(&dir.join(format!("frame_{n:05}.png")), frame.width, frame.height, &frame.rgba)?;
-        }
         if let Some(f) = &mut ffmpeg {
             if let Err(e) = f.stdin.write_all(&frame.rgba) {
                 // A broken pipe means ffmpeg exited; its status says why.
@@ -236,6 +273,7 @@ fn write_frames(
                 });
             }
         }
+        png(n, frame)?;
         report.frames += 1;
     }
     if let Some(f) = ffmpeg {
@@ -248,10 +286,9 @@ fn write_frames(
 pub fn frame_hash(rgba: &[u8]) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut h = rgba.len() as u64;
-    let words = rgba.chunks_exact(8);
-    let tail = words.remainder();
+    let (words, tail) = rgba.as_chunks::<8>();
     for w in words {
-        h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(K);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
     }
     for &b in tail {
         h = (h.rotate_left(5) ^ b as u64).wrapping_mul(K);
