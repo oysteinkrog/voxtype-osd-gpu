@@ -108,27 +108,28 @@ impl<M> Node<M> {
     }
 
     /// Moves `slot` toward `value` from `t` with the slot's motion. A slot with no channel
-    /// yet starts at rest at `value`.
+    /// yet starts from its default value (opacity 1, offset 0), so a property that appears
+    /// on a live node animates in like any other change.
     pub fn set_target(&mut self, slot: u8, value: f64, t: f64, retention: f64) {
-        let motion = self.motion_for(slot);
-        match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
-            Ok(i) => {
-                let ch = &mut self.chans[i].1;
-                match motion {
-                    Motion::Spring(s) => {
-                        ch.set_spring(s);
-                        ch.retarget(t, value);
-                    }
-                    Motion::Snap => {
-                        if ch.target() != value || !ch.is_settled(t) {
-                            ch.snap(t, value);
-                        }
-                    }
-                }
-            }
+        let i = match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
+            Ok(i) => i,
             Err(i) => {
-                let ch = self.new_channel(slot, t, value, retention);
+                let ch = self.new_channel(slot, t, Slot::default_value(slot), retention);
                 self.chans.insert(i, (slot, ch));
+                i
+            }
+        };
+        let motion = self.motion_for(slot);
+        let ch = &mut self.chans[i].1;
+        match motion {
+            Motion::Spring(s) => {
+                ch.set_spring(s);
+                ch.retarget(t, value);
+            }
+            Motion::Snap => {
+                if ch.target() != value || !ch.is_settled(t) {
+                    ch.snap(t, value);
+                }
             }
         }
     }
@@ -393,7 +394,9 @@ impl<M> Scene<M> {
             node.set_target(slot, target, t, self.retention);
         }
         for &(slot, v) in &targets {
-            node.set_target(slot, v, t, self.retention);
+            if !node.has(slot) {
+                node.start_at(slot, v, t, self.retention);
+            }
         }
         node.entered = node.settled_at().max(t);
         let id = self.nodes.insert(node);

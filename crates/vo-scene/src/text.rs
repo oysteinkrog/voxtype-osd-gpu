@@ -29,6 +29,9 @@ pub trait TextLayout {
     fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText;
 }
 
+/// Logical units a line may overshoot its width and still count as fitting.
+const FIT_TOLERANCE: f32 = 1e-3;
+
 /// Fixed advances: `advance` ems per character and `space` ems per space. Breaks only at
 /// spaces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,7 +58,8 @@ impl TextLayout for EstimateText {
         for (start, word) in words(text) {
             let w = word.chars().count() as f32 * self.advance * em;
             if any {
-                let fits = max_width.is_none_or(|max| x + space + w <= max);
+                // The tolerance absorbs rounding in widths that went through layout and back.
+                let fits = max_width.is_none_or(|max| x + space + w <= max + FIT_TOLERANCE);
                 if fits {
                     x += space;
                 } else {
