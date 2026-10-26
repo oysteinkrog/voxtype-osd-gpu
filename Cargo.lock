@@ -1234,6 +1234,7 @@ dependencies = [
  "toml",
  "vo",
  "vo-core",
+ "vo-dots",
  "vo-host",
  "vo-host-wayland",
  "vo-render",
