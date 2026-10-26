@@ -1253,6 +1253,8 @@ dependencies = [
  "pollster",
  "skrifa",
  "vo-core",
+ "vo-host",
+ "vo-host-wayland",
  "vo-render",
  "vo-scene",
  "wgpu",
