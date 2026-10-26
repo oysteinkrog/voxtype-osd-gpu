@@ -133,3 +133,8 @@ fn ign (p: vec2f) -> f32 {
   let straight = clamp (c.rgb / c.a, vec3f (0.0), vec3f (1.0));
   return vec4f (clamp (srgb_encode3 (straight) * c.a + n, vec3f (0.0), vec3f (c.a)), c.a);
 }
+
+// A feedback trail's fade: the blend keeps the blend constant times what is there.
+@fragment fn fs_fade (in: FullOut) -> @location(0) vec4f {
+  return vec4f (0.0);
+}

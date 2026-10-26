@@ -82,7 +82,13 @@ fn reduced_motion_jumps_travel_and_keeps_fades() {
 
 #[test]
 fn motion_blur_follows_the_spring_speed() {
-    let view = |x: f32| root(vec![El::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE).offset(x, 0.0).motion_blur(1.0 / 30.0)]);
+    let view = |x: f32| {
+        root(vec![El::shape("dot", ShapeKind::Circle)
+            .size(10.0, 10.0)
+            .fill(Color::WHITE)
+            .offset(x, 0.0)
+            .motion_blur(1.0 / 30.0)])
+    };
     let mut scene = Scene::new();
     scene.apply(view(0.0), 0.0);
     // At rest: no blur layer.
@@ -93,4 +99,28 @@ fn motion_blur_follows_the_spring_speed() {
     assert!(smear > 1.0, "a moving dot smears: {smear}");
     // Settled again: no blur.
     assert!(scene.sample(5.0).layers.iter().all(|l| l.motion_blur.x.abs() < 0.01));
+}
+
+#[test]
+fn trail_makes_an_offscreen_layer_with_a_steady_key() {
+    let mut scene = Scene::new();
+    let layer = |x: f32| {
+        Element::layer("comet")
+            .size(100.0, 40.0)
+            .trail(0.25)
+            .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).offset(x, 0.0).fill(Color::WHITE))
+    };
+    scene.apply(root(vec![layer(0.0)]), 0.0);
+    let a = scene.sample(1.0);
+    let trail = a.layers.iter().find_map(|l| l.trail).expect("a trail layer");
+    assert!((trail.half_life - 0.25).abs() < 1e-6, "{trail:?}");
+    assert!(a.layers.iter().any(|l| l.trail.is_some() && matches!(l.target, LayerTarget::Offscreen { .. })));
+    assert_eq!(trail.t, 1.0);
+    scene.apply(root(vec![layer(30.0)]), 1.0);
+    let b = scene.sample(1.5);
+    assert_eq!(b.layers.iter().find_map(|l| l.trail).map(|t| t.key), Some(trail.key), "same key across frames");
+    // The trail keeps the scene awake while it fades, 12 half lives after the move settles.
+    let quiet = (100..2000).map(|i| i as f64 * 0.01).find(|&t| scene.next_wake(t).is_none()).expect("settles");
+    assert!(quiet >= 1.0 + 12.0 * 0.25, "awake until {quiet}");
+    assert!(quiet < 6.0, "awake until {quiet}");
 }

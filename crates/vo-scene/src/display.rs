@@ -72,6 +72,9 @@ pub struct Layer {
     /// units. The renderer averages the content along this segment, centred on its position.
     /// Zero for none.
     pub motion_blur: Point,
+    /// A feedback trail (FX11): the layer keeps what it drew in earlier frames, faded, under
+    /// what it draws now. Only on offscreen layers.
+    pub trail: Option<Trail>,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -86,6 +89,7 @@ impl Layer {
             clip: None,
             target: LayerTarget::Direct,
             motion_blur: Point::ZERO,
+            trail: None,
             items: 0..0,
         }
     }
@@ -124,6 +128,18 @@ pub struct Bloom {
     pub strength: f32,
     /// Spread in logical units, about the blur's standard deviation.
     pub radius: f32,
+}
+
+/// A feedback trail on an offscreen layer.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Trail {
+    /// Which trail this is from frame to frame, so the renderer finds last frame's pixels:
+    /// the scene uses the node id.
+    pub key: u64,
+    /// Seconds for the trail to fade to half. Frame rate independent.
+    pub half_life: f32,
+    /// The time this frame shows, in seconds: the trail fades by the time between frames.
+    pub t: f64,
 }
 
 /// A run of content in a layer.

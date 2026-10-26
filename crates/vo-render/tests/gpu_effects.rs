@@ -13,7 +13,7 @@ use support::{Image, Tolerance};
 use vo_render::color::srgb_to_linear;
 use vo_render::Offscreen;
 use vo_scene::display::{
-    Bloom, DisplayList, GlyphInstance, Item, ItemKind, Layer, LayerTarget, Paint, ShapeInstance, NO_WORD,
+    Bloom, DisplayList, GlyphInstance, Item, ItemKind, Layer, LayerTarget, Paint, ShapeInstance, Trail, NO_WORD,
 };
 use vo_scene::geom::{Color, Point, RRect, Rect, Size};
 
@@ -320,10 +320,8 @@ fn quality_tiers_drop_effects() {
     let with_glow = render(&mut off, "q", &glow, 1.0).px;
     off.renderer.set_quality(vo_render::Quality::Minimal);
     let without = render(&mut off, "q", &glow, 1.0).px;
-    let plain = DisplayList {
-        shapes: glow.shapes.iter().filter(|s| !s.fill.is_halo()).copied().collect(),
-        ..glow.clone()
-    };
+    let plain =
+        DisplayList { shapes: glow.shapes.iter().filter(|s| !s.fill.is_halo()).copied().collect(), ..glow.clone() };
     // The plain list has fewer shapes, so its single shape item must shrink with it.
     let mut plain = plain;
     plain.items[0].len = plain.shapes.len() as u32;
@@ -368,9 +366,7 @@ fn motion_blur_golden() {
             vec![ShapeInstance::capsule(Rect::new(20.0, 20.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0)))],
             run(&font, "swift", 110.0, 40.0, 26.0, hex(0xffffff)),
         )),
-        vec![
-            ShapeInstance::capsule(Rect::new(20.0, 76.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0))),
-        ],
+        vec![ShapeInstance::capsule(Rect::new(20.0, 76.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0)))],
     );
     list.layers[1].motion_blur = Point::new(24.0, 0.0);
     let img = render(&mut off, "fx-motion-blur-1x", &list, 1.0);
@@ -382,4 +378,55 @@ fn motion_blur_golden() {
         p[2] > 60
     };
     assert!(lit(84) && !lit(94), "smear reach");
+}
+
+/// A dot on a trail layer at frame `i` of a 60 fps run, moving 16 px a frame.
+fn trail_frame(i: u32) -> DisplayList {
+    let x = 20.0 + 16.0 * i as f32;
+    let mut list = Builder::new(240.0, 60.0).build(
+        vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 60.0, 0.0), Paint::solid(hex(0x101420)))],
+        Some((
+            Bloom { strength: 0.0, radius: 1.0 },
+            vec![ShapeInstance::circle(Point::new(x, 30.0), 8.0, Paint::solid(hex(0x4cc9f0)))],
+            Vec::new(),
+        )),
+        Vec::new(),
+    );
+    list.layers[1].trail = Some(Trail { key: 7, half_life: 0.03, t: i as f64 / 60.0 });
+    list
+}
+
+#[test]
+fn trail_golden() {
+    let gpu = support::gpu();
+    let data = load_font();
+    let run_trail = |name: &str| {
+        let mut off = offscreen(&gpu, &data);
+        (0..=10).map(|i| render(&mut off, name, &trail_frame(i), 1.0)).last().unwrap()
+    };
+    let img = run_trail("fx-trail-1x");
+    assert_premultiplied(&img);
+    support::check(&img, Tolerance::default()).unwrap();
+    // Older positions are fainter: the dot is at x = 180, earlier ones every 16 px back.
+    let blue = |x: u32| img.px[((30 * img.w + x) * 4 + 2) as usize];
+    let tail: Vec<u8> = (0..6).map(|k| blue(180 - 16 * k)).collect();
+    assert!(tail.windows(2).all(|w| w[0] > w[1]), "trail fades with age: {tail:?}");
+    // Ten frames is 5.6 half lives: about 2% is left, which sRGB shows as some 18 levels over the dark background.
+    assert!(blue(20) < blue(0) + 24, "the oldest position has faded: {} over {}", blue(20), blue(0));
+    // Deterministic across renderers.
+    assert_eq!(img.px, run_trail("fx-trail-again").px, "trail differs between runs");
+}
+
+#[test]
+fn trail_starts_fresh_after_a_seek_back() {
+    let gpu = support::gpu();
+    let data = load_font();
+    let mut off = offscreen(&gpu, &data);
+    for i in 0..=6 {
+        render(&mut off, "fx-trail-seek", &trail_frame(i), 1.0);
+    }
+    let back = render(&mut off, "fx-trail-seek", &trail_frame(2), 1.0);
+    let mut fresh_off = offscreen(&gpu, &data);
+    let fresh = render(&mut fresh_off, "fx-trail-seek", &trail_frame(2), 1.0);
+    assert_eq!(back.px, fresh.px, "a seek backward clears the trail");
 }

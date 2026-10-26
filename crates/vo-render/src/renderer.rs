@@ -72,6 +72,8 @@ const POOL_KEEP_FRAMES: u64 = 120;
 const MAX_LEVELS: u32 = 6;
 /// How much of the lower level each bloom upsample mixes in.
 const BLOOM_MIX: f32 = 0.65;
+/// A trail starts fresh after a gap between frames longer than this, in seconds.
+const TRAIL_MAX_GAP: f64 = 0.5;
 
 /// Quality tiers (MO09). Every tier draws a correct picture; a lower one leaves out the costly
 /// effects. `Full` is the default. The renderer drops one tier by itself when a texture for the
@@ -244,6 +246,8 @@ enum Pipe {
     Down,
     Up,
     Final,
+    /// Fades a feedback trail's last frame by the blend constant.
+    Fade,
 }
 
 #[derive(Clone, Debug)]
@@ -270,11 +274,12 @@ struct Surface {
     /// Pool index of the texture; `None` for the target itself.
     tex: Option<usize>,
     bloom: Option<BloomPlan>,
+    trail: Option<TrailPlan>,
 }
 
 impl Surface {
     fn new() -> Surface {
-        Surface { cmds: Vec::new(), bounds: EMPTY, origin: [0, 0], size: [0, 0], tex: None, bloom: None }
+        Surface { cmds: Vec::new(), bounds: EMPTY, origin: [0, 0], size: [0, 0], tex: None, bloom: None, trail: None }
     }
 
     /// The texture's rectangle in target pixels.
@@ -282,6 +287,18 @@ impl Surface {
         let [x, y] = self.origin.map(|v| v as f32);
         [x, y, x + self.size[0] as f32, y + self.size[1] as f32]
     }
+}
+
+/// One layer's feedback trail for this frame (FX11). The layer covers the whole target and
+/// keeps its texture from frame to frame, found again by `key`.
+struct TrailPlan {
+    key: u64,
+    half_life: f32,
+    /// The time the frame shows.
+    t: f64,
+    /// What last frame's pixels are multiplied by before this frame draws. `None` clears
+    /// instead: the first frame, a seek backward, a gap over `TRAIL_MAX_GAP` or a new size.
+    fade: Option<f32>,
 }
 
 /// One layer's bloom for this frame.
@@ -316,6 +333,11 @@ struct PoolTex {
     bind: wgpu::BindGroup,
     used: bool,
     last_used: u64,
+    /// Set for a feedback trail's texture, which keeps its pixels and is never handed out by
+    /// `acquire`.
+    key: Option<u64>,
+    /// The time a trail's pixels show.
+    t: f64,
 }
 
 /// Draws display lists. Holds the pipelines, the glyph atlas and the per-frame buffers, all
@@ -522,7 +544,8 @@ impl Renderer {
     /// Records the frame into `enc` without submitting, so a caller can add a copy after it.
     pub fn encode(&mut self, list: &DisplayList, scale: f32, target: &Target, enc: &mut wgpu::CommandEncoder) {
         let (w, h) = (target.width(), target.height());
-        let effects = self.quality == Quality::Full && list.layers.iter().any(|l| bloom_of(&l.target).is_some());
+        let effects = self.quality == Quality::Full
+            && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some());
         let format = if effects { EFFECT_FORMAT } else { target.format() };
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
         self.shapes.clear();
@@ -610,6 +633,9 @@ impl Renderer {
                 if let Some(b) = bloom.filter(|b| f.effects && b.strength > 0.0) {
                     s.bloom = Some(bloom_plan(b, ppu));
                 }
+                if let Some(t) = layer.trail.filter(|_| f.effects) {
+                    s.trail = Some(TrailPlan { key: t.key, half_life: t.half_life, t: t.t, fade: None });
+                }
                 self.surfaces.push(s);
                 let pipe = if self.surfaces[child].bloom.is_some() { Pipe::CompositeBloom } else { Pipe::Composite };
                 self.surfaces[surface].cmds.push(Cmd {
@@ -627,10 +653,8 @@ impl Renderer {
         }
         // The layer's smear in target pixels: its own, through its linear part, plus its parents'.
         let mb = layer.motion_blur;
-        let smear = [
-            parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y),
-            parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y),
-        ];
+        let smear =
+            [parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y), parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y)];
         let state = LayerState { to_px, ppu, opacity, clip, scissor, smear };
         // Content reaches half the smear further either way.
         let reach = |b: [f32; 4]| {
@@ -666,7 +690,10 @@ impl Renderer {
                     let start = self.glyphs.len() as u32;
                     for g in &f.list.glyphs[range] {
                         if let Some(inst) = self.glyph(g, &state) {
-                            grow(&mut self.surfaces[draw_surface].bounds, intersect(reach(glyph_bounds(&inst)), scissor));
+                            grow(
+                                &mut self.surfaces[draw_surface].bounds,
+                                intersect(reach(glyph_bounds(&inst)), scissor),
+                            );
                             self.glyphs.push(inst);
                         }
                     }
@@ -736,18 +763,27 @@ impl Renderer {
     fn close_surface(&mut self, child: usize, parent: usize, parent_scissor: [f32; 4], target: [u32; 2]) {
         let s = &mut self.surfaces[child];
         let b = s.bounds;
-        if b[2] <= b[0] || b[3] <= b[1] {
-            s.size = [0, 0];
-            return;
-        }
-        let pad = s.bloom.as_ref().map_or(0.0, |p| (3 << p.levels) as f32);
-        // Content past the target only matters through the bloom's reach.
-        let limit = [-pad, -pad, target[0] as f32 + pad, target[1] as f32 + pad];
-        let b = intersect([b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad], limit);
-        let (x0, y0) = (b[0].floor() as i32, b[1].floor() as i32);
-        let w = ((b[2].ceil() as i32 - x0).max(1) as u32).next_multiple_of(ALIGN);
-        let h = ((b[3].ceil() as i32 - y0).max(1) as u32).next_multiple_of(ALIGN);
-        s.origin = [x0, y0];
+        let [w, h] = if s.trail.is_some() {
+            // A trail keeps what earlier frames drew anywhere, so it covers the whole target
+            // even when nothing draws this frame.
+            s.origin = [0, 0];
+            target
+        } else {
+            if b[2] <= b[0] || b[3] <= b[1] {
+                s.size = [0, 0];
+                return;
+            }
+            let pad = s.bloom.as_ref().map_or(0.0, |p| (3 << p.levels) as f32);
+            // Content past the target only matters through the bloom's reach.
+            let limit = [-pad, -pad, target[0] as f32 + pad, target[1] as f32 + pad];
+            let b = intersect([b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad], limit);
+            let (x0, y0) = (b[0].floor() as i32, b[1].floor() as i32);
+            s.origin = [x0, y0];
+            [
+                ((b[2].ceil() as i32 - x0).max(1) as u32).next_multiple_of(ALIGN),
+                ((b[3].ceil() as i32 - y0).max(1) as u32).next_multiple_of(ALIGN),
+            ]
+        };
         s.size = [w, h];
         if let Some(p) = &mut s.bloom {
             // Keep the smallest level at least 4 pixels.
@@ -875,7 +911,14 @@ impl Renderer {
             if w == 0 {
                 continue;
             }
-            let tex = self.acquire(w, h, format);
+            let tex = match &self.surfaces[si].trail {
+                Some(t) => {
+                    let (tex, fade) = self.acquire_trail(t.key, t.half_life, t.t, w, h, format);
+                    self.surfaces[si].trail.as_mut().unwrap().fade = fade;
+                    tex
+                }
+                None => self.acquire(w, h, format),
+            };
             self.surfaces[si].tex = Some(tex);
             if self.surfaces[si].bloom.is_none() {
                 continue;
@@ -925,11 +968,13 @@ impl Renderer {
     fn acquire(&mut self, w: u32, h: u32, format: wgpu::TextureFormat) -> usize {
         let (w, h) = (w.max(1), h.max(1));
         let frame = self.frame;
-        if let Some(i) = self
-            .pool
-            .iter()
-            .position(|p| !p.used && p.texture.width() == w && p.texture.height() == h && p.texture.format() == format)
-        {
+        if let Some(i) = self.pool.iter().position(|p| {
+            !p.used
+                && p.key.is_none()
+                && p.texture.width() == w
+                && p.texture.height() == h
+                && p.texture.format() == format
+        }) {
             (self.pool[i].used, self.pool[i].last_used) = (true, frame);
             return i;
         }
@@ -949,8 +994,36 @@ impl Renderer {
             layout: &self.composite_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
         });
-        self.pool.push(PoolTex { texture, view, bind, used: true, last_used: frame });
+        self.pool.push(PoolTex { texture, view, bind, used: true, last_used: frame, key: None, t: 0.0 });
         self.pool.len() - 1
+    }
+
+    /// The texture of trail `key`, and how much of last frame's pixels it keeps: `None` when
+    /// the trail starts fresh. A trail whose size or format changed lets its old texture go
+    /// back to the pool.
+    fn acquire_trail(
+        &mut self,
+        key: u64,
+        half_life: f32,
+        t: f64,
+        w: u32,
+        h: u32,
+        format: wgpu::TextureFormat,
+    ) -> (usize, Option<f32>) {
+        let frame = self.frame;
+        if let Some(i) = self.pool.iter().position(|p| p.key == Some(key)) {
+            let p = &mut self.pool[i];
+            if p.texture.width() == w && p.texture.height() == h && p.texture.format() == format {
+                let dt = t - p.t;
+                let fade = (0.0..=TRAIL_MAX_GAP).contains(&dt).then(|| 0.5f32.powf((dt / half_life as f64) as f32));
+                (p.used, p.last_used, p.t) = (true, frame, t);
+                return (i, fade);
+            }
+            p.key = None;
+        }
+        let i = self.acquire(w, h, format);
+        (self.pool[i].key, self.pool[i].t) = (Some(key), t);
+        (i, None)
     }
 
     fn ensure_fx(&mut self) {
@@ -1099,6 +1172,9 @@ impl Renderer {
                     needed.push(key);
                 }
             }
+            if s.trail.as_ref().is_some_and(|t| t.fade.is_some_and(|k| k < 1.0)) {
+                needed.push((format, Pipe::Fade, BlendMode::Normal));
+            }
             if s.bloom.is_some() {
                 needed.push((EFFECT_FORMAT, Pipe::Down, BlendMode::Normal));
                 needed.push((EFFECT_FORMAT, Pipe::Up, BlendMode::Normal));
@@ -1124,7 +1200,20 @@ impl Renderer {
                 Some(t) => &self.pool[t].view,
                 None => &target.view,
             };
-            let mut pass = begin(enc, view, if i == 0 { "vo-target" } else { "vo-layer" });
+            let fade = s.trail.as_ref().and_then(|t| t.fade);
+            let mut pass = match fade {
+                Some(k) => {
+                    let mut pass = begin_load(enc, view, "vo-trail");
+                    if k < 1.0 {
+                        pass.set_pipeline(self.cached_pipeline(format, Pipe::Fade, BlendMode::Normal));
+                        let k = k as f64;
+                        pass.set_blend_constant(wgpu::Color { r: k, g: k, b: k, a: k });
+                        pass.draw(0..3, 0..1);
+                    }
+                    pass
+                }
+                None => begin(enc, view, if i == 0 { "vo-target" } else { "vo-layer" }),
+            };
             self.run(&mut pass, s, format);
             drop(pass);
             if let Some(b) = &s.bloom {
@@ -1238,7 +1327,7 @@ impl Renderer {
                     pass.set_bind_group(0, &bind, &[]);
                     pass.draw(0..3, 0..1);
                 }
-                Pipe::Down | Pipe::Up | Pipe::Final => unreachable!("not a layer command"),
+                Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => unreachable!("not a layer command"),
             }
         }
     }
@@ -1298,7 +1387,7 @@ impl Renderer {
             Pipe::Shape => 0,
             Pipe::Glyph => 1,
             Pipe::Composite | Pipe::CompositeBloom => 2,
-            Pipe::Down | Pipe::Up | Pipe::Final => 3,
+            Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             Pipe::Dot => 4,
             Pipe::Vector => 5,
             Pipe::Glass => 7,
@@ -1316,6 +1405,7 @@ impl Renderer {
             Pipe::Composite => [Some(&self.composite_layout), Some(&self.layer_layout)],
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
+            Pipe::Fade => [None, None],
         };
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -1333,9 +1423,23 @@ impl Renderer {
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),
+            Pipe::Fade => ("vs_full", "fs_fade", vec![]),
         };
         let blend_state = match pipe {
             Pipe::Down | Pipe::Up | Pipe::Final => None,
+            // Keeps `constant` times what is there: the source is zero.
+            Pipe::Fade => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::Constant,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::Constant,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
             _ => Some(blend_state(blend)),
         };
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1417,11 +1521,25 @@ fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
 }
 
 fn begin<'e>(enc: &'e mut wgpu::CommandEncoder, view: &wgpu::TextureView, label: &str) -> wgpu::RenderPass<'e> {
+    begin_with(enc, view, label, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT))
+}
+
+/// A pass that keeps what the texture holds.
+fn begin_load<'e>(enc: &'e mut wgpu::CommandEncoder, view: &wgpu::TextureView, label: &str) -> wgpu::RenderPass<'e> {
+    begin_with(enc, view, label, wgpu::LoadOp::Load)
+}
+
+fn begin_with<'e>(
+    enc: &'e mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    label: &str,
+    load: wgpu::LoadOp<wgpu::Color>,
+) -> wgpu::RenderPass<'e> {
     let att = [Some(wgpu::RenderPassColorAttachment {
         view,
         depth_slice: None,
         resolve_target: None,
-        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+        ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
     })];
     enc.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),

@@ -82,6 +82,7 @@ pub(crate) enum Slot {
     BloomStrength = 40,
     BloomRadius = 41,
     Shutter = 42,
+    TrailHalfLife = 43,
 }
 
 impl Slot {
@@ -761,6 +762,20 @@ impl<M> Element<M> {
     /// speed comes from its position and offset springs. Text in it blurs as a whole.
     pub fn motion_blur(mut self, shutter: f32) -> Element<M> {
         self.set(Slot::Shutter as u8, shutter.max(0.0));
+        self.motion.push((Prop::MotionBlur, Motion::Snap));
+        self
+    }
+
+    /// A feedback trail on a layer (FX11): what the layer drew stays and fades to half every
+    /// `half_life` seconds, so moving content leaves a comet tail. Makes the layer offscreen
+    /// at the size of the surface. Seeking back or a gap over half a second starts it fresh.
+    pub fn trail(mut self, half_life: f32) -> Element<M> {
+        if let Kind::Layer { offscreen, .. } = &mut self.kind {
+            *offscreen = true;
+        } else {
+            debug_assert!(false, "trail on a node that is not a layer: {}", self.key);
+        }
+        self.set(Slot::TrailHalfLife as u8, half_life.max(1e-3));
         self.motion.push((Prop::MotionBlur, Motion::Snap));
         self
     }

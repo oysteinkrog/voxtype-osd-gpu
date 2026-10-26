@@ -18,7 +18,7 @@ use vo_core::spring::Spring;
 
 use crate::display::{
     BlendMode, Bloom, DisplayList, DotInstance, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint,
-    ShapeInstance, ShapeKind, NO_WORD,
+    ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
@@ -491,6 +491,21 @@ impl<M> Scene<M> {
         if moving {
             return Some(t);
         }
+        // A feedback trail fades on after its content stops, for 12 half lives: to 0.02%,
+        // under one 8-bit level even after sRGB encoding.
+        let last = self
+            .nodes
+            .values()
+            .flat_map(|n| n.chans.iter().map(|(_, c)| c.settled_at()).chain([n.since]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let fading = self.nodes.values().any(|n| {
+            n.alive(t)
+                && n.has(Slot::TrailHalfLife as u8)
+                && t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
+        });
+        if fading {
+            return Some(t);
+        }
         // Glass animates at its own capped rate (FX08), so it wakes at a time, not now.
         self.nodes
             .values()
@@ -888,6 +903,11 @@ impl<M> Scene<M> {
             clip,
             target,
             motion_blur: smear,
+            trail: n.has(Slot::TrailHalfLife as u8).then(|| Trail {
+                key: id.to_bits(),
+                half_life: n.value(Slot::TrailHalfLife as u8, t) as f32,
+                t,
+            }),
             items: 0..0,
         });
         let mut own = Vec::new();
