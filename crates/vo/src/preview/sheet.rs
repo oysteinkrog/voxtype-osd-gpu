@@ -4,16 +4,15 @@
 
 use std::path::{Path, PathBuf};
 
-use vo_render::offscreen::write_png;
-use vo_render::Offscreen;
-use vo_scene::display::DisplayList;
+use vo_render::offscreen::{write_png, FORMAT};
+use vo_render::{Offscreen, Target};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::geom::{Color, Size};
 use vo_scene::{taffy, FontRegistry, Scene};
 
-use super::Player;
+use super::composite::read_back;
+use super::source::Source;
 use crate::offline::{headless_gpu, OfflineError};
-use crate::App;
 
 #[derive(Clone, Debug)]
 pub struct SheetSpec {
@@ -49,16 +48,13 @@ pub struct Sheet {
     pub rgba: Vec<u8>,
 }
 
-/// Renders the sheet.
-pub fn render_sheet<A: App>(
-    player: &mut Player<A>,
-    spec: &SheetSpec,
-    label_font: Option<u32>,
-) -> Result<Sheet, OfflineError> {
+/// Renders the sheet, with the frame time under each thumbnail when a monospace font is found.
+pub(crate) fn render_sheet(source: &mut dyn Source, spec: &SheetSpec) -> Result<Sheet, OfflineError> {
     let (device, queue) = headless_gpu()?;
-    let fonts: FontRegistry = player.options().fonts.clone();
+    let fonts: FontRegistry = source.fonts();
+    let label_font = fonts.add_system("monospace").ok();
     let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
-    let size = player.scenario().size;
+    let size = source.size();
     let scale = spec.thumb_w as f32 / size.w;
     let (tw, th) = (spec.thumb_w, (size.h * scale).round().max(1.0) as u32);
     let times = sheet_times(spec);
@@ -66,10 +62,10 @@ pub fn render_sheet<A: App>(
     let rows = (times.len() as u32).div_ceil(cols);
     let (w, h) = (cols * tw + (cols + 1) * GAP, rows * (th + LABEL_H) + (rows + 1) * GAP);
     let mut rgba: Vec<u8> = BG.iter().copied().cycle().take((w * h * 4) as usize).collect();
-    let mut list = DisplayList::default();
+    let mut target = Target::new(&device, tw, th, FORMAT);
     for (i, t) in times.iter().enumerate() {
-        player.sample_into(*t, &mut list);
-        let thumb = off.render_to_rgba(&list, [tw, th], scale);
+        source.draw(*t, scale, &mut off.renderer, &mut target);
+        let thumb = read_back(&device, &queue, target.texture());
         let (ox, oy) = (GAP + (i as u32 % cols) * (tw + GAP), GAP + (i as u32 / cols) * (th + LABEL_H + GAP));
         over(&mut rgba, w, &thumb, tw, th, ox, oy);
     }

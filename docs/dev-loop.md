@@ -158,7 +158,10 @@ in a window: play, pause, step one frame, speed 0.25x to 2x, a loop range, jumps
 markers, and a track to scrub by dragging, with ticks for every event and marker. Overlays
 show node bounds, spring targets against current values with the moving channels listed, a
 frame time graph, and display list counts. An example opts in with a few lines at the top of
-`main` (see the `vo::preview` module docs; the title card and the toast do it).
+`main` (see the `vo::preview` module docs; the title card and the toast do it). A scene that
+is not an app yet, such as the 3D stack, uses `Preview::custom` with a function that draws
+frame `t` into a texture; it gets the window, scrubbing and contact sheets, not the overlays.
+`Preview::sheet` gives a contact sheet in a test (`crates/vo/tests/gpu_preview.rs`).
 
 | Step | Command |
 |---|---|

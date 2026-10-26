@@ -20,6 +20,7 @@
 //! - `control`: the socket that drives a running window.
 //! - `reload`: token files and watched paths.
 //! - `sheet`: contact sheets and golden checks.
+//! - `source`: what the stage shows, an app or a custom draw function (`Preview::custom`).
 
 mod chrome;
 mod composite;
@@ -27,6 +28,7 @@ pub mod control;
 mod player;
 pub mod reload;
 pub mod sheet;
+mod source;
 #[cfg(feature = "wayland")]
 mod window;
 
@@ -35,6 +37,10 @@ use std::time::Instant;
 
 pub use chrome::Overlay;
 pub use player::{Player, SeekStats};
+
+use source::{AppSource, CustomSource, Source};
+use vo_render::Target;
+use vo_scene::geom::Size;
 
 use crate::{App, Options, Scenario};
 
@@ -68,41 +74,67 @@ impl Default for State {
     }
 }
 
-/// An app, its scenario and how to start it, ready to preview.
-pub struct Preview<A: App> {
+/// A scene ready to preview: an app with its scenario, or a custom draw function.
+pub struct Preview {
     name: String,
-    player: Player<A>,
+    source: Box<dyn Source>,
     fps: f64,
     markers: Vec<(String, f64)>,
 }
 
-impl<A: App> Preview<A> {
+impl Preview {
     /// `make` builds the app in its starting state and `options` its fonts and tokens. Both
     /// run again whenever the preview replays from 0.
-    pub fn new(
+    pub fn new<A: App + 'static>(
         name: impl Into<String>,
         make: impl Fn() -> A + 'static,
         options: impl Fn() -> Options<A::Msg> + 'static,
         scenario: Scenario<A::Msg>,
-    ) -> Preview<A> {
-        Preview { name: name.into(), player: Player::new(make, options, scenario), fps: 60.0, markers: Vec::new() }
+    ) -> Preview {
+        let source = Box::new(AppSource::new(Player::new(make, options, scenario)));
+        Preview { name: name.into(), source, fps: 60.0, markers: Vec::new() }
+    }
+
+    /// A scene that is not an app: `make` runs once a GPU device exists and returns the
+    /// function that draws frame `t` into the target it is given (an `Rgba8UnormSrgb`
+    /// texture at the stage's size in pixels; `size` is the scene's logical size, which sets
+    /// the aspect). The function must give the same pixels for the same `t` in any order.
+    /// Overlays, tokens and the seek bench need an app and do nothing here.
+    pub fn custom<D: FnMut(f64, &Target) + 'static>(
+        name: impl Into<String>,
+        size: Size,
+        duration: f64,
+        make: impl Fn(&wgpu::Device, &wgpu::Queue) -> D + 'static,
+    ) -> Preview {
+        let make: source::MakeDraw = Box::new(move |d, q| Box::new(make(d, q)));
+        Preview {
+            name: name.into(),
+            source: Box::new(CustomSource::new(size, duration, make)),
+            fps: 60.0,
+            markers: Vec::new(),
+        }
     }
 
     /// The frame rate that steps and sheets snap to. 60 unless set.
-    pub fn fps(mut self, fps: f64) -> Preview<A> {
+    pub fn fps(mut self, fps: f64) -> Preview {
         self.fps = fps;
         self
     }
 
     /// A named point on the timeline, to jump to.
-    pub fn marker(mut self, name: impl Into<String>, t: f64) -> Preview<A> {
+    pub fn marker(mut self, name: impl Into<String>, t: f64) -> Preview {
         self.markers.push((name.into(), t));
         self.markers.sort_by(|a, b| a.1.total_cmp(&b.1));
         self
     }
 
+    /// A contact sheet of this scene, for golden tests (`sheet::check_golden` compares it).
+    pub fn sheet(&mut self, spec: &sheet::SheetSpec) -> Result<sheet::Sheet, crate::OfflineError> {
+        sheet::render_sheet(self.source.as_mut(), spec)
+    }
+
     /// Every marker of a timeline schedule.
-    pub fn markers_from(mut self, schedule: &vo_core::timeline::Schedule) -> Preview<A> {
+    pub fn markers_from(mut self, schedule: &vo_core::timeline::Schedule) -> Preview {
         for c in schedule.cues(0.0) {
             if c.edge == vo_core::timeline::Edge::Marker {
                 self = self.marker(c.name, c.t);
@@ -145,7 +177,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Runs the mode the command line asks for and returns the process exit code.
-pub fn main<A: App>(preview: Preview<A>) -> i32 {
+pub fn main(preview: Preview) -> i32 {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_default();
     let rest: Vec<String> = args.collect();
@@ -191,21 +223,21 @@ impl Args<'_> {
     }
 }
 
-fn load_tokens<A: App>(player: &mut Player<A>, path: Option<&PathBuf>) -> Result<(), String> {
+fn load_tokens(source: &mut dyn Source, path: Option<&PathBuf>) -> Result<(), String> {
     if let Some(p) = path {
         let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-        player.set_tokens(reload::parse_tokens(&text).map_err(|e| format!("{}: {e}", p.display()))?);
+        source.set_tokens(reload::parse_tokens(&text).map_err(|e| format!("{}: {e}", p.display()))?)?;
     }
     Ok(())
 }
 
 #[cfg(feature = "wayland")]
-fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, String> {
+fn run_window(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
     use vo_host::Host;
     let a = Args { rest };
     let path = |flag: &str, env: &str| a.value(flag).map(PathBuf::from).or_else(|| env_path(env));
     let tokens = path("--tokens", "VO_PREVIEW_TOKENS");
-    load_tokens(&mut preview.player, tokens.as_ref())?;
+    load_tokens(preview.source.as_mut(), tokens.as_ref())?;
     let mut state = State::default();
     let resumed = match path("--resume", "VO_PREVIEW_RESUME").map(std::fs::read_to_string) {
         Some(Ok(text)) => {
@@ -232,7 +264,7 @@ fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
             state.overlays.push(o);
         }
     }
-    state.t = state.t.clamp(0.0, preview.player.scenario().duration);
+    state.t = state.t.clamp(0.0, preview.source.duration());
     let shaders = path("--shaders", "VO_SHADER_DIR");
     if let Some(dir) = &shaders {
         // vo-render reads shader files from here (`vo_render::hot`). Set before any thread starts.
@@ -248,7 +280,7 @@ fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
         shaders,
         app_id: format!("vo-preview-{}", preview.name),
     };
-    let mut win = window::Window::new(preview.player, setup);
+    let mut win = window::Window::new(preview.source, setup);
     let host = vo_host_wayland::WaylandHost::connect().map_err(|e| e.to_string())?;
     let result = host.run(&mut win);
     match win.error.take().map(Err).unwrap_or(result) {
@@ -258,15 +290,15 @@ fn run_window<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
 }
 
 #[cfg(not(feature = "wayland"))]
-fn run_window<A: App>(_: Preview<A>, _: &[String]) -> Result<i32, String> {
+fn run_window(_: Preview, _: &[String]) -> Result<i32, String> {
     Err("the preview window needs the `wayland` feature".into())
 }
 
-fn run_sheet<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, String> {
+fn run_sheet(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
     let a = Args { rest };
     let out = PathBuf::from(rest.first().filter(|s| !s.starts_with("--")).ok_or("--sheet needs an output path")?);
-    load_tokens(&mut preview.player, a.value("--tokens").map(PathBuf::from).as_ref())?;
-    let duration = preview.player.scenario().duration;
+    load_tokens(preview.source.as_mut(), a.value("--tokens").map(PathBuf::from).as_ref())?;
+    let duration = preview.source.duration();
     let spec = sheet::SheetSpec {
         from: a.num("--from")?.unwrap_or(0.0),
         to: a.num("--to")?.unwrap_or(duration),
@@ -275,9 +307,8 @@ fn run_sheet<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, St
         thumb_w: a.num("--thumb")?.unwrap_or(400.0) as u32,
         fps: preview.fps,
     };
-    let font = preview.player.options().fonts.add_system("monospace").ok();
     let started = Instant::now();
-    let sheet = sheet::render_sheet(&mut preview.player, &spec, font).map_err(|e| e.to_string())?;
+    let sheet = sheet::render_sheet(preview.source.as_mut(), &spec).map_err(|e| e.to_string())?;
     sheet::write_sheet(&sheet, &out).map_err(|e| format!("{}: {e}", out.display()))?;
     println!(
         "vo-preview: sheet {} ({}x{}, {} frames from {:.3} to {:.3} s) in {:.2} s",
@@ -303,17 +334,19 @@ fn run_sheet<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, St
     Ok(0)
 }
 
-fn bench_seek<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, String> {
+fn bench_seek(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
     let n = rest.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(500);
-    let p = &mut preview.player;
+    let p = preview.source.as_mut();
+    if p.seek_stats().is_none() {
+        return Err("--bench-seek needs an app; a custom scene draws straight from t".into());
+    }
     let fps = preview.fps;
-    let duration = p.scenario().duration;
+    let duration = p.duration();
     let frames = (duration * fps).round() as u64;
-    let mut list = vo_scene::DisplayList::default();
-    let mut timed = |p: &mut Player<A>, t: f64| {
+    let timed = |p: &mut dyn Source, t: f64| {
         let started = Instant::now();
-        p.sample_into(t, &mut list);
-        (started.elapsed().as_secs_f64() * 1e3, p.stats().replayed)
+        p.seek(t);
+        (started.elapsed().as_secs_f64() * 1e3, p.seek_stats().is_some_and(|s| s.replayed))
     };
     let pct = |v: &mut Vec<f64>, q: f64| {
         v.sort_by(f64::total_cmp);
@@ -332,7 +365,7 @@ fn bench_seek<A: App>(mut preview: Preview<A>, rest: &[String]) -> Result<i32, S
             pct(&mut ms, 1.0)
         );
     };
-    let events = p.event_times(duration).len();
+    let events = p.event_times().len();
     println!("vo-preview: {duration} s at {fps} fps ({frames} frames), {events} events");
     let forward: Vec<_> = (0..=frames).map(|i| timed(p, i as f64 / fps)).collect();
     report("play forward, one frame at a time", forward);

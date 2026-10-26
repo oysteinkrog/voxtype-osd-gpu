@@ -1,7 +1,7 @@
 //! The preview window: a normal resizable window (`SurfaceKind::Window`) with the stage, the
 //! timeline bar and the debug overlays. It is a `HostApp` of its own; the app under preview
-//! never sees the host. Its scene comes from a [`Player`], so any time can be shown in any
-//! order.
+//! never sees the host. Its stage comes from a [`Source`]: an app through a `Player`, so any
+//! time can be shown in any order, or a custom draw function.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -15,16 +15,16 @@ use vo_host::{
 use vo_render::offscreen::{write_png, FORMAT};
 use vo_render::{Renderer, Target};
 use vo_scene::display::DisplayList;
-use vo_scene::geom::{Point, Rect};
+use vo_scene::geom::Rect;
 use vo_scene::input::Button;
 use vo_scene::{FontRegistry, Motion, Scene};
 
-use super::chrome::{self, ChromeIn, NodeBox, Overlay, UiMsg, BAR_H, STAGE_MARGIN};
+use super::chrome::{self, ChromeIn, Overlay, UiMsg, BAR_H, STAGE_MARGIN};
 use super::composite::{read_back, Compositor, PxRect};
 use super::control::{self, Cmd, Request};
 use super::reload::{parse_tokens, Watch};
-use super::{Player, State};
-use crate::App;
+use super::source::{OverlayAsk, Source};
+use super::State;
 
 /// Frames kept for the frame time graph.
 const GRAPH_FRAMES: usize = 120;
@@ -42,8 +42,8 @@ pub(crate) struct Setup {
     pub app_id: String,
 }
 
-pub(crate) struct Window<A: App> {
-    p: Player<A>,
+pub(crate) struct Window {
+    p: Box<dyn Source>,
     setup: Setup,
     st: State,
     duration: f64,
@@ -65,7 +65,6 @@ pub(crate) struct Window<A: App> {
     last_frame_t: Option<f64>,
     drag: bool,
     graph: VecDeque<(f32, f32)>,
-    stage_list: DisplayList,
     ui_list: DisplayList,
     status: String,
     control: Option<mpsc::Receiver<Request>>,
@@ -75,13 +74,13 @@ pub(crate) struct Window<A: App> {
     pub(crate) error: Option<HostError>,
 }
 
-impl<A: App> Window<A> {
-    pub(crate) fn new(p: Player<A>, setup: Setup) -> Window<A> {
-        let fonts = p.options().fonts.clone();
+impl Window {
+    pub(crate) fn new(p: Box<dyn Source>, setup: Setup) -> Window {
+        let fonts = p.fonts();
         let font = add_font(&fonts, "Noto Sans:medium");
         let mono = add_font(&fonts, "monospace");
-        let duration = p.scenario().duration;
-        let events = p.event_times(duration);
+        let duration = p.duration();
+        let events = p.event_times();
         let st = setup.state.clone();
         let mut tokens_watch = Watch::default();
         if let Some(t) = &setup.tokens {
@@ -117,7 +116,6 @@ impl<A: App> Window<A> {
             last_frame_t: None,
             drag: false,
             graph: VecDeque::new(),
-            stage_list: DisplayList::default(),
             ui_list: DisplayList::default(),
             status: String::new(),
             control: None,
@@ -303,12 +301,14 @@ impl<A: App> Window<A> {
         let Some(path) = self.setup.tokens.clone() else { return };
         let started = Instant::now();
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| parse_tokens(&s)) {
-            Ok(tokens) => {
-                self.p.set_tokens(tokens);
-                self.p.seek(self.st.t);
-                self.events = self.p.event_times(self.duration);
-                self.status = format!("tokens reloaded, replayed to {:.3} s in {:.1} ms", self.st.t, ms(started));
-            }
+            Ok(tokens) => match self.p.set_tokens(tokens) {
+                Ok(()) => {
+                    self.p.seek(self.st.t);
+                    self.events = self.p.event_times();
+                    self.status = format!("tokens reloaded, replayed to {:.3} s in {:.1} ms", self.st.t, ms(started));
+                }
+                Err(e) => self.status = format!("tokens: {e}"),
+            },
             Err(e) => self.status = format!("tokens: {e}"),
         }
         eprintln!("vo-preview: {}", self.status);
@@ -334,7 +334,7 @@ impl<A: App> Window<A> {
 
     /// The stage's scale and its rect in window units.
     fn stage_geometry(&self) -> (f32, Rect) {
-        let sc = &self.p.scenario().size;
+        let sc = self.p.size();
         let area_w = (self.size.w - 2.0 * STAGE_MARGIN).max(1.0);
         let area_h = (self.size.h - BAR_H - 2.0 * STAGE_MARGIN).max(1.0);
         let fit = if self.st.one_to_one { 1.0 } else { (area_w / sc.w).min(area_h / sc.h).min(2.0) };
@@ -346,76 +346,8 @@ impl<A: App> Window<A> {
         (fit, Rect::new((x * s).round() / s, (y * s).round() / s, w, h))
     }
 
-    fn node_boxes(&self, fit: f32, stage: Rect, t: f64) -> (Vec<NodeBox>, Vec<String>) {
-        let scene = self.p.scene();
-        let springs_on = self.st.overlays.contains(&Overlay::Springs);
-        let map = |m: vo_scene::geom::Affine, w: f32, h: f32| {
-            let pts =
-                [Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(0.0, h), Point::new(w, h)].map(|p| m.apply(p));
-            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for p in pts {
-                x0 = x0.min(p.x);
-                y0 = y0.min(p.y);
-                x1 = x1.max(p.x);
-                y1 = y1.max(p.y);
-            }
-            Rect::new(stage.x + x0 * fit, stage.y + y0 * fit, (x1 - x0) * fit, (y1 - y0) * fit)
-        };
-        let mut boxes = Vec::new();
-        let mut lines = Vec::new();
-        let mut more = 0;
-        for id in scene.node_ids() {
-            let Some(s) = scene.sampled(id, t) else { continue };
-            let states = scene.channel_states(id, t);
-            let moving: Vec<_> = states.iter().filter(|c| c.settles_at > t).collect();
-            let target = (springs_on && !moving.is_empty())
-                .then(|| scene.target_box(id, t))
-                .flatten()
-                .map(|(m, size)| map(m, size.w, size.h));
-            boxes.push(NodeBox { rect: map(s.transform, s.size.w, s.size.h), target, depth: scene.depth(id) });
-            if springs_on {
-                // Channels still inside their settle threshold but visibly at rest add noise.
-                for c in moving.into_iter().filter(|c| (c.value - c.target).abs() > 1e-3) {
-                    if lines.len() < 16 {
-                        lines.push(format!(
-                            "{} {} {:.2} -> {:.2}  {:.2} s",
-                            scene.path(id),
-                            c.name,
-                            c.value,
-                            c.target,
-                            c.settles_at - t
-                        ));
-                    } else {
-                        more += 1;
-                    }
-                }
-            }
-        }
-        if more > 0 {
-            lines.push(format!("and {more} more moving channels"));
-        }
-        (boxes, lines)
-    }
-
     fn stats(&self, stage_px: [u32; 2], fit: f32) -> Vec<String> {
-        let mut out = Vec::new();
-        // Count every arena through serde, so arenas added later show up without a change here.
-        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&self.stage_list) {
-            let counts: Vec<String> =
-                map.iter().filter_map(|(k, v)| v.as_array().map(|a| format!("{k} {}", a.len()))).collect();
-            for chunk in counts.chunks(4) {
-                out.push(chunk.join("  "));
-            }
-        }
-        let s = self.p.stats();
-        out.push(format!(
-            "nodes {}  seek {:.2} ms  events {}  {}replays {}",
-            self.p.scene().len(),
-            s.secs * 1e3,
-            s.events,
-            if s.replayed { "replayed  " } else { "" },
-            s.replays
-        ));
+        let mut out = self.p.stats();
         out.push(format!("stage {}x{} px at {:.3}", stage_px[0], stage_px[1], fit * self.scale));
         out
     }
@@ -441,13 +373,14 @@ impl<A: App> Window<A> {
             }
         }
         let t = self.st.t;
-        self.p.sample_into(t, &mut self.stage_list);
+        // The overlays read the scene at `t`, before the stage is drawn.
+        self.p.seek(t);
 
         let (fit, stage) = self.stage_geometry();
         let s = frame.scale;
         let stage_px = [((stage.w * s).round() as u32).max(1), ((stage.h * s).round() as u32).max(1)];
         let (boxes, springs) = if self.st.overlays.iter().any(|o| matches!(o, Overlay::Bounds | Overlay::Springs)) {
-            self.node_boxes(fit, stage, t)
+            self.p.overlays(t, &OverlayAsk { springs: self.st.overlays.contains(&Overlay::Springs), fit, stage })
         } else {
             (Vec::new(), Vec::new())
         };
@@ -493,7 +426,7 @@ impl<A: App> Window<A> {
         }
         let stage_tex = self.stage_tex.as_mut().unwrap();
         let chrome_tex = self.chrome_tex.as_mut().unwrap();
-        r.render_at(&self.stage_list, fit * s, stage_tex);
+        self.p.draw(t, fit * s, r, stage_tex);
         r.render_at(&self.ui_list, s, chrome_tex);
         let rect = PxRect { x: stage.x * s, y: stage.y * s, w: stage_px[0] as f32, h: stage_px[1] as f32 };
         let comp = self.comp.as_mut().ok_or("no compositor")?;
@@ -534,7 +467,7 @@ fn add_font(fonts: &FontRegistry, family: &str) -> u32 {
     })
 }
 
-impl<A: App> HostApp for Window<A> {
+impl HostApp for Window {
     fn start(&mut self, host: &mut dyn HostCtl) {
         let spec = OverlaySpec {
             size: self.size,
