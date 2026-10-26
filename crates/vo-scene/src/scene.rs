@@ -87,6 +87,8 @@ pub(crate) struct Node<M> {
     pub has_layout: bool,
     /// Live text: each word's own motion, sorted by word id.
     pub words: Vec<WordAnim>,
+    /// The motion of a property no `.motion()` call names: the scene's default.
+    pub default_motion: Motion,
 }
 
 /// One live-text word's motion: opacity and an offset from its laid-out place.
@@ -118,7 +120,7 @@ impl<M> Node<M> {
 
     fn motion_for(&self, slot: u8) -> Motion {
         let prop = Slot::prop(slot);
-        self.motion.iter().find(|(p, _)| *p == prop).map_or(DEFAULT_MOTION, |(_, m)| *m)
+        self.motion.iter().find(|(p, _)| *p == prop).map_or(self.default_motion, |(_, m)| *m)
     }
 
     fn new_channel(&self, slot: u8, t: f64, value: f64, retention: f64) -> Channel {
@@ -186,10 +188,11 @@ impl<M> Node<M> {
             self.words.clear();
             return had;
         };
-        let spring = |prop: Prop| match self.motion.iter().find(|(p, _)| *p == prop).map_or(DEFAULT_MOTION, |m| m.1) {
-            Motion::Spring(s) => s,
-            Motion::Snap => Spring::SNAP,
-        };
+        let spring =
+            |prop: Prop| match self.motion.iter().find(|(p, _)| *p == prop).map_or(self.default_motion, |m| m.1) {
+                Motion::Spring(s) => s,
+                Motion::Snap => Spring::SNAP,
+            };
         let (fade, slide) = (spring(Prop::Opacity), spring(Prop::Offset));
         let chan = |v: f64, s: Spring, rest: Rest| Channel::new(t, v, s).with_rest(rest).with_retention(retention);
         let from = |tr: &Transition| {
@@ -281,6 +284,7 @@ pub struct Scene<M = ()> {
     scale: f32,
     text: Box<dyn TextLayout>,
     retention: f64,
+    default_motion: Motion,
     layout_dirty: bool,
     /// Something drawn or hit-tested changed during the current `apply`.
     changed: bool,
@@ -305,6 +309,7 @@ impl<M> Scene<M> {
             scale: 1.0,
             text: Box::new(EstimateText::default()),
             retention: f64::INFINITY,
+            default_motion: DEFAULT_MOTION,
             layout_dirty: false,
             changed: false,
             pointer: PointerState::default(),
@@ -314,6 +319,13 @@ impl<M> Scene<M> {
     /// Replaces the text measurer. Takes effect at the next layout.
     pub fn with_text(mut self, text: Box<dyn TextLayout>) -> Scene<M> {
         self.text = text;
+        self
+    }
+
+    /// How properties move that no `.motion()` call names. `DEFAULT_MOTION` (a soft spring)
+    /// unless set; `Motion::Snap` makes every unnamed change jump, as in a plain toolkit.
+    pub fn with_default_motion(mut self, motion: Motion) -> Scene<M> {
+        self.default_motion = motion;
         self
     }
 
@@ -517,6 +529,7 @@ impl<M> Scene<M> {
             shaped: ShapedText::default(),
             has_layout: false,
             words: Vec::new(),
+            default_motion: self.default_motion,
         };
         node.sync_words(t, self.retention);
         let enter = presence.map_or(Transition::NONE, |(enter, _)| enter);

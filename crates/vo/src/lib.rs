@@ -47,6 +47,8 @@ pub struct Options<M> {
     /// Live only: draw the first frames on the CPU while the GPU device is made, when the
     /// host can (`HostCaps::cpu_first_frame`). Off by default.
     pub cpu_first_frame: bool,
+    /// How properties move that no `.motion()` call names (`Scene::with_default_motion`).
+    pub default_motion: vo_scene::Motion,
 }
 
 impl<M> Default for Options<M> {
@@ -58,6 +60,7 @@ impl<M> Default for Options<M> {
             inbox: None,
             diagnostics: None,
             cpu_first_frame: false,
+            default_motion: vo_scene::element::DEFAULT_MOTION,
         }
     }
 }
@@ -65,7 +68,7 @@ impl<M> Default for Options<M> {
 impl<M> Options<M> {
     /// The scene with the text layout these options ask for.
     pub(crate) fn scene(&mut self) -> vo_scene::Scene<M> {
-        let scene = vo_scene::Scene::new();
+        let scene = vo_scene::Scene::new().with_default_motion(self.default_motion);
         match self.text.take() {
             Some(text) => scene.with_text(text),
             None if !self.fonts.is_empty() => scene.with_text(Box::new(ShapedLayout::new(self.fonts.clone()))),

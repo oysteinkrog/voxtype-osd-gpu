@@ -260,6 +260,21 @@ fn layout_change_retargets_springs_instead_of_jumping() {
 }
 
 #[test]
+fn a_snap_default_motion_makes_layout_changes_jump() {
+    let bar = |key: &'static str, h: f32| Element::<Msg>::panel(key).height(h).fill(Color::WHITE);
+    let col = |bars: Vec<El>| Element::column("root").width(100.0).gap(5.0).children(bars);
+    let mut scene = Scene::new().with_default_motion(Motion::Snap);
+    scene.apply(col(vec![bar("a", 20.0), bar("b", 20.0)]), 0.0);
+    let b = scene.find(&["root", "b"]).unwrap();
+    scene.apply(col(vec![bar("a", 20.0), bar("new", 30.0), bar("b", 20.0)]), 1.0);
+    assert_eq!(scene.sampled(b, 1.0).unwrap().transform.f, 60.0);
+    assert_eq!(scene.next_wake(1.0), None);
+    // A motion the element names still springs.
+    scene.apply(col(vec![bar("a", 20.0), bar("b", 20.0).motion(Prop::Position, Spring::SOFT)]), 2.0);
+    assert!(scene.next_wake(2.0).is_some());
+}
+
+#[test]
 fn label_is_a_measure_leaf_and_wraps() {
     let mut scene = Scene::<Msg>::new();
     let view = |w: f32| Element::row("root").width(w).child(Element::label("l", "hello there world"));
