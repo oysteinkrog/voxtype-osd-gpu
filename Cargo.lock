@@ -946,6 +946,7 @@ dependencies = [
  "skrifa",
  "tiny-skia",
  "unicode-linebreak",
+ "vo-core",
  "vo-scene",
  "wgpu",
  "zeno",
