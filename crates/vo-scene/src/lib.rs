@@ -21,6 +21,9 @@ pub mod scene;
 pub mod text;
 pub mod timed;
 
+/// The layout engine, for `Element::layout` and the alignment types the builder takes.
+pub use taffy;
+
 pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};

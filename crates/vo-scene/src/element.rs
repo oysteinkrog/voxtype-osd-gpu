@@ -443,6 +443,20 @@ impl<M> Element<M> {
         self
     }
 
+    /// Padding per edge: top, right, bottom, left.
+    pub fn pad_edges(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Element<M> {
+        let l = LengthPercentage::length;
+        self.style.padding = taffy::Rect { left: l(left), right: l(right), top: l(top), bottom: l(bottom) };
+        self
+    }
+
+    /// Margin per edge: top, right, bottom, left.
+    pub fn margin_edges(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Element<M> {
+        self.style.margin =
+            taffy::Rect { left: length(left), right: length(right), top: length(top), bottom: length(bottom) };
+        self
+    }
+
     pub fn margin(mut self, m: f32) -> Element<M> {
         let m = length(m);
         self.style.margin = taffy::Rect { left: m, right: m, top: m, bottom: m };
