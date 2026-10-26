@@ -423,6 +423,7 @@ fn main() {
     let info = adapter.get_info();
     println!("adapter {} ({:?}, driver {})", info.name, info.backend, info.driver_info);
     let gpu = Gpu { device, queue };
+    #[allow(clippy::disallowed_methods, reason = "benchmark timing, not motion")]
     let t = Instant::now();
     let _ = SlugRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba16Float);
     println!("pipeline create {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
@@ -433,6 +434,7 @@ fn main() {
     let mut gids: Vec<GlyphId> = TEXTS.iter().flat_map(|t| t.chars()).filter_map(|c| cmap.map(c)).collect();
     gids.sort();
     gids.dedup();
+    #[allow(clippy::disallowed_methods, reason = "benchmark timing, not motion")]
     let t = Instant::now();
     let mut bytes = 0;
     for &g in &gids {

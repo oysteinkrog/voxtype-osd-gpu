@@ -1,0 +1,6 @@
+# Time is an input (docs/FRAMEWORK-PLAN.md decision 3): only the host reads a clock.
+# Benchmarks that time themselves allow this lint at the call, with a reason.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "vo-render gets time passed in; only the host reads the clock" },
+    { path = "std::time::SystemTime::now", reason = "vo-render gets time passed in; only the host reads the clock" },
+]

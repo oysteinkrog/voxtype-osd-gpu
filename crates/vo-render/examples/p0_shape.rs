@@ -81,6 +81,7 @@ fn fit_balanced(segs: &[Seg], max_w: f32) -> (Vec<usize>, f32) {
     (fit_greedy(segs, hi), hi)
 }
 
+#[allow(clippy::disallowed_methods, reason = "cold-start benchmark: every clock read here times a step")]
 fn once() {
     let t0 = Instant::now();
     let mut t = Vec::new();
