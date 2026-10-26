@@ -188,8 +188,11 @@ pub fn check(img: &Image, tol: Tolerance) -> Result<(), String> {
     Ok(())
 }
 
-/// Rows of the contact sheet, one per checked image: golden, actual, diff.
-static SHEET: Mutex<Vec<(u32, u32, Vec<[u8; 3]>)>> = Mutex::new(Vec::new());
+/// One contact sheet row: width, height, RGB pixels (golden, actual, diff).
+type SheetRow = (u32, u32, Vec<[u8; 3]>);
+
+/// Rows of the contact sheet, one per checked image.
+static SHEET: Mutex<Vec<SheetRow>> = Mutex::new(Vec::new());
 
 fn sheet_add(img: &Image, golden: Option<&[u8]>) {
     let (w, h) = (img.w, img.h);
