@@ -187,20 +187,32 @@ fn render(font: &FontRef, hb: &harfrust::ShaperFont, text: &str, px: f32, mode: 
     Ink { w, h, v: mask.iter().map(|&m| m as f32 / 255.0).collect() }.crop()
 }
 
-/// Mean and max absolute difference over the union of both ink boxes, with
-/// both images aligned at their top-left ink corner.
+/// Mean and max absolute difference over the union of both ink boxes, at the
+/// whole-line shift within 2 px that gives the lowest mean. Glyph position
+/// drift along the line stays in the number.
 fn diff(a: &Ink, b: &Ink) -> (f32, f32) {
-    let (w, h) = (a.w.max(b.w), a.h.max(b.h));
-    let at = |i: &Ink, x: usize, y: usize| if x < i.w && y < i.h { i.v[y * i.w + x] } else { 0.0 };
-    let (mut sum, mut max) = (0.0f32, 0.0f32);
-    for y in 0..h {
-        for x in 0..w {
-            let d = (at(a, x, y) - at(b, x, y)).abs();
-            sum += d;
-            max = max.max(d);
+    let at = |i: &Ink, x: i32, y: i32| {
+        if x >= 0 && y >= 0 && (x as usize) < i.w && (y as usize) < i.h { i.v[y as usize * i.w + x as usize] } else { 0.0 }
+    };
+    let (w, h) = (a.w.max(b.w) as i32 + 2, a.h.max(b.h) as i32 + 2);
+    let mut best = (f32::MAX, 0.0f32);
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let (mut sum, mut max) = (0.0f32, 0.0f32);
+            for y in -2..h {
+                for x in -2..w {
+                    let d = (at(a, x, y) - at(b, x + dx, y + dy)).abs();
+                    sum += d;
+                    max = max.max(d);
+                }
+            }
+            let mean = sum / ((w + 2) * (h + 2)) as f32;
+            if mean < best.0 {
+                best = (mean, max);
+            }
         }
     }
-    (sum / (w * h) as f32, max)
+    best
 }
 
 fn main() {
