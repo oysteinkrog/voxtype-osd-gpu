@@ -53,6 +53,21 @@ budget:
     {{hb}} cargo build --release -p vo --example toast -p vo-host-wayland --example fake_click
     scripts/budget.sh
 
+# Preview and scrub an example in a window, replayed to the same time after Rust edits (agents: nested KWin only).
+preview example *args:
+    {{hb}} cargo build -p vo --bin vo-preview --features preview
+    VO_PREVIEW_BUILD="{{hb}} cargo" target/debug/vo-preview run {{example}} {{args}}
+
+# Contact sheet of an example: `just sheet title_card out.png --frames 12 [--check golden.png]`.
+sheet example out *args:
+    {{hb}} cargo build --release -p vo --example {{example}}
+    target/release/examples/{{example}} --sheet {{out}} {{args}}
+
+# Seek timings of an example: forward play, backwards scrub, random frames.
+preview-bench example:
+    {{hb}} cargo build --release -p vo --example {{example}}
+    target/release/examples/{{example}} --bench-seek
+
 # Format the workspace.
 fmt:
     cargo fmt --all

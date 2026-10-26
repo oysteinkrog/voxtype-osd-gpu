@@ -17,6 +17,7 @@ call goes through `heavy-build`, so a step may wait in its queue when memory is 
 | Budget gate: heap, cold first frame, idle frames | `just budget` | 12 s (3 live runs in a nested KWin) |
 | Format | `just fmt` | |
 | All of the above | `just all` | |
+| Preview a scene, scrub, reload | `just preview title_card` | 0.25 s to a window; see below |
 | voxtype fork: type-check the GTK overlay | `just osd-check` | 0.5 s (bin edit), 1.8 s (lib edit) |
 | voxtype fork: build the GTK overlay | `just osd-build` | 1.2 s (bin edit), 11.6 s (lib edit) |
 | voxtype fork: overlay unit tests | `just osd-test` | 12.6 s (lib edit) |
@@ -138,13 +139,60 @@ it that way:
 
 ## Shader iteration
 
-The WGSL files in `crates/vo-render/src/text/wgsl/` are pulled in with `include_str!`.
-After an edit, `just shaders` rebuilds the vo-render test binary and runs the naga
-parse and validate tests in about 0.4 s. `just test-gpu` then shows the result on the
-contact sheet. There is no shader hot reload yet: the phase 0 examples render once and
-exit, so there is nothing to reload into. When a windowed example exists, reading the
-shader files from disk at run time behind an environment variable would be the cheap
-way to add it.
+The WGSL files in `crates/vo-render/src/wgsl/` and `crates/vo-render/src/text/wgsl/` are
+pulled in with `include_str!`. After an edit, `just shaders` rebuilds the vo-render test
+binary and runs the naga parse and validate tests in about 0.4 s. `just test-gpu` then shows
+the result on the contact sheet.
+
+For live reload, open a scene in the preview tool with `--shaders crates/vo-render/src/wgsl`
+(below). With `VO_SHADER_DIR` set, `vo_render::hot::wgsl` reads the shape, glyph, composite,
+dot, bloom and vector shaders from that folder, and `Renderer::reload_shaders` builds them
+again inside a validation error scope: a broken shader prints the naga error and the old
+pipelines stay. The Slug glyph shader in `text/wgsl/` and the particle shaders do not go
+through `hot` yet. Reloading the shape shader took 3 ms.
+
+## Preview and scrub tool
+
+`vo::preview` (feature `preview`, on for every vo example) opens any `App` with a `Scenario`
+in a window: play, pause, step one frame, speed 0.25x to 2x, a loop range, jumps to named
+markers, and a track to scrub by dragging, with ticks for every event and marker. Overlays
+show node bounds, spring targets against current values with the moving channels listed, a
+frame time graph, and display list counts. An example opts in with a few lines at the top of
+`main` (see the `vo::preview` module docs; the title card and the toast do it).
+
+| Step | Command |
+|---|---|
+| Open a scene, rebuild and replay on Rust edits | `just preview title_card -- --at 2.5 --overlay springs` |
+| The same, without the launcher | `cargo run -p vo --example title_card -- --preview` |
+| Token reload | add `--tokens crates/vo/examples/title_card.toml` |
+| Shader reload | add `--shaders crates/vo-render/src/wgsl` |
+| Contact sheet | `just sheet title_card /var/tmp/claude/sheet.png --frames 12` |
+| Golden check of a sheet | add `--check golden.png` (exit 1 when more than 0.05 % of pixels differ by more than 2 levels) |
+| Seek timings | `just preview-bench title_card` |
+| Drive a running window | `target/debug/vo-preview ctl seek 2.5`, `play`, `step -1`, `marker out`, `loop 1 3`, `overlay bounds on`, `shot out.png`, `state`, `quit` |
+
+Run the window only inside a nested `kwin_wayland --virtual` when an agent starts it.
+
+**Seek.** Nodes that finish leaving are dropped, so the scene cannot be sampled before its
+last event. `Player` keeps one driver: a forward seek applies the events up to the new time
+as export does; a seek back that crosses no event samples as it is, because channels keep
+their history; a seek back across an event replays the scenario from 0. A test compares
+every frame of a backwards and a random scrub with a forward run. Measured on the 10 s title
+card (41 events) in release: worst seek 0.77 ms, a full replay from 0 about 0.3 ms; in a
+debug build up to 3.5 ms. Periodic snapshots are not built, because at this cost they would
+not help, and they need `Clone` on the app and the scene.
+
+**Reload.** A token file change replays from 0 with the new tokens to the same time (5 to
+7 ms on the title card). A Rust change goes through the `vo-preview` launcher: it rebuilds
+the example, asks the window for its state over the control socket, closes it and starts the
+new build at the same time, play state, loop, overlays and window size. It watches only what
+the example can depend on. Measured: the window is up 0.25 s after start; edit to window
+1.5 s when cargo needs 1.0 s. In this shared checkout heavy-build often queues the build
+behind other lanes, which added 5 to 35 s.
+
+**Drawing.** The window draws the stage and its own chrome into two textures with the normal
+renderer and composites them, so it never merges display lists. The stage is drawn at its
+fit scale (at most 2x, or 1:1) and copied pixel for pixel over a checkerboard.
 
 ## Budget gate
 
