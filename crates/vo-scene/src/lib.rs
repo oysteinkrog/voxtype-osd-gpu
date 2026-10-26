@@ -17,6 +17,7 @@
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
+pub mod canvas;
 pub mod display;
 pub mod dots;
 pub mod element;
@@ -28,7 +29,6 @@ pub mod input;
 pub mod inspect;
 mod layout;
 pub mod path;
-pub mod canvas;
 pub mod scene;
 pub mod text;
 pub mod timed;

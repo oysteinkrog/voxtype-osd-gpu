@@ -56,8 +56,9 @@ fn options() -> Options<Msg> {
 pub fn offline(look: Look, secs: f64, dir: &Path) {
     let (_, size, _) = layout(&load_fonts(), &look);
     let scenario = Scenario { size, scale: 1.0, duration: secs, inputs: Vec::new() };
-    let n = vo::render_offline_with(GlassApp { look, secs, shown: true, still: false }, &scenario, 30.0, dir, options())
-        .expect("offline render");
+    let n =
+        vo::render_offline_with(GlassApp { look, secs, shown: true, still: false }, &scenario, 30.0, dir, options())
+            .expect("offline render");
     println!("glass_demo app: wrote {n} frames to {}", dir.display());
 }
 

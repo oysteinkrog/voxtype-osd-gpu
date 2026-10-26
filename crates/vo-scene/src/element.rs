@@ -18,12 +18,12 @@ use vo_core::spring::Spring;
 use vo_core::words::Word;
 
 use crate::canvas::{CanvasDraw, Painter};
-use crate::path::{Morph, Outline, StrokeStyle};
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
+use crate::path::{Morph, Outline, StrokeStyle};
 use crate::timed::{Progress, Wave};
 
 /// A node's key among its siblings.
@@ -347,7 +347,10 @@ pub(crate) enum Kind {
     Emitter(Emitter),
     /// A filled path from `FontRegistry::add_path`: `view` (path units) fits the box,
     /// centred, keeping its aspect.
-    Path { id: u32, view: Rect },
+    Path {
+        id: u32,
+        view: Rect,
+    },
     /// App drawing code run from the frame time (`crate::canvas`).
     Canvas(CanvasDraw),
     /// A stroked outline fitted to the box, trimmed by the trim channels.
@@ -392,7 +395,10 @@ pub struct MorphArt {
 
 impl PartialEq for MorphArt {
     fn eq(&self, o: &MorphArt) -> bool {
-        std::sync::Arc::ptr_eq(&self.morph, &o.morph) && self.view == o.view && self.style == o.style && self.filled == o.filled
+        std::sync::Arc::ptr_eq(&self.morph, &o.morph)
+            && self.view == o.view
+            && self.style == o.style
+            && self.filled == o.filled
     }
 }
 
@@ -545,13 +551,16 @@ impl<M> Element<M> {
         Element::new(key, Kind::Canvas(draw), taffy::Style::default())
     }
 
-    /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
-    pub fn dots(key: impl Into<Key>, dots: Dots) -> Element<M> {
     /// A stroked outline fitted to the box (`view` is its own box). Its trim is two animated
     /// fractions, 0 to 1 by default: `.trim(start, end)` moves them on the `Prop::Trim`
     /// motion, and `Transition::trim(0.0, 0.0)` in `.presence` draws it on as it enters.
     /// Stroke width is in logical units, not scaled with the fit.
-    pub fn stroke_path(key: impl Into<Key>, outline: std::sync::Arc<Outline>, view: Rect, style: StrokeStyle) -> Element<M> {
+    pub fn stroke_path(
+        key: impl Into<Key>,
+        outline: std::sync::Arc<Outline>,
+        view: Rect,
+        style: StrokeStyle,
+    ) -> Element<M> {
         let art = StrokeArt { outline, view, style, head: None, fill: None };
         let mut e = Element::new(key, Kind::StrokePath(art), taffy::Style::default());
         e.set(Slot::TrimEnd as u8, 1.0);
@@ -603,6 +612,8 @@ impl<M> Element<M> {
         self
     }
 
+    /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
+    pub fn dots(key: impl Into<Key>, dots: Dots) -> Element<M> {
         Element::new(key, Kind::Dots(dots), taffy::Style::default())
     }
 

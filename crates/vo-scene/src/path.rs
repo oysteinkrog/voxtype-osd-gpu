@@ -223,7 +223,14 @@ impl Contour {
         let segs = self
             .segs
             .iter()
-            .map(|s| VectorSeg { p0: m.apply(s.p0), p1: m.apply(s.p1), p2: m.apply(s.p2), s0: s.s0 * k, s1: s.s1 * k, ..*s })
+            .map(|s| VectorSeg {
+                p0: m.apply(s.p0),
+                p1: m.apply(s.p1),
+                p2: m.apply(s.p2),
+                s0: s.s0 * k,
+                s1: s.s1 * k,
+                ..*s
+            })
             .collect();
         Contour { segs, closed: self.closed }
     }
@@ -711,8 +718,8 @@ pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
 /// A small line icon set on a 24 x 24 grid (y down), drawn to be stroked about 2 units wide.
 /// Fill one with [`icons::outline`], which strokes it to a closed outline for the glyph path.
 pub mod icons {
-    use kurbo::{Arc, BezPath, Cap, Join, RoundedRect, Shape, Stroke, StrokeOpts};
     pub use super::make::brackets;
+    use kurbo::{Arc, BezPath, Cap, Join, RoundedRect, Shape, Stroke, StrokeOpts};
 
     /// A microphone: the capsule, the holder arc and the stem. Three contours.
     pub fn mic() -> BezPath {

@@ -87,9 +87,8 @@ impl<M> Options<M> {
 
     /// The scene with the text layout these options ask for.
     pub(crate) fn scene(&mut self) -> vo_scene::Scene<M> {
-        let scene = vo_scene::Scene::new()
-            .with_default_motion(self.default_motion)
-            .with_reduced_motion(self.reduced_motion);
+        let scene =
+            vo_scene::Scene::new().with_default_motion(self.default_motion).with_reduced_motion(self.reduced_motion);
         match self.text.take() {
             Some(text) => scene.with_text(text),
             None if !self.fonts.is_empty() => scene.with_text(Box::new(ShapedLayout::new(self.fonts.clone()))),

@@ -168,8 +168,9 @@ impl Assets {
         let mut start = 0usize;
         for w in text.split(' ') {
             let end = start + w.len();
-            let xs: Vec<usize> =
-                (0..shaped.glyphs.len()).filter(|&i| (start..end).contains(&(shaped.glyphs[i].cluster as usize))).collect();
+            let xs: Vec<usize> = (0..shaped.glyphs.len())
+                .filter(|&i| (start..end).contains(&(shaped.glyphs[i].cluster as usize)))
+                .collect();
             let x0 = shaped.glyphs[xs[0]].pos.x;
             let after = xs.last().unwrap() + 1;
             let x1 = shaped.glyphs.get(after).map_or(shaped.size.w, |g| g.pos.x);
@@ -234,21 +235,21 @@ fn act_icons(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let draw = Spring::critical_to_98(1.0);
     let fill = s.eased("fill", t, CubicBezier::OUT) as f32;
     b.layer(Affine::IDENTITY, fade, |b| {
-    for i in 0..3 {
-        let at = Affine::scale(k).then(&Affine::translate(640.0 - 60.0 + (i as f32 - 1.0) * 220.0, 300.0));
-        let o = a.icons[i].transform(&at);
-        let f = s.spring(&format!("draw.{i}"), t, draw, 0.0, 1.0) as f32;
-        let head = f * o.length();
-        let color = [ink(), accent(), warm()][i];
-        b.outline(&o.trim(0.0, head), &StrokeStyle::solid(10.0, color.fade(1.0 - fill)));
-        if f < 0.995 && f > 0.0 {
-            pen_tip(b, &o, head, 40.0, 10.0, color);
+        for i in 0..3 {
+            let at = Affine::scale(k).then(&Affine::translate(640.0 - 60.0 + (i as f32 - 1.0) * 220.0, 300.0));
+            let o = a.icons[i].transform(&at);
+            let f = s.spring(&format!("draw.{i}"), t, draw, 0.0, 1.0) as f32;
+            let head = f * o.length();
+            let color = [ink(), accent(), warm()][i];
+            b.outline(&o.trim(0.0, head), &StrokeStyle::solid(10.0, color.fade(1.0 - fill)));
+            if f < 0.995 && f > 0.0 {
+                pen_tip(b, &o, head, 40.0, 10.0, color);
+            }
+            if fill > 0.0 {
+                let pos = at.apply(Point::ZERO);
+                b.glyph(fill_glyph(a.fills[i], pos, k, color.fade(fill)));
+            }
         }
-        if fill > 0.0 {
-            let pos = at.apply(Point::ZERO);
-            b.glyph(fill_glyph(a.fills[i], pos, k, color.fade(fill)));
-        }
-    }
     });
 }
 
@@ -257,70 +258,73 @@ fn act_panel(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let pop = |n: &str| s.spring(n, t, Spring::POP, 0.0, 1.0) as f32;
     let (dot, cap, pan) = (pop("dot"), pop("capsule"), pop("panel"));
     b.layer(Affine::IDENTITY, fade, |b| {
-    // Dot to capsule to panel: size and radius on springs, one rounded rect.
-    let w = (18.0 + 182.0 * cap + 400.0 * pan) * dot;
-    let h = (18.0 + 102.0 * pan) * dot;
-    let r = (0.5 * h) + (22.0 - 0.5 * h) * pan.clamp(0.0, 1.0);
-    let (cx, cy) = (640.0, 290.0);
-    let rect = RRect::new(Rect::new(cx - 0.5 * w, cy - 0.5 * h, w, h), r.max(0.0));
-    let fill = mix(accent(), panel_fill(), cap);
-    b.shape(ShapeInstance::rrect(rect, Paint::solid(fill)).with_hairline(Paint::solid(Color::hex(0x3a3f4b, pan.clamp(0.0, 1.0)))));
-    // The light head: a window on the border, wrapping the seam, fading tail and glow.
-    if s.active("head", t) || s.progress("head", t) >= 1.0 {
-        let border = Outline::new(
-            &kurbo::RoundedRect::new(
-                rect.rect.x as f64,
-                rect.rect.y as f64,
-                rect.rect.right() as f64,
-                rect.rect.bottom() as f64,
-                rect.radii[0] as f64,
-            )
-            .to_path(0.01),
-            0.05,
+        // Dot to capsule to panel: size and radius on springs, one rounded rect.
+        let w = (18.0 + 182.0 * cap + 400.0 * pan) * dot;
+        let h = (18.0 + 102.0 * pan) * dot;
+        let r = (0.5 * h) + (22.0 - 0.5 * h) * pan.clamp(0.0, 1.0);
+        let (cx, cy) = (640.0, 290.0);
+        let rect = RRect::new(Rect::new(cx - 0.5 * w, cy - 0.5 * h, w, h), r.max(0.0));
+        let fill = mix(accent(), panel_fill(), cap);
+        b.shape(
+            ShapeInstance::rrect(rect, Paint::solid(fill))
+                .with_hairline(Paint::solid(Color::hex(0x3a3f4b, pan.clamp(0.0, 1.0)))),
         );
-        let total = border.length();
-        let lt = s.local("head", t) as f32;
-        let speed = 900.0;
-        let fade_in = (lt / 0.3).clamp(0.0, 1.0);
-        for (phase, color) in [(0.0, cool()), (0.5, accent())] {
-            let head = lt * speed + phase * total;
-            let tail = 260.0;
-            let style = StrokeStyle::solid(2.5, color)
-                .ramp(head - tail, color.fade(0.0), head, mix(color, Color::WHITE, 0.6).fade(fade_in))
-                .glow(7.0);
-            b.stroke(&border.window(0, head, tail), &style);
+        // The light head: a window on the border, wrapping the seam, fading tail and glow.
+        if s.active("head", t) || s.progress("head", t) >= 1.0 {
+            let border = Outline::new(
+                &kurbo::RoundedRect::new(
+                    rect.rect.x as f64,
+                    rect.rect.y as f64,
+                    rect.rect.right() as f64,
+                    rect.rect.bottom() as f64,
+                    rect.radii[0] as f64,
+                )
+                .to_path(0.01),
+                0.05,
+            );
+            let total = border.length();
+            let lt = s.local("head", t) as f32;
+            let speed = 900.0;
+            let fade_in = (lt / 0.3).clamp(0.0, 1.0);
+            for (phase, color) in [(0.0, cool()), (0.5, accent())] {
+                let head = lt * speed + phase * total;
+                let tail = 260.0;
+                let style = StrokeStyle::solid(2.5, color)
+                    .ramp(head - tail, color.fade(0.0), head, mix(color, Color::WHITE, 0.6).fade(fade_in))
+                    .glow(7.0);
+                b.stroke(&border.window(0, head, tail), &style);
+            }
         }
-    }
-    // Label in the panel.
-    let lab = s.eased("label", t, CubicBezier::OUT) as f32;
-    if lab > 0.0 {
-        let size = 34.0;
-        let k = size / REF_SIZE;
-        let x0 = cx - 0.5 * a.word_width * k;
-        for &(g, x) in &a.word {
-            b.glyph(GlyphInstance {
-                pos: Point::new(x0 + x * k, cy + 12.0 + 8.0 * (1.0 - lab)),
-                size,
-                font: a.font,
-                glyph: g,
-                word: NO_WORD,
-                color: ink().fade(lab),
-            });
+        // Label in the panel.
+        let lab = s.eased("label", t, CubicBezier::OUT) as f32;
+        if lab > 0.0 {
+            let size = 34.0;
+            let k = size / REF_SIZE;
+            let x0 = cx - 0.5 * a.word_width * k;
+            for &(g, x) in &a.word {
+                b.glyph(GlyphInstance {
+                    pos: Point::new(x0 + x * k, cy + 12.0 + 8.0 * (1.0 - lab)),
+                    size,
+                    font: a.font,
+                    glyph: g,
+                    word: NO_WORD,
+                    color: ink().fade(lab),
+                });
+            }
         }
-    }
-    // Two dots that merge and split again (smooth-min union).
-    let d = 140.0 * (1.0 - pop("merge.in")) + 140.0 * pop("merge.out");
-    let (ya, ra, rb) = (540.0, 26.0, 18.0);
-    let grow = s.spring("merge.in", t + 0.3, Spring::POP, 0.0, 1.0) as f32;
-    if grow > 0.0 {
-        b.blob(
-            (Point::new(640.0 - d, ya), ra * grow),
-            (Point::new(640.0 + d, ya), rb * grow),
-            34.0,
-            cool(),
-            Color::hex(0xc084fc, 1.0),
-        );
-    }
+        // Two dots that merge and split again (smooth-min union).
+        let d = 140.0 * (1.0 - pop("merge.in")) + 140.0 * pop("merge.out");
+        let (ya, ra, rb) = (540.0, 26.0, 18.0);
+        let grow = s.spring("merge.in", t + 0.3, Spring::POP, 0.0, 1.0) as f32;
+        if grow > 0.0 {
+            b.blob(
+                (Point::new(640.0 - d, ya), ra * grow),
+                (Point::new(640.0 + d, ya), rb * grow),
+                34.0,
+                cool(),
+                Color::hex(0xc084fc, 1.0),
+            );
+        }
     });
 }
 
@@ -337,59 +341,59 @@ fn act_morph(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
         (a.morph2.sample(m2), mix(accent(), warm(), m2))
     };
     b.layer(Affine::IDENTITY, fade * inn.clamp(0.0, 1.0), |b| {
-    for p in parts {
-        let style = StrokeStyle::solid(2.2 * k * p.weight, color.fade(p.weight.sqrt())).glow(3.0 * p.weight);
-        b.stroke(&p.contour.transform(&at), &style);
-    }
+        for p in parts {
+            let style = StrokeStyle::solid(2.2 * k * p.weight, color.fade(p.weight.sqrt())).glow(3.0 * p.weight);
+            b.stroke(&p.contour.transform(&at), &style);
+        }
     });
 }
 
 fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let s = &a.sched;
     b.layer(Affine::IDENTITY, fade, |b| {
-    // The curve draws on.
-    let total = a.curve.length();
-    let f = s.spring("curve", t, Spring::critical_to_98(0.8), 0.0, 1.0) as f32;
-    b.outline(&a.curve.trim(0.0, f * total), &StrokeStyle::solid(1.5, Color::hex(0x3a3f4b, 1.0)));
-    // Text rides along it: each glyph on its own layer, rotated to the tangent.
-    let size = 40.0;
-    let k = size / REF_SIZE;
-    let ride = s.eased("ride", t, CubicBezier::new(0.3, 0.0, 0.2, 1.0)) as f32;
-    let start = -a.ride_width * k + ride * (0.5 * (total + a.ride_width * k));
-    for &(g, x, half) in &a.ride {
-        let along = start + (x + half) * k;
-        if along < 0.0 || along > f * total {
-            continue;
+        // The curve draws on.
+        let total = a.curve.length();
+        let f = s.spring("curve", t, Spring::critical_to_98(0.8), 0.0, 1.0) as f32;
+        b.outline(&a.curve.trim(0.0, f * total), &StrokeStyle::solid(1.5, Color::hex(0x3a3f4b, 1.0)));
+        // Text rides along it: each glyph on its own layer, rotated to the tangent.
+        let size = 40.0;
+        let k = size / REF_SIZE;
+        let ride = s.eased("ride", t, CubicBezier::new(0.3, 0.0, 0.2, 1.0)) as f32;
+        let start = -a.ride_width * k + ride * (0.5 * (total + a.ride_width * k));
+        for &(g, x, half) in &a.ride {
+            let along = start + (x + half) * k;
+            if along < 0.0 || along > f * total {
+                continue;
+            }
+            let Some((p, tan)) = a.curve.contours[0].at(along) else { continue };
+            let angle = tan.y.atan2(tan.x);
+            let edge = (along / 60.0).min((f * total - along) / 60.0).clamp(0.0, 1.0);
+            b.layer(Affine::rotate(angle).then(&Affine::translate(p.x, p.y)), edge, |b| {
+                b.glyph(GlyphInstance {
+                    pos: Point::new(-half * k, -10.0),
+                    size,
+                    font: a.font,
+                    glyph: g,
+                    word: NO_WORD,
+                    color: mix(cool(), ink(), (x / a.ride_width).clamp(0.0, 1.0)),
+                });
+            });
         }
-        let Some((p, tan)) = a.curve.contours[0].at(along) else { continue };
-        let angle = tan.y.atan2(tan.x);
-        let edge = (along / 60.0).min((f * total - along) / 60.0).clamp(0.0, 1.0);
-        b.layer(Affine::rotate(angle).then(&Affine::translate(p.x, p.y)), edge, |b| {
-        b.glyph(GlyphInstance {
-            pos: Point::new(-half * k, -10.0),
-            size,
-            font: a.font,
-            glyph: g,
-            word: NO_WORD,
-            color: mix(cool(), ink(), (x / a.ride_width).clamp(0.0, 1.0)),
-        });
-        });
-    }
-    // Size morph: the word scales from 72 to 44 on a spring, instances only.
-    let inn = s.eased("word.in", t, CubicBezier::OUT) as f32;
-    let size = s.spring("shrink", t, Spring::POP, 72.0, 44.0) as f32;
-    let k = size / REF_SIZE;
-    let x0 = 640.0 - 0.5 * a.word_width * k;
-    for &(g, x) in &a.word {
-        b.glyph(GlyphInstance {
-            pos: Point::new(x0 + x * k, 610.0),
-            size,
-            font: a.font,
-            glyph: g,
-            word: NO_WORD,
-            color: ink().fade(inn),
-        });
-    }
+        // Size morph: the word scales from 72 to 44 on a spring, instances only.
+        let inn = s.eased("word.in", t, CubicBezier::OUT) as f32;
+        let size = s.spring("shrink", t, Spring::POP, 72.0, 44.0) as f32;
+        let k = size / REF_SIZE;
+        let x0 = 640.0 - 0.5 * a.word_width * k;
+        for &(g, x) in &a.word {
+            b.glyph(GlyphInstance {
+                pos: Point::new(x0 + x * k, 610.0),
+                size,
+                font: a.font,
+                glyph: g,
+                word: NO_WORD,
+                color: ink().fade(inn),
+            });
+        }
     });
 }
 
@@ -415,7 +419,9 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
             let color = mix(cool(), accent(), done);
             b.stroke(&make::progress(c, 56.0, v), &StrokeStyle::solid(10.0, color).glow(4.0 * done));
             if done > 0.0 {
-                let check = a.icons[1].transform(&Affine::translate(-12.0, -12.0).then(&Affine::scale(3.2)).then(&Affine::translate(c.x, c.y)));
+                let check = a.icons[1].transform(
+                    &Affine::translate(-12.0, -12.0).then(&Affine::scale(3.2)).then(&Affine::translate(c.x, c.y)),
+                );
                 let len = check.length();
                 b.outline(&check.trim(0.0, done * len), &StrokeStyle::solid(9.0, accent()));
             }
@@ -425,7 +431,14 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
         let k = size / REF_SIZE;
         let (x0, base) = (380.0, 210.0);
         for &(g, x) in &a.sentence {
-            b.glyph(GlyphInstance { pos: Point::new(x0 + x * k, base), size, font: a.font, glyph: g, word: NO_WORD, color: ink() });
+            b.glyph(GlyphInstance {
+                pos: Point::new(x0 + x * k, base),
+                size,
+                font: a.font,
+                glyph: g,
+                word: NO_WORD,
+                color: ink(),
+            });
         }
         let word = |i: usize| (x0 + a.words[i].0 * k, x0 + a.words[i].1 * k);
         // Highlight chip behind "every": grows from the left on a spring.
@@ -439,7 +452,10 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
         let (u0, u1) = word(0);
         let under = make::underline(u0, u1, base + 10.0);
         let f = soft("underline");
-        b.stroke(&under.trim(0.0, f * (u1 - u0)), &StrokeStyle::solid(4.0, accent()).ramp(0.0, cool(), u1 - u0, accent()));
+        b.stroke(
+            &under.trim(0.0, f * (u1 - u0)),
+            &StrokeStyle::solid(4.0, accent()).ramp(0.0, cool(), u1 - u0, accent()),
+        );
         // Wavy underline under "draws": draws on, then keeps flowing.
         let (v0, v1) = word(1);
         let flow = (s.local("wavy", t).max(0.0) * 6.0) as f32;
@@ -457,7 +473,12 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
         }
         let rc = Point::new(1080.0, 440.0);
         let spin = (lt * 1.6) as f32;
-        b.stroke(&make::ring(rc, 70.0), &StrokeStyle::solid(6.0, Color::WHITE).conic(rc, spin, Color::hex(0x22d3ee, 1.0), Color::hex(0xa855f7, 1.0)).glow(5.0));
+        b.stroke(
+            &make::ring(rc, 70.0),
+            &StrokeStyle::solid(6.0, Color::WHITE)
+                .conic(rc, spin, Color::hex(0x22d3ee, 1.0), Color::hex(0xa855f7, 1.0))
+                .glow(5.0),
+        );
         // A ribbon from two travelling sines, its width swelling along it.
         let n = 90;
         let pts: Vec<Point> = (0..=n)
@@ -467,23 +488,42 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
                 Point::new(x, 560.0 + 30.0 * (x * 0.012 + ph).sin() + 14.0 * (x * 0.031 - ph * 1.7).sin())
             })
             .collect();
-        let widths: Vec<f32> =
-            (0..=n).map(|i| 0.15 + (std::f32::consts::PI * i as f32 / n as f32).sin() * (0.8 + 0.2 * (i as f32 * 0.3 + lt as f32 * 3.0).sin())).collect();
+        let widths: Vec<f32> = (0..=n)
+            .map(|i| {
+                0.15 + (std::f32::consts::PI * i as f32 / n as f32).sin()
+                    * (0.8 + 0.2 * (i as f32 * 0.3 + lt as f32 * 3.0).sin())
+            })
+            .collect();
         b.stroke(
             &make::ribbon(&pts, &widths),
             &StrokeStyle::solid(18.0, Color::WHITE)
-                .linear(Point::new(60.0, 0.0), Color::hex(0x60a5fa, 1.0), Point::new(820.0, 0.0), Color::hex(0xf472b6, 1.0))
+                .linear(
+                    Point::new(60.0, 0.0),
+                    Color::hex(0x60a5fa, 1.0),
+                    Point::new(820.0, 0.0),
+                    Color::hex(0xf472b6, 1.0),
+                )
                 .glow(6.0),
         );
         // A glyph morph as a fill with holes: a to g and back.
         let m = s.spring("glyph.1", t, Spring::from_frequency(12.0, 0.65), 0.0, 1.0)
             - s.spring("glyph.2", t, Spring::from_frequency(12.0, 0.65), 0.0, 1.0);
         let at = Affine::translate(560.0, 480.0);
-        let parts: Vec<_> =
-            a.glyph_morph.sample(m as f32).into_iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&at)).collect();
+        let parts: Vec<_> = a
+            .glyph_morph
+            .sample(m as f32)
+            .into_iter()
+            .filter(|p| p.weight > 0.01)
+            .map(|p| p.contour.transform(&at))
+            .collect();
         b.fill(
             &parts,
-            &StrokeStyle::solid(0.0, Color::WHITE).linear(Point::new(560.0, 300.0), cool(), Point::new(560.0, 560.0), ink()),
+            &StrokeStyle::solid(0.0, Color::WHITE).linear(
+                Point::new(560.0, 300.0),
+                cool(),
+                Point::new(560.0, 560.0),
+                ink(),
+            ),
         );
     });
 }
@@ -585,8 +625,8 @@ fn write_sheet(path: &std::path::Path, frames: &[Frame]) {
     let (cols, rows) = (4, frames.len().div_ceil(4));
     let (sw, sh) = (cols * fw + (cols + 1) * 8, rows * fh + (rows + 1) * 8);
     let mut px = vec![0u8; sw * sh * 4];
-    for p in px.chunks_exact_mut(4) {
-        p.copy_from_slice(&[40, 40, 44, 255]);
+    for p in px.as_chunks_mut::<4>().0 {
+        *p = [40, 40, 44, 255];
     }
     for (i, f) in frames.iter().enumerate() {
         let (ox, oy) = (8 + (i % cols) * (fw + 8), 8 + (i / cols) * (fh + 8));
@@ -595,8 +635,8 @@ fn write_sheet(path: &std::path::Path, frames: &[Frame]) {
                 let mut acc = [0u32; 3];
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let s = ((2 * y + dy) * f.width as usize + 2 * x + dx) * 4;
-                    for c in 0..3 {
-                        acc[c] += f.rgba[s + c] as u32;
+                    for (a, v) in acc.iter_mut().zip(&f.rgba[s..s + 3]) {
+                        *a += *v as u32;
                     }
                 }
                 let d = ((oy + y) * sw + ox + x) * 4;
@@ -642,7 +682,8 @@ fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
     println!("cold first frame with vectors: {cold_vec:.2} ms (warm {warm_vec:.2} ms)");
     println!("cold first frame with three path fills (path encode): {cold_fill:.2} ms (warm {warm_fill:.2} ms)");
 
-    let qs = device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
+    let qs =
+        device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
     let resolve = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: 16,
@@ -693,7 +734,10 @@ fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
         let mean = v.iter().sum::<f64>() / v.len() as f64;
         (mean, v[v.len() / 2], v[(v.len() * 95) / 100], v[v.len() - 1])
     };
-    for (name, v) in ["icons draw-on", "panel, head, blobs", "icon morph", "text on path", "widgets, fills"].iter().zip(per_act.iter_mut()) {
+    for (name, v) in ["icons draw-on", "panel, head, blobs", "icon morph", "text on path", "widgets, fills"]
+        .iter()
+        .zip(per_act.iter_mut())
+    {
         let (mean, med, p95, max) = stats(v);
         println!("GPU per frame, {name}: mean {mean:.3} ms, median {med:.3}, p95 {p95:.3}, max {max:.3} (1280x720)");
     }

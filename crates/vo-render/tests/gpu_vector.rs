@@ -174,7 +174,7 @@ fn translucent_joins_blend_once() {
     }
     let list = b.finish();
     let px = off.render_to_rgba(&list, [120, 120], 1.0);
-    let max_alpha = px.chunks_exact(4).map(|p| p[3]).max().unwrap();
+    let max_alpha = px.as_chunks::<4>().0.iter().map(|p| p[3]).max().unwrap();
     assert!((126..=129).contains(&max_alpha), "max alpha {max_alpha}");
 }
 
@@ -188,11 +188,15 @@ fn element_path_golden() {
     // A play triangle in a 22 unit viewBox, as an SVG icon gives it.
     let play = fonts.add_path(kurbo::BezPath::from_svg("M7 4 L18 11 L7 18 Z").unwrap());
     let mic = fonts.add_path(icons::outline(&icons::mic(), 2.0));
-    let view = |row: Element<()>| Element::panel("bg").pad(12.0).gap(12.0).direction_row().fill(Color::hex(0x111318, 1.0)).child(row);
+    let view = |row: Element<()>| {
+        Element::panel("bg").pad(12.0).gap(12.0).direction_row().fill(Color::hex(0x111318, 1.0)).child(row)
+    };
     let row = Element::row("row")
         .gap(12.0)
         .child(Element::path("play", play, Rect::new(0.0, 0.0, 22.0, 22.0)).size(44.0, 44.0))
-        .child(Element::path("mic", mic, Rect::new(0.0, 0.0, 24.0, 24.0)).size(64.0, 44.0).fill(Color::hex(ACCENT, 1.0)));
+        .child(
+            Element::path("mic", mic, Rect::new(0.0, 0.0, 24.0, 24.0)).size(64.0, 44.0).fill(Color::hex(ACCENT, 1.0)),
+        );
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, Size::new(160.0, 68.0), 1.0);
     scene.apply(view(row), 0.0);
@@ -219,7 +223,8 @@ fn strokes_scene() -> DisplayList {
     for d in make::panel(20.0, 20.0, 140.0, 40.0, 8.0).dash(&[8.0, 6.0], 3.0) {
         b.stroke(&d, &StrokeStyle::solid(2.0, Color::hex(ACCENT, 1.0)));
     }
-    let pts: Vec<Point> = (0..=40).map(|i| Point::new(190.0 + 4.0 * i as f32, 40.0 + 14.0 * (i as f32 * 0.35).sin())).collect();
+    let pts: Vec<Point> =
+        (0..=40).map(|i| Point::new(190.0 + 4.0 * i as f32, 40.0 + 14.0 * (i as f32 * 0.35).sin())).collect();
     let widths: Vec<f32> = (0..=40).map(|i| 0.2 + (std::f32::consts::PI * i as f32 / 40.0).sin()).collect();
     b.stroke(
         &make::ribbon(&pts, &widths),
@@ -231,7 +236,15 @@ fn strokes_scene() -> DisplayList {
         ),
     );
     let ring = make::ring(Point::new(50.0, 130.0), 32.0);
-    b.stroke(&ring, &StrokeStyle::solid(8.0, white()).conic(Point::new(50.0, 130.0), 0.0, Color::hex(0x22d3ee, 1.0), Color::hex(0xa855f7, 1.0)));
+    b.stroke(
+        &ring,
+        &StrokeStyle::solid(8.0, white()).conic(
+            Point::new(50.0, 130.0),
+            0.0,
+            Color::hex(0x22d3ee, 1.0),
+            Color::hex(0xa855f7, 1.0),
+        ),
+    );
     let values = [0.2, 0.5, 0.35, 0.8, 0.6, 0.9, 0.4, 0.55, 0.3, 0.7, 0.65, 1.0];
     b.stroke(&make::sparkline(&values, 100.0, 100.0, 110.0, 60.0), &StrokeStyle::solid(2.0, Color::hex(ACCENT, 1.0)));
     for c in make::brackets(230.0, 95.0, 110.0, 70.0, 14.0) {
@@ -281,7 +294,8 @@ fn fills_scene(fonts: &FontRegistry) -> DisplayList {
     dark(&mut b, 420.0, 120.0);
     for (i, t) in [0.0f32, 0.33, 0.66, 1.0].into_iter().enumerate() {
         let at = Affine::translate(15.0 + 70.0 * i as f32, 80.0);
-        let parts: Vec<_> = m.sample(t).into_iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&at)).collect();
+        let parts: Vec<_> =
+            m.sample(t).into_iter().filter(|p| p.weight > 0.01).map(|p| p.contour.transform(&at)).collect();
         let item = push_fill(&mut b.list, &parts, &StrokeStyle::solid(0.0, Color::hex(0xe8eaf0, 1.0)));
         b.item(item);
     }
@@ -357,18 +371,28 @@ fn element_stroke_and_morph_goldens() {
             .direction_row()
             .fill(Color::hex(0x111318, 1.0))
             .child(
-                Element::stroke_path("border", border.clone(), Rect::new(-2.0, -2.0, 204.0, 64.0), StrokeStyle::solid(2.0, Color::hex(0x6b7280, 1.0)))
-                    .size(204.0, 64.0)
-                    .path_fill(Color::hex(0x1c1f26, 1.0))
-                    .light_head(0.3, 0.5, Color::hex(0x7dd3fc, 1.0), 5.0)
-                    .motion(Prop::Trim, Spring::critical_to_98(0.8))
-                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::NONE.trim(1.0, 1.0)),
+                Element::stroke_path(
+                    "border",
+                    border.clone(),
+                    Rect::new(-2.0, -2.0, 204.0, 64.0),
+                    StrokeStyle::solid(2.0, Color::hex(0x6b7280, 1.0)),
+                )
+                .size(204.0, 64.0)
+                .path_fill(Color::hex(0x1c1f26, 1.0))
+                .light_head(0.3, 0.5, Color::hex(0x7dd3fc, 1.0), 5.0)
+                .motion(Prop::Trim, Spring::critical_to_98(0.8))
+                .presence(Transition::NONE.trim(0.0, 0.0), Transition::NONE.trim(1.0, 1.0)),
             )
             .child(
-                Element::morph("icon", morph.clone(), Rect::new(0.0, 0.0, 24.0, 24.0), StrokeStyle::solid(4.0, Color::hex(ACCENT, 1.0)))
-                    .size(64.0, 64.0)
-                    .motion(Prop::Morph, Spring::SOFT)
-                    .morph_to(m),
+                Element::morph(
+                    "icon",
+                    morph.clone(),
+                    Rect::new(0.0, 0.0, 24.0, 24.0),
+                    StrokeStyle::solid(4.0, Color::hex(ACCENT, 1.0)),
+                )
+                .size(64.0, 64.0)
+                .motion(Prop::Morph, Spring::SOFT)
+                .morph_to(m),
             )
     };
     let mut scene: Scene<()> = Scene::new();
