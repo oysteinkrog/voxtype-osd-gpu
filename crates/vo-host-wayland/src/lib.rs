@@ -61,6 +61,15 @@ pub fn since_exec() -> f64 {
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9 - start_ticks / hz
 }
 
+/// The first vblank after `now`, from the last present time and the refresh period. Without
+/// both, `now`.
+fn next_present(last: Option<f64>, refresh: f64, now: f64) -> f64 {
+    match last {
+        Some(p) if refresh > 0.0 && now >= p => p + ((now - p) / refresh).floor() * refresh + refresh,
+        _ => now,
+    }
+}
+
 pub(crate) enum Role {
     Layer(LayerSurface),
     Window(Window),
@@ -305,12 +314,7 @@ impl State {
     /// The time the next frame is expected on screen: the next vblank after `now` when present
     /// feedback gave a phase and a period, else `now`.
     fn predict(&self, s: &Surf, now: f64) -> f64 {
-        match s.last_present {
-            Some(p) if s.refresh > 0.0 && now >= p => {
-                p + ((now - p) / s.refresh).floor().max(0.0) * s.refresh + s.refresh
-            }
-            _ => now,
-        }
+        next_present(s.last_present, s.refresh, now)
     }
 
     fn ready(&self, s: &Surf) -> bool {
@@ -638,5 +642,23 @@ impl Host for WaylandHost {
         state.instance = None;
         let _ = state.conn.flush();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_present;
+
+    #[test]
+    fn predicts_the_next_vblank() {
+        let r = 1.0 / 60.0;
+        assert_eq!(next_present(None, r, 2.0), 2.0);
+        assert_eq!(next_present(Some(1.0), 0.0, 2.0), 2.0);
+        assert!((next_present(Some(1.0), r, 1.0) - (1.0 + r)).abs() < 1e-12);
+        assert!((next_present(Some(1.0), r, 1.0 + 2.5 * r) - (1.0 + 3.0 * r)).abs() < 1e-12);
+        // A stale present time far back still lands on its phase.
+        let t = next_present(Some(1.0), r, 11.004);
+        assert!(t > 11.004 && t - 11.004 <= r);
+        assert!((((t - 1.0) / r).round() * r + 1.0 - t).abs() < 1e-9);
     }
 }

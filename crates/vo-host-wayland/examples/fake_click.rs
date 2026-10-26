@@ -51,7 +51,7 @@ fn main() {
     let conn = Connection::connect_to_env().expect("no Wayland display");
     let (globals, mut queue) = registry_queue_init::<State>(&conn).expect("registry");
     let qh = queue.handle();
-    let fake: OrgKdeKwinFakeInput = globals.bind(&qh, 3..=6, ()).expect("org_kde_kwin_fake_input (version 3 or later)");
+    let fake: OrgKdeKwinFakeInput = globals.bind(&qh, 3..=5, ()).expect("org_kde_kwin_fake_input (version 3 to 5)");
     fake.authenticate("vo fake_click".into(), "overlay input test".into());
     fake.pointer_motion_absolute(x, y);
     if verb == "click" {

@@ -25,7 +25,6 @@ struct Live<A: App> {
     region: Option<InputRegion>,
     frames: u64,
     startup_logged: bool,
-    settled_logged: bool,
     finished: bool,
     error: Option<HostError>,
 }
@@ -157,14 +156,11 @@ impl<A: App> HostApp for Live<A> {
             }
         }
         if moving {
-            self.settled_logged = false;
             host.request_frame(frame.id);
         } else {
-            if !self.settled_logged {
-                self.settled_logged = true;
-                if let Some(d) = self.diag() {
-                    d.settled(frame.t, &host_diag);
-                }
+            // The last frame until the next event: what follows is idle.
+            if let Some(d) = self.diag() {
+                d.settled(frame.t, &host_diag);
             }
             if self.driver().done(frame.t) {
                 self.finish(host);
@@ -192,7 +188,6 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
         region: None,
         frames: 0,
         startup_logged: false,
-        settled_logged: false,
         finished: false,
         error: None,
     };

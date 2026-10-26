@@ -216,3 +216,50 @@ impl<A: App> Driver<A> {
         self.exit && !self.moving(t)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Log(Vec<(u32, f64)>);
+
+    impl App for Log {
+        type Msg = u32;
+
+        fn init(&mut self, cx: &mut Cx<u32>) {
+            cx.after(2.0, 2);
+            let gone = cx.after(1.5, 99);
+            cx.after(1.0, 1);
+            cx.cancel(gone);
+        }
+
+        fn update(&mut self, msg: u32, cx: &mut Cx<u32>) {
+            self.0.push((msg, cx.t()));
+            if msg == 2 {
+                cx.exit();
+            }
+        }
+
+        fn view(&self, _: &Tokens) -> Element<u32> {
+            Element::panel("root")
+        }
+    }
+
+    #[test]
+    fn timers_fire_in_order_at_their_own_time() {
+        let mut d = Driver::new(Log::default(), Scene::new(), Tokens::default(), 0.5);
+        assert_eq!(d.timers.next_at(), Some(1.5));
+        d.fire_timers(3.0);
+        assert_eq!(d.app.0, vec![(1, 1.5), (2, 2.5)]);
+        assert!(d.done(3.0));
+    }
+
+    #[test]
+    fn late_messages_move_up_to_the_last_event() {
+        let mut d = Driver::new(Log::default(), Scene::new(), Tokens::default(), 0.0);
+        d.dispatch(7, 2.0);
+        d.dispatch(8, 1.0);
+        assert_eq!(d.app.0, vec![(7, 2.0), (8, 2.0)]);
+    }
+}
