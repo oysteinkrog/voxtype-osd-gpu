@@ -187,6 +187,22 @@ fn render(font: &FontRef, hb: &harfrust::ShaperFont, text: &str, px: f32, mode: 
     Ink { w, h, v: mask.iter().map(|&m| m as f32 / 255.0).collect() }.crop()
 }
 
+/// Mean and max absolute difference over the union of both ink boxes, with
+/// both images aligned at their top-left ink corner.
+fn diff(a: &Ink, b: &Ink) -> (f32, f32) {
+    let (w, h) = (a.w.max(b.w), a.h.max(b.h));
+    let at = |i: &Ink, x: usize, y: usize| if x < i.w && y < i.h { i.v[y * i.w + x] } else { 0.0 };
+    let (mut sum, mut max) = (0.0f32, 0.0f32);
+    for y in 0..h {
+        for x in 0..w {
+            let d = (at(a, x, y) - at(b, x, y)).abs();
+            sum += d;
+            max = max.max(d);
+        }
+    }
+    (sum / (w * h) as f32, max)
+}
+
 fn main() {
     let text = std::fs::read_to_string(format!("{KDE_DIR}/text.txt")).expect("run the nested KDE capture first");
     let path = ui_font_path();
@@ -197,7 +213,7 @@ fn main() {
     let kde = kde_rows().expect("KDE screenshot");
     assert_eq!(kde.len(), 4, "expected 4 text bands in the KDE shot, found {}", kde.len());
     println!("font {}", path.display());
-    println!("size_px row ink_w ink_h ink_sum ink_sum_vs_kde");
+    println!("size_px row ink_w ink_h ink_sum ink_sum_vs_kde mean_abs_diff_vs_kde max_abs_diff_vs_kde");
 
     let modes = [Mode::LightAuto, Mode::Interpreter, Mode::Unhinted];
     let names = ["kde", "skrifa_light_auto", "skrifa_interpreter", "unhinted"];
@@ -209,8 +225,9 @@ fn main() {
             set.push(render(&font, &hb, &text, px, m));
         }
         for (name, ink) in names.iter().zip(&set) {
+            let (mean, max) = diff(k, ink);
             println!(
-                "{px:>4} {name:<20} {:>5} {:>3} {:>8.1} {:>6.3}",
+                "{px:>4} {name:<20} {:>5} {:>3} {:>8.1} {:>6.3} {mean:>8.4} {max:>6.3}",
                 ink.w,
                 ink.h,
                 ink.total(),

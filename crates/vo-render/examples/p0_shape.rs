@@ -17,7 +17,8 @@ use unicode_linebreak::{BreakOpportunity, linebreaks};
 const LINE_A: &str = "so the plan for tomorrow is that we meet at nine in the small room on the second floor and go through the list of open bugs one by one before lunch then after lunch we split up and test";
 const LINE_B: &str = "when the build finishes I want to look at the numbers for the first frame again because last week they were much higher on the office machine than at home and nobody could explain why that would be the case";
 
-const STAGES: [&str; 9] = [
+const STAGES: [&str; 10] = [
+    "fc_match_subprocess",
     "read_font",
     "font_and_shaper",
     "shape_cold",
@@ -89,7 +90,9 @@ fn once() {
         *lap = Instant::now();
     };
 
-    let data = std::fs::read(ui_font_path()).expect("font");
+    let path = ui_font_path();
+    mark(&mut t, &mut lap);
+    let data = std::fs::read(path).expect("font");
     mark(&mut t, &mut lap);
 
     let font = harfrust::Font::new(data, 0).expect("font");
@@ -118,7 +121,9 @@ fn once() {
 
     let b = shape(LINE_B);
     mark(&mut t, &mut lap);
-    t.push(t0.elapsed().as_secs_f64() * 1e3);
+    // Text path total, without the fontconfig subprocess (the overlay will
+    // resolve the font through fontconfig in-process or from a cached path).
+    t.push(t0.elapsed().as_secs_f64() * 1e3 - t[0]);
 
     lap = Instant::now();
     let mut coll = fontique::Collection::new(fontique::CollectionOptions::default());
