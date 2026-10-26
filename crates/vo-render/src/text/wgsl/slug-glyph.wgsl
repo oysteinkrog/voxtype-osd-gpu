@@ -33,7 +33,11 @@ struct VsOut {
   let em = mix (g.ext.xy, g.ext.zw, c);
   let m = mat2x2f (g.lin.xy, g.lin.zw);
   let pos = m * em + g.offset;
-  let normal = m * (c * 2.0 - 1.0);
+  // hb_gpu_dilate moves the corner by its half-pixel step times this vector,
+  // so it must be in pixel units: the sum of the two outward unit edge
+  // normals at the corner, which is (+-1, +-1) for an unrotated glyph.
+  let s = c * 2.0 - 1.0;
+  let normal = normalize (m * vec2f (s.x, 0.0)) + normalize (m * vec2f (0.0, s.y));
   let det = g.lin.x * g.lin.w - g.lin.z * g.lin.y;
   let jac = vec4f (g.lin.w, -g.lin.z, -g.lin.y, g.lin.x) / det;
   let d = hb_gpu_dilate (pos, em, normal, jac, u.mvp, u.viewport);
