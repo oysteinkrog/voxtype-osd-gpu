@@ -232,7 +232,7 @@ fn layers_scene(font: &FontRef) -> DisplayList {
         C::Layer(L::new(vec![pair(8.0)]).with(|l| l.opacity = 0.5)),
         C::Layer(L::new(vec![pair(120.0), C::Layer(rotated)]).with(|l| {
             l.opacity = 0.5;
-            l.target = LayerTarget::Offscreen { effect: 0 };
+            l.target = LayerTarget::Offscreen { bloom: None };
         })),
         C::Layer(
             L::new(vec![C::Shapes(vec![

@@ -8,7 +8,7 @@
 //!   centre, which gives one row of full coverage with no partial neighbours.
 
 use bytemuck::{Pod, Zeroable};
-use vo_scene::display::{Paint, ShapeInstance, ShapeKind, SHAPE_HAIRLINE};
+use vo_scene::display::{Paint, PaintKind, ShapeInstance, ShapeKind, SHAPE_HAIRLINE};
 use vo_scene::geom::Affine;
 
 use crate::color::oklab_alpha;
@@ -65,7 +65,7 @@ impl GpuShape {
     /// would be drawn.
     pub fn new(s: &ShapeInstance, to_px: &Affine, ppu: f32, opacity: f32) -> Option<GpuShape> {
         let hairline = s.flags & SHAPE_HAIRLINE != 0;
-        let fill = if s.kind == ShapeKind::Line { Paint::NONE } else { s.fill };
+        let fill = if s.kind == ShapeKind::Line && !s.fill.is_halo() { Paint::NONE } else { s.fill };
         let stroke_width = if hairline { 1.0 / ppu } else { s.stroke_width.max(0.0) };
         let stroke = if stroke_width > 0.0 { s.stroke } else { Paint::NONE };
         if opacity <= 0.0 || !(fill.is_visible() || stroke.is_visible()) {
@@ -84,6 +84,37 @@ impl GpuShape {
             fill: GpuPaint::new(&fill, opacity),
             stroke: GpuPaint::new(&stroke, opacity),
         })
+    }
+
+    /// Caps a glow's strength at 1, for a target that cannot hold light above 1 (the direct
+    /// path), so the glow keeps its hue instead of clipping per channel.
+    pub fn clamp_glow(&mut self) {
+        if (self.kinds >> 8) & 0xff == PaintKind::Glow as u32 {
+            self.fill.ends[1] = self.fill.ends[1].min(1.0);
+        }
+    }
+
+    /// The quad the vertex shader draws, in layer units: `x0, y0, x1, y1`. `ppu` is physical
+    /// pixels per layer unit.
+    pub fn quad(&self, ppu: f32) -> [f32; 4] {
+        let g = self.geom;
+        let mut m = 0.5 * self.stroke_width + 1.0 / ppu;
+        let e = self.fill.ends;
+        match (self.kinds >> 8) & 0xff {
+            k if k == PaintKind::Glow as u32 => m += e[0] * (512.0 * e[1]).max(1.0).ln(),
+            k if k == PaintKind::Shadow as u32 => m += e[0].abs().max(e[1].abs()) + 3.0 * e[2] + e[3].max(0.0),
+            _ => {}
+        }
+        let b = match self.kinds & 0xff {
+            k if k == ShapeKind::Circle as u32 => [g[0] - g[2], g[1] - g[2], g[0] + g[2], g[1] + g[2]],
+            k if k == ShapeKind::Line as u32 => [g[0].min(g[2]), g[1].min(g[3]), g[0].max(g[2]), g[1].max(g[3])],
+            k if k == ShapeKind::Band as u32 => {
+                let h = self.radii[0].max(self.radii[1]);
+                [g[0], g[1] - h, g[2], g[1] + h]
+            }
+            _ => [g[0], g[1], g[0] + g[2], g[1] + g[3]],
+        };
+        [b[0] - m, b[1] - m, b[2] + m, b[3] + m]
     }
 }
 

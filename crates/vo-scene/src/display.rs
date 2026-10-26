@@ -96,8 +96,19 @@ pub enum LayerTarget {
     #[default]
     Direct,
     /// Drawn into its own texture, then composited. Needed for exact group opacity and for
-    /// effects. `effect` is an index the renderer's effect table defines; 0 means none.
-    Offscreen { effect: u32 },
+    /// effects. A layer with `bloom` puts the whole frame on the renderer's effect path.
+    Offscreen { bloom: Option<Bloom> },
+}
+
+/// Bloom on an offscreen layer: the layer's content is the light source, and a blurred copy
+/// of it is added on top when the layer is composited.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Bloom {
+    /// How much of the blurred copy is added: 0 is none, 1 adds it at full strength.
+    /// Above 1 is allowed.
+    pub strength: f32,
+    /// Spread in logical units, about the blur's standard deviation.
+    pub radius: f32,
 }
 
 /// A run of content in a layer.
@@ -150,6 +161,14 @@ pub enum PaintKind {
     Solid,
     /// `c0` at `p0` to `c1` at `p1`, clamped outside.
     Linear,
+    /// A glow around the shape, from its distance: `c0` fading out as `exp(-d / p0.x)`,
+    /// times `p0.y` (the strength, which may exceed 1). Used as a fill on an instance of
+    /// its own, drawn under the shape. See [`Paint::glow`].
+    Glow,
+    /// A soft drop shadow, a Gaussian blur of the shape: `c0`, moved by `p0`, with
+    /// `p1.x` the blur's standard deviation and `p1.y` a spread that grows the shape. Used
+    /// as a fill on an instance of its own, drawn under the shape. See [`Paint::shadow`].
+    Shadow,
 }
 
 /// Fill or stroke paint. Gradient points are in layer space.
@@ -180,13 +199,36 @@ impl Paint {
         Paint { kind: PaintKind::Linear, c0, c1, p0, p1 }
     }
 
+    /// A glow paint, `radius` in logical units. Put it in the fill of a copy of the shape
+    /// drawn under it. A stroke width on that copy moves the glow out to the stroke's
+    /// outer edge.
+    pub fn glow(c: Color, radius: f32, strength: f32) -> Paint {
+        Paint { kind: PaintKind::Glow, c0: c, c1: c, p0: Point::new(radius.max(0.0), strength.max(0.0)), p1: Point::ZERO }
+    }
+
+    /// A drop shadow paint: moved by `offset`, blurred with standard deviation `blur` and
+    /// grown by `spread`, all in logical units. Put it in the fill of a copy of the shape
+    /// drawn under it.
+    pub fn shadow(c: Color, offset: Point, blur: f32, spread: f32) -> Paint {
+        Paint { kind: PaintKind::Shadow, c0: c, c1: c, p0: offset, p1: Point::new(blur.max(0.0), spread) }
+    }
+
+    /// A glow or shadow paint.
+    pub fn is_halo(&self) -> bool {
+        matches!(self.kind, PaintKind::Glow | PaintKind::Shadow)
+    }
+
     /// The same paint with alpha multiplied by `k`.
     pub fn fade(self, k: f32) -> Paint {
         Paint { c0: self.c0.fade(k), c1: self.c1.fade(k), ..self }
     }
 
     pub fn is_visible(&self) -> bool {
-        self.kind != PaintKind::None && (self.c0.a > 0.0 || self.c1.a > 0.0)
+        match self.kind {
+            PaintKind::None => false,
+            PaintKind::Glow => self.c0.a > 0.0 && self.p0.y > 0.0,
+            _ => self.c0.a > 0.0 || self.c1.a > 0.0,
+        }
     }
 }
 

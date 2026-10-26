@@ -18,8 +18,14 @@ struct Layer {
   // clip unit, clip_t.w is 1 when there is a clip.
   clip_m: vec4f,
   clip_t: vec4f,
-  // Target size in physical pixels; z is 1 when the shader must encode sRGB itself.
+  // Size in physical pixels of the texture drawn into; z is 1 when the shader must encode
+  // sRGB itself.
   viewport: vec4f,
+  // xy: where that texture's top left sits in target pixels (0 except in an offscreen layer
+  // sized to its bounds). zw: the same for the layer texture a composite reads.
+  origin: vec4f,
+  // A composite's source layer texture: width, height in pixels, bloom strength.
+  src: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;
@@ -29,7 +35,7 @@ fn layer_to_px (p: vec2f) -> vec2f {
 }
 
 fn px_to_ndc (p: vec2f) -> vec4f {
-  let n = p / layer.viewport.xy * 2.0 - 1.0;
+  let n = (p - layer.origin.xy) / layer.viewport.xy * 2.0 - 1.0;
   return vec4f (n.x, -n.y, 0.0, 1.0);
 }
 
@@ -49,11 +55,12 @@ fn sd_rrect (p: vec2f, rect: vec4f, radii: vec4f) -> f32 {
   return length (max (q, vec2f (0.0))) + min (max (q.x, q.y), 0.0) - r;
 }
 
-// Coverage of the layer clip at a fragment position in physical pixels.
-fn clip_coverage (frag: vec2f) -> f32 {
+// Coverage of the layer clip at a fragment position in pixels of the texture drawn into.
+fn clip_coverage (frag_tex: vec2f) -> f32 {
   if (layer.clip_t.w == 0.0) {
     return 1.0;
   }
+  let frag = frag_tex + layer.origin.xy;
   let p = vec2f (layer.clip_m.x * frag.x + layer.clip_m.z * frag.y,
                  layer.clip_m.y * frag.x + layer.clip_m.w * frag.y) + layer.clip_t.xy;
   let d = sd_rrect (p, layer.clip_rect, layer.clip_radii) * layer.clip_t.z;

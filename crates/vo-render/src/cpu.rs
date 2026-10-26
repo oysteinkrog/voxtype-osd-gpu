@@ -9,7 +9,7 @@
 //! - Compositing is in linear light with premultiplied alpha, then sRGB encoded, as the GPU
 //!   writes to an sRGB swapchain.
 //! - Not exact: offscreen layers draw as direct layers (group opacity per instance), only the
-//!   nearest clip applies, and emitters are skipped.
+//!   nearest clip applies, and emitters, glows, shadows and bloom are skipped.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -174,6 +174,10 @@ impl CpuRenderer {
     }
 
     fn shape(&mut self, s: &GpuShape, st: &State) {
+        // Glows and shadows are left to the GPU frames that follow.
+        if (s.kinds >> 8) & 0xff >= vo_scene::display::PaintKind::Glow as u32 {
+            return;
+        }
         let kind = s.kinds & 0xff;
         let g = s.geom;
         let bounds = match kind {

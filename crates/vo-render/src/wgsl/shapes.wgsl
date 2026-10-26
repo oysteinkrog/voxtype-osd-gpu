@@ -2,6 +2,10 @@
 // instanced draw. Fill and stroke, solid or linear-gradient paint interpolated in OKLab,
 // analytic antialiasing with a one-pixel box filter. `common.wgsl` is prepended.
 //
+// A fill paint of kind glow or shadow makes the instance a halo: a glow from the shape's
+// distance, or a Gaussian drop shadow of it in closed form (Evan Wallace's rounded box
+// shadow). No blur pass, no texture reads.
+//
 // The CPU side (`shapes.rs`) has already resolved hairlines to a stroke width of one physical
 // pixel, snapped their geometry to the pixel grid, and folded layer opacity into the alpha
 // of every paint.
@@ -14,6 +18,8 @@ const KIND_BAND: u32 = 4u;
 
 const PAINT_NONE: u32 = 0u;
 const PAINT_SOLID: u32 = 1u;
+const PAINT_GLOW: u32 = 3u;
+const PAINT_SHADOW: u32 = 4u;
 
 struct ShapeIn {
   // Shape kind in bits 0..8, fill paint kind in 8..16, stroke paint kind in 16..24.
@@ -50,8 +56,16 @@ struct ShapeOut {
 @vertex fn vs_shape (@builtin(vertex_index) vi: u32, s: ShapeIn) -> ShapeOut {
   let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
   // Grow the quad by half the stroke plus one physical pixel for the antialiasing ramp.
-  let m = 0.5 * s.stroke_width + 1.0 / layer.t.z;
+  var m = 0.5 * s.stroke_width + 1.0 / layer.t.z;
   let kind = s.kinds & 0xffu;
+  // A halo reaches further: a glow until it falls under 1/512, a shadow by its offset, three
+  // standard deviations and its spread.
+  let fill_kind = (s.kinds >> 8u) & 0xffu;
+  if (fill_kind == PAINT_GLOW) {
+    m += s.fill_p.x * log (max (512.0 * s.fill_p.y, 1.0));
+  } else if (fill_kind == PAINT_SHADOW) {
+    m += max (abs (s.fill_p.x), abs (s.fill_p.y)) + 3.0 * s.fill_p.z + max (s.fill_p.w, 0.0);
+  }
   var p: vec2f;
   if (kind == KIND_CIRCLE) {
     let r = s.geom.z + m;
@@ -146,15 +160,112 @@ fn sd_segment (p: vec2f, a: vec2f, b: vec2f) -> f32 {
   return length (pa - ba * h);
 }
 
+// Signed distance to the shape at `p` (layer units); `frag_x` is the pixel centre in target
+// pixels, for bands.
+fn sd_shape (kind: u32, p: vec2f, frag_x: f32, in: ShapeOut) -> f32 {
+  if (kind == KIND_CIRCLE) {
+    return length (p - in.geom.xy) - in.geom.z;
+  } else if (kind == KIND_LINE) {
+    return sd_segment (p, in.geom.xy, in.geom.zw);
+  } else if (kind == KIND_BAND) {
+    return sd_band (p, in.geom, in.radii.xy, frag_x, in.band_px);
+  }
+  return sd_rrect (p, in.geom, in.radii);
+}
+
+// Error function, the 4-term approximation (max error about 5e-4).
+fn erf2 (x: vec2f) -> vec2f {
+  let s = sign (x);
+  let a = abs (x);
+  var y = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+  y = y * y;
+  return s - s / (y * y);
+}
+
+fn gaussian (x: f32, sigma: f32) -> f32 {
+  return exp (-(x * x) / (2.0 * sigma * sigma)) / (2.5066283 * sigma);
+}
+
+// The blur of one row of a rounded box: the integral along x of the Gaussian across the row's
+// span at height `y` (box centred on 0).
+fn box_shadow_x (x: f32, y: f32, sigma: f32, corner: f32, half: vec2f) -> f32 {
+  let delta = min (half.y - corner - abs (y), 0.0);
+  let curved = half.x - corner + sqrt (max (0.0, corner * corner - delta * delta));
+  let integral = 0.5 + 0.5 * erf2 ((x + vec2f (-curved, curved)) * (0.70710678 / sigma));
+  return integral.y - integral.x;
+}
+
+// Gaussian blur of a rounded box at `p`: exact in x, four samples in y.
+fn box_shadow (rect: vec4f, corner: f32, p: vec2f, sigma: f32) -> f32 {
+  let half = 0.5 * rect.zw;
+  let q = p - (rect.xy + half);
+  let lo = q.y - half.y;
+  let hi = q.y + half.y;
+  let start = clamp (-3.0 * sigma, lo, hi);
+  let end = clamp (3.0 * sigma, lo, hi);
+  let step = (end - start) / 4.0;
+  var y = start + 0.5 * step;
+  var v = 0.0;
+  for (var i = 0; i < 4; i++) {
+    v += box_shadow_x (q.x, q.y - y, sigma, corner, half) * gaussian (y, sigma) * step;
+    y += step;
+  }
+  return v;
+}
+
+// A glow or shadow instance. The paint's stops are OKLab with straight alpha; the result is
+// premultiplied linear light, with colour above alpha where a glow's strength exceeds 1.
+fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
+  let kind = in.kinds & 0xffu;
+  let hw = 0.5 * in.stroke_width;
+  var v: f32;
+  if (fill_kind == PAINT_GLOW) {
+    let r = max (in.fill_p.x, 1e-4);
+    v = in.fill_p.y * exp (-max (d - hw, 0.0) / r);
+  } else {
+    // At least a quarter pixel, so a hard shadow still has an antialiased edge.
+    let sigma = max (in.fill_p.z, 0.25 / layer.t.z);
+    let spread = in.fill_p.w;
+    let p = in.p - in.fill_p.xy;
+    if (kind == KIND_LINE || kind == KIND_BAND) {
+      let ds = sd_shape (kind, p, in.clip.x + layer.origin.x - in.fill_p.x * layer.t.z, in) - hw - spread;
+      v = 0.5 - 0.5 * erf2 (vec2f (ds * 0.70710678 / sigma)).x;
+    } else {
+      var rect = in.geom;
+      if (kind == KIND_CIRCLE) {
+        rect = vec4f (in.geom.xy - in.geom.z, vec2f (2.0 * in.geom.z));
+      }
+      rect = vec4f (rect.xy - spread - hw, rect.zw + 2.0 * (spread + hw));
+      let q = p - (rect.xy + 0.5 * rect.zw);
+      var r: f32;
+      if (q.y < 0.0) {
+        r = select (in.radii.x, in.radii.y, q.x >= 0.0);
+      } else {
+        r = select (in.radii.w, in.radii.z, q.x >= 0.0);
+      }
+      let corner = clamp (r + spread + hw, 0.0, 0.5 * min (rect.z, rect.w));
+      v = box_shadow (rect, corner, p, sigma);
+    }
+  }
+  let a = in.fill_c0.w * max (v, 0.0);
+  let rgb = clamp (oklab_to_linear (in.fill_c0.xyz), vec3f (0.0), vec3f (1.0));
+  return vec4f (rgb * a, min (a, 1.0));
+}
+
 @fragment fn fs_shape (in: ShapeOut) -> @location(0) vec4f {
   let kind = in.kinds & 0xffu;
+  let fill_kind = (in.kinds >> 8u) & 0xffu;
+  if (fill_kind >= PAINT_GLOW) {
+    let d = sd_shape (kind, in.p, in.clip.x + layer.origin.x, in);
+    return finish (halo (in, fill_kind, d) * clip_coverage (in.clip.xy));
+  }
   var d: f32;
   if (kind == KIND_CIRCLE) {
     d = length (in.p - in.geom.xy) - in.geom.z;
   } else if (kind == KIND_LINE) {
     d = sd_segment (in.p, in.geom.xy, in.geom.zw);
   } else if (kind == KIND_BAND) {
-    d = sd_band (in.p, in.geom, in.radii.xy, in.clip.x, in.band_px);
+    d = sd_band (in.p, in.geom, in.radii.xy, in.clip.x + layer.origin.x, in.band_px);
   } else {
     d = sd_rrect (in.p, in.geom, in.radii);
   }

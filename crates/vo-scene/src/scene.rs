@@ -787,7 +787,7 @@ impl<M> Scene<M> {
         let (blend, clip, target, group, inside) = match n.kind {
             Kind::Layer { blend, clip, offscreen } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
-                let target = if offscreen { LayerTarget::Offscreen { effect: 0 } } else { LayerTarget::Direct };
+                let target = if offscreen { LayerTarget::Offscreen { bloom: None } } else { LayerTarget::Direct };
                 (blend, clip, target, alpha * opacity, 1.0)
             }
             _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
