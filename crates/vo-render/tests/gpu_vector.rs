@@ -177,3 +177,29 @@ fn translucent_joins_blend_once() {
     let max_alpha = px.chunks_exact(4).map(|p| p[3]).max().unwrap();
     assert!((126..=129).contains(&max_alpha), "max alpha {max_alpha}");
 }
+
+/// `Element::path` through a `Scene`: a path from an SVG string and an icon outline, each
+/// fitted to its box, in a row with a background panel.
+#[test]
+fn element_path_golden() {
+    use vo_scene::element::Element;
+    use vo_scene::Scene;
+    let fonts = FontRegistry::new();
+    // A play triangle in a 22 unit viewBox, as an SVG icon gives it.
+    let play = fonts.add_path(kurbo::BezPath::from_svg("M7 4 L18 11 L7 18 Z").unwrap());
+    let mic = fonts.add_path(icons::outline(&icons::mic(), 2.0));
+    let view = |row: Element<()>| Element::panel("bg").pad(12.0).gap(12.0).direction_row().fill(Color::hex(0x111318, 1.0)).child(row);
+    let row = Element::row("row")
+        .gap(12.0)
+        .child(Element::path("play", play, Rect::new(0.0, 0.0, 22.0, 22.0)).size(44.0, 44.0))
+        .child(Element::path("mic", mic, Rect::new(0.0, 0.0, 24.0, 24.0)).size(64.0, 44.0).fill(Color::hex(ACCENT, 1.0)));
+    let mut scene: Scene<()> = Scene::new();
+    scene.set_viewport(0.0, Size::new(160.0, 68.0), 1.0);
+    scene.apply(view(row), 0.0);
+    let list = scene.sample(5.0);
+    assert_eq!(list.glyphs.iter().filter(|g| g.font == vo_scene::path::PATH_FONT).count(), 2);
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let img = render(&mut off, "vec-element-path", &list, 2.0);
+    support::check(&img, Tolerance::default()).unwrap();
+}

@@ -90,6 +90,8 @@ pub(crate) struct Node<M> {
     pub words: Vec<WordAnim>,
     /// The motion of a property no `.motion()` call names: the scene's default.
     pub default_motion: Motion,
+    /// Reduced motion (MO09): travel and scale jump, effects change slowly.
+    pub reduced: bool,
 }
 
 /// One live-text word's motion: opacity and an offset from its laid-out place.
@@ -121,6 +123,14 @@ impl<M> Node<M> {
 
     fn motion_for(&self, slot: u8) -> Motion {
         let prop = Slot::prop(slot);
+        if self.reduced {
+            match prop {
+                Prop::Position | Prop::Size | Prop::Offset | Prop::Scale | Prop::Rotation => return Motion::Snap,
+                // No flashing: glow, bloom and shadow follow a level only slowly.
+                Prop::Glow | Prop::Bloom | Prop::Shadow => return Motion::Spring(Spring::SLOW),
+                _ => {}
+            }
+        }
         self.motion.iter().find(|(p, _)| *p == prop).map_or(self.default_motion, |(_, m)| *m)
     }
 
@@ -196,7 +206,9 @@ impl<M> Node<M> {
             };
         let (fade, slide) = (spring(Prop::Opacity), spring(Prop::Offset));
         let chan = |v: f64, s: Spring, rest: Rest| Channel::new(t, v, s).with_rest(rest).with_retention(retention);
+        let reduced = self.reduced;
         let from = |tr: &Transition| {
+            let tr = if reduced { tr.reduced() } else { *tr };
             let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
             (tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64)
         };
@@ -286,6 +298,7 @@ pub struct Scene<M = ()> {
     text: Box<dyn TextLayout>,
     retention: f64,
     default_motion: Motion,
+    reduced_motion: bool,
     layout_dirty: bool,
     /// Something drawn or hit-tested changed during the current `apply`.
     changed: bool,
@@ -311,6 +324,7 @@ impl<M> Scene<M> {
             text: Box::new(EstimateText::default()),
             retention: f64::INFINITY,
             default_motion: DEFAULT_MOTION,
+            reduced_motion: false,
             layout_dirty: false,
             changed: false,
             pointer: PointerState::default(),
@@ -327,6 +341,14 @@ impl<M> Scene<M> {
     /// unless set; `Motion::Snap` makes every unnamed change jump, as in a plain toolkit.
     pub fn with_default_motion(mut self, motion: Motion) -> Scene<M> {
         self.default_motion = motion;
+        self
+    }
+
+    /// Reduced motion (MO09): position, size, offset, scale and rotation jump to new targets,
+    /// presence and word transitions keep only their fade, and glow, bloom and shadow follow
+    /// their targets slowly so a level cannot make them flash. Fades still show every change.
+    pub fn with_reduced_motion(mut self, reduced: bool) -> Scene<M> {
+        self.reduced_motion = reduced;
         self
     }
 
@@ -532,9 +554,11 @@ impl<M> Scene<M> {
             has_layout: false,
             words: Vec::new(),
             default_motion: self.default_motion,
+            reduced: self.reduced_motion,
         };
         node.sync_words(t, self.retention);
         let enter = presence.map_or(Transition::NONE, |(enter, _)| enter);
+        let enter = if self.reduced_motion { enter.reduced() } else { enter };
         for (slot, start) in enter.slots() {
             node.start_at(slot, start, t, self.retention);
             let target = targets.iter().find(|(s, _)| *s == slot).map_or(Slot::default_value(slot), |(_, v)| *v);
@@ -661,6 +685,7 @@ impl<M> Scene<M> {
             return true;
         }
         let Some((_, exit)) = n.presence else { return false };
+        let exit = if n.reduced { exit.reduced() } else { exit };
         for (slot, v) in exit.slots() {
             n.set_target(slot, v, t, retention);
         }
@@ -958,6 +983,19 @@ impl<M> Scene<M> {
             }
             Kind::Dots(d) => {
                 self.dots(d, rect, t, alpha, items, out);
+                None
+            }
+            Kind::Path { id, view } => {
+                let paint = fill();
+                if paint.is_visible() && view.w > 0.0 && view.h > 0.0 {
+                    let k = (size.w / view.w).min(size.h / view.h);
+                    let pos = Point::new(
+                        origin.x + 0.5 * (size.w - view.w * k) - view.x * k,
+                        origin.y + 0.5 * (size.h - view.h * k) - view.y * k,
+                    );
+                    push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
+                    out.glyphs.push(crate::path::fill_glyph(*id, pos, k, paint.c0));
+                }
                 None
             }
             Kind::Stack => None,

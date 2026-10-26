@@ -19,7 +19,7 @@ use vo_core::words::Word;
 
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
-use crate::geom::Color;
+use crate::geom::{Color, Rect};
 use crate::timed::{Progress, Wave};
 
 /// A node's key among its siblings.
@@ -197,6 +197,11 @@ impl Transition {
         self
     }
 
+    /// The transition with reduced motion: its opacity only, no travel or scale.
+    pub(crate) fn reduced(self) -> Transition {
+        Transition { opacity: self.opacity, ..Transition::NONE }
+    }
+
     /// The slot values this transition sets.
     pub(crate) fn slots(&self) -> impl Iterator<Item = (u8, f64)> {
         let o = self.opacity.map(|v| (Slot::Opacity as u8, v as f64));
@@ -280,6 +285,9 @@ pub(crate) enum Kind {
     Progress(Progress),
     /// A dot grid filling the box.
     Dots(Dots),
+    /// A filled path from `FontRegistry::add_path`: `view` (path units) fits the box,
+    /// centred, keeping its aspect.
+    Path { id: u32, view: Rect },
 }
 
 impl Kind {
@@ -399,6 +407,15 @@ impl<M> Element<M> {
     /// fraction is unknown.
     pub fn progress(key: impl Into<Key>, progress: Progress) -> Element<M> {
         Element::new(key, Kind::Progress(progress), taffy::Style::default())
+    }
+
+    /// A filled path from `FontRegistry::add_path`, drawn through the glyph shader in the
+    /// fill colour (white until `.fill`). `view` is the path's own box in path units, for an
+    /// SVG icon its `viewBox`; it is scaled to fit the element's box and centred.
+    pub fn path(key: impl Into<Key>, id: u32, view: Rect) -> Element<M> {
+        let mut e = Element::new(key, Kind::Path { id, view }, taffy::Style::default());
+        e.set(Slot::Fill0 as u8, Color::WHITE);
+        e
     }
 
     /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
