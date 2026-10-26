@@ -432,7 +432,12 @@ pub struct FrameParams {
     /// The depth attachment's format when the pass has one: sprites test against it and do
     /// not write it.
     pub depth: Option<wgpu::TextureFormat>,
+    /// The pass's MSAA sample count (4 inside the vo-3d pass).
+    pub samples: u32,
 }
+
+/// Draw pipelines are made per target format, blend, depth format and sample count.
+type DrawKey = (wgpu::TextureFormat, ParticleBlend, Option<wgpu::TextureFormat>, u32);
 
 impl FrameParams {
     /// A 2D frame at `t` with layer units mapped to pixels by `to_px`.
@@ -449,6 +454,7 @@ impl FrameParams {
             camera: None,
             blend: ParticleBlend::Add,
             depth: None,
+            samples: 1,
         }
     }
 }
@@ -669,6 +675,8 @@ struct SlotGlyph {
     reveal_t0: f64,
     reveal_delay: f32,
     state: GlyphState,
+    /// The glyph's particles in its slot: start and count.
+    range: (usize, usize),
 }
 
 #[derive(Default, Clone)]
@@ -681,7 +689,7 @@ struct Slot {
 
 /// A pipeline set for one target format, blend and depth format.
 struct DrawPipes {
-    key: (wgpu::TextureFormat, ParticleBlend, Option<wgpu::TextureFormat>),
+    key: DrawKey,
     free: wgpu::RenderPipeline,
     trail: wgpu::RenderPipeline,
     word: wgpu::RenderPipeline,
@@ -737,7 +745,7 @@ pub struct Particles {
     draw_layout: wgpu::PipelineLayout,
     draw_module: wgpu::ShaderModule,
     draw_pipes: Vec<DrawPipes>,
-    draw_key: Option<(wgpu::TextureFormat, ParticleBlend, Option<wgpu::TextureFormat>)>,
+    draw_key: Option<DrawKey>,
     // Scratch, reused.
     step_data: Vec<u8>,
     emit_data: Vec<GpuEmitStep>,
@@ -1326,24 +1334,45 @@ impl Particles {
         // At small sizes strokes are a pixel or two wide and the outline is the whole glyph.
         let interior_share = ((size_px - 18.0) / 10.0).clamp(0.0, 1.0) * 0.3;
 
+        // Which glyph each new glyph continues, and how it came in.
+        let n_glyphs = glyphs.len();
+        let info: Vec<(GlyphState, f64, f32, Option<usize>)> = glyphs
+            .iter()
+            .zip(&pts)
+            .enumerate()
+            .map(|(gi, (g, p))| {
+                let old_i = if fresh {
+                    None
+                } else if gi < prefix {
+                    Some(gi)
+                } else if gi >= n_glyphs - suffix {
+                    Some(old.glyphs.len() - (n_glyphs - gi))
+                } else {
+                    None
+                };
+                match old_i {
+                    Some(o) => (GlyphState::Kept, old.glyphs[o].reveal_t0, old.glyphs[o].reveal_delay, Some(o)),
+                    None if fresh => {
+                        let cx = g.pos.x + 0.5 * (p.bounds[0] + p.bounds[2]);
+                        (GlyphState::Fresh, t, SWEEP * ((cx - x0) / width).clamp(0.0, 1.0), None)
+                    }
+                    None => (GlyphState::Changed, t, CHANGED_DELAY, None),
+                }
+            })
+            .collect();
+        let counts: Vec<usize> = want.iter().map(|w| (w * k).round() as usize).collect();
+        let ranges =
+            allocate(cap as usize, &counts, |gi| info[gi].3.map(|o| old.glyphs[o].range).filter(|r| r.1 == counts[gi]));
+
         self.target_data.clear();
         self.target_data.resize(cap as usize, GpuTarget::default());
-        let mut slot_glyphs = Vec::with_capacity(glyphs.len());
+        let mut slot_glyphs = Vec::with_capacity(n_glyphs);
         let mut points = Vec::new();
-        let mut next = 0usize;
         for (gi, (g, p)) in glyphs.iter().zip(&pts).enumerate() {
-            let kept = !fresh && (gi < prefix || gi >= glyphs.len() - suffix);
-            let (state, reveal_t0, reveal_delay) = if kept {
-                let o = if gi < prefix { &old.glyphs[gi] } else { &old.glyphs[old.glyphs.len() - (glyphs.len() - gi)] };
-                (GlyphState::Kept, o.reveal_t0, o.reveal_delay)
-            } else if fresh {
-                let cx = g.pos.x + 0.5 * (p.bounds[0] + p.bounds[2]);
-                (GlyphState::Fresh, t, SWEEP * ((cx - x0) / width).clamp(0.0, 1.0))
-            } else {
-                (GlyphState::Changed, t, CHANGED_DELAY)
-            };
-            slot_glyphs.push(SlotGlyph { glyph: *g, reveal_t0, reveal_delay, state });
-            let n = ((want[gi] * k).round() as usize).min(cap as usize - next);
+            let (state, reveal_t0, reveal_delay, _) = info[gi];
+            let range = ranges[gi];
+            slot_glyphs.push(SlotGlyph { glyph: *g, reveal_t0, reveal_delay, state, range });
+            let n = range.1;
             let n_in = if p.interior.is_empty() { 0 } else { (n as f32 * interior_share).round() as usize };
             let n_c = if p.contour.is_empty() { 0 } else { n - n_in };
             let pick = |list: &[[f32; 2]], j: usize, n: usize| {
@@ -1354,7 +1383,7 @@ impl Particles {
                 let q = if j < n_c { pick(&p.contour, j, n_c) } else { pick(&p.interior, j - n_c, n_in) };
                 let pos = [g.pos.x + q[0], g.pos.y + q[1]];
                 points.push(pos);
-                self.target_data[next] = GpuTarget {
+                self.target_data[range.0 + j] = GpuTarget {
                     pos,
                     flags,
                     glyph: gi as u32,
@@ -1362,7 +1391,6 @@ impl Particles {
                     reveal_delay,
                     start: [0.0; 2],
                 };
-                next += 1;
             }
         }
         let anchor = GpuAnchor {
@@ -1435,6 +1463,7 @@ impl Particles {
             reveal_t0: t,
             reveal_delay: form.sweep,
             state: if old.points.is_empty() { GlyphState::Fresh } else { GlyphState::Changed },
+            range: (0, n),
         };
         self.slots[slot as usize] = Slot {
             gen: anchor.gen,
@@ -1560,7 +1589,7 @@ impl Particles {
             })
             .collect();
         self.queue.write_buffer(&self.slot_draw, 0, bytemuck::cast_slice(&sd));
-        let key = (p.format, p.blend, p.depth);
+        let key = (p.format, p.blend, p.depth, p.samples.max(1));
         self.ensure_pipelines_for(key);
         self.draw_key = Some(key);
     }
@@ -1568,14 +1597,14 @@ impl Particles {
     /// Makes the additive sprite pipelines for `format` without depth, so the first frame
     /// that draws particles does not compile them.
     pub fn ensure_pipelines(&mut self, format: wgpu::TextureFormat) {
-        self.ensure_pipelines_for((format, ParticleBlend::Add, None));
+        self.ensure_pipelines_for((format, ParticleBlend::Add, None, 1));
     }
 
-    fn ensure_pipelines_for(&mut self, key: (wgpu::TextureFormat, ParticleBlend, Option<wgpu::TextureFormat>)) {
+    fn ensure_pipelines_for(&mut self, key: DrawKey) {
         if self.draw_pipes.iter().any(|d| d.key == key) {
             return;
         }
-        let (format, blend, depth) = key;
+        let (format, blend, depth, samples) = key;
         use wgpu::BlendFactor::*;
         let color = match blend {
             ParticleBlend::Add => One,
@@ -1617,7 +1646,7 @@ impl Particles {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
                 multiview_mask: None,
                 cache: None,
             })
@@ -1690,6 +1719,73 @@ fn encode_sim(s: &EmitterSim, e: &Emitter) -> GpuEmitStep {
         shock,
         pool: [e.base, e.capacity, e.trail_base, e.spec.trails.min(e.capacity)],
     }
+}
+
+/// Places each glyph's particles in a slot of `cap`: glyph `i` keeps the range `keep(i)`
+/// gives (a glyph that stayed keeps its particles), the others go into the free gaps, each
+/// preferring the first gap after the glyph before it, so a changed glyph takes over the
+/// particles of the glyph it replaced. Counts are cut to fit; when the gaps are too broken
+/// up, everything is laid out again from the start.
+fn allocate(cap: usize, counts: &[usize], keep: impl Fn(usize) -> Option<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<Option<(usize, usize)>> = (0..counts.len()).map(&keep).collect();
+    let mut used: Vec<(usize, usize)> = ranges.iter().flatten().copied().collect();
+    used.sort();
+    let overlaps = used.windows(2).any(|w| w[0].0 + w[0].1 > w[1].0) || used.iter().any(|r| r.0 + r.1 > cap);
+    let mut gaps = Vec::new();
+    if !overlaps {
+        let mut at = 0;
+        for r in &used {
+            if r.0 > at {
+                gaps.push((at, r.0));
+            }
+            at = r.0 + r.1;
+        }
+        if at < cap {
+            gaps.push((at, cap));
+        }
+        let mut prev_end = 0;
+        let mut ok = true;
+        for i in 0..counts.len() {
+            if let Some(r) = ranges[i] {
+                prev_end = r.0 + r.1;
+                continue;
+            }
+            let n = counts[i];
+            let pick = gaps
+                .iter()
+                .position(|g| g.1 > prev_end.max(g.0) && g.1 - prev_end.max(g.0) >= n)
+                .or_else(|| gaps.iter().position(|g| g.1 - g.0 >= n));
+            let Some(gi) = pick else {
+                ok = false;
+                break;
+            };
+            let g = gaps[gi];
+            let start = if g.1 > prev_end.max(g.0) && g.1 - prev_end.max(g.0) >= n { prev_end.max(g.0) } else { g.0 };
+            ranges[i] = Some((start, n));
+            prev_end = start + n;
+            // Split the gap around the taken range.
+            gaps.remove(gi);
+            if start + n < g.1 {
+                gaps.insert(gi, (start + n, g.1));
+            }
+            if start > g.0 {
+                gaps.insert(gi, (g.0, start));
+            }
+        }
+        if ok {
+            return ranges.into_iter().map(|r| r.unwrap()).collect();
+        }
+    }
+    let mut at = 0;
+    counts
+        .iter()
+        .map(|&n| {
+            let n = n.min(cap - at);
+            let r = (at, n);
+            at += n;
+            r
+        })
+        .collect()
 }
 
 /// `w tau` at which the slowest particle's convergence reaches the end of the reveal.
@@ -1766,6 +1862,23 @@ mod tests {
         assert_eq!(at(5.0, 5.0), 0, "far outside");
         let edge = at(38.0, 25.0);
         assert!(edge > 0 && edge < at(50.0, 25.0), "blurred edge {edge}");
+    }
+
+    #[test]
+    fn allocation_keeps_kept_glyphs_and_fills_their_gaps() {
+        // "wards" to "words": glyphs 0, 2, 3, 4 keep their ranges; 1 takes the gap 1 left.
+        let old = [(0, 40), (40, 30), (70, 25), (95, 30), (125, 28)];
+        let counts = [40, 32, 25, 30, 28];
+        let r = allocate(1024, &counts, |i| (i != 1).then_some(old[i]));
+        assert_eq!(r[0], (0, 40));
+        assert_eq!(r[2..], old[2..]);
+        // 32 do not fit in the 30-wide gap: it goes after the last glyph.
+        assert_eq!(r[1], (153, 32));
+        let r = allocate(1024, &[40, 30, 25], |i| (i != 1).then_some(old[i]));
+        assert_eq!(r[1], (40, 30), "the replaced glyph's own particles");
+        // No room: a fresh layout.
+        let r = allocate(100, &[60, 60], |i| (i == 0).then_some((20, 60)));
+        assert_eq!(r, vec![(0, 60), (60, 40)]);
     }
 
     #[test]

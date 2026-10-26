@@ -154,6 +154,7 @@ fn main() {
         camera: None,
         blend: Default::default(),
         depth: None,
+        samples: 1,
     };
 
     println!();

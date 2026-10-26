@@ -58,6 +58,7 @@ impl Rig {
             camera: None,
             blend: Default::default(),
             depth: None,
+            samples: 1,
         }
     }
 
@@ -513,4 +514,129 @@ fn every_feature_is_the_same_at_any_frame_rate() {
         px: a.concat(),
     };
     support::check(&img, Tolerance { per_pixel: 4, max_fraction: 0.002 }).unwrap();
+}
+
+/// Particle words fed from a vo-scene `LiveText` element through `ParticleText`, with a
+/// revision: frames are the same at 60 fps and 144 Hz, words are readable in time.
+#[test]
+fn live_text_forms_through_particle_text() {
+    use vo_core::words::WordModel;
+    use vo_render::particle_text::ParticleText;
+    use vo_scene::element::Element;
+    use vo_scene::Scene;
+
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let mut rig = Rig::new(&fonts, 420, 80);
+    // Hypotheses at their times, as a recogniser would send them.
+    let script = [(0.1, "hello"), (0.45, "hello there"), (0.8, "hello their"), (1.15, "hello their friend")];
+    let render = |rig: &mut Rig, fps: f64, keep: &[f64]| -> Vec<Vec<u8>> {
+        let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+        scene.set_viewport(0.0, Size::new(rig.w as f32, rig.h as f32), 1.0);
+        let mut model = WordModel::new();
+        let mut p = rig.particles(&fonts, ParticleConfig { free_capacity: 64, word_slots: 4, ..Default::default() });
+        let mut text = ParticleText::new(4, 1.0, Color::hex(0x9fd8ff, 1.0));
+        let mut next = 0;
+        let mut kept = Vec::new();
+        let n = (1.6 * fps).round() as u64;
+        for i in 0..=n {
+            let t = i as f64 / fps;
+            while next < script.len() && script[next].0 <= t {
+                let (te, hyp) = script[next];
+                model.update(hyp);
+                let view = Element::column("root")
+                    .pad(20.0)
+                    .child(Element::live_text("live", model.words()).text_style(TextStyle::new(0, 30.0, 40.0)));
+                scene.apply(view, te);
+                text.update(&mut p, te, &scene.sample(te).glyphs);
+                next += 1;
+            }
+            p.advance(t, &|_, _| EmitterSim::default());
+            let mut list = scene.sample(t);
+            let looks = text.apply(&p, t, &mut list.glyphs);
+            p.prepare(&rig.params(t), &|_| EmitterLook::default(), &looks);
+            let px = rig.frame(&list, &p);
+            if keep.iter().any(|k| (k * fps).round() as u64 == i) {
+                kept.push(px);
+            }
+        }
+        kept
+    };
+    // On both the 60 fps and the 144 Hz grid.
+    let times = [0.5, 7.0 / 12.0, 10.0 / 12.0, 1.0, 1.25, 1.5];
+    let a = render(&mut rig, 60.0, &times);
+    let b = render(&mut rig, 144.0, &times);
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(x == y, "frame at {} s differs between 60 fps and 144 Hz", times[i]);
+    }
+    let img = Image {
+        name: "particles-live-text".into(),
+        w: rig.w,
+        h: rig.h * times.len() as u32,
+        channels: 4,
+        px: a.concat(),
+    };
+    support::check(&img, Tolerance { per_pixel: 4, max_fraction: 0.002 }).unwrap();
+}
+
+/// After a revision the word is readable again within 250 ms, and only the changed glyphs
+/// light up.
+#[test]
+fn a_revision_is_readable_again_within_250_ms() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let (w, h) = (320, 80);
+    let mut rig = Rig::new(&fonts, w, h);
+    let mut parts = rig.particles(&fonts, ParticleConfig { free_capacity: 64, word_slots: 1, ..Default::default() });
+    let old = shape(&fonts, "wards", 28.0, Point::new(24.0, 22.0));
+    let new = shape(&fonts, "words", 28.0, Point::new(24.0, 22.0));
+    let solid = {
+        let list = word_list(&rig, &parts, &new, 0.0, true);
+        let empty = rig.particles(&fonts, ParticleConfig { free_capacity: 64, word_slots: 1, ..Default::default() });
+        rig.frame(&list, &empty)
+    };
+    parts.set_word(0, 0.0, &old.glyphs, 1.0);
+    let t1 = 0.5;
+    parts.set_word(0, t1, &new.glyphs, 1.0);
+    assert_eq!(
+        parts.glyph_states(0),
+        [GlyphState::Kept, GlyphState::Changed, GlyphState::Kept, GlyphState::Kept, GlyphState::Kept]
+    );
+    let mut readable = None;
+    let mut lit_outside = 0.0f32;
+    // Columns of the changed glyph, from its pen position to the next one.
+    let (x0, x1) = (new.origin.x + new.glyphs[1].pos.x - 2.0, new.origin.x + new.glyphs[2].pos.x + 2.0);
+    for i in 0..=40 {
+        let t = t1 + i as f64 * 0.01;
+        let px = word_frame(&mut rig, &mut parts, &new, t);
+        let c = correlation(&px, &solid);
+        if readable.is_none() && c > 0.9 {
+            readable = Some(t - t1);
+        }
+        // Kept glyphs stay solid the whole time: only the changed one hands over again.
+        for g in [0, 2, 3, 4] {
+            assert_eq!(parts.glyph_alpha(0, g, t), 1.0, "glyph {g} at {t}");
+        }
+        // Once the scatter has faded, no light is left away from the changed glyph.
+        let mut lit = 0.0f32;
+        for (k, (p, s)) in px.chunks(4).zip(solid.chunks(4)).enumerate() {
+            let x = (k as u32 % w) as f32;
+            if x < x0 || x > x1 {
+                lit = lit.max(light(p) - light(s));
+            }
+        }
+        if t - t1 >= 0.2 {
+            lit_outside = lit_outside.max(lit);
+        }
+        if i % 5 == 0 {
+            println!("{:3.0} ms: correlation {c:.3}, light outside {lit:.3}", (t - t1) * 1000.0);
+        }
+    }
+    let readable = readable.expect("never readable again");
+    println!(
+        "revision readable again after {:.0} ms; light outside the changed glyph after 200 ms {lit_outside:.3}",
+        readable * 1000.0
+    );
+    assert!(readable <= 0.25, "{readable}");
+    assert!(lit_outside < 0.35, "kept glyphs lit up: {lit_outside}");
 }

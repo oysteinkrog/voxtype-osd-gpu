@@ -20,6 +20,7 @@ pub mod glass;
 pub mod glyph_points;
 pub mod hot;
 pub mod offscreen;
+pub mod particle_text;
 pub mod particles;
 pub mod renderer;
 pub mod shapes;

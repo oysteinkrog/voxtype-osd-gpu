@@ -107,7 +107,14 @@ struct Demo {
 impl Demo {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, fonts: FontRegistry) -> Demo {
         let renderer = Renderer::with_fonts(device, queue, fonts.clone());
-        let cfg = ParticleConfig { free_capacity: 24_576, word_slots: 8, slot_capacity: 1024, tick_hz: 120.0, seed: 9 };
+        let cfg = ParticleConfig {
+            free_capacity: 24_576,
+            word_slots: 8,
+            slot_capacity: 1024,
+            tick_hz: 120.0,
+            seed: 9,
+            ..Default::default()
+        };
         let mut particles = Particles::new(device, queue, fonts.clone(), cfg);
         particles.add_ring(24_576, 21, 0.9);
         Demo { renderer, particles, layout: ShapedLayout::new(fonts), words: vec![None; 8], next_event: 0 }
@@ -222,6 +229,7 @@ impl Demo {
             camera: None,
             blend: Default::default(),
             depth: None,
+            samples: 1,
         };
         self.particles.prepare(&params, &|_| ring_look(t), &looks);
         let list = self.display_list(t, &origins);
