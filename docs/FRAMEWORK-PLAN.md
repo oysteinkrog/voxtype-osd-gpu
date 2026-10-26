@@ -127,6 +127,9 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
   desynchronized one would, and the last CPU frame stays on screen meanwhile, so the entrance motion
   holds for 2 to 3 refreshes. The overlay is click-through until the first GPU frame, because the input
   region lives on the GPU's sub-surface.
+- Against a nested KWin started fresh for each run (`just budget`), the CPU first frame shows at 63 to
+  73 ms, because a new compositor answers the first configure more slowly. The GPU path there is 200
+  to 216 ms.
 
 ## Crates
 
