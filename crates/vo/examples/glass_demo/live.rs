@@ -96,7 +96,7 @@ impl HostApp for Live {
         }
         let k = (t / SLIDE_SECS).clamp(0.0, 1.0) as f32;
         let slide = SLIDE * (1.0 - k).powi(3);
-        self.scene.apply(view(&self.look, t, slide, None), frame.t);
+        self.scene.apply(view(&self.look, t, slide, None, true), frame.t);
         self.scene.sample_into(frame.t, &mut self.list);
         let rect = self.panel_rect(frame.t);
 

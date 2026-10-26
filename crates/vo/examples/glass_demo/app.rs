@@ -18,6 +18,8 @@ pub struct GlassApp {
     look: Look,
     secs: f64,
     shown: bool,
+    /// No waveform: the orbit alone drives frames.
+    still: bool,
 }
 
 impl App for GlassApp {
@@ -42,7 +44,7 @@ impl App for GlassApp {
             return Element::column("root");
         }
         let glass = self.look.glass.with_orbit(self.look.hues[0]);
-        view(&self.look, 0.0, 0.0, Some(glass))
+        view(&self.look, 0.0, 0.0, Some(glass), !self.still)
     }
 }
 
@@ -54,13 +56,13 @@ fn options() -> Options<Msg> {
 pub fn offline(look: Look, secs: f64, dir: &Path) {
     let (_, size, _) = layout(&load_fonts(), &look);
     let scenario = Scenario { size, scale: 1.0, duration: secs, inputs: Vec::new() };
-    let n = vo::render_offline_with(GlassApp { look, secs, shown: true }, &scenario, 30.0, dir, options())
+    let n = vo::render_offline_with(GlassApp { look, secs, shown: true, still: false }, &scenario, 30.0, dir, options())
         .expect("offline render");
     println!("glass_demo app: wrote {n} frames to {}", dir.display());
 }
 
 /// Runs the popup live for `secs` seconds through `vo::run_overlay_with`.
-pub fn live(look: Look, secs: f64) {
+pub fn live(look: Look, secs: f64, still: bool) {
     let (_, size, _) = layout(&load_fonts(), &look);
     let spec = OverlaySpec {
         size,
@@ -71,7 +73,7 @@ pub fn live(look: Look, secs: f64) {
     };
     let mut options = options();
     options.diagnostics = Some(Box::new(LogDiagnostics::new(None)));
-    if let Err(e) = vo::run_overlay_with(GlassApp { look, secs, shown: true }, spec, options) {
+    if let Err(e) = vo::run_overlay_with(GlassApp { look, secs, shown: true, still }, spec, options) {
         eprintln!("glass_demo app: {e}");
         std::process::exit(1);
     }

@@ -37,6 +37,8 @@ struct Live<A: App> {
     region: Option<InputRegion>,
     /// The last compositor blur region sent, from the glass panels in the list (FX07).
     blur: Option<InputRegion>,
+    /// When a capped-rate animation (glass at 30 fps, FX08) wants its next frame.
+    paced: Option<f64>,
     frames: u64,
     startup_logged: bool,
     finished: bool,
@@ -52,12 +54,20 @@ impl<A: App> Live<A> {
     fn after_change(&mut self, host: &mut dyn HostCtl) {
         let now = host.now();
         let id = self.surface;
+        let paced = self.paced;
         let d = self.driver();
-        if d.dirty || d.moving(now) {
+        // A capped-rate animation is not due at every event (each present is one), only at
+        // its own wake time.
+        let due = d.scene.next_wake(now).is_some_and(|w| w <= now) || paced.is_some_and(|w| w <= now);
+        if d.dirty || due {
             host.request_frame(id);
         }
-        let next = self.driver().timers.next_at();
-        host.wake_at(next);
+        let next = d.timers.next_at();
+        let paced = paced.filter(|&w| w > now);
+        host.wake_at(match (next, paced) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        });
         if self.driver().done(now) && !self.driver().dirty {
             self.finish(host);
         }
@@ -151,11 +161,16 @@ impl<A: App> Live<A> {
         if let Some(d) = self.diag() {
             d.frame(n, t, &host_diag);
         }
+        self.paced = None;
         if moving {
             // Glass animates at a capped rate (FX08): a wake time after `t` is a timer, not
             // the next vblank.
             match self.driver().scene.next_wake(t) {
                 Some(w) if w > t => {
+                    // The frame comes at the first vblank after the request, so ask half a
+                    // 60 Hz refresh early, or a 30 fps loop lands at 20 fps.
+                    let w = (w - 1.0 / 120.0).max(t);
+                    self.paced = Some(w);
                     let timer = self.driver().timers.next_at();
                     host.wake_at(Some(timer.map_or(w, |x| x.min(w))));
                 }
@@ -284,6 +299,7 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
         list: DisplayList::default(),
         region: None,
         blur: None,
+        paced: None,
         frames: 0,
         startup_logged: false,
         finished: false,

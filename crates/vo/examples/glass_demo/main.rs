@@ -12,7 +12,8 @@
 //!
 //! The element path, `Element::panel(..).glass(..)` in a plain vo App, offline or live:
 //!   glass_demo --app-offline DIR [--light]
-//!   glass_demo --app-live [--secs S] [--light]
+//!   glass_demo --app-live [--secs S] [--light] [--still]
+//! `--still` drops the waveform, so the orbit alone drives frames and they come at 30 fps.
 
 mod app;
 mod live;
@@ -78,7 +79,8 @@ pub const LIGHT: Look = Look {
 /// `slide` moves the panel up from its rest position, for the show animation.
 /// `glass` puts the material on the panel element (the element path); without it the panel
 /// has no fill and the caller draws the glass.
-pub fn view<M>(look: &Look, t: f64, slide: f32, glass: Option<Glass>) -> Element<M> {
+/// Without `show_wave` the popup has no waveform, so nothing moves but the glass itself.
+pub fn view<M>(look: &Look, t: f64, slide: f32, glass: Option<Glass>, show_wave: bool) -> Element<M> {
     let mono = |px: f32| TextStyle::new(MONO, px, (px * 1.3).round());
     let caption = |key: &'static str, text: &str, px: f32, tracking: f32| {
         Element::label(key, text).text_style(mono(px).tracking(tracking)).color(look.inactive)
@@ -149,12 +151,13 @@ pub fn view<M>(look: &Look, t: f64, slide: f32, glass: Option<Glass>) -> Element
     if let Some(g) = glass {
         panel = panel.glass(g);
     }
+    let mut panel = panel.width(PANEL_W).pad_edges(17.0, 23.0, 13.0, 23.0).radius(RADIUS).child(header);
+    panel = if show_wave {
+        panel.child(Element::wave("wave", wave).height(40.0).margin_edges(10.0, 0.0, 10.0, 0.0))
+    } else {
+        panel.child(Element::column("wave").height(40.0).margin_edges(10.0, 0.0, 10.0, 0.0))
+    };
     let panel = panel
-        .width(PANEL_W)
-        .pad_edges(17.0, 23.0, 13.0, 23.0)
-        .radius(RADIUS)
-        .child(header)
-        .child(Element::wave("wave", wave).height(40.0).margin_edges(10.0, 0.0, 10.0, 0.0))
         .child(
             Element::label("text", text)
                 .text_style(TextStyle::new(SANS, 22.0, 30.0))
@@ -178,7 +181,7 @@ pub fn load_fonts() -> FontRegistry {
 pub fn layout(fonts: &FontRegistry, look: &Look) -> (Scene<()>, Size, [f32; 4]) {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, Size::new(PANEL_W + 2.0 * MARGIN, 1000.0), 1.0);
-    scene.apply(view(look, 0.0, 0.0, None), 0.0);
+    scene.apply(view(look, 0.0, 0.0, None, true), 0.0);
     let id = scene.find(&["root", "panel"]).expect("panel");
     let s = scene.sampled(id, 0.0).expect("panel drawn");
     let o = s.transform.apply(Point::new(0.0, 0.0));
@@ -307,7 +310,7 @@ impl Offline {
         // instead of animating from the last frame.
         let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(self.fonts.clone())));
         scene.set_viewport(t, self.size, 1.0);
-        scene.apply(view(look, t, 0.0, None), t);
+        scene.apply(view(look, t, 0.0, None, true), t);
         scene.sample_into(t, &mut self.list);
         if glass_only {
             self.list.clear();
@@ -671,11 +674,11 @@ fn main() {
     } else if args.iter().any(|a| a == "--app-live") {
         let secs = val("--secs").and_then(|s| s.parse().ok()).unwrap_or(8.0);
         let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
-        app::live(look, secs);
+        app::live(look, secs, args.iter().any(|a| a == "--still"));
     } else {
         eprintln!(
             "usage: glass_demo --offline DIR | --live [--secs S] [--no-blur] [--light] \
-             | --app-offline DIR [--light] | --app-live [--secs S] [--light]"
+             | --app-offline DIR [--light] | --app-live [--secs S] [--light] [--still]"
         );
         std::process::exit(2);
     }
