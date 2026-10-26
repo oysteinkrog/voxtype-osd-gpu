@@ -99,6 +99,21 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 - **Clips.** Only the nearest clip is rounded; outer clips act through their bounding-box scissor.
 - taffy is 0.15.1, not the 0.13 the lane reports cite.
 
+## Host notes (M1, 2026-10-26)
+
+- The `Host` trait lives in its own small crate, `vo-host`, so the macOS and Windows hosts never depend on
+  the Wayland crate. There is no separate offscreen host crate: `render_offline` uses vo-render's
+  `Offscreen` directly.
+- The host presents. The frame callback and the input region must be set before the commit that present
+  makes, so the host calls the app's frame function with the texture and presents afterwards.
+- Wayland's u32 millisecond timestamps have no fixed base and wrap. Events are stamped with the host
+  clock when they arrive. Frame time is the next vblank, predicted from `wp_presentation` feedback.
+- App timers (`Cx::after`) exist because `next_wake` only covers motion. Offline, timers merge with
+  scripted input in time order.
+- Measured on NVIDIA in a nested KWin: cold first frame about 200 to 220 ms, about 60 % of it creating
+  the Vulkan instance. Own heap 1.35 MB. PSS about 70 MB, almost all driver. Zero frames while idle. So
+  the own-heap budget is easy, and the CPU-drawn first frame is still worth building.
+
 ## Crates
 
 | Crate | Contents |
@@ -106,7 +121,8 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 | `vo-core` | maths, clock, channels, tracks, signals, seeded noise, tokens, `LiveText`, event log. No GPU |
 | `vo-scene` | elements, reconcile, nodes, taffy, shaping, line fitting, display list |
 | `vo-render` | wgpu, passes, Slug, hinted text, SDF shapes, effects, particles. No windowing |
-| `vo-host-wayland`, `vo-host-appkit`, `vo-host-win32`, `vo-host-offscreen` | one per platform, behind features |
+| `vo-host` | the Host trait and its types |
+| `vo-host-wayland` (later `vo-host-appkit`, `vo-host-win32`) | one per platform, behind features |
 | `vo` | facade: `run_overlay`, `render_offline`, and the preview, bench and contact-sheet tools |
 
 The popup app and `osd-protocol` live in voxtype.
