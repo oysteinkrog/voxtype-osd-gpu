@@ -30,7 +30,10 @@ pub struct EventLog<E> {
 #[derive(Debug)]
 pub enum EventLogError {
     /// An event earlier than the one before it, or a time that is not a finite number.
-    BadTime { previous: f64, t: f64 },
+    BadTime {
+        previous: f64,
+        t: f64,
+    },
     /// Written by a newer build.
     UnsupportedVersion(u32),
     Json(serde_json::Error),

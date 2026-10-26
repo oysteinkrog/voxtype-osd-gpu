@@ -26,7 +26,8 @@ impl Segment {
         if dt <= 0.0 {
             return (self.x0, self.v0);
         }
-        if dt >= self.settle {
+        // Same expression as `Channel::settled_at`, so sampling at that time is at rest.
+        if t >= self.t0 + self.settle {
             return (self.target, 0.0);
         }
         let (y, v) = self.spring.eval(self.x0 - self.target, self.v0, dt);
@@ -179,9 +180,12 @@ mod tests {
         ev
     }
 
+    /// A drawn frame: its time and the sampled value and velocity.
+    type Frame = (f64, (f64, f64));
+
     /// A host loop at `hz`: before each frame, apply every event stamped up to the frame time
     /// at its own timestamp, then sample the frame. Returns the channel and the samples.
-    fn run(spring: Spring, ev: &[(f64, f64)], hz: f64, span: f64) -> (Channel, Vec<(f64, (f64, f64))>) {
+    fn run(spring: Spring, ev: &[(f64, f64)], hz: f64, span: f64) -> (Channel, Vec<Frame>) {
         let mut ch = Channel::new(0.0, 0.0, spring);
         let mut next = 0;
         let mut out = Vec::new();
@@ -216,7 +220,7 @@ mod tests {
                     }
                 }
                 // Times all three rates share (every 1/6 s) were drawn as the same pixels.
-                let at = |frames: &Vec<(f64, (f64, f64))>, k: u64, hz: f64| frames[(k as f64 * hz / 6.0) as usize].1;
+                let at = |frames: &Vec<Frame>, k: u64, hz: f64| frames[(k as f64 * hz / 6.0) as usize].1;
                 for k in 0..=(span * 6.0) as u64 {
                     let a = at(&runs[0].1, k, 144.0);
                     assert_eq!(a, at(&runs[1].1, k, 60.0));
@@ -231,7 +235,8 @@ mod tests {
         for (name, spring) in Spring::PRESETS {
             let mut ch = Channel::new(0.0, 0.0, spring);
             ch.retarget(0.0, 100.0);
-            for (i, (t, target)) in [(0.05, -50.0), (0.0731, 300.0), (0.2, 10.0), (0.21, 10.5)].into_iter().enumerate() {
+            for (i, (t, target)) in [(0.05, -50.0), (0.0731, 300.0), (0.2, 10.0), (0.21, 10.5)].into_iter().enumerate()
+            {
                 let before = ch.sample(t);
                 ch.retarget(t, target);
                 let after = ch.sample(t);
@@ -239,10 +244,18 @@ mod tests {
                 // Velocity has no jump on either side: it changes by at most what the
                 // acceleration allows in 0.1 microseconds.
                 let h = 1e-7;
-                let accel = |x: f64, v: f64, target: f64| spring.stiffness * (x - target).abs() + spring.damping * v.abs();
+                let accel =
+                    |x: f64, v: f64, target: f64| spring.stiffness * (x - target).abs() + spring.damping * v.abs();
                 let (_, v_left) = ch.sample(t - h);
                 let (_, v_right) = ch.sample(t + h);
-                let bound = 1.01 * h * accel(before.0, before.1, target).max(accel(before.0, before.1, ch.segments()[ch.segments().len() - 2].target)) + 1e-6;
+                let bound = 1.01
+                    * h
+                    * accel(before.0, before.1, target).max(accel(
+                        before.0,
+                        before.1,
+                        ch.segments()[ch.segments().len() - 2].target,
+                    ))
+                    + 1e-6;
                 assert!((v_left - before.1).abs() < bound, "{name} retarget {i}: left {v_left} vs {}", before.1);
                 assert!((v_right - before.1).abs() < bound, "{name} retarget {i}: right {v_right} vs {}", before.1);
             }
@@ -324,8 +337,9 @@ mod tests {
         ch.set_spring(Spring::SNAP);
         ch.retarget(0.2, 0.0);
         assert_eq!(ch.sample(0.15), before);
-        assert_eq!(ch.segments()[1].spring, Spring::SLOW);
-        assert_eq!(ch.segments()[2].spring, Spring::SNAP);
+        // The retarget at t = 0 replaced the resting segment that also started at 0.
+        assert_eq!(ch.segments()[0].spring, Spring::SLOW);
+        assert_eq!(ch.segments()[1].spring, Spring::SNAP);
     }
 
     #[test]

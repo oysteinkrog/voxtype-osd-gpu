@@ -102,8 +102,11 @@ impl Spring {
                 self.settle_after(y0, v0, eps_x, eps_v, crossings)
             }
             Solution::Over { r1, r2, c1, c2 } => {
-                let crossings =
-                    [exp_root(c1, c2, r1, r2), exp_root(r1 * c1, r2 * c2, r1, r2), exp_root(r1 * r1 * c1, r2 * r2 * c2, r1, r2)];
+                let crossings = [
+                    exp_root(c1, c2, r1, r2),
+                    exp_root(r1 * c1, r2 * c2, r1, r2),
+                    exp_root(r1 * r1 * c1, r2 * r2 * c2, r1, r2),
+                ];
                 self.settle_after(y0, v0, eps_x, eps_v, crossings)
             }
         }

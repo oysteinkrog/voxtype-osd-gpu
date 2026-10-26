@@ -183,9 +183,10 @@ mod tests {
             assert_eq!(c.ease(1.0), 1.0);
             assert_eq!(c.ease(-0.5), 0.0);
             assert_eq!(c.ease(2.0), 1.0);
-            // Continuous into the end points.
-            assert!(c.ease(1e-9).abs() < 1e-6, "{c:?}");
-            assert!((c.ease(1.0 - 1e-9) - 1.0).abs() < 1e-6, "{c:?}");
+            // Continuous into the end points. The steepest curve here, (0, 0, 0, 1), has
+            // y close to 3 p^(2/3) near 0, so 1e-12 gives about 3e-8.
+            assert!(c.ease(1e-12).abs() < 1e-6, "{c:?}");
+            assert!((c.ease(1.0 - 1e-12) - 1.0).abs() < 1e-6, "{c:?}");
         }
     }
 
