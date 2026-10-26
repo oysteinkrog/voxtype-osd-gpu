@@ -19,6 +19,7 @@ use vo_core::words::Word;
 
 use crate::display::{BlendMode, ShapeKind};
 use crate::geom::Color;
+use crate::timed::{Progress, Wave};
 
 /// A node's key among its siblings.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -240,6 +241,10 @@ pub(crate) enum Kind {
         words: Vec<Word>,
         style: TextStyle,
     },
+    /// A scrolling waveform filling the box.
+    Wave(Wave),
+    /// A progress bar filling the box.
+    Progress(Progress),
 }
 
 impl Kind {
@@ -338,6 +343,17 @@ impl<M> Element<M> {
     /// as its diameter; a line runs from the top-left to the bottom-right corner.
     pub fn shape(key: impl Into<Key>, kind: ShapeKind) -> Element<M> {
         Element::new(key, Kind::Shape(kind), taffy::Style::default())
+    }
+
+    /// A filled waveform that fills the element's box and scrolls by the frame time.
+    pub fn wave(key: impl Into<Key>, wave: Wave) -> Element<M> {
+        Element::new(key, Kind::Wave(wave), taffy::Style::default())
+    }
+
+    /// A progress bar that fills the element's box, with an indeterminate sweep when the
+    /// fraction is unknown.
+    pub fn progress(key: impl Into<Key>, progress: Progress) -> Element<M> {
+        Element::new(key, Kind::Progress(progress), taffy::Style::default())
     }
 
     /// A container drawn as its own layer: group transform, blend mode, optional clip to

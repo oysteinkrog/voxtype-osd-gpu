@@ -337,7 +337,15 @@ impl<M> Scene<M> {
     /// The time at or after `t` from which the display list may differ from `sample(t)`:
     /// `Some(t)` while anything moves, `None` once everything has settled.
     pub fn next_wake(&self, t: f64) -> Option<f64> {
-        let moving = self.nodes.values().any(|n| n.chans.iter().any(|(_, c)| c.settled_at() > t));
+        let moving = self.nodes.values().any(|n| {
+            n.chans.iter().any(|(_, c)| c.settled_at() > t)
+                || (n.alive(t)
+                    && match &n.kind {
+                        Kind::Wave(w) => w.moving(t),
+                        Kind::Progress(p) => p.moving(),
+                        _ => false,
+                    })
+        });
         moving.then_some(t)
     }
 
@@ -784,6 +792,14 @@ impl<M> Scene<M> {
                 self.glyphs(n, style.font, style.size, origin, color, word_of, items, out);
                 None
             }
+            Kind::Wave(w) => {
+                self.timed_shapes(items, out, |v| w.shapes(rect, t, alpha, v));
+                None
+            }
+            Kind::Progress(p) => {
+                self.timed_shapes(items, out, |v| p.shapes(rect, t, alpha, v));
+                None
+            }
             Kind::Stack => None,
         };
         if let Some(s) = shape.map(stroked) {
@@ -791,6 +807,15 @@ impl<M> Scene<M> {
                 push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                 out.shapes.push(s);
             }
+        }
+    }
+
+    /// Shapes from a timed element, appended in order.
+    fn timed_shapes(&self, items: &mut Vec<Item>, out: &mut DisplayList, f: impl FnOnce(&mut Vec<ShapeInstance>)) {
+        let start = out.shapes.len();
+        f(&mut out.shapes);
+        for i in start..out.shapes.len() {
+            push_item(items, ItemKind::Shapes, i as u32);
         }
     }
 
