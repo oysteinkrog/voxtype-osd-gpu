@@ -200,8 +200,8 @@ impl Paint {
     }
 
     /// A glow paint, `radius` in logical units. Put it in the fill of a copy of the shape
-    /// drawn under it. A stroke width on that copy moves the glow out to the stroke's
-    /// outer edge.
+    /// drawn under it. A stroke width on that copy makes it the glow of the stroke: it falls
+    /// off on both sides of the stroke, so an outline glows inside as well.
     pub fn glow(c: Color, radius: f32, strength: f32) -> Paint {
         Paint { kind: PaintKind::Glow, c0: c, c1: c, p0: Point::new(radius.max(0.0), strength.max(0.0)), p1: Point::ZERO }
     }

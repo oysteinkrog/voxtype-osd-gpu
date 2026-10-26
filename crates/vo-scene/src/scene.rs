@@ -17,7 +17,7 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
 use crate::display::{
-    BlendMode, DisplayList, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint, ShapeInstance,
+    BlendMode, Bloom, DisplayList, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint, ShapeInstance,
     ShapeKind, NO_WORD,
 };
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
@@ -787,7 +787,11 @@ impl<M> Scene<M> {
         let (blend, clip, target, group, inside) = match n.kind {
             Kind::Layer { blend, clip, offscreen } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
-                let target = if offscreen { LayerTarget::Offscreen { bloom: None } } else { LayerTarget::Direct };
+                let bloom = n.has(Slot::BloomStrength as u8).then(|| Bloom {
+                    strength: n.value(Slot::BloomStrength as u8, t).max(0.0) as f32,
+                    radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
+                });
+                let target = if offscreen { LayerTarget::Offscreen { bloom } } else { LayerTarget::Direct };
                 (blend, clip, target, alpha * opacity, 1.0)
             }
             _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
@@ -953,6 +957,24 @@ impl<M> Scene<M> {
             Kind::Stack => None,
         };
         if let Some(s) = shape.map(stroked) {
+            // Shadow, then glow, then the shape: copies of its outline with a halo fill. The
+            // stroke width stays so the halo starts at the stroke's outer edge.
+            let halo = |fill: Paint| ShapeInstance { fill, stroke: Paint::NONE, flags: 0, ..s };
+            let mut halos = [None, None];
+            if n.has(Slot::ShadowColor as u8) {
+                let offset = Point::new(n.value(Slot::ShadowX as u8, t) as f32, n.value(Slot::ShadowY as u8, t) as f32);
+                let blur = n.value(Slot::ShadowBlur as u8, t).max(0.0) as f32;
+                halos[0] = Some(halo(Paint::shadow(n.color(Slot::ShadowColor, t), offset, blur, 0.0).fade(alpha)));
+            }
+            if n.has(Slot::GlowColor as u8) {
+                let radius = n.value(Slot::GlowRadius as u8, t).max(0.0) as f32;
+                let strength = n.value(Slot::GlowStrength as u8, t).max(0.0) as f32;
+                halos[1] = Some(halo(Paint::glow(n.color(Slot::GlowColor, t), radius, strength).fade(alpha)));
+            }
+            for h in halos.into_iter().flatten().filter(|h| h.fill.is_visible()) {
+                push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                out.shapes.push(h);
+            }
             if s.fill.is_visible() || s.stroke.is_visible() {
                 push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                 out.shapes.push(s);

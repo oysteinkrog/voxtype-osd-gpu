@@ -69,6 +69,15 @@ pub(crate) enum Slot {
     Fill1 = 15,
     Stroke = 19,
     Text = 23,
+    GlowColor = 27,
+    GlowRadius = 31,
+    GlowStrength = 32,
+    ShadowColor = 33,
+    ShadowX = 37,
+    ShadowY = 38,
+    ShadowBlur = 39,
+    BloomStrength = 40,
+    BloomRadius = 41,
 }
 
 impl Slot {
@@ -93,7 +102,10 @@ impl Slot {
             s if s == Slot::StrokeWidth as u8 => Prop::StrokeWidth,
             s if s < Slot::Stroke as u8 => Prop::Fill,
             s if s < Slot::Text as u8 => Prop::Stroke,
-            _ => Prop::TextColor,
+            s if s < Slot::GlowColor as u8 => Prop::TextColor,
+            s if s < Slot::ShadowColor as u8 => Prop::Glow,
+            s if s < Slot::BloomStrength as u8 => Prop::Shadow,
+            _ => Prop::Bloom,
         }
     }
 
@@ -104,7 +116,10 @@ impl Slot {
             || slot == Slot::OffsetX as u8
             || slot == Slot::OffsetY as u8
             || slot == Slot::Radius as u8
-            || slot == Slot::StrokeWidth as u8)
+            || slot == Slot::StrokeWidth as u8
+            || slot == Slot::GlowRadius as u8
+            || (Slot::ShadowX as u8..=Slot::ShadowBlur as u8).contains(&slot)
+            || slot == Slot::BloomRadius as u8)
     }
 }
 
@@ -126,6 +141,12 @@ pub enum Prop {
     Fill,
     Stroke,
     TextColor,
+    /// Glow colour, radius and strength.
+    Glow,
+    /// Shadow colour, offset and blur.
+    Shadow,
+    /// Bloom strength and radius.
+    Bloom,
 }
 
 /// How a property moves to a new target.
@@ -636,6 +657,40 @@ impl<M> Element<M> {
         } else {
             debug_assert!(false, "clip on a node that is not a layer: {}", self.key);
         }
+        self
+    }
+
+    /// A glow around the element's shape: `c` fading out over about `radius` logical units,
+    /// at `strength` (1 is the colour at the shape's edge; above 1 is brighter than the
+    /// colour and lights a bloom around it). For elements that draw a shape: panels, layers
+    /// and shapes. Text glows through a [`Element::bloom`] layer around it instead.
+    pub fn glow(mut self, c: Color, radius: f32, strength: f32) -> Element<M> {
+        self.set(Slot::GlowColor as u8, c);
+        self.set(Slot::GlowRadius as u8, radius);
+        self.set(Slot::GlowStrength as u8, strength);
+        self
+    }
+
+    /// A soft drop shadow of the element's shape, moved by `dx`, `dy` and blurred with a
+    /// standard deviation of `blur`, in logical units. For panels, layers and shapes.
+    pub fn shadow(mut self, c: Color, dx: f32, dy: f32, blur: f32) -> Element<M> {
+        self.set(Slot::ShadowColor as u8, c);
+        self.set(Slot::ShadowX as u8, [dx, dy]);
+        self.set(Slot::ShadowBlur as u8, blur);
+        self
+    }
+
+    /// Bloom on a layer: a blurred copy of everything in it, spread over about `radius`
+    /// logical units, is added `strength` times on top. Makes the layer offscreen and puts
+    /// the frame on the renderer's effect path. The halo is not cut by the layer's clip.
+    pub fn bloom(mut self, strength: f32, radius: f32) -> Element<M> {
+        if let Kind::Layer { offscreen, .. } = &mut self.kind {
+            *offscreen = true;
+        } else {
+            debug_assert!(false, "bloom on a node that is not a layer: {}", self.key);
+        }
+        self.set(Slot::BloomStrength as u8, strength);
+        self.set(Slot::BloomRadius as u8, radius);
         self
     }
 

@@ -220,8 +220,11 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
   let hw = 0.5 * in.stroke_width;
   var v: f32;
   if (fill_kind == PAINT_GLOW) {
+    // Around a stroke the glow falls off on both sides of it, so a stroked outline glows
+    // inside too; a fill drawn over it hides that part.
     let r = max (in.fill_p.x, 1e-4);
-    v = in.fill_p.y * exp (-max (d - hw, 0.0) / r);
+    let dd = select (d, abs (d), hw > 0.0) - hw;
+    v = in.fill_p.y * exp (-max (dd, 0.0) / r);
   } else {
     // At least a quarter pixel, so a hard shadow still has an antialiased edge.
     let sigma = max (in.fill_p.z, 0.25 / layer.t.z);
