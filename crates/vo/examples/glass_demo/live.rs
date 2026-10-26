@@ -1,43 +1,23 @@
 //! Live mode: the glass popup as a layer surface, with the blur region sent through the host
 //! on every frame in which the panel moves. Run it only inside a nested compositor.
 
-use vo::scene::display::{DisplayList, IRect, InputRegion};
+use vo::scene::display::DisplayList;
 use vo::scene::geom::{Point, Size};
 use vo::scene::Scene;
 use vo::{InputMode, OverlaySpec, Placement};
 use vo_host::{Frame, Host, HostApp, HostCtl, HostEvent, SurfaceChange, SurfaceId};
 use vo_host_wayland::WaylandHost;
+use vo_render::glass::{blur_region, GlassBlend, GlassPass};
 use vo_render::{Renderer, Target};
 
-use crate::glass::GlassPass;
-use crate::{glass_at, glass_fps, layout, load_fonts, view, LOOK, RADIUS};
+use crate::{glass_at, glass_fps, layout, load_fonts, view, Look, RADIUS};
 
 /// The show slide: 16 logical pixels over 300 ms, ease out.
 const SLIDE: f32 = 16.0;
 const SLIDE_SECS: f64 = 0.30;
 
-/// Rectangles covering a rounded rect, one band per pixel row of the corner radius, each
-/// rounded outward to whole logical pixels. The stair-step test in the `blur_probe` example
-/// showed coarser bands leave visible blur steps outside the corner.
-pub fn blur_region(rect: [f32; 4], r: f32) -> InputRegion {
-    let (x0, y0) = (rect[0].floor() as i32, rect[1].floor() as i32);
-    let (x1, y1) = ((rect[0] + rect[2]).ceil() as i32, (rect[1] + rect[3]).ceil() as i32);
-    let r = r.min(rect[2] / 2.0).min(rect[3] / 2.0);
-    let ri = r.ceil() as i32;
-    let mut rects = Vec::with_capacity(2 * ri as usize + 1);
-    for row in 0..ri {
-        // The row's lower edge is nearest the straight side, so its inset is the smallest.
-        let dy = (r - (row + 1) as f32).max(0.0);
-        let inset = (r - (r * r - dy * dy).sqrt()).floor() as i32;
-        let w = x1 - x0 - 2 * inset;
-        rects.push(IRect { x: x0 + inset, y: y0 + row, w, h: 1 });
-        rects.push(IRect { x: x0 + inset, y: y1 - row - 1, w, h: 1 });
-    }
-    rects.push(IRect { x: x0, y: y0 + ri, w: x1 - x0, h: (y1 - y0 - 2 * ri).max(0) });
-    InputRegion { rects }
-}
-
 struct Live {
+    look: Look,
     blur: bool,
     secs: f64,
     size: Size,
@@ -116,27 +96,21 @@ impl HostApp for Live {
         }
         let k = (t / SLIDE_SECS).clamp(0.0, 1.0) as f32;
         let slide = SLIDE * (1.0 - k).powi(3);
-        self.scene.apply(view(&LOOK, t, slide), frame.t);
+        self.scene.apply(view(&self.look, t, slide), frame.t);
         self.scene.sample_into(frame.t, &mut self.list);
         let rect = self.panel_rect(frame.t);
 
         let device_queue = self.queue.as_ref().expect("gpu");
         let renderer = self.renderer.as_mut().expect("gpu");
         let format = frame.texture.format();
-        let glass = self.glass.get_or_insert_with(|| GlassPass::new(renderer.device(), format));
+        let glass = self.glass.get_or_insert_with(|| GlassPass::new(renderer.device(), format, GlassBlend::Behind));
+        let draw = glass_at(&self.look, rect, t, self.blur);
+        glass.prepare(renderer.device(), device_queue, frame.size, frame.scale, &[draw]);
         let target = Target::from_texture(frame.texture.clone());
         let view_tex = frame.texture.create_view(&Default::default());
         let mut enc = renderer.device().create_command_encoder(&Default::default());
         renderer.encode(&self.list, frame.scale, &target, &mut enc);
-        glass.encode(
-            device_queue,
-            &mut enc,
-            &view_tex,
-            frame.size,
-            frame.scale,
-            &glass_at(&LOOK, rect, t, self.blur),
-            None,
-        );
+        glass.encode(&mut enc, &view_tex, None);
         device_queue.submit([enc.finish()]);
 
         // The region rides on this frame's commit, only when the panel moved.
@@ -154,10 +128,11 @@ impl HostApp for Live {
     }
 }
 
-pub fn run(secs: f64, blur: bool) {
+pub fn run(look: Look, secs: f64, blur: bool) {
     let fonts = load_fonts();
-    let (scene, size, _) = layout(&fonts, &LOOK);
+    let (scene, size, _) = layout(&fonts, &look);
     let mut app = Live {
+        look,
         blur,
         secs,
         size,
