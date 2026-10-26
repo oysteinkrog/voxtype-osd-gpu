@@ -929,17 +929,17 @@ impl<M> Scene<M> {
         let index = out.layers.len() as u32;
         items.push(Item { kind: ItemKind::Layer, start: index, len: 1 });
         let transform = m.then(&out.layers[layer as usize].transform);
-        let (blend, clip, target, group, inside) = match n.kind {
-            Kind::Layer { blend, clip, offscreen } => {
+        let (blend, clip, clip_fade, target, group, inside) = match n.kind {
+            Kind::Layer { blend, clip, offscreen, fade } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
                 let bloom = n.has(Slot::BloomStrength as u8).then(|| Bloom {
                     strength: n.value(Slot::BloomStrength as u8, t).max(0.0) as f32,
                     radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
                 });
                 let target = if offscreen { LayerTarget::Offscreen { bloom } } else { LayerTarget::Direct };
-                (blend, clip, target, alpha * opacity, 1.0)
+                (blend, clip, fade, target, alpha * opacity, 1.0)
             }
-            _ => (BlendMode::Normal, None, LayerTarget::Direct, 1.0, alpha * opacity),
+            _ => (BlendMode::Normal, None, [0.0; 4], LayerTarget::Direct, 1.0, alpha * opacity),
         };
         out.layers.push(Layer {
             parent: Some(layer),
@@ -947,6 +947,7 @@ impl<M> Scene<M> {
             opacity: group,
             blend,
             clip,
+            clip_fade,
             target,
             motion_blur: smear,
             trail: n.has(Slot::TrailHalfLife as u8).then(|| Trail {

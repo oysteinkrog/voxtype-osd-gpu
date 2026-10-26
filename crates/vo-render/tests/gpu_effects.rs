@@ -492,3 +492,81 @@ fn rim_and_sheen_on_the_cpu_match_the_gpu() {
     let max = img.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(max <= 3, "CPU differs from GPU by {max}");
 }
+
+/// A ticker-like clip (FX04): a bar and a word cut by a clip whose left and right edges fade.
+fn fade_scene(font: &FontRef) -> DisplayList {
+    let mut list = Builder::new(240.0, 80.0).build(
+        vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 80.0, 0.0), Paint::solid(hex(0x101420)))],
+        Some((
+            Bloom { strength: 0.0, radius: 1.0 },
+            vec![ShapeInstance::rrect(rr(0.0, 16.0, 240.0, 12.0, 6.0), Paint::solid(hex(0x4cc9f0)))],
+            run(font, "ticker words", 6.0, 62.0, 26.0, hex(0xffffff)),
+        )),
+        Vec::new(),
+    );
+    let ticker = &mut list.layers[1];
+    ticker.target = LayerTarget::Direct;
+    ticker.clip = Some(rr(20.0, 8.0, 200.0, 64.0, 8.0));
+    ticker.clip_fade = [40.0, 0.0, 40.0, 0.0];
+    list
+}
+
+#[test]
+fn edge_fade_golden() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = fade_scene(&font);
+    let mut failures = Vec::new();
+    for (name, scale) in [("fx-edge-fade-1x", 1.0), ("fx-edge-fade-1.5x", 1.5)] {
+        let img = render(&mut off, name, &list, scale);
+        assert_premultiplied(&img);
+        failures.extend(support::check(&img, Tolerance::default()).err());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    // The bar fades in over the first 40 units of the clip: dim near the edge, full past it.
+    let img = render(&mut off, "fade", &list, 1.0);
+    let blue = |x: u32| img.px[((22 * img.w + x) * 4 + 2) as usize];
+    assert!(
+        blue(24) < blue(40) && blue(40) < blue(64) && blue(64) == blue(120),
+        "{} {} {} {}",
+        blue(24),
+        blue(40),
+        blue(64),
+        blue(120)
+    );
+    assert_eq!(blue(10), blue(230), "outside the clip both sides show the background");
+}
+
+#[cfg(feature = "cpu")]
+#[test]
+fn edge_fade_on_the_cpu_matches_the_gpu() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = fade_scene(&font);
+    let mut shapes_only = list.clone();
+    shapes_only.items.retain(|i| i.kind != ItemKind::Glyphs);
+    // Item ranges moved: rebuild each layer's range over the kept items.
+    let mut at = 0u32;
+    for layer in &mut shapes_only.layers {
+        let n = list.items[layer.items.start as usize..layer.items.end as usize]
+            .iter()
+            .filter(|i| i.kind != ItemKind::Glyphs)
+            .count() as u32;
+        layer.items = at..at + n;
+        at += n;
+    }
+    let img = render(&mut off, "fade-shapes", &shapes_only, 1.0);
+    let mut cpu = vo_render::cpu::CpuRenderer::new(vo_scene::font::FontRegistry::new());
+    let (w, h) = (img.w, img.h);
+    let mut got = vec![0u8; (w * h * 4) as usize];
+    cpu.draw_bgra(&shapes_only, 1.0, w, h, w as usize * 4, &mut got);
+    for px in got.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    let max = img.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(max <= 3, "CPU differs from GPU by {max}");
+}

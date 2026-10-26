@@ -73,6 +73,9 @@ pub struct Layer {
     pub blend: BlendMode,
     /// Content outside this shape is not drawn. In layer space.
     pub clip: Option<RRect>,
+    /// Edge fades of the clip (FX04): content fades out over this many layer units toward
+    /// the clip's left, top, right and bottom edge. Zero for a hard edge.
+    pub clip_fade: [f32; 4],
     pub target: LayerTarget,
     /// Motion blur (FX12): the distance the content moves while the shutter is open, in layer
     /// units. The renderer averages the content along this segment, centred on its position.
@@ -93,6 +96,7 @@ impl Layer {
             opacity: 1.0,
             blend: BlendMode::Normal,
             clip: None,
+            clip_fade: [0.0; 4],
             target: LayerTarget::Direct,
             motion_blur: Point::ZERO,
             trail: None,

@@ -325,6 +325,8 @@ pub(crate) enum Kind {
         blend: BlendMode,
         clip: bool,
         offscreen: bool,
+        /// Edge fades of the clip: left, top, right, bottom.
+        fade: [f32; 4],
     },
     /// Live dictation text: lays out the words like a label, tags each glyph with its word
     /// id, and moves each word by its own channels. A new id enters from `enter`; a kept id
@@ -627,7 +629,7 @@ impl<M> Element<M> {
     /// A container drawn as its own layer: group transform, blend mode, optional clip to
     /// its rounded box, optional offscreen target. Laid out as a flex column.
     pub fn layer(key: impl Into<Key>) -> Element<M> {
-        let kind = Kind::Layer { blend: BlendMode::Normal, clip: false, offscreen: false };
+        let kind = Kind::Layer { blend: BlendMode::Normal, clip: false, offscreen: false, fade: [0.0; 4] };
         Element::new(key, kind, Element::<M>::flex(FlexDirection::Column))
     }
 
@@ -903,6 +905,19 @@ impl<M> Element<M> {
             *clip = true;
         } else {
             debug_assert!(false, "clip on a node that is not a layer: {}", self.key);
+        }
+        self
+    }
+
+    /// Clip the layer and fade its content out toward the edges (FX04): over `left`, `top`,
+    /// `right` and `bottom` logical units from each edge of the box, 0 for a hard edge. For
+    /// tickers and scrolling text, whose words should not end at a cut.
+    pub fn fade_edges(mut self, left: f32, top: f32, right: f32, bottom: f32) -> Element<M> {
+        if let Kind::Layer { clip, fade, .. } = &mut self.kind {
+            *clip = true;
+            *fade = [left, top, right, bottom].map(|v| v.max(0.0));
+        } else {
+            debug_assert!(false, "fade_edges on a node that is not a layer: {}", self.key);
         }
         self
     }

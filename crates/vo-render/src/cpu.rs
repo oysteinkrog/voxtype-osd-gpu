@@ -49,6 +49,7 @@ struct Clip {
     rect: RRect,
     from_px: Affine,
     ppu: f32,
+    fade: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -135,7 +136,7 @@ impl CpuRenderer {
         let Some(from_px) = to_px.invert() else { return };
         let ppu = pixels_per_unit(&to_px);
         let clip = match layer.clip {
-            Some(rect) => Some(Clip { rect, from_px, ppu }),
+            Some(rect) => Some(Clip { rect, from_px, ppu, fade: layer.clip_fade }),
             None => parent.clip,
         };
         let opacity = parent.opacity * layer.opacity;
@@ -384,7 +385,20 @@ fn clip_coverage(clip: Option<&Clip>, frag: Point) -> f32 {
     let p = c.from_px.apply(frag);
     let r = c.rect.rect;
     let d = sd_rrect(p, [r.x, r.y, r.w, r.h], c.rect.radii) * c.ppu;
-    (0.5 - d).clamp(0.0, 1.0)
+    // The shader's edge fades: a smoothstep over the fade width from each edge.
+    let edges = [p.x - r.x, p.y - r.y, r.x + r.w - p.x, r.y + r.h - p.y];
+    let fade: f32 = edges
+        .iter()
+        .zip(c.fade)
+        .map(|(e, f)| {
+            if f <= 0.0 {
+                return 1.0;
+            }
+            let x = (e / f).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        })
+        .product();
+    (0.5 - d).clamp(0.0, 1.0) * fade
 }
 
 struct PathPen(tiny_skia::PathBuilder);

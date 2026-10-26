@@ -204,10 +204,43 @@ after M3, the macOS host, which has since been dropped.
   20.2 MB at 1920x1080, most of it the scene texture. Cold first frame of a 600x300 effect scene, from
   process start to readback, 124 to 132 ms against 123 to 129 ms for the direct scene, so the extra
   pipelines cost a few ms.
-- **Not done.** The CPU first frame skips glows, shadows and bloom. Glyph-level effects (TY17), the noise
-  library (FX10) and quality tiers (MO09) are next steps: MO09 switches bloom off by leaving
-  `bloom` out of the display list, which drops the frame to the direct path.
-
+- **Quality tiers and reduced motion (MO09).** `Quality::Full`, `NoBloom` and `Minimal`, from
+  `VO_QUALITY` or `Renderer::set_quality`. `NoBloom` leaves bloom and trails out, so every frame takes
+  the direct path; `Minimal` also leaves out glows and shadows. When an effect texture cannot be
+  allocated (an out-of-memory error scope), the renderer drops one tier by itself and draws the frame
+  again. Reduced motion (`VO_REDUCED_MOTION`, `Scene::with_reduced_motion`) makes position, size, offset,
+  scale and rotation jump, moves glow, bloom and shadow on a slow spring so nothing flashes, keeps only
+  the opacity of enter and exit transitions, and stops orbiting rims and sheens.
+- **Light mode (FX14).** `Renderer::set_light(true)` (or `VO_LIGHT`) turns a layer's bloom into a soft
+  dark shadow, since added light does not show on a light background. Alpha-blended particles in light
+  mode belong to the particle lane; dark-on-light text tuning is not done.
+- **Motion blur (FX12).** `Element::motion_blur(shutter)` blurs a node along the distance its spring moved
+  during the shutter time. The node gets a layer of its own, and the shape and glyph shaders average
+  one sample per pixel of smear, 4 to 32, so thin text does not show as copies. At rest there is no blur
+  and no extra layer.
+- **Feedback trails (FX11).** `Element::trail(half_life)` keeps what a layer drew in earlier frames and
+  fades it to half every `half_life` seconds, independent of frame rate. The trail texture covers the
+  target and stays in the pool under the node's key. Each frame a blend-constant pass fades it and the
+  layer draws on top. A seek backward, a gap over 0.5 s or a new size starts it fresh, so exports stay
+  deterministic. The scene stays awake 12 half lives after the last change, until the tail is under one
+  8-bit level. Trails need `Full` quality.
+- **Rim light and sheen (FX08).** Two shape paints: `Conic`, a soft band of colour around one direction,
+  and `Sheen`, a soft straight band. `Element::rim(colour, width, span, angle, period)` draws a conic
+  stroke over the outline: a still specular edge, or a segment that orbits the border once per
+  `period`, stepped at 30 fps so the scene wakes 30 times a second. `Element::sheen(colour, secs)`
+  sweeps a slanted band across the shape once as it enters. The glass material has its own sheen and
+  orbit inside the glass shader.
+- **Edge fades and digit roll (FX04).** `Element::fade_edges(left, top, right, bottom)` clips a layer and
+  fades its content out over those widths, in the same clip test the shaders already run, at no extra
+  pass. `roll::digit_roll` builds a number whose changed digits roll: each digit is a clipped, faded
+  window over a column of the ten digits on a spring. The column is keyed by the text to its left, so
+  a carry rolls a new column in from below while the old one leaves upward, with no history in the
+  view. R8 mask textures for arbitrary shapes are not done.
+- **Demos.** `glow_demo` (glow, bloom, shadow), `comet_demo` (trail, motion blur, rim, sheen) and
+  `ticker_demo` (edge fades, digit roll) each write an mp4 and a contact sheet, and `--check` renders
+  twice and compares all 360 frame hashes.
+- **Not done.** The CPU first frame skips glows, shadows and bloom; it draws conic, sheen and edge-fade
+  paints. Glyph-level effects (TY17), the noise library (FX10) and the style pack (FX13) are next.
 ## Crates
 
 | Crate | Contents |

@@ -28,6 +28,8 @@ struct Layer {
   src: vec4f,
   // Motion blur: the smear in layer units (xy) and in target pixels (zw); zero for none.
   smear: vec4f,
+  // Edge fades of the clip in clip units: left, top, right, bottom; zero for a hard edge.
+  clip_fade: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;
@@ -66,7 +68,12 @@ fn clip_coverage (frag_tex: vec2f) -> f32 {
   let p = vec2f (layer.clip_m.x * frag.x + layer.clip_m.z * frag.y,
                  layer.clip_m.y * frag.x + layer.clip_m.w * frag.y) + layer.clip_t.xy;
   let d = sd_rrect (p, layer.clip_rect, layer.clip_radii) * layer.clip_t.z;
-  return clamp (0.5 - d, 0.0, 1.0);
+  // Edge fades (FX04): a smoothstep over the fade width from each edge.
+  let r = layer.clip_rect;
+  let e = vec4f (p.x - r.x, p.y - r.y, r.x + r.z - p.x, r.y + r.w - p.y);
+  let ramp = smoothstep (vec4f (0.0), max (layer.clip_fade, vec4f (1e-6)), e);
+  let f = select (vec4f (1.0), ramp, layer.clip_fade > vec4f (0.0));
+  return clamp (0.5 - d, 0.0, 1.0) * f.x * f.y * f.z * f.w;
 }
 
 fn srgb_encode (c: vec3f) -> vec3f {

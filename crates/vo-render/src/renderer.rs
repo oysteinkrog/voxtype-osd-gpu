@@ -203,6 +203,7 @@ struct LayerUniform {
     origin: [f32; 4],
     src: [f32; 4],
     smear: [f32; 4],
+    clip_fade: [f32; 4],
 }
 
 /// One block of `Fx` in `bloom.wgsl`.
@@ -220,6 +221,8 @@ struct ClipState {
     /// Physical pixels to the clip owner's layer space.
     from_px: Affine,
     ppu: f32,
+    /// Edge fades in clip units: left, top, right, bottom.
+    fade: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -625,7 +628,7 @@ impl Renderer {
             Some(rect) => {
                 let Some(from_px) = to_px.invert() else { return };
                 scissor = intersect(scissor, bounds(&rect, &to_px));
-                Some(ClipState { rect, from_px, ppu })
+                Some(ClipState { rect, from_px, ppu, fade: layer.clip_fade })
             }
             None => parent.clip,
         };
@@ -907,6 +910,7 @@ impl Renderer {
             u.clip_radii = c.rect.radii;
             u.clip_m = [k.a, k.b, k.c, k.d];
             u.clip_t = [k.e, k.f, c.ppu, 1.0];
+            u.clip_fade = c.fade;
         }
         let offset = self.uniforms.len() as u32;
         self.uniforms.extend_from_slice(bytemuck::bytes_of(&u));

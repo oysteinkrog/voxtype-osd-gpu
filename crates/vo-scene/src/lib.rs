@@ -15,6 +15,7 @@
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `emitter`: particle emitters and particle words, simulated by the renderer.
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
+//! - `roll`: digit roll, numbers whose changed digits roll like an odometer (FX04).
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod canvas;
@@ -29,6 +30,7 @@ pub mod input;
 pub mod inspect;
 mod layout;
 pub mod path;
+pub mod roll;
 pub mod scene;
 pub mod text;
 pub mod timed;
