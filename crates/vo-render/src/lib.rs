@@ -3,6 +3,7 @@
 //! - `renderer`: [`Renderer`] and [`Target`], the display list to texture path.
 //! - `shapes`: the CPU side of the SDF shape uber-shader.
 //! - `text`: the Slug glyph path.
+//! - `particles`: GPU particles, free ones at a fixed tick and words that form from them.
 //! - `glyph_points`: points sampled from glyph outlines, for text made of particles.
 //! - `offscreen`: readback to CPU memory for goldens and export.
 //! - `color`: sRGB, linear and OKLab conversions.
@@ -13,6 +14,7 @@ pub mod color;
 pub mod cpu;
 pub mod glyph_points;
 pub mod offscreen;
+pub mod particles;
 pub mod renderer;
 pub mod shapes;
 pub mod text;

@@ -107,10 +107,7 @@ impl OutlinePen for Flatten {
             let t = i as f32 / n as f32;
             let u = 1.0 - t;
             let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-            self.cur.push([
-                a * p0[0] + b * c0[0] + c * c1[0] + d * p[0],
-                a * p0[1] + b * c0[1] + c * c1[1] + d * p[1],
-            ]);
+            self.cur.push([a * p0[0] + b * c0[0] + c * c1[0] + d * p[0], a * p0[1] + b * c0[1] + c * c1[1] + d * p[1]]);
         }
     }
 
