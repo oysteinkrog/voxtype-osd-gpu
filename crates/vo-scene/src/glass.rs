@@ -106,6 +106,30 @@ impl Glass {
         self
     }
 
+    /// The same glass tinted `tint` (sRGB, alpha ignored), with the lowest interior alpha
+    /// that keeps every colour in `texts` at `ratio` or more (AX01: 4.5) over pure white and
+    /// pure black. Use it for theme colours (LY03), where the tint is not known ahead. `None`
+    /// when no alpha reaches the ratio, for example light text on a light tint.
+    pub fn tinted_for(self, tint: Color, texts: &[Color], ratio: f32) -> Option<Glass> {
+        let with = |a: f32| Glass { tint: Color::rgba(tint.r, tint.g, tint.b, a), ..self };
+        let ok = |a: f32| texts.iter().all(|t| with(a).contrast(*t, 0.02) >= ratio);
+        if !ok(1.0) {
+            return None;
+        }
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..20 {
+            let mid = 0.5 * (lo + hi);
+            if ok(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        // Round up to the next 1/256 so 8-bit storage cannot drop below the bar.
+        let a = ((hi * 256.0).ceil() / 256.0).min(1.0);
+        Some(Glass { edge_alpha: self.edge_alpha.min(a), ..with(a) })
+    }
+
     /// The lowest contrast ratio of `text` against the panel interior, over pure white and
     /// pure black backdrops, blended in linear light and in sRGB. `light_margin` is the most
     /// luminance the glass's own light (rim, Fresnel, grain) adds in the interior.
@@ -230,6 +254,18 @@ fn ratio(a: f32, b: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tinted_glass_finds_the_lowest_alpha_that_passes() {
+        let white = Color::rgba(0.96, 0.97, 0.98, 1.0);
+        let blue = Color::rgba(0.10, 0.20, 0.45, 1.0);
+        let g = Glass::dark().tinted_for(blue, &[white], 4.5).expect("white on deep blue passes");
+        assert!(g.contrast(white, 0.02) >= 4.5);
+        let lower = Glass { tint: Color { a: g.tint.a - 2.0 / 256.0, ..g.tint }, ..g };
+        assert!(lower.contrast(white, 0.02) < 4.5, "alpha {} is not the lowest", g.tint.a);
+        // White text on a pale tint can never pass.
+        assert_eq!(Glass::light().tinted_for(Color::rgba(0.9, 0.9, 0.9, 1.0), &[white], 4.5), None);
+    }
 
     #[test]
     fn a_still_panel_stops_asking_for_frames() {
