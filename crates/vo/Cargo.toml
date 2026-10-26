@@ -14,7 +14,7 @@ wayland = ["dep:vo-host-wayland"]
 [dependencies]
 vo-core = { path = "../vo-core" }
 vo-scene = { path = "../vo-scene" }
-vo-render = { path = "../vo-render", features = ["png"] }
+vo-render = { path = "../vo-render", features = ["png", "cpu"] }
 vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland", optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }

@@ -6,8 +6,8 @@
 //! Offline, to PNG frames:
 //!   cargo run -p vo --example toast -- --offline /var/tmp/claude/toast-frames [--fps 30]
 //!
-//! Options: `--dismiss-after S` (default 4), `--font PATH`. `VO_DIAG_FRAMES=1` prints a line
-//! per frame.
+//! Options: `--dismiss-after S` (default 4), `--font PATH`, `--cpu-first-frame` (draw the first
+//! frames on the CPU while the GPU starts). `VO_DIAG_FRAMES=1` prints a line per frame.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
@@ -166,6 +166,7 @@ fn targets(fonts: &FontRegistry, dismiss_after: f64) -> (Point, Point) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut offline, mut fps, mut dismiss_after) = (None::<PathBuf>, 30.0, 4.0);
+    let mut cpu_first_frame = false;
     let mut font_path = "/usr/share/fonts/noto/NotoSans-Medium.ttf".to_string();
     while let Some(a) = args.next() {
         let mut v = || args.next().unwrap_or_else(|| panic!("{a} needs a value"));
@@ -174,6 +175,7 @@ fn main() {
             "--fps" => fps = v().parse().expect("--fps takes a number"),
             "--dismiss-after" => dismiss_after = v().parse().expect("--dismiss-after takes seconds"),
             "--font" => font_path = v(),
+            "--cpu-first-frame" => cpu_first_frame = true,
             _ => panic!("unknown option {a}"),
         }
     }
@@ -215,6 +217,7 @@ fn main() {
     };
     let mut options = options();
     options.diagnostics = Some(Box::new(LogDiagnostics::new(Some(heap))));
+    options.cpu_first_frame = cpu_first_frame;
     if let Err(e) = vo::run_overlay_with(app, spec, options) {
         eprintln!("toast: {e}");
         std::process::exit(1);

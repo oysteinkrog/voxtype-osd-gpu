@@ -38,11 +38,21 @@ pub struct Options<M> {
     pub inbox: Option<Inbox<M>>,
     /// Live only.
     pub diagnostics: Option<Box<dyn Diagnostics>>,
+    /// Live only: draw the first frames on the CPU while the GPU device is made, when the
+    /// host can (`HostCaps::cpu_first_frame`). Off by default.
+    pub cpu_first_frame: bool,
 }
 
 impl<M> Default for Options<M> {
     fn default() -> Self {
-        Options { tokens: Tokens::default(), fonts: FontRegistry::new(), text: None, inbox: None, diagnostics: None }
+        Options {
+            tokens: Tokens::default(),
+            fonts: FontRegistry::new(),
+            text: None,
+            inbox: None,
+            diagnostics: None,
+            cpu_first_frame: false,
+        }
     }
 }
 
