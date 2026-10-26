@@ -157,10 +157,10 @@ impl WordModel {
             let id = self.words[oi].id;
             changes.push(Change { kind: ChangeKind::Removed, id, old_index: Some(oi), new_index: None });
         }
-        for ni in cur.1..end.1 {
+        for (ni, text) in new_texts.iter().enumerate().take(end.1).skip(cur.1) {
             let id = self.fresh_id();
             changes.push(Change { kind: ChangeKind::Inserted, id, old_index: None, new_index: Some(ni) });
-            words.push(Word { id, text: new_texts[ni].to_string() });
+            words.push(Word { id, text: text.to_string() });
         }
         *cur = end;
     }
