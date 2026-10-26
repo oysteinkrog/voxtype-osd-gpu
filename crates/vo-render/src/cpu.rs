@@ -29,6 +29,8 @@ const KIND_LINE: u32 = vo_scene::display::ShapeKind::Line as u32;
 const KIND_BAND: u32 = vo_scene::display::ShapeKind::Band as u32;
 const PAINT_NONE: u32 = vo_scene::display::PaintKind::None as u32;
 const PAINT_SOLID: u32 = vo_scene::display::PaintKind::Solid as u32;
+const PAINT_CONIC: u32 = vo_scene::display::PaintKind::Conic as u32;
+const PAINT_SHEEN: u32 = vo_scene::display::PaintKind::Sheen as u32;
 
 /// The CPU renderer. Keeps its buffers and glyph outlines between frames.
 pub struct CpuRenderer {
@@ -197,7 +199,8 @@ impl CpuRenderer {
 
     fn shape(&mut self, s: &GpuShape, st: &State) {
         // Glows and shadows are left to the GPU frames that follow.
-        if (s.kinds >> 8) & 0xff >= vo_scene::display::PaintKind::Glow as u32 {
+        let fill = (s.kinds >> 8) & 0xff;
+        if fill == vo_scene::display::PaintKind::Glow as u32 || fill == vo_scene::display::PaintKind::Shadow as u32 {
             return;
         }
         let kind = s.kinds & 0xff;
@@ -326,8 +329,18 @@ fn paint(kind: u32, pt: &GpuPaint, p: Point) -> [f32; 4] {
         return [0.0; 4];
     }
     let mut t = 0.0;
-    if kind != PAINT_SOLID {
-        let e = pt.ends;
+    let e = pt.ends;
+    let smooth = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    if kind == PAINT_CONIC {
+        let a = (p.y - e[1]).atan2(p.x - e[0]) * std::f32::consts::FRAC_1_PI * 0.5 - e[2] + 0.5;
+        t = smooth(((a - a.floor()) - 0.5).abs() / e[3]);
+    } else if kind == PAINT_SHEEN {
+        let len2 = e[2] * e[2] + e[3] * e[3];
+        t = if len2 > 0.0 { smooth(((p.x - e[0]) * e[2] + (p.y - e[1]) * e[3]).abs() / len2) } else { 1.0 };
+    } else if kind != PAINT_SOLID {
         let (dx, dy) = (e[2] - e[0], e[3] - e[1]);
         let len2 = dx * dx + dy * dy;
         if len2 > 0.0 {

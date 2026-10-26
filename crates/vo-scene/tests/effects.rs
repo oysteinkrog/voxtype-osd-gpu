@@ -124,3 +124,37 @@ fn trail_makes_an_offscreen_layer_with_a_steady_key() {
     assert!(quiet >= 1.0 + 12.0 * 0.25, "awake until {quiet}");
     assert!(quiet < 6.0, "awake until {quiet}");
 }
+
+#[test]
+fn rim_orbits_at_thirty_fps_and_sheen_sweeps_once() {
+    let pill = || {
+        Element::shape("pill", ShapeKind::Capsule)
+            .size(120.0, 30.0)
+            .fill(Color::WHITE)
+            .rim(Color::hex(0x7dd3fc, 1.0), 2.0, 0.1, 0.0, 2.0)
+            .sheen(Color::WHITE, 0.5)
+    };
+    let mut scene = Scene::new();
+    scene.apply(root(vec![pill()]), 0.0);
+    // Mid sweep: the shape, then the sheen over it, then the rim.
+    let list = scene.sample(0.25);
+    let kinds: Vec<_> = list.shapes.iter().map(|s| (s.fill.kind, s.stroke.kind)).collect();
+    assert_eq!(
+        kinds,
+        [(PaintKind::Solid, PaintKind::None), (PaintKind::Sheen, PaintKind::None), (PaintKind::None, PaintKind::Conic)]
+    );
+    // After the sweep only the rim is left, and it moves in 30 fps steps.
+    let rim_angle = |t: f64| {
+        let list = scene.sample(t);
+        assert_eq!(list.shapes.len(), 2);
+        list.shapes[1].stroke.p1.x
+    };
+    assert_eq!(rim_angle(1.0), rim_angle(1.0 + 0.5 / 30.0));
+    assert!((rim_angle(1.0 + 1.0 / 30.0) - rim_angle(1.0) - 1.0 / 60.0).abs() < 1e-4);
+    assert_eq!(scene.next_wake(1.01), Some(31.0 / 30.0));
+    // Reduced motion: no orbit, no sheen.
+    let mut calm = Scene::new().with_reduced_motion(true);
+    calm.apply(root(vec![pill()]), 0.0);
+    assert_eq!(calm.sample(0.25).shapes.len(), 2);
+    assert_eq!(calm.next_wake(1.0), None);
+}

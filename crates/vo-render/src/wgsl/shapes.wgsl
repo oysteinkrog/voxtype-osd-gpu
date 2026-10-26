@@ -1,6 +1,7 @@
 // SDF primitive uber-shader: rounded rect (per-corner radii), circle, capsule, line and band in one
-// instanced draw. Fill and stroke, solid or linear-gradient paint interpolated in OKLab,
-// analytic antialiasing with a one-pixel box filter. `common.wgsl` is prepended.
+// instanced draw. Fill and stroke, solid, linear-gradient, conic-band or sheen-band paint
+// interpolated in OKLab, analytic antialiasing with a one-pixel box filter. `common.wgsl` is
+// prepended.
 //
 // A fill paint of kind glow or shadow makes the instance a halo: a glow from the shape's
 // distance, or a Gaussian drop shadow of it in closed form (Evan Wallace's rounded box
@@ -20,6 +21,8 @@ const PAINT_NONE: u32 = 0u;
 const PAINT_SOLID: u32 = 1u;
 const PAINT_GLOW: u32 = 3u;
 const PAINT_SHADOW: u32 = 4u;
+const PAINT_CONIC: u32 = 5u;
+const PAINT_SHEEN: u32 = 6u;
 
 struct ShapeIn {
   // Shape kind in bits 0..8, fill paint kind in 8..16, stroke paint kind in 16..24.
@@ -125,7 +128,15 @@ fn paint (kind: u32, c0: vec4f, c1: vec4f, ends: vec4f, p: vec2f) -> vec4f {
     return vec4f (0.0);
   }
   var t = 0.0;
-  if (kind != PAINT_SOLID) {
+  if (kind == PAINT_CONIC) {
+    // Turns from the band's direction, -0.5 to 0.5.
+    let v = p - ends.xy;
+    let da = fract (atan2 (v.y, v.x) * 0.15915494 - ends.z + 0.5) - 0.5;
+    t = smoothstep (0.0, 1.0, abs (da) / ends.w);
+  } else if (kind == PAINT_SHEEN) {
+    let len2 = dot (ends.zw, ends.zw);
+    t = select (1.0, smoothstep (0.0, 1.0, abs (dot (p - ends.xy, ends.zw)) / len2), len2 > 0.0);
+  } else if (kind != PAINT_SOLID) {
     let d = ends.zw - ends.xy;
     let len2 = dot (d, d);
     if (len2 > 0.0) {
@@ -262,7 +273,7 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
 fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
   let kind = in.kinds & 0xffu;
   let fill_kind = (in.kinds >> 8u) & 0xffu;
-  if (fill_kind >= PAINT_GLOW) {
+  if (fill_kind == PAINT_GLOW || fill_kind == PAINT_SHADOW) {
     let d = sd_shape (kind, p, frag_x, in);
     return halo (in, fill_kind, d);
   }

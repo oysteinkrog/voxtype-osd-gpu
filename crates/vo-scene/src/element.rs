@@ -83,6 +83,15 @@ pub(crate) enum Slot {
     BloomRadius = 41,
     Shutter = 42,
     TrailHalfLife = 43,
+    /// Rim (FX08): colour, stroke width, band width in turns, angle in turns, seconds a lap.
+    RimColor = 44,
+    RimWidth = 48,
+    RimSpan = 49,
+    RimAngle = 50,
+    RimPeriod = 51,
+    /// Sheen (FX08): colour and the seconds one sweep takes.
+    SheenColor = 52,
+    SheenSecs = 56,
 }
 
 impl Slot {
@@ -111,7 +120,9 @@ impl Slot {
             s if s < Slot::ShadowColor as u8 => Prop::Glow,
             s if s < Slot::BloomStrength as u8 => Prop::Shadow,
             s if s < Slot::Shutter as u8 => Prop::Bloom,
-            _ => Prop::MotionBlur,
+            s if s < Slot::RimColor as u8 => Prop::MotionBlur,
+            s if s < Slot::SheenColor as u8 => Prop::Rim,
+            _ => Prop::Sheen,
         }
     }
 
@@ -125,7 +136,8 @@ impl Slot {
             || slot == Slot::StrokeWidth as u8
             || slot == Slot::GlowRadius as u8
             || (Slot::ShadowX as u8..=Slot::ShadowBlur as u8).contains(&slot)
-            || slot == Slot::BloomRadius as u8)
+            || slot == Slot::BloomRadius as u8
+            || slot == Slot::RimWidth as u8)
     }
 }
 
@@ -153,8 +165,12 @@ pub enum Prop {
     Shadow,
     /// Bloom strength and radius.
     Bloom,
-    /// The motion blur shutter.
+    /// The motion blur shutter and the trail's half life.
     MotionBlur,
+    /// Rim colour, width, span, angle and lap time.
+    Rim,
+    /// Sheen colour and sweep time.
+    Sheen,
 }
 
 /// How a property moves to a new target.
@@ -720,6 +736,31 @@ impl<M> Element<M> {
         } else {
             debug_assert!(false, "clip on a node that is not a layer: {}", self.key);
         }
+        self
+    }
+
+    /// A rim light on the element's outline (FX08): a band of `c`, `span` turns wide each
+    /// side, on a stroke `width` wide, centred on the direction `angle` (turns, clockwise
+    /// from +x: -0.125 is up and right, -0.375 up and left). With `period` above 0 the band
+    /// orbits the outline once every `period` seconds, drawn at 30 fps; 0 keeps it still, as
+    /// a specular edge. Reduced motion stops the orbit. For panels, layers and shapes.
+    pub fn rim(mut self, c: Color, width: f32, span: f32, angle: f32, period: f32) -> Element<M> {
+        self.set(Slot::RimColor as u8, c);
+        self.set(Slot::RimWidth as u8, width.max(0.0));
+        self.set(Slot::RimSpan as u8, span.max(1e-3));
+        self.set(Slot::RimAngle as u8, angle);
+        self.set(Slot::RimPeriod as u8, period.max(0.0));
+        self.motion.push((Prop::Rim, Motion::Snap));
+        self
+    }
+
+    /// A sheen (FX08): a soft slanted band of `c` sweeps once across the element's shape,
+    /// left to right over `secs` seconds, when the element enters. Reduced motion leaves it
+    /// out. For panels, layers and shapes.
+    pub fn sheen(mut self, c: Color, secs: f32) -> Element<M> {
+        self.set(Slot::SheenColor as u8, c);
+        self.set(Slot::SheenSecs as u8, secs.max(1e-3));
+        self.motion.push((Prop::Sheen, Motion::Snap));
         self
     }
 

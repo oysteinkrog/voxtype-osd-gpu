@@ -203,6 +203,14 @@ pub enum PaintKind {
     /// `p1.x` the blur's standard deviation and `p1.y` a spread that grows the shape. Used
     /// as a fill on an instance of its own, drawn under the shape. See [`Paint::shadow`].
     Shadow,
+    /// A conic band (FX08): `c0` in a soft band around the direction `p1.x` (in turns,
+    /// clockwise from +x) seen from `p0`, `p1.y` turns wide each side, `c1` elsewhere. On a
+    /// stroke with the angle moving over time it is a rotating rim. See [`Paint::conic`].
+    Conic,
+    /// A straight band (FX08): `c0` on the line through `p0` square to `p1`, fading to `c1`
+    /// at `p1` either side of it. Moving `p0` across a shape sweeps a sheen over it. See
+    /// [`Paint::sheen`].
+    Sheen,
 }
 
 /// Fill or stroke paint. Gradient points are in layer space.
@@ -251,6 +259,18 @@ impl Paint {
     /// drawn under it.
     pub fn shadow(c: Color, offset: Point, blur: f32, spread: f32) -> Paint {
         Paint { kind: PaintKind::Shadow, c0: c, c1: c, p0: offset, p1: Point::new(blur.max(0.0), spread) }
+    }
+
+    /// A conic band paint: `c0` around the direction `angle` (turns, clockwise from +x in
+    /// layer space) seen from `centre`, fading over `width` turns either side to `c1`.
+    pub fn conic(centre: Point, c0: Color, c1: Color, angle: f32, width: f32) -> Paint {
+        Paint { kind: PaintKind::Conic, c0, c1, p0: centre, p1: Point::new(angle, width.max(1e-4)) }
+    }
+
+    /// A straight band paint: `c0` on the line through `at`, square to `half`, fading to `c1`
+    /// at `at + half` and `at - half`.
+    pub fn sheen(at: Point, half: Point, c0: Color, c1: Color) -> Paint {
+        Paint { kind: PaintKind::Sheen, c0, c1, p0: at, p1: half }
     }
 
     /// A glow or shadow paint.

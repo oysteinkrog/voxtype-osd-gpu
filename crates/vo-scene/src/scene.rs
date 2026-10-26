@@ -43,6 +43,9 @@ impl NodeId {
     }
 }
 
+/// Frame rate of ambient loops such as an orbiting rim (FX08).
+const AMBIENT_FPS: f64 = 30.0;
+
 /// Where a node is in its life, at some time `t`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Presence {
@@ -284,6 +287,33 @@ impl<M> Node<M> {
         Color::rgba(c(0), c(1), c(2), c(3))
     }
 
+    /// The rim's direction at `t` in turns: its angle, plus the laps it has orbited since the
+    /// node entered, counted in 30 fps steps (FX08 caps ambient loops at 30 fps).
+    fn rim_angle(&self, t: f64) -> f32 {
+        let angle = self.value(Slot::RimAngle as u8, t);
+        let period = self.value(Slot::RimPeriod as u8, t);
+        if period <= 0.0 || self.reduced {
+            return angle as f32;
+        }
+        let step = ((t - self.since).max(0.0) * AMBIENT_FPS).floor() / AMBIENT_FPS;
+        (angle + (step / period).fract()) as f32
+    }
+
+    /// When an orbiting rim next moves, after `t`.
+    fn rim_wake(&self, t: f64) -> Option<f64> {
+        let orbits = self.has(Slot::RimColor as u8) && self.value(Slot::RimPeriod as u8, t) > 0.0 && !self.reduced;
+        orbits.then(|| self.since + (((t - self.since).max(0.0) * AMBIENT_FPS).floor() + 1.0) / AMBIENT_FPS)
+    }
+
+    /// How far a sheen has swept at `t`, 0 to 1, while it is sweeping.
+    fn sheen_progress(&self, t: f64) -> Option<f32> {
+        if !self.has(Slot::SheenColor as u8) || self.reduced {
+            return None;
+        }
+        let u = (t - self.since) / self.value(Slot::SheenSecs as u8, t).max(1e-3);
+        (0.0..1.0).contains(&u).then_some(u as f32)
+    }
+
     /// Whether the node is drawn at `t`: created by then and not yet gone.
     fn alive(&self, t: f64) -> bool {
         t >= self.born && self.leaving.is_none_or(|(_, until)| t < until)
@@ -479,6 +509,7 @@ impl<M> Scene<M> {
         let moving = self.nodes.values().any(|n| {
             n.chans.iter().any(|(_, c)| c.settled_at() > t)
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
+                || (n.alive(t) && n.sheen_progress(t).is_some())
                 || (n.alive(t)
                     && match &n.kind {
                         Kind::Wave(w) => w.moving(t),
@@ -499,9 +530,7 @@ impl<M> Scene<M> {
             .flat_map(|n| n.chans.iter().map(|(_, c)| c.settled_at()).chain([n.since]))
             .fold(f64::NEG_INFINITY, f64::max);
         let fading = self.nodes.values().any(|n| {
-            n.alive(t)
-                && n.has(Slot::TrailHalfLife as u8)
-                && t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
+            n.alive(t) && n.has(Slot::TrailHalfLife as u8) && t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
         });
         if fading {
             return Some(t);
@@ -511,6 +540,7 @@ impl<M> Scene<M> {
             .values()
             .filter(|n| n.alive(t) && !n.reduced && matches!(n.kind, Kind::Panel))
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
+            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
             .min_by(f64::total_cmp)
     }
 
@@ -1131,6 +1161,35 @@ impl<M> Scene<M> {
             if s.fill.is_visible() || s.stroke.is_visible() {
                 push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                 out.shapes.push(s);
+            }
+            // Rim and sheen (FX08): copies of the outline over the shape.
+            let centre = Point::new(origin.x + 0.5 * size.w, origin.y + 0.5 * size.h);
+            let mut overlays = [None, None];
+            if let Some(u) = n.sheen_progress(t) {
+                let c = n.color(Slot::SheenColor, t);
+                // A band leaning right like a slash, a third of the height wide, from fully left of the
+                // shape to fully right of it.
+                let k = 0.33 * size.h.max(1.0);
+                let half = Point::new(0.94 * k, 0.34 * k);
+                let reach = 0.5 * size.w + 1.2 * size.h;
+                let at = Point::new(centre.x - reach + 2.0 * reach * u, centre.y);
+                overlays[0] = Some(ShapeInstance {
+                    fill: Paint::sheen(at, half, c, c.fade(0.0)).fade(alpha),
+                    stroke: Paint::NONE,
+                    flags: 0,
+                    ..s
+                });
+            }
+            if n.has(Slot::RimColor as u8) {
+                let c = n.color(Slot::RimColor, t);
+                let span = n.value(Slot::RimSpan as u8, t) as f32;
+                let paint = Paint::conic(centre, c, c.fade(0.0), n.rim_angle(t), span).fade(alpha);
+                let width = n.value(Slot::RimWidth as u8, t).max(0.0) as f32;
+                overlays[1] = Some(ShapeInstance { fill: Paint::NONE, flags: 0, ..s }.with_stroke(paint, width));
+            }
+            for o in overlays.into_iter().flatten().filter(|o| o.fill.is_visible() || o.stroke.is_visible()) {
+                push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                out.shapes.push(o);
             }
         }
     }

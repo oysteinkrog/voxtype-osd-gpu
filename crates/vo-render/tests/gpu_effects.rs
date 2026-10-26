@@ -430,3 +430,65 @@ fn trail_starts_fresh_after_a_seek_back() {
     let fresh = render(&mut fresh_off, "fx-trail-seek", &trail_frame(2), 1.0);
     assert_eq!(back.px, fresh.px, "a seek backward clears the trail");
 }
+
+/// A capsule with a conic rim (FX08) on its outline and a sheen band half way across it.
+fn rim_scene() -> DisplayList {
+    let pill = Rect::new(20.0, 24.0, 200.0, 48.0);
+    let clear = |c: Color| c.fade(0.0);
+    let rim = hex(0x7dd3fc);
+    let sheen = Color::rgba(1.0, 1.0, 1.0, 0.35);
+    Builder::new(240.0, 96.0).build(
+        vec![
+            ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 96.0, 0.0), Paint::solid(hex(0x101420))),
+            ShapeInstance::capsule(pill, Paint::solid(hex(0x1d2433))),
+            ShapeInstance::capsule(
+                pill,
+                Paint::sheen(Point::new(96.0, 48.0), Point::new(15.0, 5.5), sheen, clear(sheen)),
+            ),
+            ShapeInstance::capsule(pill, Paint::NONE)
+                .with_stroke(Paint::conic(Point::new(120.0, 48.0), rim, clear(rim), -0.125, 0.15), 3.0),
+        ],
+        None,
+        Vec::new(),
+    )
+}
+
+#[test]
+fn rim_and_sheen_golden() {
+    let data = load_font();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = rim_scene();
+    let mut failures = Vec::new();
+    for (name, scale) in [("fx-rim-sheen-1x", 1.0), ("fx-rim-sheen-1.5x", 1.5)] {
+        let img = render(&mut off, name, &list, scale);
+        assert_premultiplied(&img);
+        failures.extend(support::check(&img, Tolerance::default()).err());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    // The rim is bright at its angle (up and right) and gone on the far side.
+    let img = render(&mut off, "rim", &list, 1.0);
+    let blue = |x: u32, y: u32| img.px[((y * img.w + x) * 4 + 2) as usize];
+    assert!(blue(190, 25) > blue(50, 71) + 60, "rim {} against {}", blue(190, 25), blue(50, 71));
+}
+
+/// The first frame's CPU renderer draws the conic and sheen paints as the shader does.
+#[cfg(feature = "cpu")]
+#[test]
+fn rim_and_sheen_on_the_cpu_match_the_gpu() {
+    let data = load_font();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = rim_scene();
+    let img = render(&mut off, "rim", &list, 1.0);
+    let fonts = vo_scene::font::FontRegistry::new();
+    let mut cpu = vo_render::cpu::CpuRenderer::new(fonts);
+    let (w, h) = (img.w, img.h);
+    let mut got = vec![0u8; (w * h * 4) as usize];
+    cpu.draw_bgra(&list, 1.0, w, h, w as usize * 4, &mut got);
+    for px in got.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    let max = img.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(max <= 3, "CPU differs from GPU by {max}");
+}
