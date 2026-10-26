@@ -360,6 +360,23 @@ fn events_out_of_order_panic_in_debug() {
 }
 
 #[test]
+fn a_border_lies_inside_the_box_and_a_stroke_on_its_edge() {
+    let mut scene = Scene::<Msg>::new();
+    let panel = |key: &'static str| Element::panel(key).size(100.0, 40.0).radius(6.0).fill(Color::BLACK);
+    let view = root(vec![panel("border").border(Color::WHITE, 2.0), panel("stroke").stroke(Color::WHITE, 2.0)]);
+    scene.apply(view, 0.0);
+    let list = scene.sample(0.0);
+    assert_eq!(list.shapes.len(), 2);
+    let (border, stroke) = (&list.shapes[0], &list.shapes[1]);
+    // geom is x, y, w, h: moved in by half the width, so the outer edge stays at the box.
+    assert_eq!(border.geom, [1.0, 1.0, 98.0, 38.0]);
+    assert_eq!(border.radii, [5.0; 4]);
+    assert_eq!(border.stroke_width, 2.0);
+    assert_eq!(stroke.geom, [0.0, 40.0, 100.0, 40.0]);
+    assert_eq!(stroke.radii, [6.0; 4]);
+}
+
+#[test]
 fn opacity_zero_draws_nothing_and_layers_carry_group_opacity() {
     let mut scene = Scene::<Msg>::new();
     let view = root(vec![

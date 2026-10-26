@@ -293,6 +293,9 @@ pub struct Element<M = ()> {
     pub(crate) targets: Vec<(u8, f64)>,
     pub(crate) gradient: bool,
     pub(crate) hairline: bool,
+    /// The stroke lies inside the box, as a CSS border does, rather than centred on its
+    /// edge.
+    pub(crate) inside: bool,
     pub(crate) motion: Vec<(Prop, Motion)>,
     pub(crate) presence: Option<(Transition, Transition)>,
     pub(crate) handlers: Handlers<M>,
@@ -308,6 +311,7 @@ impl<M> Element<M> {
             targets: Vec::new(),
             gradient: false,
             hairline: false,
+            inside: false,
             motion: Vec::new(),
             presence: None,
             handlers: Handlers::default(),
@@ -555,10 +559,20 @@ impl<M> Element<M> {
         self
     }
 
+    /// A stroke `width` wide centred on the outline.
     pub fn stroke(mut self, c: Color, width: f32) -> Element<M> {
         self.set(Slot::Stroke as u8, c);
         self.set(Slot::StrokeWidth as u8, width);
         self.hairline = false;
+        self.inside = false;
+        self
+    }
+
+    /// A stroke `width` wide inside the box, as a CSS border: the shape's outer edge stays
+    /// on the box edge. For panels, layers and rounded rects; other shapes centre it.
+    pub fn border(mut self, c: Color, width: f32) -> Element<M> {
+        self = self.stroke(c, width);
+        self.inside = true;
         self
     }
 
@@ -566,6 +580,7 @@ impl<M> Element<M> {
     pub fn hairline(mut self, c: Color) -> Element<M> {
         self.set(Slot::Stroke as u8, c);
         self.hairline = true;
+        self.inside = false;
         self
     }
 

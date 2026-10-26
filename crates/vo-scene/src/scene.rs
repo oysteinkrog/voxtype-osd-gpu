@@ -74,6 +74,7 @@ pub(crate) struct Node<M> {
     pub presence: Option<(Transition, Transition)>,
     pub gradient: bool,
     pub hairline: bool,
+    pub inside: bool,
     pub handlers: Handlers<M>,
     pub born: f64,
     /// `(since, until)`.
@@ -489,7 +490,8 @@ impl<M> Scene<M> {
     // Reconcile.
 
     fn create(&mut self, parent: Option<NodeId>, el: Element<M>, t: f64) -> NodeId {
-        let Element { key, kind, style, targets, gradient, hairline, motion, presence, handlers, children } = el;
+        let Element { key, kind, style, targets, gradient, hairline, inside, motion, presence, handlers, children } =
+            el;
         self.changed = true;
         let mut node = Node {
             key,
@@ -506,6 +508,7 @@ impl<M> Scene<M> {
             presence,
             gradient,
             hairline,
+            inside,
             handlers,
             born: t,
             leaving: None,
@@ -538,11 +541,12 @@ impl<M> Scene<M> {
     }
 
     fn update(&mut self, id: NodeId, el: Element<M>, t: f64) {
-        let Element { key: _, kind, style, targets, gradient, hairline, motion, presence, handlers, children } = el;
+        let Element { key: _, kind, style, targets, gradient, hairline, inside, motion, presence, handlers, children } =
+            el;
         let retention = self.retention;
         let n = &mut self.nodes[id];
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
-        let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline;
+        let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
@@ -550,6 +554,7 @@ impl<M> Scene<M> {
         n.presence = presence;
         n.gradient = gradient;
         n.hairline = hairline;
+        n.inside = inside;
         n.handlers = handlers;
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
@@ -844,10 +849,26 @@ impl<M> Scene<M> {
             }
             s
         };
+        // An inside stroke is a centred one on the outline moved in by half its width; the
+        // fill reaches the stroke's centre, so fill and stroke still cover the whole box.
+        let boxed = || {
+            let inset = if n.inside && !n.hairline && n.has(Slot::Stroke as u8) {
+                0.5 * n.value(Slot::StrokeWidth as u8, t).max(0.0) as f32
+            } else {
+                0.0
+            };
+            let r = Rect::new(
+                rect.x + inset,
+                rect.y + inset,
+                (rect.w - 2.0 * inset).max(0.0),
+                (rect.h - 2.0 * inset).max(0.0),
+            );
+            RRect::new(r, (radius(n, t) - inset).max(0.0))
+        };
         let shape = match &n.kind {
-            Kind::Panel | Kind::Layer { .. } => Some(ShapeInstance::rrect(RRect::new(rect, radius(n, t)), fill())),
+            Kind::Panel | Kind::Layer { .. } => Some(ShapeInstance::rrect(boxed(), fill())),
             Kind::Shape(kind) => Some(match kind {
-                ShapeKind::RRect => ShapeInstance::rrect(RRect::new(rect, radius(n, t)), fill()),
+                ShapeKind::RRect => ShapeInstance::rrect(boxed(), fill()),
                 ShapeKind::Circle => {
                     let centre = Point::new(origin.x + 0.5 * size.w, origin.y + 0.5 * size.h);
                     ShapeInstance::circle(centre, 0.5 * size.w.min(size.h), fill())
