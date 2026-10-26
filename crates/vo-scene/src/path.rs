@@ -110,6 +110,8 @@ pub struct Contour {
 }
 
 impl Contour {
+    /// The arc length at the end. A trimmed piece keeps its original arc lengths, so for it
+    /// this is where it ends, not how long it is.
     pub fn length(&self) -> f32 {
         self.segs.last().map_or(0.0, |s| s.s1)
     }
@@ -130,8 +132,8 @@ impl Contour {
                 continue;
             }
             let q = quad(s);
-            let t0 = if s.s0 < from { q.inv_arclen((from - s.s0) as f64, ACCURACY) } else { 0.0 };
-            let t1 = if s.s1 > to { q.inv_arclen((to - s.s0) as f64, ACCURACY) } else { 1.0 };
+            let t0 = if s.s0 < from { param_at(s, (from - s.s0) as f64) } else { 0.0 };
+            let t1 = if s.s1 > to { param_at(s, (to - s.s0) as f64) } else { 1.0 };
             let sub = q.subsegment(t0..t1);
             out.segs.push(seg(sub, s.s0.max(from), s.s1.min(to)));
         }
@@ -169,8 +171,7 @@ impl Contour {
     pub fn at(&self, s: f32) -> Option<(Point, Point)> {
         let seg = self.segs.iter().find(|g| s <= g.s1).or(self.segs.last())?;
         let q = quad(seg);
-        let local = ((s - seg.s0) as f64).clamp(0.0, (seg.s1 - seg.s0) as f64);
-        let t = q.inv_arclen(local, ACCURACY);
+        let t = param_at(seg, (s - seg.s0) as f64);
         let p = q.eval(t);
         let d = q.deriv().eval(t).to_vec2();
         let d = if d.hypot() > 1e-9 { d.normalize() } else { (q.p2 - q.p0).normalize() };
@@ -290,10 +291,11 @@ impl Outline {
 
 /// A morph between two outlines by matched, resampled contours.
 ///
-/// Contours pair up in order. Each pair is resampled to `n` points by arc length; a closed
-/// contour's start is rotated to the point that best matches the other contour. A contour
-/// with no partner shrinks to (or grows from) the other outline's nearest point, and its
-/// [`MorphPart::weight`] goes to 0 so the caller can thin or fade it.
+/// Contours pair up by length: the longest target contour takes the longest source contour,
+/// and so on. Each pair is resampled to `n` points by arc length; a closed contour's start is
+/// rotated, and an open one maybe reversed, to best match the other. A contour with no
+/// partner shrinks to (or grows from) its own centroid, and its [`MorphPart::weight`] goes to
+/// 0 so the caller can thin or fade it.
 #[derive(Clone, Debug)]
 pub struct Morph {
     pairs: Vec<(Vec<Point>, Vec<Point>, Presence)>,
@@ -318,30 +320,39 @@ pub struct MorphPart {
 impl Morph {
     pub fn new(from: &Outline, to: &Outline, n: usize) -> Morph {
         let n = n.max(2);
-        let count = from.contours.len().max(to.contours.len());
-        let mut pairs = Vec::with_capacity(count);
-        for i in 0..count {
-            match (from.contours.get(i), to.contours.get(i)) {
-                (Some(a), Some(b)) => {
-                    let pa = a.resample(n);
-                    let mut pb = b.resample(n);
-                    if b.closed {
-                        pb = best_rotation(&pa, &pb);
-                    }
-                    pairs.push((pa, pb, Presence::Both));
-                }
-                (Some(a), None) => {
-                    let pa = a.resample(n);
-                    let to_pt = nearest(to, centroid(&pa));
-                    pairs.push((pa, vec![to_pt; n], Presence::FromOnly));
-                }
-                (None, Some(b)) => {
-                    let pb = b.resample(n);
-                    let from_pt = nearest(from, centroid(&pb));
-                    pairs.push((vec![from_pt; n], pb, Presence::ToOnly));
-                }
-                (None, None) => unreachable!(),
+        // Longest target contours choose first, each the longest source contour still free.
+        let by_len = |o: &Outline| {
+            let mut ix: Vec<usize> = (0..o.contours.len()).collect();
+            ix.sort_by(|a, b| o.contours[*b].length().total_cmp(&o.contours[*a].length()));
+            ix
+        };
+        let mut free = by_len(from);
+        let mut pairs = Vec::new();
+        for j in by_len(to) {
+            let b = &to.contours[j];
+            let pb = b.resample(n);
+            if free.is_empty() {
+                pairs.push((vec![centroid(&pb); n], pb, Presence::ToOnly));
+                continue;
             }
+            let a = &from.contours[free.remove(0)];
+            let mut pa = a.resample(n);
+            let mut pb = pb;
+            if b.closed {
+                pb = best_rotation(&pa, &pb);
+            } else if a.closed {
+                pa = best_rotation(&pb, &pa);
+            }
+            let reversed: Vec<Point> = pb.iter().rev().copied().collect();
+            if !b.closed && cost(&pa, &reversed) < cost(&pa, &pb) {
+                pb = reversed;
+            }
+            pairs.push((pa, pb, Presence::Both));
+        }
+        for i in free {
+            let pa = from.contours[i].resample(n);
+            let c = centroid(&pa);
+            pairs.push((pa, vec![c; n], Presence::FromOnly));
         }
         Morph { pairs }
     }
@@ -449,6 +460,18 @@ pub mod icons {
     }
 }
 
+/// The curve parameter at arc length `len` from the segment's start.
+fn param_at(s: &VectorSeg, len: f64) -> f64 {
+    let total = (s.s1 - s.s0) as f64;
+    let q = quad(s);
+    let t = if total > 0.0 { q.inv_arclen(len.clamp(0.0, total), ACCURACY) } else { 0.0 };
+    if t.is_finite() {
+        t
+    } else {
+        (len / total).clamp(0.0, 1.0)
+    }
+}
+
 fn quad(s: &VectorSeg) -> QuadBez {
     let k = |p: Point| kurbo::Point::new(p.x as f64, p.y as f64);
     QuadBez::new(k(s.p0), k(s.p1), k(s.p2))
@@ -464,7 +487,10 @@ fn line(a: Point, b: Point, s0: f32, s1: f32) -> VectorSeg {
 }
 
 fn push_quad(c: &mut Contour, q: QuadBez, s: &mut f32) {
-    let len = q.arclen(ACCURACY) as f32;
+    // kurbo's closed form gives NaN for some straight quadratics; their length is the chord.
+    let curved = (q.p0.to_vec2() - 2.0 * q.p1.to_vec2() + q.p2.to_vec2()).hypot2() > 1e-12 * (q.p2 - q.p0).hypot2();
+    let len = if curved { q.arclen(ACCURACY) } else { (q.p2 - q.p0).hypot() };
+    let len = if len.is_finite() { len as f32 } else { (q.p2 - q.p0).hypot() as f32 };
     if len <= 1e-6 {
         return;
     }
@@ -482,13 +508,9 @@ fn centroid(pts: &[Point]) -> Point {
     Point::new(x / n, y / n)
 }
 
-/// The segment end point of `o` nearest to `p`.
-fn nearest(o: &Outline, p: Point) -> Point {
-    o.contours
-        .iter()
-        .flat_map(|c| c.segs.iter().flat_map(|s| [s.p0, s.p2]))
-        .min_by(|a, b| dist(*a, p).total_cmp(&dist(*b, p)))
-        .unwrap_or(p)
+/// Sum of squared distances between matching points.
+fn cost(a: &[Point], b: &[Point]) -> f32 {
+    a.iter().zip(b).map(|(p, q)| (p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sum()
 }
 
 /// `b` (a closed loop whose last point repeats the first) rotated so its points best match
@@ -561,6 +583,15 @@ mod tests {
         assert!((at0[0].contour.length() - 40.0).abs() < 0.5);
         let at1 = m.sample(1.0);
         assert!((at1[0].contour.length() - 31.4).abs() < 0.5, "{}", at1[0].contour.length());
+    }
+
+    #[test]
+    fn diagonal_lines_have_finite_lengths() {
+        let o = Outline::new(&icons::check(), 0.01);
+        assert!((o.length() - (50f32.sqrt() + 221f32.sqrt())).abs() < 1e-3, "{}", o.length());
+        assert!(o.contours[0].resample(33).iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+        let t = &o.trim(2.0, 9.0).contours[0];
+        assert!((t.segs[0].s0 - 2.0).abs() < 1e-4 && (t.length() - 9.0).abs() < 1e-4);
     }
 
     #[test]
