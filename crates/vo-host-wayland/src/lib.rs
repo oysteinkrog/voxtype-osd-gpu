@@ -14,10 +14,19 @@
 //!   reach the app stamped with the host clock at receipt.
 //! - A calloop ping wakes the loop from other threads. Nothing is drawn unless the app asks,
 //!   so a settled app costs zero frames and the loop sleeps in `epoll`.
+//! - CPU first frame (`HostCtl::gpu_in_background`): the device is made on a thread while
+//!   the app draws CPU frames into `wl_shm` buffers on the role surface. The Vulkan WSI owns
+//!   buffer attachment on its own surface, so the GPU draws into a sub-surface of the role
+//!   surface, placed over it at (0, 0). The sub-surface starts synchronized: the first GPU
+//!   frame's commit waits in its cache until the host commits the role surface with a clear
+//!   buffer, so the switch from CPU to GPU pixels lands in one compositor update. Then the
+//!   sub-surface goes desynchronized and runs on its own. Input regions live on the GPU
+//!   surface, so the overlay is click-through until the first GPU frame.
 
 mod handlers;
 
 use std::ptr::NonNull;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
@@ -32,11 +41,16 @@ use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, La
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowDecorations};
 use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
+use smithay_client_toolkit::shm::Shm;
+use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
-    ClickThrough, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode, Keyboard,
-    OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId, SurfaceKind, Waker,
+    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode,
+    Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId, SurfaceKind, Waker,
 };
 use wayland_client::globals::registry_queue_init;
+use wayland_client::protocol::wl_shm::Format;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::{wl_pointer::WlPointer, wl_surface::WlSurface};
 use wayland_client::{Connection, Proxy, QueueHandle};
 
@@ -84,11 +98,36 @@ impl Role {
     }
 }
 
+/// The GPU's own surface while the CPU first frame is in use: a sub-surface of the role
+/// surface.
+pub(crate) struct Child {
+    sub: WlSubsurface,
+    pub(crate) wl: WlSurface,
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        self.sub.destroy();
+        self.wl.destroy();
+    }
+}
+
+/// CPU frames on the role surface, until the GPU takes over.
+struct ShmStage {
+    pool: SlotPool,
+    /// The buffer on the role surface: the last CPU frame, then a clear one.
+    buffer: Option<Buffer>,
+    handed_over: bool,
+}
+
 pub(crate) struct Surf {
     pub(crate) id: SurfaceId,
     spec: OverlaySpec,
-    // Field order matters: the wgpu surface must drop before the Wayland surface.
+    // Field order matters: the wgpu surface must drop before the Wayland surfaces, and the
+    // sub-surface before its parent.
     wgpu: Option<wgpu::Surface<'static>>,
+    pub(crate) child: Option<Child>,
+    shm: Option<ShmStage>,
     pub(crate) role: Role,
     config: Option<wgpu::SurfaceConfiguration>,
     /// Logical size from the last configure.
@@ -99,16 +138,61 @@ pub(crate) struct Surf {
     want_frame: bool,
     pub(crate) callback_pending: bool,
     frames: u64,
-    /// Frame numbers with present feedback still to come, oldest first.
-    pub(crate) feedback: std::collections::VecDeque<u64>,
+    /// `(on the GPU's sub-surface, frame number)` with present feedback still to come, oldest
+    /// first.
+    pub(crate) feedback: std::collections::VecDeque<(bool, u64)>,
+    /// The number of the first frame the GPU drew.
+    pub(crate) first_gpu: Option<u64>,
     pub(crate) last_present: Option<f64>,
     pub(crate) refresh: f64,
     pending_input: Option<InputMode>,
 }
 
+impl Surf {
+    /// The surface the GPU draws into, which also holds the input region.
+    pub(crate) fn gpu_wl(&self) -> &WlSurface {
+        self.child.as_ref().map_or(self.role.wl(), |c| &c.wl)
+    }
+
+    pub(crate) fn is_child(&self, wl: &WlSurface) -> bool {
+        self.child.as_ref().is_some_and(|c| &c.wl == wl)
+    }
+}
+
 struct GpuState {
     adapter: wgpu::Adapter,
     gpu: Gpu,
+}
+
+/// What the device thread sends back.
+struct BgGpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    /// Host clock times of "instance" and "adapter and device".
+    stages: [f64; 2],
+}
+
+/// Makes the instance, adapter and device off the main thread. The adapter is picked without
+/// a surface to match, since the surface is made later on the main thread.
+fn make_gpu(display: DisplayHandle, origin: f64) -> Result<BgGpu, String> {
+    let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
+    desc.backends = wgpu::Backends::VULKAN;
+    let instance = wgpu::Instance::new(desc);
+    let t_instance = monotonic() - origin;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .map_err(|e| e.to_string())?;
+    let (device, queue) = pollster::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-host-wayland"), ..Default::default() }),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(BgGpu { instance, adapter, device, queue, stages: [t_instance, monotonic() - origin] })
 }
 
 pub struct State {
@@ -118,6 +202,8 @@ pub struct State {
     pub(crate) outputs: OutputState,
     pub(crate) seats: SeatState,
     compositor: CompositorState,
+    subcompositor: Option<SubcompositorState>,
+    pub(crate) shm: Option<Shm>,
     layer_shell: Option<LayerShell>,
     xdg: Option<XdgShell>,
     pub(crate) presentation: PresentationTimeState,
@@ -126,6 +212,10 @@ pub struct State {
     origin: f64,
     instance: Option<wgpu::Instance>,
     gpu: Option<GpuState>,
+    /// The device thread's answer, while it is being made.
+    bg: Option<mpsc::Receiver<Result<BgGpu, String>>>,
+    gpu_failed: Option<String>,
+    loop_handle: calloop::LoopHandle<'static, State>,
     pub(crate) surfaces: Vec<Surf>,
     next_id: SurfaceId,
     pub(crate) pointers: Vec<WlPointer>,
@@ -151,6 +241,8 @@ impl WaylandHost {
         let (globals, queue) = registry_queue_init::<State>(&conn).map_err(|e| HostError::Connect(e.to_string()))?;
         let qh = queue.handle();
         let compositor = CompositorState::bind(&globals, &qh).map_err(|e| HostError::Connect(e.to_string()))?;
+        let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh).ok();
+        let shm = Shm::bind(&globals, &qh).ok();
         let layer_shell = LayerShell::bind(&globals, &qh).ok();
         let xdg = XdgShell::bind(&globals, &qh).ok();
         if layer_shell.is_none() && xdg.is_none() {
@@ -167,7 +259,7 @@ impl WaylandHost {
             backdrop_blur: false,
             fractional_scale: false,
             present_feedback: has("wp_presentation"),
-            cpu_first_frame: false,
+            cpu_first_frame: subcompositor.is_some() && shm.is_some(),
         };
         let presentation = PresentationTimeState::bind(&globals, &qh);
 
@@ -195,6 +287,8 @@ impl WaylandHost {
             conn,
             qh,
             compositor,
+            subcompositor,
+            shm,
             layer_shell,
             xdg,
             presentation,
@@ -203,6 +297,9 @@ impl WaylandHost {
             origin,
             instance: None,
             gpu: None,
+            bg: None,
+            gpu_failed: None,
+            loop_handle: event_loop.handle(),
             surfaces: Vec::new(),
             next_id: 1,
             pointers: Vec::new(),
@@ -222,8 +319,70 @@ impl State {
         self.diag.stages.push((name, t));
     }
 
+    /// The surface `wl` belongs to: its role surface or its GPU sub-surface.
     pub(crate) fn surface_index(&self, wl: &WlSurface) -> Option<usize> {
-        self.surfaces.iter().position(|s| s.role.wl() == wl)
+        self.surfaces.iter().position(|s| s.role.wl() == wl || s.is_child(wl))
+    }
+
+    fn display_handle(&self) -> DisplayHandle {
+        DisplayHandle(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            NonNull::new(self.conn.backend().display_ptr() as *mut std::ffi::c_void).expect("display pointer"),
+        )))
+    }
+
+    /// Takes the device thread's answer if it is there; with `wait`, waits for it.
+    fn poll_gpu(&mut self, wait: bool) {
+        let Some(rx) = &self.bg else { return };
+        let answer = if wait {
+            rx.recv().map_err(|_| "the GPU thread ended".to_string())
+        } else {
+            match rx.try_recv() {
+                Ok(a) => Ok(a),
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => Err("the GPU thread ended".to_string()),
+            }
+        };
+        self.bg = None;
+        match answer.and_then(|a| a) {
+            Ok(b) => {
+                self.diag.stages.push(("instance", b.stages[0]));
+                self.diag.stages.push(("adapter and device", b.stages[1]));
+                let name = b.adapter.get_info().name;
+                self.diag.notes.push(format!("adapter: {name}"));
+                self.instance = Some(b.instance);
+                self.gpu =
+                    Some(GpuState { adapter: b.adapter, gpu: Gpu { device: b.device, queue: b.queue, adapter: name } });
+                for i in 0..self.surfaces.len() {
+                    let wl = self.surfaces[i].gpu_wl().clone();
+                    match self.wgpu_surface(&wl) {
+                        Ok(surface) => self.surfaces[i].wgpu = Some(surface),
+                        Err(e) => self.gpu_failed = Some(e.to_string()),
+                    }
+                }
+                self.stage("gpu ready");
+            }
+            Err(e) => self.gpu_failed = Some(e),
+        }
+        let t = self.now();
+        self.events.push(HostEvent::GpuReady { t });
+    }
+
+    /// A wgpu surface on `wl`.
+    fn wgpu_surface(&mut self, wl: &WlSurface) -> Result<wgpu::Surface<'static>, HostError> {
+        let window = RawWindowHandle::Wayland(WaylandWindowHandle::new(
+            NonNull::new(wl.id().as_ptr() as *mut std::ffi::c_void).expect("surface pointer"),
+        ));
+        let display = self.display_handle().0;
+        // SAFETY: the handles point at live Wayland objects. `Surf` drops the wgpu surface
+        // before the Wayland surfaces (field order), and the host drops all surfaces before the
+        // connection.
+        unsafe {
+            self.instance().create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(display),
+                raw_window_handle: window,
+            })
+        }
+        .map_err(|e| HostError::Gpu(e.to_string()))
     }
 
     fn index(&self, id: SurfaceId) -> Result<usize, HostError> {
@@ -232,10 +391,7 @@ impl State {
 
     fn instance(&mut self) -> &wgpu::Instance {
         if self.instance.is_none() {
-            let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                NonNull::new(self.conn.backend().display_ptr() as *mut std::ffi::c_void).expect("display pointer"),
-            ));
-            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(DisplayHandle(display)));
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(self.display_handle()));
             desc.backends = wgpu::Backends::VULKAN;
             self.instance = Some(wgpu::Instance::new(desc));
             self.stage("instance");
@@ -318,10 +474,96 @@ impl State {
     }
 
     fn ready(&self, s: &Surf) -> bool {
-        s.want_frame && s.configured && !s.callback_pending
+        s.want_frame
+            && s.configured
+            && !s.callback_pending
+            && (s.wgpu.is_some() || s.shm.as_ref().is_some_and(|m| !m.handed_over))
+    }
+
+    /// A CPU frame into a `wl_shm` buffer on the role surface.
+    fn draw_cpu(&mut self, i: usize, app: &mut dyn HostApp) {
+        let Some(mut stage) = self.surfaces[i].shm.take() else { return };
+        let s = &self.surfaces[i];
+        let (id, frame, scale, role) = (s.id, s.frames, s.scale, s.role.wl().clone());
+        let w = (s.size.w.round() as u32).max(1) * scale as u32;
+        let h = (s.size.h.round() as u32).max(1) * scale as u32;
+        let stride = w as usize * 4;
+        let t = self.predict(s, self.now());
+        let (buffer, canvas) = match stage.pool.create_buffer(w as i32, h as i32, stride as i32, Format::Argb8888) {
+            Ok(b) => b,
+            Err(e) => {
+                self.diag.notes.push(format!("surface {id}: no shm buffer ({e}), waiting for the GPU"));
+                let s = &mut self.surfaces[i];
+                s.shm = Some(stage);
+                s.want_frame = false;
+                return;
+            }
+        };
+        self.in_frame = Some(id);
+        let mut cpu = CpuFrame { id, t, frame, size: [w, h], scale: scale as f32, stride, pixels: canvas };
+        let drawn = app.cpu_frame(self, &mut cpu);
+        self.in_frame = None;
+        let Ok(i) = self.index(id) else { return };
+        if let Some(mode) = self.surfaces[i].pending_input.take() {
+            let gpu_wl = self.surfaces[i].gpu_wl().clone();
+            self.apply_input(&gpu_wl, &mode);
+            gpu_wl.commit();
+        }
+        if !drawn {
+            let s = &mut self.surfaces[i];
+            s.shm = Some(stage);
+            s.want_frame = false;
+            return;
+        }
+        role.frame(&self.qh, role.clone());
+        if self.caps.present_feedback && self.presentation.feedback(&role, &self.qh).is_ok() {
+            self.surfaces[i].feedback.push_back((false, frame));
+        }
+        if buffer.attach_to(&role).is_err() {
+            self.diag.notes.push(format!("surface {id}: shm buffer busy"));
+        }
+        role.damage_buffer(0, 0, w as i32, h as i32);
+        role.commit();
+        stage.buffer = Some(buffer);
+        let s = &mut self.surfaces[i];
+        s.shm = Some(stage);
+        s.callback_pending = true;
+        s.want_frame = false;
+        s.frames += 1;
+        if s.frames == 1 {
+            self.stage("first present call");
+        }
+    }
+
+    /// After the first GPU frame: a clear buffer on the role surface, committed together with
+    /// the GPU frame waiting in the synchronized sub-surface's cache.
+    fn hand_over(&mut self, i: usize) {
+        let s = &mut self.surfaces[i];
+        let (Some(stage), Some(child)) = (s.shm.as_mut(), s.child.as_ref()) else { return };
+        if stage.handed_over {
+            return;
+        }
+        stage.handed_over = true;
+        let role = s.role.wl();
+        let w = (s.size.w.round() as i32).max(1) * s.scale;
+        let h = (s.size.h.round() as i32).max(1) * s.scale;
+        if let Ok((clear, canvas)) = stage.pool.create_buffer(w, h, w * 4, Format::Argb8888) {
+            canvas.fill(0);
+            let _ = clear.attach_to(role);
+            role.damage_buffer(0, 0, w, h);
+            stage.buffer = Some(clear);
+        }
+        child.sub.set_desync();
+        role.commit();
+        let _ = self.conn.flush();
+        self.stage("hand-over commit");
     }
 
     fn draw(&mut self, i: usize, app: &mut dyn HostApp) {
+        if self.surfaces[i].wgpu.is_none() {
+            self.draw_cpu(i, app);
+            return;
+        }
         if self.surfaces[i].dirty_config || self.surfaces[i].config.is_none() {
             self.configure_swapchain(i);
         }
@@ -338,14 +580,15 @@ impl State {
             }
         };
         let now = self.now();
-        let (id, wl, frame, scale, t) = {
+        let (id, wl, frame, scale, t, on_child) = {
             let s = &self.surfaces[i];
-            (s.id, s.role.wl().clone(), s.frames, s.scale as f32, self.predict(s, now))
+            (s.id, s.gpu_wl().clone(), s.frames, s.scale as f32, self.predict(s, now), s.child.is_some())
         };
         wl.frame(&self.qh, wl.clone());
         if self.caps.present_feedback && self.presentation.feedback(&wl, &self.qh).is_ok() {
-            self.surfaces[i].feedback.push_back(frame);
+            self.surfaces[i].feedback.push_back((on_child, frame));
         }
+        self.surfaces[i].first_gpu.get_or_insert(frame);
         let size = [tex.texture.width(), tex.texture.height()];
         self.in_frame = Some(id);
         app.frame(self, &Frame { id, t, frame, size, scale, texture: &tex.texture });
@@ -357,12 +600,17 @@ impl State {
         }
         let queue = self.gpu.as_ref().unwrap().gpu.queue.clone();
         queue.present(tex);
+        self.hand_over(i);
         let s = &mut self.surfaces[i];
         s.callback_pending = true;
         s.want_frame = false;
         s.frames += 1;
-        if s.frames == 1 {
+        let (first, first_gpu) = (s.frames == 1, s.first_gpu == Some(s.frames - 1));
+        if first {
             self.stage("first present call");
+        }
+        if first_gpu {
+            self.stage("first GPU present call");
         }
     }
 
@@ -404,6 +652,10 @@ impl HostCtl for State {
     }
 
     fn gpu(&mut self) -> Result<Gpu, HostError> {
+        self.poll_gpu(true);
+        if let Some(e) = &self.gpu_failed {
+            return Err(HostError::Gpu(e.clone()));
+        }
         if let Some(g) = &self.gpu {
             return Ok(g.gpu.clone());
         }
@@ -426,6 +678,31 @@ impl HostCtl for State {
         self.gpu = Some(GpuState { adapter, gpu: Gpu { device, queue, adapter: name } });
         self.stage("adapter and device");
         Ok(self.gpu.as_ref().unwrap().gpu.clone())
+    }
+
+    fn gpu_in_background(&mut self) -> bool {
+        if self.bg.is_some() {
+            return true;
+        }
+        if !self.caps.cpu_first_frame || self.gpu.is_some() || self.instance.is_some() {
+            return false;
+        }
+        let Ok((ping, source)) = calloop::ping::make_ping() else { return false };
+        if self.loop_handle.insert_source(source, |_, _, state: &mut State| state.poll_gpu(false)).is_err() {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (display, origin) = (self.display_handle(), self.origin);
+        let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
+            let _ = tx.send(make_gpu(display, origin));
+            ping.ping();
+        });
+        if spawned.is_err() {
+            return false;
+        }
+        self.bg = Some(rx);
+        self.stage("gpu thread started");
+        true
     }
 
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
@@ -469,34 +746,43 @@ impl HostCtl for State {
             }
             (None, None, _) => unreachable!("connect checks for a shell"),
         };
-        self.apply_input(role.wl(), &spec.input);
+        // While the device thread runs, the GPU gets a sub-surface and the role surface shows
+        // CPU frames.
+        let (child, shm) = match (&self.bg, &self.subcompositor, &self.shm) {
+            (Some(_), Some(sub), Some(shm)) => {
+                let (sub, wl) = sub.create_subsurface(role.wl().clone(), &self.qh);
+                sub.set_position(0, 0);
+                let pool = SlotPool::new((w * h * 4) as usize * 2, shm)
+                    .map_err(|e| HostError::Io(std::io::Error::other(e)))?;
+                (Some(Child { sub, wl }), Some(ShmStage { pool, buffer: None, handed_over: false }))
+            }
+            _ => (None, None),
+        };
+        match &child {
+            Some(c) => {
+                self.apply_input(role.wl(), &InputMode::None);
+                self.apply_input(&c.wl, &spec.input);
+                c.wl.commit();
+            }
+            None => self.apply_input(role.wl(), &spec.input),
+        }
         role.wl().commit();
         let _ = self.conn.flush();
         if self.surfaces.is_empty() {
             self.stage("surface committed");
         }
-        let window = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-            NonNull::new(role.wl().id().as_ptr() as *mut std::ffi::c_void).expect("surface pointer"),
-        ));
-        let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            NonNull::new(self.conn.backend().display_ptr() as *mut std::ffi::c_void).expect("display pointer"),
-        ));
-        // SAFETY: the handles point at live Wayland objects. `Surf` drops the wgpu surface
-        // before the Wayland surface (field order), and the host drops all surfaces before the
-        // connection.
-        let wgpu_surface = unsafe {
-            self.instance().create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(display),
-                raw_window_handle: window,
-            })
-        }
-        .map_err(|e| HostError::Gpu(e.to_string()))?;
+        let wgpu_surface = match &child {
+            Some(_) => None,
+            None => Some(self.wgpu_surface(&role.wl().clone())?),
+        };
         let id = self.next_id;
         self.next_id += 1;
         self.surfaces.push(Surf {
             id,
             spec: spec.clone(),
-            wgpu: Some(wgpu_surface),
+            wgpu: wgpu_surface,
+            child,
+            shm,
             role,
             config: None,
             size: spec.size,
@@ -507,6 +793,7 @@ impl HostCtl for State {
             callback_pending: false,
             frames: 0,
             feedback: Default::default(),
+            first_gpu: None,
             last_present: None,
             refresh: 0.0,
             pending_input: None,
@@ -521,7 +808,7 @@ impl HostCtl for State {
                 if self.in_frame == Some(id) {
                     self.surfaces[i].pending_input = Some(mode);
                 } else {
-                    let wl = self.surfaces[i].role.wl().clone();
+                    let wl = self.surfaces[i].gpu_wl().clone();
                     self.apply_input(&wl, &mode);
                     wl.commit();
                     let _ = self.conn.flush();
@@ -583,6 +870,9 @@ impl HostCtl for WaylandHost {
     fn gpu(&mut self) -> Result<Gpu, HostError> {
         self.state.gpu()
     }
+    fn gpu_in_background(&mut self) -> bool {
+        self.state.gpu_in_background()
+    }
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
         self.state.open(spec)
     }
@@ -636,6 +926,8 @@ impl Host for WaylandHost {
                 i += 1;
             }
         }
+        // A device thread still running holds the display pointer: wait for it.
+        state.bg.take().map(|rx| rx.recv());
         // Surfaces before the device and the instance, all before the connection.
         state.surfaces.clear();
         state.gpu = None;

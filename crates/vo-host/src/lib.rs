@@ -32,6 +32,8 @@ pub struct HostCaps {
     /// The host knows when a frame reached the screen, so `Frame::t` is a prediction from
     /// real present times rather than the time the frame was asked for.
     pub present_feedback: bool,
+    /// The host can draw the first frames on the CPU while the GPU device is still being made
+    /// ([`HostCtl::gpu_in_background`]).
     pub cpu_first_frame: bool,
 }
 
@@ -186,6 +188,11 @@ pub enum HostEvent {
     Timer {
         t: f64,
     },
+    /// The device started by [`HostCtl::gpu_in_background`] is ready: `HostCtl::gpu` returns
+    /// at once, and frames go to `HostApp::frame` from now on.
+    GpuReady {
+        t: f64,
+    },
 }
 
 /// A frame to draw. The app encodes and submits its work into `texture` before returning; the
@@ -200,6 +207,23 @@ pub struct Frame<'a> {
     pub size: [u32; 2],
     pub scale: f32,
     pub texture: &'a wgpu::Texture,
+}
+
+/// A frame to draw on the CPU, while the GPU device is still being made. The app writes every
+/// pixel of `pixels`; the host attaches the buffer afterwards.
+pub struct CpuFrame<'a> {
+    pub id: SurfaceId,
+    /// As in [`Frame::t`].
+    pub t: f64,
+    /// Frames drawn on this surface before this one, CPU and GPU together.
+    pub frame: u64,
+    /// Physical pixels.
+    pub size: [u32; 2],
+    pub scale: f32,
+    /// Bytes from one row to the next.
+    pub stride: usize,
+    /// Premultiplied, sRGB encoded, 4 bytes per pixel in the order B, G, R, A.
+    pub pixels: &'a mut [u8],
 }
 
 /// The device and queue every surface of the host renders with.
@@ -290,6 +314,14 @@ pub trait HostCtl {
     /// one, so open the first surface before asking.
     fn gpu(&mut self) -> Result<Gpu, HostError>;
 
+    /// Starts making the GPU device on another thread, so the first frames can be drawn on the
+    /// CPU meanwhile: until `HostEvent::GpuReady` the host calls `HostApp::cpu_frame` instead
+    /// of `HostApp::frame`. Call it before opening the first surface. Returns false when the
+    /// host cannot do this (`HostCaps::cpu_first_frame`); then use `gpu` as usual.
+    fn gpu_in_background(&mut self) -> bool {
+        false
+    }
+
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError>;
 
     fn update(&mut self, id: SurfaceId, change: SurfaceChange) -> Result<(), HostError>;
@@ -322,6 +354,14 @@ pub trait HostApp {
     /// Draw `frame`. Changes asked for with `HostCtl::update` during this call land on the
     /// same commit as the frame.
     fn frame(&mut self, host: &mut dyn HostCtl, frame: &Frame<'_>);
+
+    /// Draw `frame` on the CPU, before the GPU is ready. Return false to skip it; the host
+    /// then waits for the GPU. Changes asked for with `HostCtl::update` during this call land
+    /// on the same commit.
+    fn cpu_frame(&mut self, host: &mut dyn HostCtl, frame: &mut CpuFrame<'_>) -> bool {
+        let _ = (host, frame);
+        false
+    }
 }
 
 /// A platform host. `run` owns the calling thread until the app exits or the display closes.

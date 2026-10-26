@@ -12,9 +12,11 @@ use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure};
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_presentation_time,
-    delegate_registry, delegate_seat, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
+    delegate_registry, delegate_seat, delegate_shm, delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    registry_handlers,
 };
 use vo_host::{Button, HostCtl, HostEvent, Point, PointerEvent, PointerKind, Size};
 use wayland_client::protocol::wl_pointer::WlPointer;
@@ -24,7 +26,22 @@ use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::
 
 use smithay_client_toolkit::reexports::protocols as wayland_protocols;
 
-use crate::{Role, State};
+use crate::{Role, State, Surf};
+
+impl Surf {
+    /// The oldest frame waiting for present feedback on `wl`.
+    fn take_feedback(&mut self, wl: &wl_surface::WlSurface) -> Option<u64> {
+        let on_child = self.is_child(wl);
+        let i = self.feedback.iter().position(|f| f.0 == on_child)?;
+        self.feedback.remove(i).map(|f| f.1)
+    }
+}
+
+impl ShmHandler for State {
+    fn shm_state(&mut self) -> &mut Shm {
+        self.shm.as_mut().expect("wl_shm events come only once it is bound")
+    }
+}
 
 impl State {
     fn configured(&mut self, wl: &wl_surface::WlSurface, size: Option<(u32, u32)>) {
@@ -58,10 +75,14 @@ impl CompositorHandler for State {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, factor: i32) {
         let Some(i) = self.surface_index(wl) else { return };
         let s = &mut self.surfaces[i];
-        if s.scale == factor || factor < 1 {
+        // The role surface sets the scale for both.
+        if s.scale == factor || factor < 1 || s.is_child(wl) {
             return;
         }
         s.scale = factor;
+        if let Some(c) = &s.child {
+            c.wl.set_buffer_scale(factor);
+        }
         // Integer scale only: fractional-scale-v1 is not bound yet (HostCaps::fractional_scale).
         let _ = match &s.role {
             Role::Layer(l) => l.set_buffer_scale(factor as u32),
@@ -156,7 +177,7 @@ impl PresentationTimeHandler for State {
         _: WEnum<Kind>,
     ) {
         let Some(i) = self.surface_index(wl) else { return };
-        let frame = self.surfaces[i].feedback.pop_front().unwrap_or(0);
+        let frame = self.surfaces[i].take_feedback(wl).unwrap_or(0);
         // Only a monotonic present clock can be compared with the host clock.
         if time.clk_id != libc::CLOCK_MONOTONIC as u32 {
             return;
@@ -170,6 +191,9 @@ impl PresentationTimeHandler for State {
         if frame == 0 {
             self.diag.stages.push(("first frame on screen", t));
         }
+        if self.surfaces[i].first_gpu == Some(frame) {
+            self.diag.stages.push(("first GPU frame on screen", t));
+        }
         self.events.push(HostEvent::Presented { id, t, frame, refresh });
     }
 
@@ -181,7 +205,7 @@ impl PresentationTimeHandler for State {
         wl: &wl_surface::WlSurface,
     ) {
         if let Some(i) = self.surface_index(wl) {
-            self.surfaces[i].feedback.pop_front();
+            self.surfaces[i].take_feedback(wl);
         }
     }
 }
@@ -272,3 +296,5 @@ delegate_seat!(State);
 delegate_pointer!(State);
 delegate_presentation_time!(State);
 delegate_registry!(State);
+delegate_shm!(State);
+delegate_subcompositor!(State);
