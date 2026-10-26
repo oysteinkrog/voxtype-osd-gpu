@@ -109,10 +109,10 @@ and 2 runs insert a word. [V]
 ### Cohere replay of all 94 recordings
 
 Only 14 recordings had a live Cohere final, so voxtype's `replay_engine_final` example
-ran Cohere (q4f16, GPU, 5.5 GiB VRAM free at the start) over all 94 WAVs, in the same
+ran Cohere (q4f16, CUDA build, 5.5 GiB VRAM free at the start) over all 94 WAVs, in the same
 pause-split parts the live worker sends it, and diffed that final against the replayed
 preview. 2 recordings gave no Cohere text, so 92 count. It took 104 s for 1687 s of
-audio. On the 14 recordings that also had a live Cohere final, the replayed text is
+audio, 16 times real time, which points to the GPU; no log line confirms it [I]. On the 14 recordings that also had a live Cohere final, the replayed text is
 identical in 7 and differs in 5 % of words on average. [V]
 
 | Measure | Cohere replay, 92 recordings |
