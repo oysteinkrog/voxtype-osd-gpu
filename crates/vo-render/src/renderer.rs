@@ -394,6 +394,8 @@ pub struct Renderer {
     light: bool,
     /// Emitter elements and particle words, which live from frame to frame.
     particles: ParticleLayer,
+    /// How this frame's pass on the target starts (`encode_with`).
+    load: wgpu::LoadOp<wgpu::Color>,
 }
 
 struct FxShared {
@@ -436,6 +438,7 @@ impl Renderer {
             device: device.clone(),
             queue: queue.clone(),
             particles: ParticleLayer::new(fonts.clone()),
+            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -552,6 +555,21 @@ impl Renderer {
 
     /// Records the frame into `enc` without submitting, so a caller can add a copy after it.
     pub fn encode(&mut self, list: &DisplayList, scale: f32, target: &Target, enc: &mut wgpu::CommandEncoder) {
+        self.encode_with(list, scale, target, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), enc);
+    }
+
+    /// [`Renderer::encode`] with the target's load op. With `LoadOp::Load` the frame is drawn
+    /// premultiplied over what the target already holds, on both paths: the direct path loads
+    /// the target, and the effect path's last pass blends the scene over it.
+    pub fn encode_with(
+        &mut self,
+        list: &DisplayList,
+        scale: f32,
+        target: &Target,
+        load: wgpu::LoadOp<wgpu::Color>,
+        enc: &mut wgpu::CommandEncoder,
+    ) {
+        self.load = load;
         let (w, h) = (target.width(), target.height());
         let effects = self.quality == Quality::Full
             && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some());
@@ -609,7 +627,7 @@ impl Renderer {
                 eprintln!("vo-render: effect textures failed ({e}); dropping to quality {:?}", self.quality.lower());
                 self.quality = self.quality.lower();
                 self.pool.clear();
-                return self.encode(list, scale, target, enc);
+                return self.encode_with(list, scale, target, load, enc);
             }
         }
         self.upload(format, target.format(), w, h);
@@ -1251,7 +1269,10 @@ impl Renderer {
                     }
                     pass
                 }
-                None => begin(enc, view, if i == 0 { "vo-target" } else { "vo-layer" }),
+                // The target itself takes the caller's load op; the effect path's scene
+                // texture and every layer texture clear.
+                None if s.tex.is_none() => begin_with(enc, view, "vo-target", self.load),
+                None => begin(enc, view, if i == 0 { "vo-scene" } else { "vo-layer" }),
             };
             self.run(&mut pass, s, format);
             drop(pass);
@@ -1261,7 +1282,7 @@ impl Renderer {
         }
         if let (Some(scene), Some(fx)) = (self.scene, &self.fx) {
             let bind = self.sampled_bind(fx, scene, scene);
-            let mut pass = begin(enc, &target.view, "vo-final");
+            let mut pass = begin_with(enc, &target.view, "vo-final", self.load);
             pass.set_pipeline(self.cached_pipeline(target.format(), Pipe::Final, BlendMode::Normal));
             pass.set_bind_group(0, &bind, &[]);
             let offset = (self.fx_uniforms.len() - self.uniform_stride as usize) as u32;
@@ -1474,7 +1495,9 @@ impl Renderer {
             Pipe::Particles => unreachable!("returned above"),
         };
         let blend_state = match pipe {
-            Pipe::Down | Pipe::Up | Pipe::Final => None,
+            Pipe::Down | Pipe::Up => None,
+            // Over a cleared target this equals replacing; over a loaded one it composites.
+            Pipe::Final => Some(PREMULTIPLIED_OVER),
             // Keeps `constant` times what is there: the source is zero.
             Pipe::Fade => Some(wgpu::BlendState {
                 color: wgpu::BlendComponent {
