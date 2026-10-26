@@ -371,11 +371,18 @@ mod live {
                 }
                 host.request_frame(id);
             }
+            // The host drops a request made while it draws, so ask again once a frame is shown.
+            if let HostEvent::Presented { id, .. } = event {
+                host.request_frame(id);
+            }
         }
 
         fn frame(&mut self, host: &mut dyn HostCtl, frame: &Frame<'_>) {
             let Some(demo) = &mut self.demo else { return };
             let t = (frame.t - self.start).max(0.0);
+            if std::env::var_os("VO_DIAG_FRAMES").is_some() {
+                eprintln!("frame {} t {t:.3}", frame.frame);
+            }
             let gpu = host.gpu().expect("GPU");
             let target = Target::from_texture(frame.texture.clone());
             let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -383,8 +390,6 @@ mod live {
             gpu.queue.submit([enc.finish()]);
             if t > DURATION + 1.0 {
                 host.exit();
-            } else {
-                host.request_frame(frame.id);
             }
         }
     }
