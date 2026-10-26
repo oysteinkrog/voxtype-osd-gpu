@@ -751,6 +751,10 @@ impl<M> Scene<M> {
                 ShapeKind::Line => {
                     ShapeInstance::line(origin, Point::new(rect.right(), rect.bottom()), 0.0, Paint::NONE)
                 }
+                ShapeKind::Band => {
+                    let half = 0.5 * size.h;
+                    ShapeInstance::band(origin.x, rect.right(), origin.y + half, half, half, fill())
+                }
             }),
             Kind::Label { style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);

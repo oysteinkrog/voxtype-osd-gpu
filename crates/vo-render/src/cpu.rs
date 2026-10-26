@@ -26,6 +26,7 @@ use crate::shapes::{pixels_per_unit, GpuPaint, GpuShape};
 
 const KIND_CIRCLE: u32 = vo_scene::display::ShapeKind::Circle as u32;
 const KIND_LINE: u32 = vo_scene::display::ShapeKind::Line as u32;
+const KIND_BAND: u32 = vo_scene::display::ShapeKind::Band as u32;
 const PAINT_NONE: u32 = vo_scene::display::PaintKind::None as u32;
 const PAINT_SOLID: u32 = vo_scene::display::PaintKind::Solid as u32;
 
@@ -178,6 +179,10 @@ impl CpuRenderer {
         let bounds = match kind {
             KIND_CIRCLE => [g[0] - g[2], g[1] - g[2], g[0] + g[2], g[1] + g[2]],
             KIND_LINE => [g[0].min(g[2]), g[1].min(g[3]), g[0].max(g[2]), g[1].max(g[3])],
+            KIND_BAND => {
+                let h = s.radii[0].max(s.radii[1]);
+                [g[0], g[1] - h, g[2], g[1] + h]
+            }
             _ => [g[0], g[1], g[0] + g[2], g[1] + g[3]],
         };
         // Grown like the shader's quad: half the stroke plus a pixel.
@@ -187,6 +192,8 @@ impl CpuRenderer {
         else {
             return;
         };
+        // A band's ends in pixels, compared with the pixel centre as the shader does.
+        let ends = (st.to_px.apply(Point::new(g[0], g[1])).x, st.to_px.apply(Point::new(g[2], g[1])).x);
         let fill_kind = (s.kinds >> 8) & 0xff;
         let stroke_kind = (s.kinds >> 16) & 0xff;
         for y in y0..y1 {
@@ -196,6 +203,7 @@ impl CpuRenderer {
                 let d = match kind {
                     KIND_CIRCLE => (p.x - g[0]).hypot(p.y - g[1]) - g[2],
                     KIND_LINE => sd_segment(p, Point::new(g[0], g[1]), Point::new(g[2], g[3])),
+                    KIND_BAND => sd_band(p, g, s.radii, frag.x, ends),
                     _ => sd_rrect(p, g, s.radii),
                 };
                 let dp = d * st.ppu;
@@ -273,6 +281,17 @@ impl CpuRenderer {
 
 fn scale4(c: [f32; 4], k: f32) -> [f32; 4] {
     c.map(|v| v * k)
+}
+
+/// The shader's `sd_band`: distance to the straight top or bottom edge, or far outside when the
+/// pixel centre `frag_x` is not between the ends (in pixels).
+fn sd_band(p: Point, g: [f32; 4], r: [f32; 4], frag_x: f32, ends: (f32, f32)) -> f32 {
+    if frag_x < ends.0.min(ends.1) || frag_x >= ends.0.max(ends.1) {
+        return 1e9;
+    }
+    let slope = (r[1] - r[0]) / (g[2] - g[0]).max(1e-6);
+    let half = r[0] + slope * (p.x - g[0]);
+    ((p.y - g[1]).abs() - half) / (1.0 + slope * slope).sqrt()
 }
 
 /// The shader's `paint`: premultiplied linear colour at `p`, stops mixed in premultiplied OKLab.

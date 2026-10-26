@@ -154,6 +154,32 @@ fn gradient_scene() -> DisplayList {
     .list(240.0, 120.0)
 }
 
+/// A filled waveform from bands: a mirrored envelope whose segments share their ends, with a
+/// gradient stepped per band, then a flat run of bands at fractional ends.
+fn bands_scene() -> DisplayList {
+    let mut shapes = Vec::new();
+    let n = 60;
+    let (x0, w, mid) = (8.0f32, 224.0f32, 34.0f32);
+    let level = |i: usize| {
+        let t = i as f32 / n as f32;
+        (0.5 + 0.45 * (t * 17.0).sin() * (t * 5.0).cos()).abs() * 24.0 + 0.5
+    };
+    let color = |x: f32| {
+        let t = ((x - x0) / w).clamp(0.0, 1.0);
+        Color::rgba(0.2 + 0.6 * t, 0.6, 0.9 - 0.5 * t, (t * 5.0).min(1.0))
+    };
+    for i in 0..n {
+        let (a, b) = (x0 + w * i as f32 / n as f32, x0 + w * (i + 1) as f32 / n as f32);
+        let paint = Paint::linear(Point::new(a, 0.0), color(a), Point::new(b, 0.0), color(b));
+        shapes.push(ShapeInstance::band(a, b, mid, level(i), level(i + 1), paint));
+    }
+    for i in 0..37 {
+        let (a, b) = (8.0 + i as f32 * 6.07, 8.0 + (i + 1) as f32 * 6.07);
+        shapes.push(ShapeInstance::band(a, b, 92.0, 10.0, 10.0, solid(0xf8fafc)));
+    }
+    L::new(vec![C::Shapes(shapes)]).list(240.0, 112.0)
+}
+
 /// Lays `text` out with cmap and advances (no shaping); one word id per word.
 fn run(font: &FontRef, text: &str, x: f32, y: f32, size: f32, color: Color, first_word: u32) -> Vec<GlyphInstance> {
     let upem = font.head().unwrap().units_per_em() as f32;
@@ -256,6 +282,8 @@ fn display_list_goldens() {
         render(&mut off, "dl-text", &text_scene(&font), 1.0),
         render(&mut off, "dl-text-1.5x", &text_scene(&font), 1.5),
         render(&mut off, "dl-layers", &layers_scene(&font), 1.0),
+        render(&mut off, "dl-bands", &bands_scene(), 1.0),
+        render(&mut off, "dl-bands-1.5x", &bands_scene(), 1.5),
     ];
     let failures: Vec<String> =
         images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
@@ -293,6 +321,27 @@ fn hairlines_are_one_full_pixel() {
         let x = at(115.0);
         let first = (at(5.0)..at(20.0)).map(|y| (y, alpha(x, y))).find(|&(_, a)| a > 0);
         assert!(first.is_some_and(|(_, a)| a == 255), "scale {scale}, filled rect top edge: {first:?}");
+    }
+}
+
+/// Bands that share an end cover the pixels between them fully: no seam where they meet.
+#[test]
+fn bands_tile_with_no_seam() {
+    let data = load_font();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = bands_scene();
+    for scale in [1.0f32, 1.25, 1.5, 2.0] {
+        let [w, h] = size_at(&list, scale);
+        let px = off.render_to_rgba(&list, [w, h], scale);
+        let alpha = |x: u32, y: u32| px[((y * w + x) * 4 + 3) as usize];
+        // The flat run spans x 8 to 232.6 and y 82 to 102; look inside it, off the edges.
+        let row = (92.0 * scale) as u32;
+        let gaps: Vec<(u32, u8)> = ((9.0 * scale) as u32..(231.0 * scale) as u32)
+            .map(|x| (x, alpha(x, row)))
+            .filter(|&(_, a)| a != 255)
+            .collect();
+        assert!(gaps.is_empty(), "scale {scale}: seams at {gaps:?}");
     }
 }
 
@@ -344,6 +393,7 @@ fn cpu_matches_gpu() {
         ("shapes-1.5x", shapes_scene(), 1.5, 2, 0.05),
         ("hairlines", hairline_scene(), 1.0, 2, 0.05),
         ("gradient", gradient_scene(), 1.0, 3, 0.2),
+        ("bands", bands_scene(), 1.0, 3, 0.2),
         ("text", text_scene(&font), 1.0, 96, 1.0),
     ];
     let mut report = Vec::new();

@@ -131,6 +131,13 @@ pub enum ShapeKind {
     Capsule,
     /// `geom` is `x0, y0, x1, y1`. Stroked only, with round caps.
     Line,
+    /// A vertical strip mirrored about a centre line, for filled waveforms. `geom` is
+    /// `x0, y, x1, 0`: the strip runs from `x0` to `x1` around the centre line at `y`.
+    /// `radii[0]` and `radii[1]` are the half heights at `x0` and `x1`; the top and bottom
+    /// edges are straight between them. Only those edges are antialiased: a pixel belongs to
+    /// the band when its centre is in `[x0, x1)` measured in pixels along x, so bands that share
+    /// an end tile with no seam. Meant for layers that map x to pixel x.
+    Band,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -248,6 +255,20 @@ impl ShapeInstance {
             fill: Paint::NONE,
             stroke,
             stroke_width: width,
+        }
+    }
+
+    /// A band from `x0` to `x1` around the centre line at `y`, half height `h0` at `x0` and
+    /// `h1` at `x1`.
+    pub fn band(x0: f32, x1: f32, y: f32, h0: f32, h1: f32, fill: Paint) -> ShapeInstance {
+        ShapeInstance {
+            kind: ShapeKind::Band,
+            flags: 0,
+            geom: [x0, y, x1, 0.0],
+            radii: [h0.max(0.0), h1.max(0.0), 0.0, 0.0],
+            fill,
+            stroke: Paint::NONE,
+            stroke_width: 0.0,
         }
     }
 

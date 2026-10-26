@@ -1,4 +1,4 @@
-// SDF primitive uber-shader: rounded rect (per-corner radii), circle, capsule and line in one
+// SDF primitive uber-shader: rounded rect (per-corner radii), circle, capsule, line and band in one
 // instanced draw. Fill and stroke, solid or linear-gradient paint interpolated in OKLab,
 // analytic antialiasing with a one-pixel box filter. `common.wgsl` is prepended.
 //
@@ -10,6 +10,7 @@ const KIND_RRECT: u32 = 0u;
 const KIND_CIRCLE: u32 = 1u;
 const KIND_CAPSULE: u32 = 2u;
 const KIND_LINE: u32 = 3u;
+const KIND_BAND: u32 = 4u;
 
 const PAINT_NONE: u32 = 0u;
 const PAINT_SOLID: u32 = 1u;
@@ -42,6 +43,8 @@ struct ShapeOut {
   @location(8) @interpolate(flat) stroke_c0: vec4f,
   @location(9) @interpolate(flat) stroke_c1: vec4f,
   @location(10) @interpolate(flat) stroke_p: vec4f,
+  // A band's ends in physical pixels along x, compared with the exact pixel centre.
+  @location(11) @interpolate(flat) band_px: vec2f,
 };
 
 @vertex fn vs_shape (@builtin(vertex_index) vi: u32, s: ShapeIn) -> ShapeOut {
@@ -62,6 +65,9 @@ struct ShapeOut {
     }
     let n = vec2f (-dir.y, dir.x);
     p = s.geom.xy + dir * mix (-m, len + m, c.x) + n * mix (-m, m, c.y);
+  } else if (kind == KIND_BAND) {
+    let h = max (s.radii.x, s.radii.y) + m;
+    p = vec2f (mix (s.geom.x - m, s.geom.z + m, c.x), s.geom.y + mix (-h, h, c.y));
   } else {
     p = mix (s.geom.xy - m, s.geom.xy + s.geom.zw + m, c);
   }
@@ -79,6 +85,7 @@ struct ShapeOut {
   o.stroke_c0 = s.stroke_c0;
   o.stroke_c1 = s.stroke_c1;
   o.stroke_p = s.stroke_p;
+  o.band_px = vec2f (layer_to_px (s.geom.xy).x, layer_to_px (s.geom.zy).x);
   return o;
 }
 
@@ -117,6 +124,21 @@ fn paint (kind: u32, c0: vec4f, c1: vec4f, ends: vec4f, p: vec2f) -> vec4f {
   return vec4f (rgb * lab.w, lab.w);
 }
 
+// Distance to the straight top or bottom edge of a band. A pixel whose centre `frag_x` is
+// outside the band's ends `ends` (both in pixels) is not covered at all. The ends are the same
+// numbers for two bands that share one, and the pixel centre is exact, so neighbouring bands
+// tile without a seam; comparing the interpolated layer position would not, because two quads
+// interpolate it with different rounding.
+fn sd_band (p: vec2f, g: vec4f, h: vec2f, frag_x: f32, ends: vec2f) -> f32 {
+  if (frag_x < min (ends.x, ends.y) || frag_x >= max (ends.x, ends.y)) {
+    return 1e9;
+  }
+  let w = max (g.z - g.x, 1e-6);
+  let slope = (h.y - h.x) / w;
+  let half = h.x + slope * (p.x - g.x);
+  return (abs (p.y - g.y) - half) / sqrt (1.0 + slope * slope);
+}
+
 fn sd_segment (p: vec2f, a: vec2f, b: vec2f) -> f32 {
   let pa = p - a;
   let ba = b - a;
@@ -131,6 +153,8 @@ fn sd_segment (p: vec2f, a: vec2f, b: vec2f) -> f32 {
     d = length (in.p - in.geom.xy) - in.geom.z;
   } else if (kind == KIND_LINE) {
     d = sd_segment (in.p, in.geom.xy, in.geom.zw);
+  } else if (kind == KIND_BAND) {
+    d = sd_band (in.p, in.geom, in.radii.xy, in.clip.x, in.band_px);
   } else {
     d = sd_rrect (in.p, in.geom, in.radii);
   }

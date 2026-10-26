@@ -125,6 +125,8 @@ fn snap_hairline(kind: ShapeKind, geom: &mut [f32; 4], to_px: &Affine) {
             geom[0] = back_x(to_centre(px_x(geom[0])));
             geom[1] = back_y(to_centre(px_y(geom[1])));
         }
+        // A band has no stroke worth snapping.
+        ShapeKind::Band => {}
         ShapeKind::Line => {
             if geom[1] == geom[3] {
                 let y = back_y(to_centre(px_y(geom[1])));
