@@ -235,6 +235,13 @@ fn bevel_slope (t: f32) -> f32 {
     let across = exp (-pow (inside / (1.6 * k), 2.0)) + 0.35 * exp (-pow (inside / (6.0 * k), 2.0));
     orbit = in.accent.rgb * along * across * in.anim.y;
   }
+  // On light glass an added colour washes out to white, so the orbit paints its colour over
+  // the tint instead.
+  var paint = 0.0;
+  if (dark < 0.5) {
+    paint = clamp (max (orbit.r, max (orbit.g, orbit.b)) / max (max (in.accent.r, max (in.accent.g, in.accent.b)), 1e-3), 0.0, 1.0);
+    orbit = vec3f (0.0);
+  }
 
   // Compose: the tint as a premultiplied layer, light added on top like a reflection (it
   // adds coverage too), the dark edge multiplied in.
@@ -242,7 +249,8 @@ fn bevel_slope (t: f32) -> f32 {
   let add = light + vec3f (edge_add + sheen) + orbit;
   let add_a = clamp (max (add.r, max (add.g, add.b)), 0.0, 1.0);
   let a_panel = clamp (a_tint + add_a * (1.0 - a_tint) + edge_dark * (1.0 - a_tint), 0.0, 1.0);
-  var panel = vec4f (min (rgb * a_tint + add, vec3f (a_panel)), a_panel) * cover;
+  var panel = vec4f (min (rgb * a_tint + add, vec3f (a_panel)), a_panel);
+  panel = mix (panel, vec4f (in.accent.rgb, 1.0), paint * 0.9) * cover;
   // The shadow goes under the panel's antialiased edge.
   panel = panel + vec4f (0.0, 0.0, 0.0, shadow) * (1.0 - panel.a);
   return finish (panel * opacity);
