@@ -44,6 +44,7 @@ pub use vo_scene::emitter::{tilt_x, EmitterLook, EmitterSim, Shape, Shock, Sprit
 
 use crate::color::srgb_to_linear;
 use crate::glyph_points::{GlyphPointCache, GlyphPoints};
+use crate::hot::wgsl;
 
 const COMMON_WGSL: &str = include_str!("wgsl/particles.wgsl");
 const STEP_WGSL: &str = include_str!("wgsl/particles_step.wgsl");
@@ -52,17 +53,17 @@ const DRAW_WGSL: &str = include_str!("wgsl/particles_draw.wgsl");
 
 /// The compute shader that steps free particles.
 pub fn step_shader_source() -> String {
-    [COMMON_WGSL, STEP_WGSL].join("\n")
+    [wgsl("particles.wgsl", COMMON_WGSL), wgsl("particles_step.wgsl", STEP_WGSL)].join("\n")
 }
 
 /// The compute shader that re-anchors a slot of formed particles.
 pub fn anchor_shader_source() -> String {
-    [COMMON_WGSL, ANCHOR_WGSL].join("\n")
+    [wgsl("particles.wgsl", COMMON_WGSL), wgsl("particles_anchor.wgsl", ANCHOR_WGSL)].join("\n")
 }
 
 /// The sprite shaders.
 pub fn draw_shader_source() -> String {
-    [COMMON_WGSL, DRAW_WGSL].join("\n")
+    [wgsl("particles.wgsl", COMMON_WGSL), wgsl("particles_draw.wgsl", DRAW_WGSL)].join("\n")
 }
 
 /// Workgroup size of the compute passes, and the alignment of every pool.
