@@ -62,11 +62,8 @@ impl LogDiagnostics {
 
 impl Diagnostics for LogDiagnostics {
     fn startup(&mut self, host: &HostDiag) {
-        let stages: Vec<String> = host
-            .stages
-            .iter()
-            .map(|(name, t)| format!("{name}={:.1}ms", (host.exec_to_origin + t) * 1000.0))
-            .collect();
+        let stages: Vec<String> =
+            host.stages.iter().map(|(name, t)| format!("{name}={:.1}ms", (host.exec_to_origin + t) * 1000.0)).collect();
         eprintln!("vo: startup since exec: {}", stages.join(" "));
         for n in &host.notes {
             eprintln!("vo: {n}");
@@ -97,12 +94,7 @@ impl Diagnostics for LogDiagnostics {
                 woke_next - woke
             );
         }
-        eprintln!(
-            "vo: exit: frames={} loop_wakeups={} {}",
-            self.frames.len(),
-            host.loop_wakeups,
-            self.memory()
-        );
+        eprintln!("vo: exit: frames={} loop_wakeups={} {}", self.frames.len(), host.loop_wakeups, self.memory());
     }
 }
 
@@ -111,7 +103,9 @@ pub fn smaps_kb(key: &str) -> f64 {
     std::fs::read_to_string("/proc/self/smaps_rollup")
         .ok()
         .and_then(|s| {
-            s.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse().ok()))
+            s.lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse().ok()))
         })
         .unwrap_or(0.0)
 }

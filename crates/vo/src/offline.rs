@@ -5,10 +5,9 @@
 use std::path::Path;
 
 use vo_core::time::FrameTime;
-use vo_host::{PointerEvent, PointerKind, Point, Size};
+use vo_host::{Point, PointerEvent, PointerKind, Size};
 use vo_render::offscreen::{write_png, Frame};
 use vo_render::Offscreen;
-use vo_scene::Scene;
 
 use crate::app::{App, Driver};
 use crate::Options;
@@ -67,8 +66,10 @@ fn headless_gpu() -> Result<(wgpu::Device, wgpu::Queue), OfflineError> {
         apply_limit_buckets: false,
     }))
     .map_err(|e| OfflineError::Gpu(e.to_string()))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-offline"), ..Default::default() }))
-        .map_err(|e| OfflineError::Gpu(e.to_string()))
+    pollster::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-offline"), ..Default::default() }),
+    )
+    .map_err(|e| OfflineError::Gpu(e.to_string()))
 }
 
 /// Renders `app` through `scenario` at `fps` into `out_dir/frame_00000.png` and onwards.
@@ -93,14 +94,8 @@ pub fn render_offline_with<A: App>(
 ) -> Result<u64, OfflineError> {
     std::fs::create_dir_all(out_dir)?;
     let (device, queue) = headless_gpu()?;
-    let mut off = Offscreen::new(&device, &queue);
-    for font in options.fonts.drain(..) {
-        off.renderer.add_font(font).map_err(|e| OfflineError::Gpu(format!("font: {e}")))?;
-    }
-    let mut scene = Scene::new();
-    if let Some(text) = options.text.take() {
-        scene = scene.with_text(text);
-    }
+    let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
+    let mut scene = options.scene();
     scene.set_viewport(0.0, scenario.size, scenario.scale);
     let mut driver = Driver::new(app, scene, options.tokens.clone(), 0.0);
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];

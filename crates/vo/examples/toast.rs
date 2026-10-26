@@ -13,14 +13,14 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use skrifa::instance::{LocationRef, Size as FontSize};
-use skrifa::{FontRef, MetadataProvider};
 use vo::scene::display::ShapeKind;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Point, Size};
-use vo::scene::text::{PlacedGlyph, ShapedText, TextLayout};
 use vo::scene::{Prop, Scene, Transition};
-use vo::{App, Cx, Edges, Input, InputMode, LogDiagnostics, Options, OverlaySpec, Placement, PointerKind, Scenario};
+use vo::{
+    App, Cx, Edges, FontRegistry, Input, InputMode, LogDiagnostics, Options, OverlaySpec, Placement, PointerKind,
+    Scenario, ShapedLayout,
+};
 use vo_core::spring::Spring;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
@@ -56,55 +56,6 @@ static ALLOC: Counting = Counting;
 
 fn heap() -> usize {
     HEAP.load(Ordering::Relaxed)
-}
-
-/// Text through the font's cmap and advances: no shaping, no kerning. A stand-in for the
-/// harfrust line fitter (plan decision 8), so the toast shows real glyphs.
-struct CmapText {
-    font: Vec<u8>,
-}
-
-impl TextLayout for CmapText {
-    fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText {
-        let font = FontRef::new(&self.font).expect("font parsed at startup");
-        let size = FontSize::new(style.size);
-        let cmap = font.charmap();
-        let adv = font.glyph_metrics(size, LocationRef::default());
-        let m = font.metrics(size, LocationRef::default());
-        let baseline0 = (style.line_height - (m.ascent - m.descent)) / 2.0 + m.ascent;
-        let advance = |c: char| cmap.map(c).map_or((0, style.size * 0.5), |g| (g.to_u32(), adv.advance_width(g).unwrap_or(0.0)));
-        let space = advance(' ').1;
-        let mut glyphs = Vec::new();
-        let (mut x, mut line, mut widest, mut any) = (0.0f32, 0usize, 0.0f32, false);
-        let mut offset = 0;
-        for word in text.split(' ') {
-            let start = offset;
-            offset += word.len() + 1;
-            if word.is_empty() {
-                continue;
-            }
-            let w: f32 = word.chars().map(|c| advance(c).1).sum();
-            if any {
-                if max_width.is_none_or(|max| x + space + w <= max + 1e-3) {
-                    x += space;
-                } else {
-                    widest = widest.max(x);
-                    line += 1;
-                    x = 0.0;
-                }
-            }
-            let baseline = line as f32 * style.line_height + baseline0;
-            for (i, c) in word.char_indices() {
-                let (glyph, a) = advance(c);
-                glyphs.push(PlacedGlyph { glyph, pos: Point::new(x, baseline), cluster: (start + i) as u32 });
-                x += a;
-            }
-            any = true;
-        }
-        widest = widest.max(x);
-        let lines = if any { line + 1 } else { 0 };
-        ShapedText { size: Size::new(widest.ceil(), lines as f32 * style.line_height), glyphs }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -171,7 +122,7 @@ impl App for Toast {
             .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::hex(0x4cc38a, 1.0)))
             .child(
                 Element::label("title", "Saved")
-                    .text_style(TextStyle { font: 0, size: 15.0, line_height: 19.0 })
+                    .text_style(TextStyle::new(0, 15.0, 19.0))
                     .color(Color::WHITE)
                     .grow(1.0),
             )
@@ -189,7 +140,7 @@ impl App for Toast {
             .child(header)
             .child(
                 Element::label("body", "The recording was transcribed and copied to the clipboard.")
-                    .text_style(TextStyle { font: 0, size: 13.0, line_height: 17.0 })
+                    .text_style(TextStyle::new(0, 13.0, 17.0))
                     .color(Color::hex(0xc8cad0, 1.0)),
             );
         root.child(toast)
@@ -199,8 +150,8 @@ impl App for Toast {
 const SURFACE: Size = Size::new(352.0, 132.0);
 
 /// Where the toast and its close button sit once settled, in surface coordinates.
-fn targets(text: Box<dyn TextLayout>, dismiss_after: f64) -> (Point, Point) {
-    let mut scene = Scene::new().with_text(text);
+fn targets(fonts: &FontRegistry, dismiss_after: f64) -> (Point, Point) {
+    let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, SURFACE, 1.0);
     let app = Toast { shown: true, dismiss_after, deadline: 0.0, timer: None };
     scene.apply(app.view(&vo::Tokens::default()), 0.0);
@@ -226,16 +177,15 @@ fn main() {
             _ => panic!("unknown option {a}"),
         }
     }
-    let font = std::fs::read(&font_path).unwrap_or_else(|e| panic!("cannot read {font_path}: {e}"));
-    FontRef::new(&font).expect("a font file");
-    let text = || Box::new(CmapText { font: font.clone() }) as Box<dyn TextLayout>;
-    let (toast_at, close_at) = targets(text(), dismiss_after);
+    let fonts = FontRegistry::new();
+    fonts.add_file(font_path.as_ref()).unwrap_or_else(|e| panic!("cannot load {font_path}: {e}"));
+    let (toast_at, close_at) = targets(&fonts, dismiss_after);
     eprintln!(
         "toast: surface {}x{}, toast centre ({:.1}, {:.1}), close button centre ({:.1}, {:.1})",
         SURFACE.w, SURFACE.h, toast_at.x, toast_at.y, close_at.x, close_at.y
     );
     let app = Toast { shown: true, dismiss_after, deadline: 0.0, timer: None };
-    let options = || Options::<Msg> { fonts: vec![font.clone()], text: Some(text()), ..Options::default() };
+    let options = || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
 
     if let Some(dir) = offline {
         // Hover at 1 s (holds the timer), click the close button at 2.5 s.

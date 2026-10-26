@@ -19,6 +19,3 @@ vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland", optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 pollster = "0.4"
-
-[dev-dependencies]
-skrifa = "0.49"

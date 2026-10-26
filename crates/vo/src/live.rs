@@ -5,7 +5,6 @@
 use vo_host::{Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, SurfaceChange, SurfaceId};
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, InputRegion};
-use vo_scene::Scene;
 
 use crate::app::{App, Driver};
 use crate::{Options, Tokens};
@@ -66,18 +65,11 @@ impl<A: App> Live<A> {
         let (app, mut options) = self.pending.take().expect("start runs once");
         self.surface = host.open(&self.spec)?;
         let gpu = host.gpu()?;
-        let mut renderer = Renderer::new(&gpu.device, &gpu.queue);
-        for font in options.fonts.drain(..) {
-            renderer.add_font(font).map_err(|e| HostError::Unsupported(format!("font: {e}")))?;
-        }
-        self.renderer = Some(renderer);
+        self.renderer = Some(Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone()));
         if let Some(inbox) = &options.inbox {
             inbox.connect(host.waker());
         }
-        let mut scene = Scene::new().with_retention(LIVE_RETENTION);
-        if let Some(text) = options.text.take() {
-            scene = scene.with_text(text);
-        }
+        let mut scene = options.scene().with_retention(LIVE_RETENTION);
         let t = host.now();
         scene.set_viewport(t, self.spec.size, 1.0);
         self.driver = Some(Driver::new(app, scene, self.tokens.clone(), t));

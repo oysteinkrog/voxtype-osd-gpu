@@ -158,17 +158,34 @@ pub enum SurfaceChange {
 pub enum HostEvent {
     /// The surface has a size and can be drawn. `size` is logical, `scale` is physical pixels
     /// per logical pixel. Sent again when either changes.
-    Configured { id: SurfaceId, t: f64, size: Size, scale: f32 },
+    Configured {
+        id: SurfaceId,
+        t: f64,
+        size: Size,
+        scale: f32,
+    },
     Pointer(PointerEvent),
     /// A frame reached the screen at `t`. `refresh` is the output's refresh period in seconds,
     /// 0 when unknown.
-    Presented { id: SurfaceId, t: f64, frame: u64, refresh: f64 },
+    Presented {
+        id: SurfaceId,
+        t: f64,
+        frame: u64,
+        refresh: f64,
+    },
     /// The compositor closed the surface. The id is no longer valid.
-    Closed { id: SurfaceId, t: f64 },
+    Closed {
+        id: SurfaceId,
+        t: f64,
+    },
     /// A [`Waker`] was woken. The app drains whatever channel goes with it.
-    External { t: f64 },
+    External {
+        t: f64,
+    },
     /// The time set with [`HostCtl::wake_at`] was reached.
-    Timer { t: f64 },
+    Timer {
+        t: f64,
+    },
 }
 
 /// A frame to draw. The app encodes and submits its work into `texture` before returning; the

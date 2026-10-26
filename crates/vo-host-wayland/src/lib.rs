@@ -306,7 +306,9 @@ impl State {
     /// feedback gave a phase and a period, else `now`.
     fn predict(&self, s: &Surf, now: f64) -> f64 {
         match s.last_present {
-            Some(p) if s.refresh > 0.0 && now >= p => p + ((now - p) / s.refresh).floor().max(0.0) * s.refresh + s.refresh,
+            Some(p) if s.refresh > 0.0 && now >= p => {
+                p + ((now - p) / s.refresh).floor().max(0.0) * s.refresh + s.refresh
+            }
             _ => now,
         }
     }
@@ -609,9 +611,7 @@ impl Host for WaylandHost {
             let _ = state.conn.flush();
             let timeout = state.timeout();
             state.diag.loop_wakeups += 1;
-            self.event_loop
-                .dispatch(timeout, state)
-                .map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
+            self.event_loop.dispatch(timeout, state).map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
             if state.timer.is_some_and(|t| state.now() >= t) {
                 state.timer = None;
                 let t = state.now();

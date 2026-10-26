@@ -21,18 +21,18 @@ pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};
 pub use live::run_overlay_with;
 pub use offline::{render_offline, render_offline_with, Input, OfflineError, Scenario};
 
-pub use vo_host::{
-    Edges, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind,
-};
+pub use vo_host::{Edges, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind};
 pub use vo_scene as scene;
-pub use vo_scene::text::TextLayout;
+pub use vo_scene::font::FontRegistry;
+pub use vo_scene::text::{ShapedLayout, TextLayout};
 
 /// Optional parts of a run.
 pub struct Options<M> {
     pub tokens: Tokens,
-    /// Font files, registered in order: the first is font id 0.
-    pub fonts: Vec<Vec<u8>>,
-    /// Text measurer for the scene. The scene's width estimate when `None`.
+    /// The fonts that text styles name by id. The scene's text layout and the renderer share it.
+    pub fonts: FontRegistry,
+    /// Text layout for the scene. When `None`: shaped text over `fonts`, or the scene's width
+    /// estimate when `fonts` is empty.
     pub text: Option<Box<dyn TextLayout>>,
     /// Messages from other threads (live only).
     pub inbox: Option<Inbox<M>>,
@@ -42,7 +42,19 @@ pub struct Options<M> {
 
 impl<M> Default for Options<M> {
     fn default() -> Self {
-        Options { tokens: Tokens::default(), fonts: Vec::new(), text: None, inbox: None, diagnostics: None }
+        Options { tokens: Tokens::default(), fonts: FontRegistry::new(), text: None, inbox: None, diagnostics: None }
+    }
+}
+
+impl<M> Options<M> {
+    /// The scene with the text layout these options ask for.
+    pub(crate) fn scene(&mut self) -> vo_scene::Scene<M> {
+        let scene = vo_scene::Scene::new();
+        match self.text.take() {
+            Some(text) => scene.with_text(text),
+            None if !self.fonts.is_empty() => scene.with_text(Box::new(ShapedLayout::new(self.fonts.clone()))),
+            None => scene,
+        }
     }
 }
 

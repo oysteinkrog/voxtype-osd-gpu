@@ -16,11 +16,27 @@ const BTN_LEFT: u32 = 0x110;
 struct State;
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
-    fn event(_: &mut State, _: &WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<State>) {}
+    fn event(
+        _: &mut State,
+        _: &WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+    }
 }
 
 impl Dispatch<OrgKdeKwinFakeInput, ()> for State {
-    fn event(_: &mut State, _: &OrgKdeKwinFakeInput, _: org_kde_kwin_fake_input::Event, _: &(), _: &Connection, _: &QueueHandle<State>) {}
+    fn event(
+        _: &mut State,
+        _: &OrgKdeKwinFakeInput,
+        _: org_kde_kwin_fake_input::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+    }
 }
 
 fn main() {

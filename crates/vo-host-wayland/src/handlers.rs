@@ -72,7 +72,14 @@ impl CompositorHandler for State {
         }
     }
 
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, _time: u32) {
         if let Some(i) = self.surface_index(wl) {
@@ -80,9 +87,23 @@ impl CompositorHandler for State {
         }
     }
 
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 }
 
 impl LayerShellHandler for State {
@@ -90,7 +111,14 @@ impl LayerShellHandler for State {
         State::closed(self, &layer.wl_surface().clone());
     }
 
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, c: LayerSurfaceConfigure, _: u32) {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        c: LayerSurfaceConfigure,
+        _: u32,
+    ) {
         self.configured(&layer.wl_surface().clone(), Some(c.new_size));
     }
 }
@@ -145,7 +173,13 @@ impl PresentationTimeHandler for State {
         self.events.push(HostEvent::Presented { id, t, frame, refresh });
     }
 
-    fn discarded(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WpPresentationFeedback, wl: &wl_surface::WlSurface) {
+    fn discarded(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WpPresentationFeedback,
+        wl: &wl_surface::WlSurface,
+    ) {
         if let Some(i) = self.surface_index(wl) {
             self.surfaces[i].feedback.pop_front();
         }
