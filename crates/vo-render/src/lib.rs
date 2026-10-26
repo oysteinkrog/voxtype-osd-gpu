@@ -6,6 +6,7 @@
 //! - `text`: the Slug glyph path.
 //! - `vector`: the CPU side of the vector stroke and blob pipeline.
 //! - `particles`: GPU particles, free and word-forming; `glyph_points` samples glyphs for them.
+//! - `glass`: glass panels, their animated rim and the compositor blur region.
 //! - `offscreen`: readback to CPU memory for goldens and export.
 //! - `hot`: WGSL read from disk when `VO_SHADER_DIR` is set, for live shader reload.
 //! - `color`: sRGB, linear and OKLab conversions.
@@ -15,6 +16,7 @@ pub mod color;
 #[cfg(feature = "cpu")]
 pub mod cpu;
 pub mod dots;
+pub mod glass;
 pub mod glyph_points;
 pub mod hot;
 pub mod offscreen;
