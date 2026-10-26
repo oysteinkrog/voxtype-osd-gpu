@@ -5,6 +5,7 @@
 //! Word model (phase 0): `words`.
 
 pub mod channel;
+pub mod event_log;
 pub mod hash;
 pub mod spring;
 pub mod time;
