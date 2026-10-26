@@ -1,33 +1,35 @@
 //! Vector animation spike: paths that draw themselves, shape and icon morphs, blob merge, a
 //! light head on a panel border, text on a path and a size morph, 12 s at 1280x720 and 60 fps.
 //!
-//! Every frame is `frame(t)`, a pure function of the time: the timeline (`vo_core::timeline`)
-//! says when each part moves and its closed-form springs say how. No scene, no state.
+//! The app is one canvas element (`Element::canvas`) whose draw function is a pure function of
+//! the time: the timeline (`vo_core::timeline`) says when each part moves and its closed-form
+//! springs say how. The same app exports to video and runs as a live overlay.
 //!
-//!   cargo run --release -p vo --example vector_demo -- [--out DIR] [--check] [--bench]
+//!   cargo run --release -p vo --example vector_demo -- [--out DIR] [--check] [--bench] [--live]
 //!
 //! Writes `DIR/vector_demo.mp4` (default DIR `/var/tmp/claude/m4-vector`) and
 //! `DIR/contact-sheet.png`. `--check` renders twice and compares every frame's hash.
 //! `--bench` times every frame on the GPU with timestamp queries and prints the cold cost of
-//! the vector pipeline and of the first path fill.
+//! the vector pipeline and of the first path fill. `--live` plays it in a loop as an overlay.
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
-use vo::scene::display::{DisplayList, GlyphInstance, Item, ItemKind, Layer, Paint, ShapeInstance, NO_WORD};
-use vo::scene::element::TextStyle;
+use vo::scene::canvas::Painter;
+use vo::scene::display::{DisplayList, GlyphInstance, Paint, ShapeInstance, NO_WORD};
+use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Affine, Color, Point, RRect, Rect, Size};
 use vo::scene::path::kurbo::{self, Shape};
-use vo::scene::path::{fill_glyph, icons, push_blob, push_stroke, Contour, Morph, Outline, StrokeStyle};
+use vo::scene::path::{fill_glyph, icons, Morph, Outline, StrokeStyle};
 use vo::scene::text::TextLayout;
-use vo::{FontRegistry, ShapedLayout};
+use vo::scene::Scene;
+use vo::{App, Cx, Export, FontRegistry, Options, OverlaySpec, Placement, Scenario, ShapedLayout, Tokens, Video};
 use vo_core::spring::Spring;
 use vo_core::timeline::{all, clip, delay, stagger, Schedule, Timeline};
 use vo_core::track::CubicBezier;
 use vo_render::offscreen::{write_png, Frame};
-use vo_render::{Offscreen, Renderer, Target};
+use vo_render::{Renderer, Target};
 
 const W: f32 = 1280.0;
 const H: f32 = 720.0;
@@ -88,74 +90,6 @@ fn timeline() -> Timeline {
         delay(11.6, clip("act4.out", 0.4)),
         clip("all", DURATION),
     ])
-}
-
-/// A layer tree built in paint order: `begin` opens a layer, `end` closes it.
-struct Builder {
-    list: DisplayList,
-    stack: Vec<(u32, Vec<Item>, Affine)>,
-}
-
-impl Builder {
-    fn new() -> Builder {
-        let mut b =
-            Builder { list: DisplayList { size: Size::new(W, H), scale: 1.0, ..Default::default() }, stack: Vec::new() };
-        b.begin(Affine::IDENTITY, 1.0);
-        b
-    }
-
-    /// Opens a layer with `m` relative to its parent and group opacity `opacity`.
-    fn begin(&mut self, m: Affine, opacity: f32) {
-        let (parent, pm) = self.stack.last().map_or((None, Affine::IDENTITY), |s| (Some(s.0), s.2));
-        let transform = m.then(&pm);
-        let idx = self.list.layers.len() as u32;
-        self.list.layers.push(Layer { parent, transform, opacity, ..Layer::root() });
-        if let Some(top) = self.stack.last_mut() {
-            top.1.push(Item { kind: ItemKind::Layer, start: idx, len: 1 });
-        }
-        self.stack.push((idx, Vec::new(), transform));
-    }
-
-    fn end(&mut self) {
-        let (idx, items, _) = self.stack.pop().expect("open layer");
-        let start = self.list.items.len() as u32;
-        self.list.items.extend(items);
-        self.list.layers[idx as usize].items = start..self.list.items.len() as u32;
-    }
-
-    fn item(&mut self, item: Option<Item>) {
-        self.stack.last_mut().expect("open layer").1.extend(item);
-    }
-
-    fn shape(&mut self, s: ShapeInstance) {
-        let item = Item { kind: ItemKind::Shapes, start: self.list.shapes.len() as u32, len: 1 };
-        self.list.shapes.push(s);
-        self.item(Some(item));
-    }
-
-    fn glyph(&mut self, g: GlyphInstance) {
-        let item = Item { kind: ItemKind::Glyphs, start: self.list.glyphs.len() as u32, len: 1 };
-        self.list.glyphs.push(g);
-        self.item(Some(item));
-    }
-
-    fn stroke(&mut self, c: &Contour, style: &StrokeStyle) {
-        let item = push_stroke(&mut self.list, c, style);
-        self.item(item);
-    }
-
-    fn outline(&mut self, o: &Outline, style: &StrokeStyle) {
-        for c in &o.contours {
-            self.stroke(c, style);
-        }
-    }
-
-    fn finish(mut self) -> DisplayList {
-        while !self.stack.is_empty() {
-            self.end();
-        }
-        self.list
-    }
 }
 
 /// Everything built once: flattened icons, morphs, the registered fill paths, shaped text.
@@ -224,36 +158,36 @@ impl Assets {
     }
 }
 
-/// The frame at `t`.
-fn frame(a: &Assets, t: f64) -> DisplayList {
+/// The demo at `t` seconds into it, drawn in `rect` (the canvas box, 1280x720).
+fn paint(a: &Assets, t: f64, rect: Rect, p: &mut Painter) {
     let s = &a.sched;
-    let mut b = Builder::new();
-    b.shape(ShapeInstance::rrect(RRect::new(Rect::new(0.0, 0.0, W, H), 0.0), Paint::solid(bg())));
-    let out = |name: &str| 1.0 - s.eased(name, t, CubicBezier::IN) as f32;
-    if t < 3.0 {
-        act_icons(a, t, out("act1.out"), &mut b);
-    } else if t < 6.4 {
-        act_panel(a, t, out("act2.out"), &mut b);
-    } else if t < 9.3 {
-        act_morph(a, t, out("act3.out"), &mut b);
-    } else {
-        act_text(a, t, out("act4.out"), &mut b);
-    }
-    b.finish()
+    p.layer(Affine::translate(rect.x, rect.y), 1.0, |b| {
+        b.shape(ShapeInstance::rrect(RRect::new(Rect::new(0.0, 0.0, W, H), 0.0), Paint::solid(bg())));
+        let out = |name: &str| 1.0 - s.eased(name, t, CubicBezier::IN) as f32;
+        if t < 3.0 {
+            act_icons(a, t, out("act1.out"), b);
+        } else if t < 6.4 {
+            act_panel(a, t, out("act2.out"), b);
+        } else if t < 9.3 {
+            act_morph(a, t, out("act3.out"), b);
+        } else {
+            act_text(a, t, out("act4.out"), b);
+        }
+    });
 }
 
 /// A pen tip: the last `len` units of `o` up to `head`, brighter and glowing.
-fn pen_tip(b: &mut Builder, o: &Outline, head: f32, len: f32, width: f32, color: Color) {
+fn pen_tip(b: &mut Painter, o: &Outline, head: f32, len: f32, width: f32, color: Color) {
     let style = StrokeStyle::solid(width, color).ramp(head - len, color.fade(0.0), head, Color::WHITE).glow(width);
     b.outline(&o.trim(head - len, head), &style);
 }
 
-fn act_icons(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
+fn act_icons(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let s = &a.sched;
     let k = 5.0;
     let draw = Spring::critical_to_98(1.0);
     let fill = s.eased("fill", t, CubicBezier::OUT) as f32;
-    b.begin(Affine::IDENTITY, fade);
+    b.layer(Affine::IDENTITY, fade, |b| {
     for i in 0..3 {
         let at = Affine::scale(k).then(&Affine::translate(640.0 - 60.0 + (i as f32 - 1.0) * 220.0, 300.0));
         let o = a.icons[i].transform(&at);
@@ -269,14 +203,14 @@ fn act_icons(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
             b.glyph(fill_glyph(a.fills[i], pos, k, color.fade(fill)));
         }
     }
-    b.end();
+    });
 }
 
-fn act_panel(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
+fn act_panel(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let s = &a.sched;
     let pop = |n: &str| s.spring(n, t, Spring::POP, 0.0, 1.0) as f32;
     let (dot, cap, pan) = (pop("dot"), pop("capsule"), pop("panel"));
-    b.begin(Affine::IDENTITY, fade);
+    b.layer(Affine::IDENTITY, fade, |b| {
     // Dot to capsule to panel: size and radius on springs, one rounded rect.
     let w = (18.0 + 182.0 * cap + 400.0 * pan) * dot;
     let h = (18.0 + 102.0 * pan) * dot;
@@ -333,20 +267,18 @@ fn act_panel(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
     let (ya, ra, rb) = (540.0, 26.0, 18.0);
     let grow = s.spring("merge.in", t + 0.3, Spring::POP, 0.0, 1.0) as f32;
     if grow > 0.0 {
-        let item = push_blob(
-            &mut b.list,
+        b.blob(
             (Point::new(640.0 - d, ya), ra * grow),
             (Point::new(640.0 + d, ya), rb * grow),
             34.0,
             cool(),
             Color::hex(0xc084fc, 1.0),
         );
-        b.item(Some(item));
     }
-    b.end();
+    });
 }
 
-fn act_morph(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
+fn act_morph(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let s = &a.sched;
     let inn = s.spring("icon.in", t, Spring::POP, 0.0, 1.0) as f32;
     let m1 = s.spring("morph.1", t, Spring::from_frequency(11.0, 0.62), 0.0, 1.0) as f32;
@@ -358,17 +290,17 @@ fn act_morph(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
     } else {
         (a.morph2.sample(m2), mix(accent(), warm(), m2))
     };
-    b.begin(Affine::IDENTITY, fade * inn.clamp(0.0, 1.0));
+    b.layer(Affine::IDENTITY, fade * inn.clamp(0.0, 1.0), |b| {
     for p in parts {
         let style = StrokeStyle::solid(2.2 * k * p.weight, color.fade(p.weight.sqrt())).glow(3.0 * p.weight);
         b.stroke(&p.contour.transform(&at), &style);
     }
-    b.end();
+    });
 }
 
-fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
+fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
     let s = &a.sched;
-    b.begin(Affine::IDENTITY, fade);
+    b.layer(Affine::IDENTITY, fade, |b| {
     // The curve draws on.
     let total = a.curve.length();
     let f = s.spring("curve", t, Spring::critical_to_98(0.8), 0.0, 1.0) as f32;
@@ -386,7 +318,7 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
         let Some((p, tan)) = a.curve.contours[0].at(along) else { continue };
         let angle = tan.y.atan2(tan.x);
         let edge = (along / 60.0).min((f * total - along) / 60.0).clamp(0.0, 1.0);
-        b.begin(Affine::rotate(angle).then(&Affine::translate(p.x, p.y)), edge);
+        b.layer(Affine::rotate(angle).then(&Affine::translate(p.x, p.y)), edge, |b| {
         b.glyph(GlyphInstance {
             pos: Point::new(-half * k, -10.0),
             size,
@@ -395,7 +327,7 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
             word: NO_WORD,
             color: mix(cool(), ink(), (x / a.ride_width).clamp(0.0, 1.0)),
         });
-        b.end();
+        });
     }
     // Size morph: the word scales from 72 to 44 on a spring, instances only.
     let inn = s.eased("word.in", t, CubicBezier::OUT) as f32;
@@ -412,23 +344,59 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Builder) {
             color: ink().fade(inn),
         });
     }
-    b.end();
+    });
+}
+
+/// The demo as an app: one canvas element the size of the surface.
+struct Demo {
+    assets: Arc<Assets>,
+    /// Scene time the demo starts at (the host clock's time at `init` when live).
+    start: f64,
+    /// Live: play again and again.
+    looped: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Msg {}
+
+impl App for Demo {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        self.start = cx.t();
+    }
+
+    fn update(&mut self, msg: Msg, _cx: &mut Cx<Msg>) {
+        match msg {}
+    }
+
+    fn view(&self, _tokens: &Tokens) -> Element<Msg> {
+        let (a, start, looped) = (self.assets.clone(), self.start, self.looped);
+        let until = if looped { f64::INFINITY } else { start + DURATION };
+        Element::canvas("demo", until, move |t, rect, p| {
+            let lt = if looped { (t - start).rem_euclid(DURATION) } else { (t - start).clamp(0.0, DURATION) };
+            paint(&a, lt, rect, p)
+        })
+        .size(W, H)
+    }
 }
 
 struct Args {
     out: PathBuf,
     check: bool,
     bench: bool,
+    live: bool,
 }
 
 fn args() -> Args {
-    let mut a = Args { out: PathBuf::from("/var/tmp/claude/m4-vector"), check: false, bench: false };
+    let mut a = Args { out: PathBuf::from("/var/tmp/claude/m4-vector"), check: false, bench: false, live: false };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
             "--out" => a.out = it.next().expect("--out DIR").into(),
             "--check" => a.check = true,
             "--bench" => a.bench = true,
+            "--live" => a.live = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -463,34 +431,12 @@ fn frame_count() -> u64 {
     (DURATION * FPS).round() as u64
 }
 
-/// Renders every frame; returns the hashes. Feeds `video` and the contact sheet when given.
-fn render_all(a: &Assets, fonts: &FontRegistry, mut video: Option<&mut dyn Write>, sheet: &mut Vec<Frame>) -> Vec<u64> {
-    let (device, queue) = device(false);
-    let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
-    let n = frame_count();
-    let picks: Vec<u64> = (0..16).map(|i| ((i as f64 + 0.5) / 16.0 * n as f64) as u64).collect();
-    let mut hashes = Vec::with_capacity(n as usize);
-    let mut seen = 0u64;
-    let mut take = |f: Frame, hashes: &mut Vec<u64>, video: &mut Option<&mut dyn Write>| {
-        hashes.push(vo::frame_hash(&f.rgba));
-        if let Some(v) = video.as_mut() {
-            v.write_all(&f.rgba).expect("ffmpeg stdin");
-        }
-        if picks.contains(&seen) {
-            sheet.push(f);
-        }
-        seen += 1;
-    };
-    for i in 0..n {
-        let list = frame(a, i as f64 / FPS);
-        if let Some(f) = off.submit(&list, [W as u32, H as u32], 1.0) {
-            take(f, &mut hashes, &mut video);
-        }
-    }
-    for f in off.finish() {
-        take(f, &mut hashes, &mut video);
-    }
-    hashes
+fn options(fonts: &FontRegistry) -> Options<Msg> {
+    Options { fonts: fonts.clone(), ..Options::default() }
+}
+
+fn scenario() -> Scenario<Msg> {
+    Scenario { size: Size::new(W, H), scale: 1.0, duration: DURATION, inputs: Vec::new() }
 }
 
 /// A 4 x 4 grid of frames at half size, composited over black.
@@ -522,17 +468,23 @@ fn write_sheet(path: &std::path::Path, frames: &[Frame]) {
 }
 
 /// GPU time per frame from timestamp queries, and the cold cost of the new pipelines.
-fn bench(a: &Assets, fonts: &FontRegistry) {
+fn bench(assets: Arc<Assets>, fonts: &FontRegistry) {
     let (device, queue) = device(true);
     let mut r = Renderer::with_fonts(&device, &queue, fonts.clone());
     let mut target = Target::new(&device, W as u32, H as u32, vo_render::offscreen::FORMAT);
     let wait = |d: &wgpu::Device| d.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    let demo = Demo { assets, start: 0.0, looped: false };
+    let mut scene: Scene<Msg> = Scene::new();
+    scene.set_viewport(0.0, Size::new(W, H), 1.0);
+    scene.apply(demo.view(&Tokens::default()), 0.0);
+    let frame = |t: f64| scene.sample(t);
 
     // Cold costs: shapes first (warms the shape pipeline), then the first frame with vectors,
     // then the first path fill, each timed on the CPU including the GPU wait.
-    let mut base = Builder::new();
-    base.shape(ShapeInstance::rrect(RRect::new(Rect::new(0.0, 0.0, W, H), 0.0), Paint::solid(bg())));
-    let base = base.finish();
+    let mut base = DisplayList { size: Size::new(W, H), scale: 1.0, ..Default::default() };
+    base.shapes.push(ShapeInstance::rrect(RRect::new(Rect::new(0.0, 0.0, W, H), 0.0), Paint::solid(bg())));
+    base.items.push(vo::scene::display::Item { kind: vo::scene::display::ItemKind::Shapes, start: 0, len: 1 });
+    base.layers.push(vo::scene::display::Layer { items: 0..1, ..vo::scene::display::Layer::root() });
     r.render(&base, &mut target);
     wait(&device);
     let timed = |r: &mut Renderer, list: &DisplayList, target: &mut Target| {
@@ -541,14 +493,14 @@ fn bench(a: &Assets, fonts: &FontRegistry) {
         wait(&device);
         t0.elapsed().as_secs_f64() * 1e3
     };
-    let vec_frame = frame(a, 8.5);
+    let vec_frame = frame(8.5);
     let cold_vec = timed(&mut r, &vec_frame, &mut target);
     let warm_vec = timed(&mut r, &vec_frame, &mut target);
-    let fill_frame = frame(a, 2.4);
+    let fill_frame = frame(2.4);
     let cold_fill = timed(&mut r, &fill_frame, &mut target);
     let warm_fill = timed(&mut r, &fill_frame, &mut target);
     println!("cold first frame with vectors: {cold_vec:.2} ms (warm {warm_vec:.2} ms)");
-    println!("cold first frame with three path fills (glyph pipeline, path encode): {cold_fill:.2} ms (warm {warm_fill:.2} ms)");
+    println!("cold first frame with three path fills (path encode): {cold_fill:.2} ms (warm {warm_fill:.2} ms)");
 
     let qs = device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
     let resolve = device.create_buffer(&wgpu::BufferDescriptor {
@@ -569,7 +521,7 @@ fn bench(a: &Assets, fonts: &FontRegistry) {
     for i in 0..frame_count() {
         let t = i as f64 / FPS;
         let c0 = Instant::now();
-        let list = frame(a, t);
+        let list = frame(t);
         cpu_build.push(c0.elapsed().as_secs_f64() * 1e3);
         let mut enc = device.create_command_encoder(&Default::default());
         enc.write_timestamp(&qs, 0);
@@ -580,10 +532,18 @@ fn bench(a: &Assets, fonts: &FontRegistry) {
         queue.submit([enc.finish()]);
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         wait(&device);
-        let ts: [u64; 2] = bytemuck_read(&read.slice(..).get_mapped_range().expect("mapped"));
+        let ts: [u64; 2] = read_u64x2(&read.slice(..).get_mapped_range().expect("mapped"));
         read.unmap();
         let ms = (ts[1].wrapping_sub(ts[0])) as f64 * period / 1e6;
-        let act = if t < 3.0 { 0 } else if t < 6.4 { 1 } else if t < 9.3 { 2 } else { 3 };
+        let act = if t < 3.0 {
+            0
+        } else if t < 6.4 {
+            1
+        } else if t < 9.3 {
+            2
+        } else {
+            3
+        };
         per_act[act].push(ms);
     }
     let stats = |v: &mut Vec<f64>| {
@@ -596,47 +556,56 @@ fn bench(a: &Assets, fonts: &FontRegistry) {
         println!("GPU per frame, {name}: mean {mean:.3} ms, median {med:.3}, p95 {p95:.3}, max {max:.3} (1280x720)");
     }
     let (mean, _, p95, max) = stats(&mut cpu_build);
-    println!("CPU frame(t) build (trim, morph, display list): mean {mean:.3} ms, p95 {p95:.3}, max {max:.3}");
-    let _ = target.width();
+    println!("CPU scene.sample(t) (canvas: trim, morph, display list): mean {mean:.3} ms, p95 {p95:.3}, max {max:.3}");
 }
 
-fn bytemuck_read(b: &[u8]) -> [u64; 2] {
+fn read_u64x2(b: &[u8]) -> [u64; 2] {
     [u64::from_le_bytes(b[0..8].try_into().unwrap()), u64::from_le_bytes(b[8..16].try_into().unwrap())]
 }
 
 fn main() {
     let args = args();
     let fonts = FontRegistry::new();
-    let assets = Assets::new(&fonts);
+    let assets = Arc::new(Assets::new(&fonts));
     if args.bench {
-        bench(&assets, &fonts);
+        bench(assets, &fonts);
         return;
     }
-    std::fs::create_dir_all(&args.out).expect("out dir");
+    if args.live {
+        let spec = OverlaySpec {
+            size: Size::new(W, H),
+            placement: Placement::Centered,
+            app_id: "vo-vector-demo".into(),
+            ..OverlaySpec::default()
+        };
+        if let Err(e) = vo::run_overlay_with(Demo { assets, start: 0.0, looped: true }, spec, options(&fonts)) {
+            eprintln!("vector_demo: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let mp4 = args.out.join("vector_demo.mp4");
-    let ffmpeg = std::env::var_os("VO_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
-    let mut child = Command::new(ffmpeg)
-        .args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
-        .arg(format!("{}x{}", W as u32, H as u32))
-        .args(["-r", &FPS.to_string(), "-i", "-"])
-        .args("-c:v libx264 -preset medium -crf 16 -pix_fmt yuv420p -movflags +faststart".split(' '))
-        .arg(&mp4)
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("ffmpeg (install it or set VO_FFMPEG)");
-    let t0 = Instant::now();
+    let spec = Export { fps: FPS, duration: DURATION, png_dir: None, video: Some(Video::h264(&mp4)) };
+    let n = frame_count();
+    let picks: Vec<u64> = (0..16).map(|i| ((i as f64 + 0.5) / 16.0 * n as f64) as u64).collect();
     let mut sheet = Vec::new();
-    let mut stdin = child.stdin.take().unwrap();
-    let hashes = render_all(&assets, &fonts, Some(&mut stdin), &mut sheet);
-    drop(stdin);
-    assert!(child.wait().expect("ffmpeg").success(), "ffmpeg failed");
+    let t0 = Instant::now();
+    let demo = Demo { assets: assets.clone(), start: 0.0, looped: false };
+    let report = vo::export_with(demo, &scenario(), &spec, options(&fonts), |i, f| {
+        if picks.contains(&i) {
+            sheet.push(f.clone());
+        }
+    })
+    .expect("export");
     let secs = t0.elapsed().as_secs_f64();
     write_sheet(&args.out.join("contact-sheet.png"), &sheet);
-    println!("{} frames in {secs:.2} s -> {}", hashes.len(), mp4.display());
+    println!("{} frames in {secs:.2} s -> {}", report.frames, mp4.display());
     println!("contact sheet: {}", args.out.join("contact-sheet.png").display());
     if args.check {
-        let again = render_all(&assets, &fonts, None, &mut Vec::new());
-        let same = hashes == again;
+        let again = Export { video: None, ..spec };
+        let demo = Demo { assets, start: 0.0, looped: false };
+        let second = vo::export(demo, &scenario(), &again, options(&fonts)).expect("export");
+        let same = report.frame_hashes == second.frame_hashes;
         println!("determinism: second render {}", if same { "matches every frame" } else { "DIFFERS" });
         assert!(same);
     }

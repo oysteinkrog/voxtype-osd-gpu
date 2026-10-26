@@ -17,6 +17,7 @@ use taffy::prelude::{
 use vo_core::spring::Spring;
 use vo_core::words::Word;
 
+use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
 use crate::geom::{Color, Rect};
@@ -288,6 +289,8 @@ pub(crate) enum Kind {
     /// A filled path from `FontRegistry::add_path`: `view` (path units) fits the box,
     /// centred, keeping its aspect.
     Path { id: u32, view: Rect },
+    /// App drawing code run from the frame time (`crate::canvas`).
+    Canvas(CanvasDraw),
 }
 
 impl Kind {
@@ -416,6 +419,23 @@ impl<M> Element<M> {
         let mut e = Element::new(key, Kind::Path { id, view }, taffy::Style::default());
         e.set(Slot::Fill0 as u8, Color::WHITE);
         e
+    }
+
+    /// Drawn by `draw(t, rect, painter)` each time the scene is sampled (`crate::canvas`).
+    /// `draw` must be pure in `t`. The scene keeps waking until `until`. Give it a size: it
+    /// has no content size.
+    pub fn canvas(
+        key: impl Into<Key>,
+        until: f64,
+        draw: impl Fn(f64, Rect, &mut Painter) + Send + Sync + 'static,
+    ) -> Element<M> {
+        Element::new(key, Kind::Canvas(CanvasDraw::new(until, std::sync::Arc::new(draw))), taffy::Style::default())
+    }
+
+    /// [`Element::canvas`] with a drawing that already exists, so a view rebuilt each time
+    /// keeps the same node content.
+    pub fn canvas_shared(key: impl Into<Key>, draw: CanvasDraw) -> Element<M> {
+        Element::new(key, Kind::Canvas(draw), taffy::Style::default())
     }
 
     /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.

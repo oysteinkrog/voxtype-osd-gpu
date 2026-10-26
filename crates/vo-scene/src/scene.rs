@@ -474,6 +474,7 @@ impl<M> Scene<M> {
                         Kind::Wave(w) => w.moving(t),
                         Kind::Progress(p) => p.moving(),
                         Kind::Dots(d) => d.source.moving(t),
+                        Kind::Canvas(c) => c.moving(t),
                         _ => false,
                     })
         });
@@ -850,7 +851,12 @@ impl<M> Scene<M> {
             let shape = RRect::new(Rect::from_size(size), radius(n, t));
             out.hits.push(HitShape { node: id.to_bits(), transform, shape });
         }
-        self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
+        if let Kind::Canvas(c) = &n.kind {
+            let mut painter = crate::canvas::Painter { list: out, items, alpha, layer };
+            (c.draw)(t, Rect::new(m.e, m.f, size.w, size.h), &mut painter);
+        } else {
+            self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
+        }
         for &c in &n.children {
             self.emit(c, t, m, alpha, layer, leaving, items, out);
         }
@@ -985,6 +991,8 @@ impl<M> Scene<M> {
                 self.dots(d, rect, t, alpha, items, out);
                 None
             }
+            // Drawn by `emit_body`, which knows the layer.
+            Kind::Canvas(_) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
                 if paint.is_visible() && view.w > 0.0 && view.h > 0.0 {
