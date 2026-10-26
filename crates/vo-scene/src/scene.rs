@@ -114,8 +114,9 @@ impl<M> Node<M> {
 
     /// Moves `slot` toward `value` from `t` with the slot's motion. A slot with no channel
     /// yet starts from its default value (opacity 1, offset 0), so a property that appears
-    /// on a live node animates in like any other change.
-    pub fn set_target(&mut self, slot: u8, value: f64, t: f64, retention: f64) {
+    /// on a live node animates in like any other change. Returns whether the motion changed:
+    /// false when the slot already heads to `value`.
+    pub fn set_target(&mut self, slot: u8, value: f64, t: f64, retention: f64) -> bool {
         let i = match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
             Ok(i) => i,
             Err(i) => {
@@ -126,6 +127,8 @@ impl<M> Node<M> {
         };
         let motion = self.motion_for(slot);
         let ch = &mut self.chans[i].1;
+        let last = |ch: &Channel| ch.segments().last().map(|s| (s.t0, s.target));
+        let before = last(ch);
         match motion {
             Motion::Spring(s) => {
                 ch.set_spring(s);
@@ -137,6 +140,7 @@ impl<M> Node<M> {
                 }
             }
         }
+        last(ch) != before
     }
 
     /// Puts `slot` at `value` at `t`, at rest, for an enter motion to start from.
@@ -184,6 +188,8 @@ pub struct Scene<M = ()> {
     text: Box<dyn TextLayout>,
     retention: f64,
     layout_dirty: bool,
+    /// Something drawn or hit-tested changed during the current `apply`.
+    changed: bool,
     pub(crate) pointer: PointerState,
 }
 
@@ -206,6 +212,7 @@ impl<M> Scene<M> {
             text: Box::new(EstimateText::default()),
             retention: f64::INFINITY,
             layout_dirty: false,
+            changed: false,
             pointer: PointerState::default(),
         }
     }
@@ -291,13 +298,19 @@ impl<M> Scene<M> {
     }
 
     /// Applies a new view at `t`. Events must come in time order.
-    pub fn apply(&mut self, view: Element<M>, t: f64) {
+    ///
+    /// Returns whether anything changed: a retarget, a node added, removed or reordered, a
+    /// node starting to leave, a drawn property or hit flag, or anything that needs layout.
+    /// When it returns false, `sample` gives the same lists as before for every `t`, so a
+    /// host needs no new frame.
+    pub fn apply(&mut self, view: Element<M>, t: f64) -> bool {
         debug_assert!(
             t >= self.last_t,
             "scene event at t = {t} after one at {}; events must be in time order",
             self.last_t
         );
         self.last_t = self.last_t.max(t);
+        self.changed = false;
         self.drop_gone(t);
         match self.root {
             Some(r) if self.nodes[r].key == view.key && self.nodes[r].kind.same_variant(&view.kind) => {
@@ -314,9 +327,11 @@ impl<M> Scene<M> {
             }
         }
         if self.layout_dirty {
+            self.changed = true;
             self.run_layout(t);
         }
         self.pointer.forget_missing(|id| self.nodes.get(id).is_some_and(|n| n.leaving.is_none()));
+        self.changed
     }
 
     /// The time at or after `t` from which the display list may differ from `sample(t)`:
@@ -373,6 +388,7 @@ impl<M> Scene<M> {
 
     fn create(&mut self, parent: Option<NodeId>, el: Element<M>, t: f64) -> NodeId {
         let Element { key, kind, style, targets, gradient, hairline, motion, presence, handlers, children } = el;
+        self.changed = true;
         let mut node = Node {
             key,
             parent,
@@ -422,6 +438,8 @@ impl<M> Scene<M> {
         let retention = self.retention;
         let n = &mut self.nodes[id];
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
+        let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline;
+        changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
         n.motion = motion;
@@ -430,7 +448,7 @@ impl<M> Scene<M> {
         n.hairline = hairline;
         n.handlers = handlers;
         for &(slot, v) in &targets {
-            n.set_target(slot, v, t, retention);
+            changed |= n.set_target(slot, v, t, retention);
         }
         // Visual slots the view no longer sets go back to their defaults.
         let unset: Vec<u8> = n
@@ -440,8 +458,9 @@ impl<M> Scene<M> {
             .filter(|s| *s >= Slot::Opacity as u8 && !targets.iter().any(|(k, _)| k == s))
             .collect();
         for slot in unset {
-            n.set_target(slot, Slot::default_value(slot), t, retention);
+            changed |= n.set_target(slot, Slot::default_value(slot), t, retention);
         }
+        self.changed |= changed;
         if relayout {
             self.mark_layout(id);
         }
@@ -493,6 +512,7 @@ impl<M> Scene<M> {
         }
         let n = &mut self.nodes[id];
         let changed = n.flow != flow;
+        self.changed |= n.children != order;
         n.flow = flow;
         n.children = order;
         if changed {
@@ -503,7 +523,9 @@ impl<M> Scene<M> {
     /// A leaving node whose key is back in the view enters again from where it is.
     /// Returns whether it was leaving.
     fn revive(&mut self, id: NodeId) -> bool {
-        self.nodes[id].leaving.take().is_some()
+        let revived = self.nodes[id].leaving.take().is_some();
+        self.changed |= revived;
+        revived
     }
 
     /// Starts the exit motion. Returns false when the node should go at once.
@@ -517,6 +539,7 @@ impl<M> Scene<M> {
         for (slot, v) in exit.slots() {
             n.set_target(slot, v, t, retention);
         }
+        self.changed = true;
         let until = self.subtree_settled_at(id);
         if until <= t {
             return false;
@@ -546,6 +569,7 @@ impl<M> Scene<M> {
                 Some(p) => self.nodes[p].children.retain(|c| *c != id),
                 None => self.root = None,
             }
+            self.changed = true;
             self.remove_subtree(id);
         }
     }

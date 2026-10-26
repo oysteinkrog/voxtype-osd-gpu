@@ -164,7 +164,7 @@ pub(crate) struct Driver<A: App> {
     pub(crate) timers: Timers<A::Msg>,
     exit: bool,
     last_t: f64,
-    /// The scene changed since the last frame.
+    /// The scene changed since the last frame, so the host needs a new one.
     pub(crate) dirty: bool,
 }
 
@@ -186,8 +186,9 @@ impl<A: App> Driver<A> {
         self.last_t = t;
         self.app.update(msg, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit });
         let view = self.app.view(&self.tokens);
-        self.scene.apply(view, t);
-        self.dirty = true;
+        // A message that changes nothing drawn, such as a hover that only stops a timer,
+        // costs no frame.
+        self.dirty |= self.scene.apply(view, t);
     }
 
     /// Fires every timer due at or before `t`, each at its own time.
@@ -253,6 +254,47 @@ mod tests {
         d.fire_timers(3.0);
         assert_eq!(d.app.0, vec![(1, 1.5), (2, 2.5)]);
         assert!(d.done(3.0));
+    }
+
+    /// A toast body that holds its dismiss timer while hovered and draws nothing different.
+    struct Hold {
+        timer: Option<TimerId>,
+    }
+
+    impl App for Hold {
+        type Msg = bool;
+
+        fn init(&mut self, cx: &mut Cx<bool>) {
+            self.timer = Some(cx.after(5.0, false));
+        }
+
+        fn update(&mut self, hovered: bool, cx: &mut Cx<bool>) {
+            if let Some(id) = self.timer.take() {
+                cx.cancel(id);
+            }
+            if !hovered {
+                self.timer = Some(cx.after(5.0, false));
+            }
+        }
+
+        fn view(&self, _: &Tokens) -> Element<bool> {
+            Element::panel("root").size(100.0, 40.0).on_hover(true, false)
+        }
+    }
+
+    #[test]
+    fn a_hover_that_only_stops_a_timer_costs_no_frame() {
+        use vo_host::{PointerEvent, PointerKind};
+        use vo_scene::geom::Point;
+
+        let mut d = Driver::new(Hold { timer: None }, Scene::new(), Tokens::default(), 0.0);
+        // The first frame went out and the scene has settled.
+        d.dirty = false;
+        assert!(!d.moving(1.0));
+        let ev = PointerEvent { surface: 0, t: 1.0, pos: Point::new(10.0, 10.0), kind: PointerKind::Enter };
+        d.pointer(&ev);
+        assert_eq!(d.timers.next_at(), None, "the hover stopped the timer");
+        assert!(!d.dirty && !d.moving(1.0), "but asked for no frame");
     }
 
     #[test]

@@ -45,6 +45,21 @@ fn reconcile_keeps_channel_state_for_the_same_key() {
 }
 
 #[test]
+fn apply_reports_whether_anything_changed() {
+    let mut scene = Scene::new();
+    assert!(scene.apply(root(vec![dot("a", 0.0)]), 0.0), "first view");
+    assert!(!scene.apply(root(vec![dot("a", 0.0)]), 1.0), "same view");
+    assert!(scene.apply(root(vec![dot("a", 50.0)]), 2.0), "retarget");
+    assert!(!scene.apply(root(vec![dot("a", 50.0)]), 2.1), "same target mid-flight");
+    assert!(scene.apply(root(vec![dot("a", 50.0), dot("b", 0.0)]), 5.0), "new node");
+    assert!(scene.apply(root(vec![dot("b", 0.0), dot("a", 50.0)]), 6.0), "reorder");
+    assert!(scene.apply(root(vec![dot("b", 0.0), dot("a", 50.0).on_click(Msg::Click)]), 7.0), "hit flag");
+    assert!(!scene.apply(root(vec![dot("b", 0.0), dot("a", 50.0).on_click(Msg::Click)]), 8.0));
+    assert!(scene.apply(root(vec![dot("b", 0.0)]), 9.0), "removed");
+    assert!(scene.apply(root(vec![dot("b", 0.0).width(20.0)]), 10.0), "layout");
+}
+
+#[test]
 fn key_moved_to_another_parent_is_a_new_node() {
     let mut scene = Scene::new();
     let view = |x_in_a: bool| {
