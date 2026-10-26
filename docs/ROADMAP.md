@@ -735,4 +735,4 @@ These review points were considered and not adopted, or adopted in a different f
 - Bloom: https://www.iryoku.com/next-generation-post-processing-in-call-of-duty-advanced-warfare/
 - KWin pacing history: https://invent.kde.org/plasma/kwin/-/work_items/124
 - WCAG 2.3.1: https://www.w3.org/WAI/WCAG22/Understanding/three-flashes-or-below-threshold.html
-- Protocols on this KWin: `wayland-info` on `oystein-home-primary`, 2026-10-26, as reported in `review-fable.md`.
+- Protocols on this KWin: `wayland-info` on the home desktop, 2026-10-26, as reported in `review-fable.md`.
