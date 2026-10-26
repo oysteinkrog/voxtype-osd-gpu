@@ -5,6 +5,7 @@
 //!   `Element::dots`.
 //! - `font`: [`DotFont`], 5x7 and 7x9 dot fonts as data (TY16).
 //! - `text`: [`DotText`], a string as dots that assembles, dissolves and morphs (TY16).
+//! - `wave`: [`DotWave`], [`DotMeter`] and [`DotTicker`]: level visuals and a ticker as dots.
 //!
 //! Nothing here touches the GPU. The renderer draws the dots with an instanced pipeline of
 //! its own (`vo_render::dots`).
@@ -13,8 +14,10 @@ pub mod field;
 pub mod font;
 mod font_data;
 pub mod text;
+pub mod wave;
 
 pub use field::{DotField, Look, Springs};
 pub use font::DotFont;
 pub use text::{Change, DotText, TextStyle};
 pub use vo_scene::dots::{Dot, DotSource, Dots};
+pub use wave::{DotMeter, DotTicker, DotWave};
