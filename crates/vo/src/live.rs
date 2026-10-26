@@ -175,7 +175,7 @@ impl<A: App> HostApp for Live<A> {
                 }
             },
             HostEvent::Presented { id, frame, .. }
-                if id == self.surface && !self.startup_logged && self.first_gpu_frame == Some(frame) =>
+                if id == self.surface && !self.startup_logged && self.first_gpu_frame.is_some_and(|f| frame >= f) =>
             {
                 self.startup_logged = true;
                 let host_diag = host.diag().clone();

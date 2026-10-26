@@ -191,7 +191,10 @@ impl PresentationTimeHandler for State {
         if frame == 0 {
             self.diag.stages.push(("first frame on screen", t));
         }
-        if self.surfaces[i].first_gpu == Some(frame) {
+        // The first GPU frame itself may have been replaced before it showed.
+        if self.surfaces[i].first_gpu.is_some_and(|f| frame >= f)
+            && !self.diag.stages.iter().any(|s| s.0 == "first GPU frame on screen")
+        {
             self.diag.stages.push(("first GPU frame on screen", t));
         }
         self.events.push(HostEvent::Presented { id, t, frame, refresh });
