@@ -93,31 +93,60 @@ impl ParticleText {
     /// no particles.
     pub fn update(&mut self, p: &mut Particles, t: f64, glyphs: &[GlyphInstance]) {
         let runs = word_runs(glyphs);
-        // Words that went.
-        for (i, h) in self.slots.iter_mut().enumerate() {
-            if let Some(w) = h.word {
-                if !runs.iter().any(|r| r.word == w) {
-                    p.set_word(i as u32, t, &[], self.px_per_unit);
-                    *h = Held { word: None, glyphs: Vec::new(), origin: h.origin, freed_at: t };
-                }
-            }
+        let gone: Vec<u32> =
+            self.slots.iter().filter_map(|h| h.word).filter(|w| !runs.iter().any(|r| r.word == *w)).collect();
+        for w in gone {
+            self.remove(p, w, t);
         }
-        for run in runs {
-            let slot = match self.slot_of(run.word) {
-                Some(s) => s,
-                None => match self.slots.iter().position(|h| h.word.is_none() && t - h.freed_at >= REUSE_AFTER) {
-                    Some(s) => s as u32,
-                    None => continue,
-                },
-            };
-            let h = &mut self.slots[slot as usize];
-            if h.word == Some(run.word) && h.glyphs == run.glyphs {
-                h.origin = run.origin;
-                continue;
-            }
-            p.set_word(slot, t, &run.glyphs, self.px_per_unit);
-            *h = Held { word: Some(run.word), glyphs: run.glyphs, origin: run.origin, freed_at: f64::NEG_INFINITY };
+        for run in &runs {
+            self.set(p, t, run);
         }
+    }
+
+    /// Sets one word at `t`: a new word forms, a changed one re-forms its changed glyphs, an
+    /// unchanged one only moves. Returns false when no slot was free.
+    pub fn set(&mut self, p: &mut Particles, t: f64, run: &WordRun) -> bool {
+        let slot = match self.slot_of(run.word) {
+            Some(s) => s,
+            None => match self.slots.iter().position(|h| h.word.is_none() && t - h.freed_at >= REUSE_AFTER) {
+                Some(s) => s as u32,
+                None => return false,
+            },
+        };
+        let h = &mut self.slots[slot as usize];
+        if h.word == Some(run.word) && h.glyphs == run.glyphs {
+            h.origin = run.origin;
+            return true;
+        }
+        p.set_word(slot, t, &run.glyphs, self.px_per_unit);
+        *h = Held { word: Some(run.word), glyphs: run.glyphs.clone(), origin: run.origin, freed_at: f64::NEG_INFINITY };
+        true
+    }
+
+    /// Scatters `word` away at `t` and frees its slot.
+    pub fn remove(&mut self, p: &mut Particles, word: u32, t: f64) {
+        if let Some(i) = self.slot_of(word) {
+            p.set_word(i, t, &[], self.px_per_unit);
+            let h = &mut self.slots[i as usize];
+            *h = Held { word: None, glyphs: Vec::new(), origin: h.origin, freed_at: t };
+        }
+    }
+
+    /// Forgets every word, for a seek back. Call [`Particles::reset_slots`] with it.
+    pub fn clear(&mut self) {
+        for h in &mut self.slots {
+            *h = Held { freed_at: f64::NEG_INFINITY, ..Default::default() };
+        }
+    }
+
+    /// Slots whose word went less than the reuse time before `t`: their scatter still shows,
+    /// at the word's last place.
+    pub fn fading(&self, t: f64) -> impl Iterator<Item = (u32, Point)> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(move |(_, h)| h.word.is_none() && t - h.freed_at < REUSE_AFTER)
+            .map(|(i, h)| (i as u32, h.origin))
     }
 
     /// Fades each live glyph in `glyphs` (the frame's display list) by its hand-over opacity
@@ -142,10 +171,8 @@ impl ParticleText {
             g.color.a *= p.glyph_alpha(slot, index, t);
         }
         // Slots whose word has gone keep drawing their scatter at its last place.
-        for (i, h) in self.slots.iter().enumerate() {
-            if h.word.is_none() && t - h.freed_at < REUSE_AFTER {
-                looks[i] = SlotLook { size: self.size, style: self.style, ..SlotLook::new(h.origin, self.color) };
-            }
+        for (i, origin) in self.fading(t) {
+            looks[i as usize] = SlotLook { size: self.size, style: self.style, ..SlotLook::new(origin, self.color) };
         }
         looks
     }

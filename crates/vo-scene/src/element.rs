@@ -20,6 +20,7 @@ use vo_core::words::Word;
 use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, ShapeKind};
 use crate::dots::Dots;
+use crate::emitter::{Emitter, WordParticles};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
 use crate::timed::{Progress, Wave};
@@ -301,6 +302,8 @@ pub(crate) enum Kind {
         style: TextStyle,
         enter: Transition,
         change: Transition,
+        /// Words form from particles (`Element::word_particles`).
+        particles: Option<WordParticles>,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -308,6 +311,8 @@ pub(crate) enum Kind {
     Progress(Progress),
     /// A dot grid filling the box.
     Dots(Dots),
+    /// A particle emitter at the centre of the box, simulated by the renderer.
+    Emitter(Emitter),
     /// A filled path from `FontRegistry::add_path`: `view` (path units) fits the box,
     /// centred, keeping its aspect.
     Path { id: u32, view: Rect },
@@ -414,6 +419,7 @@ impl<M> Element<M> {
             style: TextStyle::default(),
             enter: Transition::NONE,
             change: Transition::NONE,
+            particles: None,
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
@@ -466,6 +472,13 @@ impl<M> Element<M> {
     /// A dot grid filling the box (`crate::dots`). Give it a size: it has no content size.
     pub fn dots(key: impl Into<Key>, dots: Dots) -> Element<M> {
         Element::new(key, Kind::Dots(dots), taffy::Style::default())
+    }
+
+    /// A particle emitter at the centre of the box (`crate::emitter`). The renderer runs its
+    /// simulation; put it in a layer with bloom for a glow. Give it a size: particles outside
+    /// the box are drawn, but layout only reserves the box.
+    pub fn emitter(key: impl Into<Key>, emitter: Emitter) -> Element<M> {
+        Element::new(key, Kind::Emitter(emitter), taffy::Style::default())
     }
 
     /// A container drawn as its own layer: group transform, blend mode, optional clip to
@@ -716,6 +729,18 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { change, .. } => *change = t,
             _ => debug_assert!(false, "word_change on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: each new or changed word forms from particles and hands over to the solid
+    /// glyphs. A word is readable about 110 ms after it arrives; on a revision only the
+    /// changed glyphs scatter and re-form. Drawn by the renderer; word ids must be unique
+    /// among the live texts in a scene that use it.
+    pub fn word_particles(mut self, look: WordParticles) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { particles, .. } => *particles = Some(look),
+            _ => debug_assert!(false, "word_particles on a node that is not live text: {}", self.key),
         }
         self
     }

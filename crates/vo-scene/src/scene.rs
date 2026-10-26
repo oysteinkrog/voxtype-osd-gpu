@@ -22,6 +22,7 @@ use crate::display::{
 };
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
+use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::{Glass, GlassInstance};
 use crate::input::PointerState;
@@ -93,6 +94,8 @@ pub(crate) struct Node<M> {
     pub has_layout: bool,
     /// Live text: each word's own motion, sorted by word id.
     pub words: Vec<WordAnim>,
+    /// Live text: when a word last came or went.
+    pub words_at: f64,
     /// The motion of a property no `.motion()` call names: the scene's default.
     pub default_motion: Motion,
     /// Reduced motion (MO09): travel and scale jump, effects change slowly.
@@ -103,6 +106,8 @@ pub(crate) struct Node<M> {
 pub(crate) struct WordAnim {
     pub id: u32,
     pub text: String,
+    /// When the word entered or its text last changed.
+    pub since: f64,
     pub opacity: Channel,
     pub dx: Channel,
     pub dy: Channel,
@@ -240,6 +245,7 @@ impl<M> Node<M> {
                     WordAnim {
                         id: a.id,
                         text: w.text.clone(),
+                        since: if a.text != w.text { t } else { a.since },
                         opacity: a.opacity.clone(),
                         dx: a.dx.clone(),
                         dy: a.dy.clone(),
@@ -248,6 +254,7 @@ impl<M> Node<M> {
                 None => WordAnim {
                     id: w.id,
                     text: w.text.clone(),
+                    since: t,
                     opacity: chan(1.0, fade, Rest::UNIT),
                     dx: chan(0.0, slide, Rest::PIXELS),
                     dy: chan(0.0, slide, Rest::PIXELS),
@@ -266,6 +273,9 @@ impl<M> Node<M> {
         }
         next.sort_by_key(|a| a.id);
         changed |= next.len() != self.words.len() || next.iter().zip(&self.words).any(|(a, b)| a.id != b.id);
+        if changed {
+            self.words_at = t;
+        }
         self.words = next;
         changed
     }
@@ -515,6 +525,10 @@ impl<M> Scene<M> {
                         Kind::Wave(w) => w.moving(t),
                         Kind::Progress(p) => p.moving(),
                         Kind::Dots(d) => d.source.moving(t),
+                        Kind::Emitter(_) => true,
+                        Kind::LiveText { particles: Some(_), .. } => {
+                            t < n.words.iter().map(|w| w.since).fold(n.words_at, f64::max) + WORD_PARTICLES_BUSY
+                        }
                         Kind::Canvas(c) => c.moving(t),
                         _ => false,
                     })
@@ -630,6 +644,7 @@ impl<M> Scene<M> {
             shaped: ShapedText::default(),
             has_layout: false,
             words: Vec::new(),
+            words_at: t,
             default_motion: self.default_motion,
             reduced: self.reduced_motion,
         };
@@ -986,6 +1001,10 @@ impl<M> Scene<M> {
         if let Kind::Canvas(c) = &n.kind {
             let mut painter = crate::canvas::Painter { list: out, items, alpha, layer };
             (c.draw)(t, Rect::new(m.e, m.f, size.w, size.h), &mut painter);
+        } else if let Kind::Emitter(e) = &n.kind {
+            let centre = Point::new(m.e + 0.5 * size.w, m.f + 0.5 * size.h);
+            let i = crate::emitter::push_instance(out, e, id.to_bits(), n.born, t, centre, alpha);
+            push_item(items, ItemKind::Emitters, i);
         } else {
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
         }
@@ -1069,8 +1088,12 @@ impl<M> Scene<M> {
                 self.glyphs(n, style.font, style.size, origin, color, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style, .. } => {
+            Kind::LiveText { words, style, particles, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
+                if let Some(look) = particles {
+                    let pw = out.particle_words.get_or_insert_with(|| ParticleWords { t, words: Vec::new() });
+                    pw.words.extend(n.words.iter().map(|w| ParticleWord { word: w.id, since: w.since, look: *look }));
+                }
                 // Byte offset where each word starts in the joined text.
                 let mut starts = Vec::with_capacity(words.len());
                 let mut at = 0u32;
@@ -1124,7 +1147,7 @@ impl<M> Scene<M> {
                 None
             }
             // Drawn by `emit_body`, which knows the layer.
-            Kind::Canvas(_) => None,
+            Kind::Canvas(_) | Kind::Emitter(_) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
                 if paint.is_visible() && view.w > 0.0 && view.h > 0.0 {

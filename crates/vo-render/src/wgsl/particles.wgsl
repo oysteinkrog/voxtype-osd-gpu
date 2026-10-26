@@ -138,7 +138,7 @@ struct EmitStep {
   life: vec4f,
   // x swirl in rad/s about z, y ring pull, z ring pull radius, w drag per second.
   swirl: vec4f,
-  // x curl strength, y curl scale, z curl time speed, w unused.
+  // x curl strength, y curl scale, z curl time speed, w the first tick that steps the pool.
   noise: vec4f,
   // xyz attractor, w its strength (negative repels).
   attract: vec4f,

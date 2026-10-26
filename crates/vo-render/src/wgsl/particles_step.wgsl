@@ -96,6 +96,10 @@ fn cs_step (@builtin(global_invocation_id) gid: vec3u) {
   var p = free_rw[i];
   let em = p.info.y;
   let e = emits[step.index * step.emitters + em];
+  // A pool added later is not stepped before its start tick.
+  if (f32 (step.tick) < e.noise.w) {
+    return;
+  }
   let local = i - e.pool.x;
   let dt = step.dt;
   var pos = p.pos.xyz;

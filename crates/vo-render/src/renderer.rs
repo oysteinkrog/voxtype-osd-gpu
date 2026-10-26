@@ -49,6 +49,7 @@ use crate::color::linear_premul;
 use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::hot::wgsl;
+use crate::particle_layer::ParticleLayer;
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
 use crate::vector::{vector_shader_source, GpuVector};
@@ -248,6 +249,8 @@ enum Pipe {
     Final,
     /// Fades a feedback trail's last frame by the blend constant.
     Fade,
+    /// Particles (`crate::particle_layer`): the range is of its placements.
+    Particles,
 }
 
 #[derive(Clone, Debug)]
@@ -386,6 +389,8 @@ pub struct Renderer {
     quality: Quality,
     /// Light-mode shading (FX14).
     light: bool,
+    /// Emitter elements and particle words, which live from frame to frame.
+    particles: ParticleLayer,
 }
 
 struct FxShared {
@@ -427,6 +432,7 @@ impl Renderer {
         Renderer {
             device: device.clone(),
             queue: queue.clone(),
+            particles: ParticleLayer::new(fonts.clone()),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -566,6 +572,7 @@ impl Renderer {
         root.bounds = [0.0, 0.0, w as f32, h as f32];
         self.surfaces.push(root);
         self.scene = None;
+        self.particles.advance(&self.device, &self.queue, list);
         // An effect frame allocates its textures inside an error scope, so a failed allocation
         // drops a quality tier and redoes the frame instead of drawing with a broken texture.
         let scope = effects.then(|| self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory));
@@ -587,6 +594,9 @@ impl Renderer {
             };
             let frame = Frame { list, scale, effects, encode_srgb: encode_srgb as u32 as f32, target: [w, h] };
             self.visit(&frame, 0, &top, 0);
+            if let Some((r, _)) = self.particles.place_fading(0) {
+                self.push_cmd(0, Pipe::Particles, r, 0, BlendMode::Normal, [0.0, 0.0, w as f32, h as f32]);
+            }
         }
         self.place_surfaces(format);
         if let Some(scope) = scope {
@@ -600,6 +610,8 @@ impl Renderer {
             }
         }
         self.upload(format, target.format(), w, h);
+        let surfaces = &self.surfaces;
+        self.particles.prepare(w, h, format, &|i| (surfaces[i].origin, surfaces[i].size));
         self.encode_passes(target, format, enc);
         self.pool.retain(|p| p.used || self.frame - p.last_used < POOL_KEEP_FRAMES);
     }
@@ -688,7 +700,9 @@ impl Renderer {
                 }
                 ItemKind::Glyphs => {
                     let start = self.glyphs.len() as u32;
-                    for g in &f.list.glyphs[range] {
+                    for g in &f.list.glyphs[range.clone()] {
+                        // A word forming from particles fades its glyphs in as they converge.
+                        let g = &DlGlyph { color: g.color.fade(self.particles.glyph_alpha(g)), ..*g };
                         if let Some(inst) = self.glyph(g, &state) {
                             grow(
                                 &mut self.surfaces[draw_surface].bounds,
@@ -698,6 +712,11 @@ impl Renderer {
                         }
                     }
                     self.push_cmd(draw_surface, Pipe::Glyph, start..self.glyphs.len() as u32, uniform, blend, scissor);
+                    let words = &f.list.glyphs[range];
+                    if let Some((r, b)) = self.particles.place_words(words, &to_px, opacity, draw_surface) {
+                        grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                        self.push_cmd(draw_surface, Pipe::Particles, r, uniform, blend, scissor);
+                    }
                 }
                 ItemKind::Vectors => {
                     let start = self.vectors.len() as u32;
@@ -716,8 +735,19 @@ impl Renderer {
                         scissor,
                     );
                 }
-                // Drawn by their own lanes' pipelines, not wired in here yet.
-                ItemKind::Emitters => {}
+                ItemKind::Emitters => {
+                    let mut placed: Option<Range<u32>> = None;
+                    for i in range {
+                        let at = self.particles.place_emitter(f.list, i, &to_px, opacity, draw_surface);
+                        if let Some((r, b)) = at {
+                            grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                            placed = Some(placed.map_or(r.clone(), |p| p.start..r.end));
+                        }
+                    }
+                    if let Some(r) = placed {
+                        self.push_cmd(draw_surface, Pipe::Particles, r, uniform, blend, scissor);
+                    }
+                }
                 ItemKind::Dots => {
                     let start = self.dots.len() as u32;
                     let mut b = EMPTY;
@@ -1171,7 +1201,7 @@ impl Renderer {
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
-            for c in &s.cmds {
+            for c in s.cmds.iter().filter(|c| c.pipe != Pipe::Particles) {
                 let key = (format, c.pipe, c.blend);
                 if !needed.contains(&key) {
                     needed.push(key);
@@ -1293,6 +1323,10 @@ impl Renderer {
                 continue;
             }
             pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+            if c.pipe == Pipe::Particles {
+                self.particles.draw(pass, c.range.clone());
+                continue;
+            }
             pass.set_pipeline(self.cached_pipeline(format, c.pipe, c.blend));
             pass.set_bind_group(1, layers, &[c.uniform]);
             match c.pipe {
@@ -1333,6 +1367,7 @@ impl Renderer {
                     pass.draw(0..3, 0..1);
                 }
                 Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => unreachable!("not a layer command"),
+                Pipe::Particles => unreachable!("drawn above"),
             }
         }
     }
@@ -1393,6 +1428,8 @@ impl Renderer {
             Pipe::Glyph => 1,
             Pipe::Composite | Pipe::CompositeBloom => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
+            // The particle layer has its own pipelines.
+            Pipe::Particles => return,
             Pipe::Dot => 4,
             Pipe::Vector => 5,
             Pipe::Glass => 7,
@@ -1411,6 +1448,7 @@ impl Renderer {
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
+            Pipe::Particles => unreachable!("returned above"),
         };
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -1429,6 +1467,7 @@ impl Renderer {
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
+            Pipe::Particles => unreachable!("returned above"),
         };
         let blend_state = match pipe {
             Pipe::Down | Pipe::Up | Pipe::Final => None,

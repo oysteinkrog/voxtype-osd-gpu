@@ -37,6 +37,12 @@ pub struct DisplayList {
     pub shapes: Vec<ShapeInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub emitters: Vec<EmitterInstance>,
+    /// The sources that `emitters` point into. Not serialized.
+    #[serde(skip)]
+    pub emitter_sources: Vec<SourceRef>,
+    /// Live-text words that form from particles, with the time each last changed. `None`
+    /// when no live text uses particles.
+    pub particle_words: Option<ParticleWords>,
     /// Round dots, for dot grids (`crate::dots`).
     pub dots: Vec<DotInstance>,
     /// Path strokes and blobs (`crate::path`).
@@ -419,14 +425,8 @@ pub struct DotInstance {
     pub color: Color,
 }
 
-/// Placeholder for particle emitters (M4). Only identity and origin for now.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[repr(C)]
-pub struct EmitterInstance {
-    pub emitter: u32,
-    pub seed: u32,
-    pub pos: Point,
-}
+/// Particle emitters (`crate::emitter`).
+pub use crate::emitter::{EmitterInstance, ParticleWords, SourceRef};
 
 /// A hit target's shape as sampled for this frame, for the input region.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -469,6 +469,8 @@ impl DisplayList {
         self.shapes.clear();
         self.glyphs.clear();
         self.emitters.clear();
+        self.emitter_sources.clear();
+        self.particle_words = None;
         self.dots.clear();
         self.vectors.clear();
         self.vector_segs.clear();

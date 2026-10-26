@@ -40,6 +40,8 @@ use vo_core::hash::rand_f32;
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
 
+pub use vo_scene::emitter::{tilt_x, EmitterLook, EmitterSim, Shape, Shock, SpriteStyle};
+
 use crate::color::srgb_to_linear;
 use crate::glyph_points::{GlyphPointCache, GlyphPoints};
 
@@ -72,6 +74,16 @@ pub const MAX_EMITTERS: u32 = 16;
 /// Ticks of history per hero particle, for ribbons.
 pub const TRAIL: u32 = 16;
 const STEP_STRIDE: u64 = 256;
+/// Frames a [`Particles`] can draw into at once: the target plus offscreen layers.
+pub const VIEWS: u32 = 8;
+const VIEW_STRIDE: u64 = 256;
+
+/// What [`Particles::draw_part`] draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Emitter(EmitterId),
+    Slot(u32),
+}
 
 /// Spring rate of a word particle in 1/s, before its ±20 % jitter.
 pub const WORD_RATE: f32 = 36.0;
@@ -129,182 +141,13 @@ impl Default for ParticleConfig {
     }
 }
 
-/// Where an emitter spawns, in its own space. Parameters may change from tick to tick.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Shape {
-    Point,
-    /// A circle in the xy plane; `spread` is the band width as a share of the radius.
-    Ring {
-        radius: f32,
-        spread: f32,
-    },
-    Disc {
-        radius: f32,
-    },
-    /// A segment through the origin, `angle` in radians from +x.
-    Line {
-        half_length: f32,
-        angle: f32,
-    },
-    Box {
-        half: [f32; 3],
-    },
-    /// A torus about z: `major` to the tube's centre, `minor` the tube's radius (D302).
-    Torus {
-        major: f32,
-        minor: f32,
-    },
-}
-
-/// A shockwave: a front leaving the emitter's origin (PA05).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Shock {
-    /// Seconds since it started.
-    pub age: f32,
-    /// Front speed in units per second, and its width in units.
-    pub speed: f32,
-    pub width: f32,
-    /// Push in units per second squared at the front.
-    pub strength: f32,
-}
-
-/// An emitter's simulation inputs at one tick time. Everything that should follow a level, a
-/// state or a burst goes here, computed from the tick's own time.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EmitterSim {
-    pub shape: Shape,
-    /// Share of deaths that respawn, 0 to 1. 0 lets the pool die out.
-    pub emit: f32,
-    /// Mean life in seconds and its jitter as a share of it.
-    pub life: f32,
-    pub life_jitter: f32,
-    /// Speed outward from the shape at spawn.
-    pub spawn_speed: f32,
-    /// Swirl about z in radians per second.
-    pub swirl: f32,
-    /// Pull towards the circle of `ring_radius` (the torus core in 3D), per second squared.
-    pub ring_pull: f32,
-    pub ring_radius: f32,
-    /// Velocity damping per second.
-    pub drag: f32,
-    /// Curl noise strength (units per second squared), scale (cells per unit) and time speed.
-    pub noise: f32,
-    pub noise_scale: f32,
-    pub noise_speed: f32,
-    /// A point attractor and its strength per second squared per unit of distance (negative
-    /// repels).
-    pub attract: [f32; 3],
-    pub attract_strength: f32,
-    /// Gravity plus wind, units per second squared.
-    pub gravity: [f32; 3],
-    pub shock: Option<Shock>,
-    /// Text mask force (PA08): positive pushes out of the text, negative hugs glyph edges.
-    pub mask: f32,
-    /// Burst counter: when it changes, the whole pool respawns on that tick.
-    pub epoch: u32,
-    /// The level, 0 to 1. Only recorded; the other fields carry its effect.
-    pub level: f32,
-}
-
-impl Default for EmitterSim {
-    fn default() -> Self {
-        EmitterSim {
-            shape: Shape::Point,
-            emit: 1.0,
-            life: 1.0,
-            life_jitter: 0.5,
-            spawn_speed: 0.0,
-            swirl: 0.0,
-            ring_pull: 0.0,
-            ring_radius: 0.0,
-            drag: 1.5,
-            noise: 0.0,
-            noise_scale: 0.02,
-            noise_speed: 0.7,
-            attract: [0.0; 3],
-            attract_strength: 0.0,
-            gravity: [0.0; 3],
-            shock: None,
-            mask: 0.0,
-            epoch: 0,
-            level: 0.0,
-        }
+/// Packs a sprite style for the shaders.
+fn style_code(s: SpriteStyle) -> [f32; 4] {
+    match s {
+        SpriteStyle::Soft => [0.0; 4],
+        SpriteStyle::Dot { pitch } => [1.0, pitch, 0.0, 0.0],
+        SpriteStyle::Bokeh { focus, aperture } => [2.0, 0.0, focus, aperture],
     }
-}
-
-impl EmitterSim {
-    /// A ring of `radius` that holds its particles on it (the voice ring, PA04).
-    pub fn ring(radius: f32, spread: f32) -> EmitterSim {
-        EmitterSim { shape: Shape::Ring { radius, spread }, ring_pull: 40.0, ring_radius: radius, ..Default::default() }
-    }
-
-    /// A torus about z that holds its particles near its core (D302).
-    pub fn torus(major: f32, minor: f32) -> EmitterSim {
-        EmitterSim { shape: Shape::Torus { major, minor }, ring_pull: 30.0, ring_radius: major, ..Default::default() }
-    }
-}
-
-/// How a sprite is drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SpriteStyle {
-    /// A soft glow.
-    Soft,
-    /// A hard disc, snapped to a grid of `pitch` pixels when `pitch` is above 0 (PA09).
-    Dot { pitch: f32 },
-    /// Out of focus by depth (FX16): sprites at clip depth `focus` are sharp, others grow by
-    /// `aperture` pixels per unit of depth into flat discs with the same light. 3D only.
-    Bokeh { focus: f32, aperture: f32 },
-}
-
-impl SpriteStyle {
-    fn encode(self) -> [f32; 4] {
-        match self {
-            SpriteStyle::Soft => [0.0; 4],
-            SpriteStyle::Dot { pitch } => [1.0, pitch, 0.0, 0.0],
-            SpriteStyle::Bokeh { focus, aperture } => [2.0, 0.0, focus, aperture],
-        }
-    }
-}
-
-/// An emitter's look at the frame time.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EmitterLook {
-    /// Where the emitter's origin is in layer space, and its z (3D only).
-    pub origin: Point,
-    pub z: f32,
-    /// Rows of a rotation applied to emitter space before the origin: a tilt for a 3D ring.
-    pub rotation: [[f32; 3]; 3],
-    /// Sprite radius in logical units.
-    pub size: f32,
-    pub brightness: f32,
-    /// Colour at birth, in mid-life and at death (sRGB, straight alpha).
-    pub ramp: [Color; 3],
-    pub style: SpriteStyle,
-    /// Ribbon width as a share of the sprite, and its opacity (PA07; hero particles only).
-    pub trail_width: f32,
-    pub trail_alpha: f32,
-}
-
-impl Default for EmitterLook {
-    fn default() -> Self {
-        EmitterLook {
-            origin: Point::ZERO,
-            z: 0.0,
-            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            size: 1.5,
-            brightness: 1.0,
-            ramp: [Color::WHITE, Color::WHITE, Color::hex(0xffffff, 0.0)],
-            style: SpriteStyle::Soft,
-            trail_width: 0.8,
-            trail_alpha: 0.6,
-        }
-    }
-}
-
-/// A rotation about x by `a` radians, as rows, for [`EmitterLook::rotation`].
-pub fn tilt_x(a: f32) -> [[f32; 3]; 3] {
-    let (s, c) = a.sin_cos();
-    [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]]
 }
 
 /// What an emitter is made of. Fixed once added.
@@ -655,6 +498,8 @@ struct Emitter {
     base: u32,
     capacity: u32,
     trail_base: u32,
+    /// The first tick that steps this pool; earlier ticks leave it as added.
+    start: u64,
 }
 
 /// How a glyph came into the current text of its slot.
@@ -746,6 +591,9 @@ pub struct Particles {
     draw_module: wgpu::ShaderModule,
     draw_pipes: Vec<DrawPipes>,
     draw_key: Option<DrawKey>,
+    /// The frame as `prepare` wrote it, for further views.
+    frame_data: GpuFrame,
+    view_keys: [Option<DrawKey>; VIEWS as usize],
     // Scratch, reused.
     step_data: Vec<u8>,
     emit_data: Vec<GpuEmitStep>,
@@ -846,7 +694,7 @@ impl Particles {
         let words = buffer(device, "vo-particles-words", word_count * size_of::<GpuWord>() as u64, U::STORAGE);
         let targets = buffer(device, "vo-particles-targets", word_count * size_of::<GpuTarget>() as u64, U::STORAGE);
         let anchor = buffer(device, "vo-particles-anchor", size_of::<GpuAnchor>() as u64, U::UNIFORM);
-        let frame = buffer(device, "vo-particles-frame", size_of::<GpuFrame>() as u64, U::UNIFORM);
+        let frame = buffer(device, "vo-particles-frame", VIEWS as u64 * VIEW_STRIDE, U::UNIFORM);
         let emit_draw =
             buffer(device, "vo-particles-emit-draw", MAX_EMITTERS as u64 * size_of::<GpuEmitDraw>() as u64, U::STORAGE);
         let slot_draw = buffer(
@@ -905,7 +753,7 @@ impl Particles {
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vo-particles-draw"),
             entries: &[
-                uniform(0, false, size_of::<GpuFrame>() as u64, vf),
+                uniform(0, true, size_of::<GpuFrame>() as u64, vf),
                 storage(1, true, S::VERTEX),
                 storage(2, true, S::VERTEX),
                 storage(3, true, S::VERTEX),
@@ -1014,6 +862,8 @@ impl Particles {
             draw_module,
             draw_pipes: Vec::new(),
             draw_key: None,
+            frame_data: GpuFrame::default(),
+            view_keys: [None; VIEWS as usize],
             step_data: Vec::new(),
             emit_data: Vec::new(),
             target_data: Vec::new(),
@@ -1088,7 +938,14 @@ impl Particles {
 
     /// Adds an emitter with its own pool. Must be called before the first tick.
     pub fn add_emitter(&mut self, spec: EmitterSpec) -> EmitterId {
-        assert_eq!(self.tick, 0, "emitters are added before the first tick");
+        self.add_emitter_at(spec, self.tick)
+    }
+
+    /// Adds an emitter whose pool is stepped from tick `start` on. Ticks before leave it as
+    /// added, so the result does not depend on when it was added: a pool for an element born
+    /// at `t` starts at `ticks_for(t) - 1` however late the first frame that shows it comes.
+    /// When `start` is before the current tick, the pools are rewound to it.
+    pub fn add_emitter_at(&mut self, spec: EmitterSpec, start: u64) -> EmitterId {
         assert!((self.emitters.len() as u32) < MAX_EMITTERS, "at most {MAX_EMITTERS} emitters");
         let capacity = spec.capacity.next_multiple_of(WORKGROUP);
         let base = self.free_used;
@@ -1097,7 +954,7 @@ impl Particles {
         let trail_base = self.trails_used;
         assert!(trail_base + trails <= self.cfg.trail_capacity, "trail pool is full");
         let id = self.emitters.len() as u32;
-        self.emitters.push(Emitter { spec, base, capacity, trail_base });
+        self.emitters.push(Emitter { spec, base, capacity, trail_base, start });
         self.free_used += capacity;
         self.trails_used += trails;
         // Not yet born: negative age, staggered by a hash of the slot. Ages sit on the tick
@@ -1111,7 +968,11 @@ impl Particles {
                 ..Default::default()
             });
         }
-        self.queue.write_buffer(&self.free, 0, bytemuck::cast_slice(&self.initial));
+        let new = &self.initial[base as usize..];
+        self.queue.write_buffer(&self.free, base as u64 * size_of::<GpuFree>() as u64, bytemuck::cast_slice(new));
+        if start < self.tick {
+            self.restore(start);
+        }
         if trails > 0 {
             let owners: Vec<u32> = (base..base + trails).collect();
             self.queue.write_buffer(&self.trail_owner, trail_base as u64 * 4, bytemuck::cast_slice(&owners));
@@ -1229,9 +1090,16 @@ impl Particles {
         let size = self.free_used as u64 * size_of::<GpuFree>() as u64;
         match &self.snapshot {
             Some((tick, buf)) if *tick <= want => {
+                // Pools added after the snapshot were not stepped before their start tick, so
+                // their state at the snapshot is the state they were added with.
+                let copied = buf.size().min(size);
                 let mut enc = self.device.create_command_encoder(&Default::default());
-                enc.copy_buffer_to_buffer(buf, 0, &self.free, 0, size);
+                enc.copy_buffer_to_buffer(buf, 0, &self.free, 0, copied);
                 self.queue.submit([enc.finish()]);
+                let rest = (copied / size_of::<GpuFree>() as u64) as usize;
+                if rest < self.initial.len() {
+                    self.queue.write_buffer(&self.free, copied, bytemuck::cast_slice(&self.initial[rest..]));
+                }
                 self.tick = *tick;
             }
             _ => {
@@ -1552,6 +1420,8 @@ impl Particles {
             cam,
         };
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
+        self.frame_data = frame;
+        self.view_keys = [None; VIEWS as usize];
         let draws: Vec<GpuEmitDraw> = self
             .emitters
             .iter()
@@ -1567,7 +1437,7 @@ impl Particles {
                         [r[2][0], r[2][1], r[2][2], 0.0],
                     ],
                     c: l.ramp.map(linear),
-                    look: l.style.encode(),
+                    look: style_code(l.style),
                     trail: [l.trail_width, l.trail_alpha, 0.0, 0.0],
                     pool: [e.base, e.capacity, e.trail_base, if e.spec.three_d { E_3D } else { 0 }],
                 }
@@ -1583,7 +1453,7 @@ impl Particles {
                     visible: s.visible as u32 as f32,
                     size: s.size,
                     color: linear(s.color),
-                    look: s.style.encode(),
+                    look: style_code(s.style),
                 },
                 None => GpuSlotDraw::default(),
             })
@@ -1592,6 +1462,65 @@ impl Particles {
         let key = (p.format, p.blend, p.depth, p.samples.max(1));
         self.ensure_pipelines_for(key);
         self.draw_key = Some(key);
+        self.view_keys[0] = Some(key);
+    }
+
+    /// Sets up view `view` (1 to [`VIEWS`] - 1) after [`Particles::prepare`]: the same frame
+    /// drawn into another target, such as an offscreen layer, with its own transform, size
+    /// and format. Blend, depth and samples are the prepared frame's.
+    pub fn set_view(&mut self, view: u32, to_px: Affine, width: u32, height: u32, format: wgpu::TextureFormat) {
+        assert!(view > 0 && view < VIEWS, "view {view} is not 1 to {}", VIEWS - 1);
+        let Some((_, blend, depth, samples)) = self.draw_key else { return };
+        let m = to_px;
+        let srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
+        let px_per_unit = (m.a * m.d - m.b * m.c).abs().sqrt();
+        let frame = GpuFrame {
+            m: [m.a, m.b, m.c, m.d],
+            t: [m.e, m.f, px_per_unit, 0.0],
+            viewport: [width as f32, height as f32, srgb as u32 as f32, 0.0],
+            ..self.frame_data
+        };
+        self.queue.write_buffer(&self.frame, view as u64 * VIEW_STRIDE, bytemuck::bytes_of(&frame));
+        let key = (format, blend, depth, samples);
+        self.ensure_pipelines_for(key);
+        self.view_keys[view as usize] = Some(key);
+    }
+
+    /// Draws one emitter's particles and ribbons, or one slot's formed particles, in view
+    /// `view` (0 is the frame [`Particles::prepare`] set up).
+    pub fn draw_part(&self, pass: &mut wgpu::RenderPass<'_>, view: u32, part: Part) {
+        let Some(key) = self.view_keys.get(view as usize).copied().flatten() else { return };
+        let Some(pipes) = self.draw_pipes.iter().find(|d| d.key == key) else { return };
+        pass.set_bind_group(0, &self.draw_bind, &[view * VIEW_STRIDE as u32]);
+        match part {
+            Part::Emitter(id) => {
+                let Some(e) = self.emitters.get(id as usize) else { return };
+                pass.set_pipeline(&pipes.free);
+                pass.draw(e.base * 6..(e.base + e.capacity) * 6, 0..1);
+                let trails = e.spec.trails.min(e.capacity);
+                if trails > 0 {
+                    let per = (TRAIL - 1) * 6;
+                    pass.set_pipeline(&pipes.trail);
+                    pass.draw(e.trail_base * per..(e.trail_base + trails) * per, 0..1);
+                }
+            }
+            Part::Slot(slot) => {
+                if self.slots.get(slot as usize).is_some_and(|s| s.gen > 0) {
+                    let n = self.cfg.slot_capacity * 6;
+                    pass.set_pipeline(&pipes.word);
+                    pass.draw(slot * n..(slot + 1) * n, 0..1);
+                }
+            }
+        }
+    }
+
+    /// Clears every slot's formed particles, as before the first [`Particles::set_word`].
+    pub fn reset_slots(&mut self) {
+        let words = self.cfg.word_slots as usize * self.cfg.slot_capacity as usize;
+        self.queue.write_buffer(&self.words, 0, bytemuck::cast_slice(&vec![GpuWord::default(); words]));
+        for s in &mut self.slots {
+            *s = Slot::default();
+        }
     }
 
     /// Makes the additive sprite pipelines for `format` without depth, so the first frame
@@ -1660,7 +1589,7 @@ impl Particles {
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         let Some(key) = self.draw_key else { return };
         let Some(pipes) = self.draw_pipes.iter().find(|d| d.key == key) else { return };
-        pass.set_bind_group(0, &self.draw_bind, &[]);
+        pass.set_bind_group(0, &self.draw_bind, &[0]);
         if self.free_used > 0 {
             pass.set_pipeline(&pipes.free);
             pass.draw(0..self.free_used * 6, 0..1);
@@ -1713,7 +1642,7 @@ fn encode_sim(s: &EmitterSim, e: &Emitter) -> GpuEmitStep {
         shape,
         life: [s.life, s.life_jitter, s.emit, s.spawn_speed],
         swirl: [s.swirl, s.ring_pull, s.ring_radius, s.drag],
-        noise: [s.noise, s.noise_scale, s.noise_speed, 0.0],
+        noise: [s.noise, s.noise_scale, s.noise_speed, e.start as f32],
         attract: [a[0], a[1], a[2], s.attract_strength],
         gravity: [g[0], g[1], g[2], s.mask],
         shock,
