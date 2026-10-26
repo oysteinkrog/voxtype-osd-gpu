@@ -106,11 +106,24 @@ fn rotate (e: EmitDraw, p: vec3f) -> vec3f {
   return vec3f (dot (e.rot0.xyz, p), dot (e.rot1.xyz, p), dot (e.rot2.xyz, p));
 }
 
-fn snap (px: vec2f, pitch: f32) -> vec2f {
-  if (pitch <= 0.0) {
-    return px;
+// Dot centres (PA09), snapped as vo-dots snaps its dots: onto the grid of `pitch` pixels
+// (rounded to whole pixels; 0 for no grid), then onto the pixel grid by the dot's diameter,
+// so an even diameter sits on a pixel corner and an odd one on a pixel centre. The move is
+// weighted by `1 - 0.5 * speed in cells per second`, so snapping fades in as a dot slows.
+fn snap_dot (px: vec2f, radius: f32, pitch: f32, v_px: vec2f) -> vec2f {
+  var s = px;
+  var cells = length (v_px);
+  if (pitch > 0.0) {
+    let p = max (round (pitch), 1.0);
+    s = (floor (px / p) + 0.5) * p;
+    cells = cells / p;
   }
-  return (floor (px / pitch) + 0.5) * pitch;
+  if (round (2.0 * radius) % 2.0 == 0.0) {
+    s = round (s);
+  } else {
+    s = floor (s) + 0.5;
+  }
+  return mix (px, s, clamp (1.0 - 0.5 * cells, 0.0, 1.0));
 }
 
 // Radius, colour scale and softness of a sprite of `r_px` at clip depth `w` for emitter `e`.
@@ -158,11 +171,12 @@ fn vs_free (@builtin(vertex_index) vid: u32) -> VOut {
   let b = bokeh (e, radius, clip_w (world, is3d));
   radius = b.x;
   a *= b.y;
+  radius = max (radius, 0.75);
   var px = pr.px;
   if (style == ST_DOT) {
-    px = snap (px, e.look.y);
+    px = snap_dot (px, radius, e.look.y, v_px);
   }
-  return moving (vid % 6u, px, v_px, max (radius, 0.75), pr.depth, vec4f (c.rgb * a, a), vec2f (f32 (style), b.z));
+  return moving (vid % 6u, px, v_px, radius, pr.depth, vec4f (c.rgb * a, a), vec2f (f32 (style), b.z));
 }
 
 // Ribbons (PA07): segment k of hero h joins its positions k and k + 1 ticks ago.
@@ -262,9 +276,9 @@ fn vs_word (@builtin(vertex_index) vid: u32) -> VOut {
   var radius: f32;
   var a = sd.color.a * light * sd.visible;
   if (style == ST_DOT) {
-    // A dot: its own size, snapped to the grid once it has nearly arrived.
+    // A dot: its own size, snapped as it comes to rest.
     radius = max (sd.size * ppu, 0.75);
-    p_px = mix (p_px, snap (p_px, sd.look.y), smoothstep (0.15, 0.02, ev.rem));
+    p_px = snap_dot (p_px, radius, sd.look.y, v_px);
   } else {
     // Ink condensing: large and soft while far, about 0.6 of a stroke at arrival.
     let base = select (p.stroke, sd.size, sd.size > 0.0);

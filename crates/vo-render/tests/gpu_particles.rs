@@ -640,3 +640,45 @@ fn a_revision_is_readable_again_within_250_ms() {
     assert!(readable <= 0.25, "{readable}");
     assert!(lit_outside < 0.35, "kept glyphs lit up: {lit_outside}");
 }
+
+#[test]
+fn dots_at_rest_sit_on_pixels_by_their_diameter() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let mut rig = Rig::new(&fonts, 48, 24);
+    // Off-pixel targets; a 3 px dot (odd) and a 4 px dot (even), on a grid of 4 px.
+    let pts = [Point::new(10.3, 11.6), Point::new(33.9, 10.2)];
+    let px_of = |rig: &mut Rig, radius: f32, at: Point| {
+        let mut p = rig.particles(&fonts, ParticleConfig { free_capacity: 64, word_slots: 1, ..Default::default() });
+        let form = PointForm { points: &[at], starts: None, size: 8.0, persist: true, sweep: 0.0, scatter: false };
+        p.set_points(0, 0.0, &form);
+        p.advance(2.0, &|_, _| EmitterSim { emit: 0.0, ..Default::default() });
+        let look = SlotLook {
+            size: radius,
+            style: SpriteStyle::Dot { pitch: 4.0 },
+            ..SlotLook::new(Point::ZERO, Color::WHITE)
+        };
+        p.prepare(&rig.params(2.0), &|_| EmitterLook::default(), &[look]);
+        rig.frame(&empty_list(rig.w, rig.h), &p)
+    };
+    // The dot's light-weighted centre in pixels.
+    let centre = |px: &[u8], w: u32| {
+        let (mut sx, mut sy, mut sw) = (0.0f64, 0.0f64, 0.0f64);
+        for (i, c) in px.chunks(4).enumerate() {
+            let k = c[3] as f64;
+            sx += k * ((i as u32 % w) as f64 + 0.5);
+            sy += k * ((i as u32 / w) as f64 + 0.5);
+            sw += k;
+        }
+        (sx / sw, sy / sw)
+    };
+    let odd = px_of(&mut rig, 1.5, pts[0]);
+    let even = px_of(&mut rig, 2.0, pts[1]);
+    let (ox, oy) = centre(&odd, rig.w);
+    let (ex, ey) = centre(&even, rig.w);
+    println!("odd dot at ({ox:.3}, {oy:.3}), even dot at ({ex:.3}, {ey:.3})");
+    // Cell centres of the 4 px grid are at 2, 6, 10, ...: (10, 10) and (34, 10); an odd
+    // diameter then moves to a pixel centre, an even one stays on the pixel corner.
+    assert!((ox - 10.5).abs() < 0.02 && (oy - 10.5).abs() < 0.02, "odd dot at ({ox}, {oy})");
+    assert!((ex - 34.0).abs() < 0.02 && (ey - 10.0).abs() < 0.02, "even dot at ({ex}, {ey})");
+}
