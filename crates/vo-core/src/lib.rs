@@ -1,4 +1,10 @@
-//! Overlay core: pure CPU logic shared by the renderer and its tests.
-//! Phase 0 holds only the word model (`words`).
+//! Overlay core: pure CPU logic shared by the scene, the renderer and their tests.
+//!
+//! Time model (M1): `time`, `spring`, `channel`, `track`, `hash`, `event_log`. Nothing here
+//! reads a clock; `clippy.toml` in this crate bans `Instant::now` and `SystemTime::now`.
+//! Word model (phase 0): `words`.
 
+pub mod hash;
+pub mod spring;
+pub mod time;
 pub mod words;
