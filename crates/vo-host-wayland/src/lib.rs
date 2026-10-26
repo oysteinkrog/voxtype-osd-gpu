@@ -339,9 +339,6 @@ impl WaylandHost {
 
         let event_loop: EventLoop<'static, State> =
             EventLoop::try_new().map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
-        WaylandSource::new(conn.clone(), queue)
-            .insert(event_loop.handle())
-            .map_err(|e| HostError::Connect(format!("wayland source: {e}")))?;
         let (ping, ping_source) = calloop::ping::make_ping()?;
         event_loop
             .handle()
@@ -354,7 +351,7 @@ impl WaylandHost {
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
-        let state = State {
+        let mut state = State {
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &qh),
             seats: SeatState::new(&globals, &qh),
@@ -384,6 +381,14 @@ impl WaylandHost {
             waker: Waker::new(move || ping.ping()),
             in_frame: None,
         };
+        // Output sizes arrive after the outputs are bound; `Placement::FromTop` needs them
+        // before the first surface opens.
+        let mut queue = queue;
+        queue.roundtrip(&mut state).map_err(|e| HostError::Connect(format!("output roundtrip: {e}")))?;
+        state.stage("outputs known");
+        WaylandSource::new(state.conn.clone(), queue)
+            .insert(event_loop.handle())
+            .map_err(|e| HostError::Connect(format!("wayland source: {e}")))?;
         Ok(WaylandHost { state, event_loop })
     }
 }
@@ -392,6 +397,23 @@ impl State {
     pub(crate) fn stage(&mut self, name: &'static str) {
         let t = self.now();
         self.diag.stages.push((name, t));
+    }
+
+    /// Logical height of the first output with a known size, else 1080. A layer surface with
+    /// no output goes where the compositor puts it, which this does not know, so the first
+    /// output stands in, as GTK's layer shell does.
+    fn output_height(&self) -> i32 {
+        self.outputs
+            .outputs()
+            .filter_map(|o| self.outputs.info(&o))
+            .find_map(|info| {
+                info.logical_size.map(|(_, h)| h).or_else(|| {
+                    let mode = info.modes.iter().find(|m| m.current)?;
+                    Some(mode.dimensions.1 / info.scale_factor.max(1))
+                })
+            })
+            .filter(|h| *h > 0)
+            .unwrap_or(1080)
     }
 
     /// The surface `wl` belongs to: its role surface or its GPU sub-surface.
@@ -786,14 +808,22 @@ impl HostCtl for State {
                 };
                 let l = shell.create_layer_surface(&self.qh, wl, layer, Some(spec.app_id.clone()), None);
                 l.set_size(w, h);
-                if let Placement::Anchored { edges, margin } = spec.placement {
-                    let mut a = Anchor::empty();
-                    a.set(Anchor::TOP, edges.top);
-                    a.set(Anchor::BOTTOM, edges.bottom);
-                    a.set(Anchor::LEFT, edges.left);
-                    a.set(Anchor::RIGHT, edges.right);
-                    l.set_anchor(a);
-                    l.set_margin(margin[0], margin[1], margin[2], margin[3]);
+                match spec.placement {
+                    Placement::Anchored { edges, margin } => {
+                        let mut a = Anchor::empty();
+                        a.set(Anchor::TOP, edges.top);
+                        a.set(Anchor::BOTTOM, edges.bottom);
+                        a.set(Anchor::LEFT, edges.left);
+                        a.set(Anchor::RIGHT, edges.right);
+                        l.set_anchor(a);
+                        l.set_margin(margin[0], margin[1], margin[2], margin[3]);
+                    }
+                    Placement::FromTop { fraction } => {
+                        let top = (fraction.clamp(0.0, 1.0) * self.output_height() as f32).round() as i32;
+                        l.set_anchor(Anchor::TOP);
+                        l.set_margin(top, 0, 0, 0);
+                    }
+                    Placement::Centered => {}
                 }
                 l.set_keyboard_interactivity(KeyboardInteractivity::None);
                 Role::Layer(l)

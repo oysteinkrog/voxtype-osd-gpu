@@ -73,6 +73,10 @@ pub enum Placement {
     /// Stuck to `edges`, `margin` logical pixels in from each anchored edge
     /// (top, right, bottom, left).
     Anchored { edges: Edges, margin: [i32; 4] },
+    /// Centred across the output, with the top edge `fraction` of the output's height down
+    /// (0 at the top, 1 at the bottom). Where the host cannot learn the output's height it
+    /// takes 1080.
+    FromTop { fraction: f32 },
 }
 
 /// Which parts of a surface take pointer input. Everything else is click-through.
