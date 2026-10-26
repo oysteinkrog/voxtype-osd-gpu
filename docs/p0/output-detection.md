@@ -20,6 +20,12 @@ inference, [G] a guess.
    over D-Bus with the window's `resourceClass`, `desktopFileName` and output name. The
    daemon keeps the latest value, so reading it at recording start or at paste time costs
    nothing. [I for the callback design; V for the fields, see below]
+   A persistent script also avoids a failure seen with per-call scripts on 2026-10-26 on
+   another Plasma machine: kdotool timed out on every call. KWin gave a newly loaded
+   script an id that another loaded script already had (load A, B and C, unload B, and the
+   next load gets C's id), so kdotool ran the wrong script and never got its answer. A
+   script loaded once and kept loaded by name is not exposed to that id reuse. [V for the
+   failure, reported by the lead; I for the cause being avoided]
 4. **Fallback** when the script cannot load (not KWin, or scripting disabled): the same
    `kdotool getactivewindow getwindowclassname` call that `~/bin/voxtype-auto-enter`
    uses, run once at paste time. [V]
