@@ -293,9 +293,27 @@ impl Signals {
         self.frames.iter().map(|p| (p.at, &p.frame))
     }
 
+    /// Frames that arrived together at scene time `arrived`, in clock order. The newest one
+    /// is taken to have arrived at `arrived`, and each older one that much earlier as its
+    /// audio clock is behind, so every frame keeps its own time.
+    pub fn push_batch(&mut self, frames: impl IntoIterator<Item = SignalFrame>, arrived: f64) {
+        let frames: Vec<SignalFrame> = frames.into_iter().collect();
+        let Some(newest) = frames.last().map(|f| f.clock) else {
+            return;
+        };
+        for frame in frames {
+            let back = newest - frame.clock;
+            self.push(frame, arrived - back);
+        }
+    }
+
     /// A frame that arrived at scene time `arrived`. Frames that land at or before the newest
     /// one are dropped. A clock that runs backwards or jumps by more than a second means the
     /// daemon restarted: the history starts over.
+    ///
+    /// Each frame needs its own arrival time. Pushing several frames with one `arrived`
+    /// places them all at that time, and all but the first are dropped: use
+    /// [`Signals::push_batch`] for frames read together.
     pub fn push(&mut self, frame: SignalFrame, arrived: f64) {
         let seen = arrived - frame.clock;
         let offset = match (self.offset, self.frames.back()) {
@@ -517,6 +535,14 @@ impl SignalsCell {
     pub fn push(&self, frame: SignalFrame, arrived: f64) -> Arc<Signals> {
         let mut guard = self.0.write().unwrap_or_else(|e| e.into_inner());
         Arc::make_mut(&mut guard).push(frame, arrived);
+        guard.clone()
+    }
+
+    /// Adds frames that arrived together (see [`Signals::push_batch`]) and returns the new
+    /// snapshot.
+    pub fn push_batch(&self, frames: impl IntoIterator<Item = SignalFrame>, arrived: f64) -> Arc<Signals> {
+        let mut guard = self.0.write().unwrap_or_else(|e| e.into_inner());
+        Arc::make_mut(&mut guard).push_batch(frames, arrived);
         guard.clone()
     }
 }
@@ -805,6 +831,24 @@ mod tests {
             assert!((w[1] - w[0] - FRAME_SECS).abs() < 1e-4, "{at:?}");
         }
         assert!((at[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn push_batch_keeps_every_frame_at_its_own_time() {
+        let mut s = Signals::new().with_playout(0.0);
+        s.push_batch((0..10).map(|i| frame(5.0 + i as f64 * FRAME_SECS, -20.0)), 2.0);
+        let at: Vec<f64> = s.frames().map(|(at, _)| at).collect();
+        assert_eq!(at.len(), 10, "{at:?}");
+        for w in at.windows(2) {
+            assert!((w[1] - w[0] - FRAME_SECS).abs() < 1e-4, "{at:?}");
+        }
+        assert!((at[9] - 2.0).abs() < 1e-9, "{at:?}");
+
+        // A second batch a tick later carries on the same timeline.
+        s.push_batch((10..20).map(|i| frame(5.0 + i as f64 * FRAME_SECS, -20.0)), 2.1);
+        let at: Vec<f64> = s.frames().map(|(at, _)| at).collect();
+        assert_eq!(at.len(), 20, "{at:?}");
+        assert!((at[19] - 2.1).abs() < 1e-3, "{at:?}");
     }
 
     #[test]
