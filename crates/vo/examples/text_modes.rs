@@ -19,6 +19,10 @@
 //!   their new place, "LIVE TRANSCRIPT" loses "LIVE" and closes the gap, and the keyboard badge
 //!   slides to its new x on a position spring.
 //!
+//! - `prompter` (T14): the teleprompter. Live words are broken into lines (`break_lines`);
+//!   when a line fills, the older lines move up in 260 ms, scale to 0.88 and dim to 0.45, and
+//!   the top line fades out (`aged_lines`).
+//!
 //!   cargo run --release -p vo --example text_modes -- --mode ticker [--out DIR] [--check]
 //!
 //! Writes `DIR/<mode>.mp4` and `DIR/<mode>-sheet.png` (default DIR
@@ -28,6 +32,7 @@ use std::path::PathBuf;
 
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
+use vo::scene::lines::{aged_lines, break_lines, Ages};
 use vo::scene::roll::{digit_roll, digit_roll_with, Roll};
 use vo::scene::swap::{word_swap, Swap};
 use vo::scene::taffy::prelude::{AlignItems, JustifyContent};
@@ -508,6 +513,60 @@ impl App for Status {
     }
 }
 
+// T14: teleprompter.
+
+const PROMPTER_TEXT: &str = "when a line fills up the older lines roll upward and shrink a little while \
+                             they dim so the eye stays on the newest words at the bottom and the top \
+                             line fades away before it reaches the edge of the window";
+const PROMPTER_W: f32 = 620.0;
+
+struct Prompter {
+    words: Vec<(f64, Word)>,
+    shown: usize,
+    measure: ShapedLayout,
+    style: TextStyle,
+}
+
+impl Prompter {
+    fn new(fonts: &FontRegistry) -> Prompter {
+        Prompter {
+            words: arrivals(PROMPTER_TEXT, 0.3, 0.2),
+            shown: 0,
+            measure: ShapedLayout::new(fonts.clone()),
+            style: TextStyle::new(0, 28.0, 38.0),
+        }
+    }
+}
+
+impl App for Prompter {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        for (i, (t, _)) in self.words.iter().enumerate() {
+            cx.after(*t, Msg::Tick(i + 1));
+        }
+    }
+
+    fn update(&mut self, msg: Msg, _: &mut Cx<Msg>) {
+        if let Msg::Tick(n) = msg {
+            self.shown = n;
+        }
+    }
+
+    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
+        let words: Vec<Word> = self.words[..self.shown].iter().map(|(_, w)| w.clone()).collect();
+        let lines = break_lines(&self.measure, &words, &self.style, PROMPTER_W);
+        let text = aged_lines("lines", &lines, self.style, text_color(), &Ages::teleprompter());
+        // Three lines tall, bottom-anchored, so the text rolls up out of a soft top edge.
+        let window = Element::layer("window")
+            .size(PROMPTER_W, 3.0 * self.style.line_height)
+            .justify(JustifyContent::FLEX_END)
+            .fade_edges(0.0, 16.0, 0.0, 0.0)
+            .child(text);
+        bg().child(window)
+    }
+}
+
 // Running a mode.
 
 fn fonts() -> FontRegistry {
@@ -620,6 +679,9 @@ fn main() {
         "status" => {
             run(&mode, SIZE, &out, check, 6.0, &[0.5, 1.53, 1.58, 1.7, 3.04, 3.3, 4.55, 5.9], || Status { state: 0 })
         }
-        _ => panic!("unknown mode {mode}; known: ticker, telemetry, log, status"),
+        "prompter" => {
+            run(&mode, SIZE, &out, check, 8.5, &[1.0, 2.0, 2.15, 2.4, 4.0, 4.2, 6.0, 8.4], || Prompter::new(&fonts))
+        }
+        _ => panic!("unknown mode {mode}; known: ticker, telemetry, log, status, prompter"),
     }
 }
