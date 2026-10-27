@@ -9,8 +9,7 @@ use vo_scene::taffy::prelude::JustifyContent;
 use vo_scene::text::{EstimateText, TextLayout};
 use vo_scene::{NodeId, Presence, Scene};
 
-const STYLE: TextStyle =
-    TextStyle { font: 0, size: 20.0, line_height: 24.0, max_lines: 0, ellipsis: false, tracking: 0.0 };
+const STYLE: TextStyle = TextStyle::new(0, 20.0, 24.0);
 /// Ten characters of 11 units, with spaces of 6: "aaaa bbbb" fits, a third word does not.
 const WIDTH: f32 = 110.0;
 

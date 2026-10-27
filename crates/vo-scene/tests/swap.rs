@@ -8,8 +8,7 @@ use vo_scene::geom::Color;
 use vo_scene::swap::{word_swap, Swap};
 use vo_scene::{NodeId, Presence, Prop, Scene};
 
-const STYLE: TextStyle =
-    TextStyle { font: 0, size: 20.0, line_height: 24.0, max_lines: 0, ellipsis: false, tracking: 0.0 };
+const STYLE: TextStyle = TextStyle::new(0, 20.0, 24.0);
 
 fn view(text: &str) -> Element<()> {
     Element::row("root")

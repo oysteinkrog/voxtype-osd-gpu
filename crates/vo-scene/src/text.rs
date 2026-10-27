@@ -23,6 +23,7 @@ use unicode_linebreak::{linebreaks, BreakOpportunity};
 use crate::element::TextStyle;
 use crate::font::{FontId, FontRegistry};
 use crate::geom::{Point, Size};
+use crate::inline::{OBJECT_CHAR, OBJECT_GLYPH, OBJECT_TEXT};
 
 /// One placed glyph. `pos` is the pen position on the baseline, relative to the text box.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +42,76 @@ pub struct PlacedGlyph {
 pub struct ShapedText {
     pub size: Size,
     pub glyphs: Vec<PlacedGlyph>,
+    /// The lines, top to bottom.
+    pub lines: Vec<Line>,
+}
+
+/// One laid-out line: its glyphs, where it sits across the box and its baseline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Line {
+    /// Range in `ShapedText::glyphs`.
+    pub glyphs: Range<usize>,
+    /// Left end of the line's ink and its width, after alignment.
+    pub x: f32,
+    pub width: f32,
+    pub baseline: f32,
+}
+
+/// Where each line of a paragraph sits across the text box (FX-002).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    /// Lines start at the left edge.
+    #[default]
+    Start,
+    /// Each line is centred.
+    Center,
+    /// Lines end at the right edge.
+    End,
+}
+
+impl Align {
+    /// Share of the free space that goes before the line.
+    pub fn factor(self) -> f32 {
+        match self {
+            Align::Start => 0.0,
+            Align::Center => 0.5,
+            Align::End => 1.0,
+        }
+    }
+}
+
+impl ShapedText {
+    /// Moves every glyph across by the alignment's share of `width` less the text's width,
+    /// and widens the text to `width`. Layout calls this when the box is wider than the
+    /// text; lines are already aligned to each other.
+    pub fn align_in(&mut self, align: Align, width: f32) {
+        let dx = align.factor() * (width - self.size.w);
+        if dx > 0.0 {
+            for g in &mut self.glyphs {
+                g.pos.x += dx;
+            }
+            for l in &mut self.lines {
+                l.x += dx;
+            }
+            self.size.w = width;
+        }
+    }
+}
+
+/// Shifts the glyphs of each line, given as `(first glyph, width, baseline)` in order, so
+/// the lines sit by `align` across the widest one, and returns the lines.
+fn align_lines(glyphs: &mut [PlacedGlyph], lines: &[(usize, f32, f32)], widest: f32, align: Align) -> Vec<Line> {
+    let k = align.factor();
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, &(start, width, baseline)) in lines.iter().enumerate() {
+        let end = lines.get(i + 1).map_or(glyphs.len(), |l| l.0).min(glyphs.len());
+        let dx = k * (widest - width);
+        for g in &mut glyphs[start.min(end)..end] {
+            g.pos.x += dx;
+        }
+        out.push(Line { glyphs: start.min(end)..end, x: dx, width, baseline });
+    }
+    out
 }
 
 /// `PlacedGlyph::cluster` of the glyphs of an ellipsis the layout added.
@@ -51,8 +122,17 @@ pub trait TextLayout {
     /// line breaks in the text) and places its glyphs. A word longer than the width starts
     /// a new line and breaks between characters, as Pango's `WRAP_WORD_CHAR` does
     /// (`EstimateText` lets it overflow instead). `style.max_lines` and `style.ellipsis` cut
-    /// the result.
+    /// the result. Lines sit by `style.align` across the widest line, and `style.balance`
+    /// evens out their lengths (`ShapedLayout` only).
     fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText;
+
+    /// As `layout`, with each [`OBJECT_CHAR`] taking the next width of `objects`, in logical
+    /// units, and placing an [`OBJECT_GLYPH`] there: room for an inline object
+    /// (`crate::inline`). An object with no width left in `objects` takes none.
+    fn layout_objects(&self, text: &str, style: &TextStyle, max_width: Option<f32>, objects: &[f32]) -> ShapedText {
+        let _ = objects;
+        self.layout(text, style, max_width)
+    }
 }
 
 /// Logical units a line may overshoot its width and still count as fitting.
@@ -76,13 +156,21 @@ impl Default for EstimateText {
 
 impl TextLayout for EstimateText {
     fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText {
+        self.layout_objects(text, style, max_width, &[])
+    }
+
+    fn layout_objects(&self, text: &str, style: &TextStyle, max_width: Option<f32>, objects: &[f32]) -> ShapedText {
+        let mut objects = objects.iter();
         let em = style.size;
         let space = self.space * em;
         let mut glyphs = Vec::new();
         let (mut x, mut line, mut widest) = (0.0f32, 0usize, 0.0f32);
         let mut any = false;
+        let first_baseline = self.ascent * em;
+        let mut starts: Vec<(usize, f32, f32)> = vec![(0, 0.0, first_baseline)];
         for (start, word) in words(text) {
-            let w = word.chars().count() as f32 * self.advance * em;
+            let object = (word == OBJECT_TEXT).then(|| objects.next().copied().unwrap_or(0.0));
+            let w = object.unwrap_or(word.chars().count() as f32 * self.advance * em);
             if any {
                 // The tolerance absorbs rounding in widths that went through layout and back.
                 let fits = max_width.is_none_or(|max| x + space + w <= max + FIT_TOLERANCE);
@@ -90,11 +178,25 @@ impl TextLayout for EstimateText {
                     x += space;
                 } else {
                     widest = widest.max(x);
+                    starts.last_mut().expect("a line").1 = x;
                     line += 1;
+                    starts.push((glyphs.len(), 0.0, line as f32 * style.line_height + first_baseline));
                     x = 0.0;
                 }
             }
             let baseline = line as f32 * style.line_height + self.ascent * em;
+            if let Some(w) = object {
+                glyphs.push(PlacedGlyph {
+                    glyph: OBJECT_GLYPH,
+                    font: style.font,
+                    pos: Point::new(x, baseline),
+                    cluster: start as u32,
+                    advance: w,
+                });
+                x += w;
+                any = true;
+                continue;
+            }
             for (i, c) in word.char_indices() {
                 glyphs.push(PlacedGlyph {
                     glyph: c as u32,
@@ -108,14 +210,16 @@ impl TextLayout for EstimateText {
             any = true;
         }
         widest = widest.max(x);
-        let mut lines = if any { line + 1 } else { 0 };
+        starts.last_mut().expect("a line").1 = x;
+        let mut placed = if any { align_lines(&mut glyphs, &starts, widest, style.align) } else { Vec::new() };
+        let mut lines = placed.len();
         let max_lines = style.max_lines as usize;
         if max_lines > 0 && lines > max_lines {
             lines = max_lines;
-            let bottom = lines as f32 * style.line_height;
-            glyphs.retain(|g| g.pos.y < bottom);
+            placed.truncate(lines);
+            glyphs.truncate(placed.last().map_or(0, |l| l.glyphs.end));
         }
-        ShapedText { size: Size::new(widest, lines as f32 * style.line_height), glyphs }
+        ShapedText { size: Size::new(widest, lines as f32 * style.line_height), glyphs, lines: placed }
     }
 }
 
@@ -157,8 +261,12 @@ struct Segment {
 
 impl TextLayout for ShapedLayout {
     fn layout(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> ShapedText {
+        self.layout_objects(text, style, max_width, &[])
+    }
+
+    fn layout_objects(&self, text: &str, style: &TextStyle, max_width: Option<f32>, objects: &[f32]) -> ShapedText {
         let Some(face) = self.fonts.get(style.font) else {
-            return EstimateText::default().layout(text, style, max_width);
+            return EstimateText::default().layout_objects(text, style, max_width, objects);
         };
         if text.is_empty() {
             return ShapedText::default();
@@ -166,12 +274,16 @@ impl TextLayout for ShapedLayout {
         let upem = face.units_per_em();
         let k = style.size / upem as f32;
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
-        let glyphs = self.shape_runs(text, style, &shaper, k);
+        let mut glyphs = self.shape_runs(text, style, &shaper, k);
+        size_objects(text, &mut glyphs, objects, style.tracking);
         let mut segments = segments(text, &glyphs, style.tracking);
         if let Some(max) = max_width {
             segments = split_long_words(text, segments, &glyphs, style.tracking, max);
         }
         let mut lines = fit(&segments, max_width);
+        if let (true, Some(max)) = (style.balance && lines.len() > 1, max_width) {
+            lines = balance(&segments, lines, max);
+        }
         let max_lines = style.max_lines as usize;
         let dropped = max_lines > 0 && lines.len() > max_lines;
         if dropped {
@@ -184,6 +296,7 @@ impl TextLayout for ShapedLayout {
         let mut out = ShapedText::default();
         let mut ends: Vec<f32> = Vec::new();
         let mut widest = 0.0f32;
+        let mut line_starts: Vec<(usize, f32, f32)> = Vec::with_capacity(lines.len());
         for (i, line) in lines.iter().enumerate() {
             let baseline = first_baseline + i as f32 * style.line_height;
             let range = segments[line.start].glyphs.start..segments[line.end - 1].glyphs.end;
@@ -229,7 +342,9 @@ impl TextLayout for ShapedLayout {
                 width = x + *dots_width;
             }
             widest = widest.max(width);
+            line_starts.push((start, width, baseline));
         }
+        out.lines = align_lines(&mut out.glyphs, &line_starts, widest, style.align);
         out.size = Size::new(widest, lines.len() as f32 * style.line_height);
         out
     }
@@ -529,6 +644,51 @@ fn fit(segments: &[Segment], max_width: Option<f32>) -> Vec<Range<usize>> {
     lines
 }
 
+/// Gives each object character the next width of `objects` (tracking included) and the
+/// placeholder glyph. Extra glyphs of an object's cluster take no room.
+fn size_objects(text: &str, glyphs: &mut [Shaped], objects: &[f32], tracking: f32) {
+    if !text.contains(OBJECT_CHAR) {
+        return;
+    }
+    let mut objects = objects.iter();
+    let mut last = None;
+    for g in glyphs {
+        if !text.get(g.cluster as usize..).is_some_and(|s| s.starts_with(OBJECT_CHAR)) {
+            continue;
+        }
+        let first = last != Some(g.cluster);
+        last = Some(g.cluster);
+        let width = if first { objects.next().copied().unwrap_or(0.0) } else { 0.0 };
+        (g.id, g.advance, g.dx, g.dy) = (OBJECT_GLYPH, width - tracking, 0.0, 0.0);
+    }
+}
+
+/// Even line lengths (TY25): the narrowest width at which the greedy fill still takes no
+/// more lines than it does at `max`, found by bisection. Like CSS `text-wrap: balance`, the
+/// last line comes out close to the others instead of holding one stray word.
+fn balance(segments: &[Segment], greedy: Vec<Range<usize>>, max: f32) -> Vec<Range<usize>> {
+    let count = greedy.len();
+    let total: f32 = segments.iter().map(|s| s.width).sum();
+    let widest_piece = segments.iter().map(|s| s.fit_width).fold(0.0f32, f32::max);
+    let (mut lo, mut hi) = ((total / count as f32).max(widest_piece).min(max), max);
+    let tightest = fit(segments, Some(lo));
+    if tightest.len() <= count {
+        return tightest;
+    }
+    let mut best = greedy;
+    // Half a logical unit is below what a reader can see.
+    while hi - lo > 0.5 {
+        let mid = 0.5 * (lo + hi);
+        let lines = fit(segments, Some(mid));
+        if lines.len() <= count {
+            (hi, best) = (mid, lines);
+        } else {
+            lo = mid;
+        }
+    }
+    best
+}
+
 /// Words split on ASCII spaces, with their byte offsets.
 fn words(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.split(' ')
@@ -563,8 +723,7 @@ mod tests {
         ShapedLayout::new(fonts)
     }
 
-    const STYLE: TextStyle =
-        TextStyle { font: 0, size: 20.0, line_height: 26.0, max_lines: 0, ellipsis: false, tracking: 0.0 };
+    const STYLE: TextStyle = TextStyle::new(0, 20.0, 26.0);
 
     fn gid(t: &ShapedLayout, c: char) -> u32 {
         let face = t.fonts().get(0).unwrap();
@@ -833,5 +992,129 @@ mod tests {
         let wide = t.layout("ab cd", &STYLE.tracking(2.0), None);
         assert!((wide.size.w - plain.size.w - 10.0).abs() < 1e-3, "{} vs {}", wide.size.w, plain.size.w);
         assert!((wide.glyphs[3].pos.x - plain.glyphs[3].pos.x - 8.0).abs() < 1e-3);
+    }
+
+    /// Each line's ink as `(left, right)`, from the glyphs that share its baseline.
+    fn line_spans(s: &ShapedText) -> Vec<(f32, f32)> {
+        let mut out: Vec<(f32, f32, f32)> = Vec::new();
+        for g in &s.glyphs {
+            match out.iter_mut().find(|l| (l.0 - g.pos.y).abs() < 0.5) {
+                Some(l) => (l.1, l.2) = (l.1.min(g.pos.x), l.2.max(g.pos.x + g.advance)),
+                None => out.push((g.pos.y, g.pos.x, g.pos.x + g.advance)),
+            }
+        }
+        out.into_iter().map(|(_, a, b)| (a, b)).collect()
+    }
+
+    const PARAGRAPH: &str = "the quick brown fox jumps over the lazy dog";
+
+    #[test]
+    fn centred_lines_share_a_middle() {
+        let t = shaped();
+        let s = t.layout(PARAGRAPH, &STYLE.centered(), Some(150.0));
+        let spans = line_spans(&s);
+        assert!(spans.len() >= 3, "{spans:?}");
+        let mid = 0.5 * s.size.w;
+        for &(a, b) in &spans {
+            assert!((0.5 * (a + b) - mid).abs() < 0.01, "line {a}..{b} against middle {mid}");
+        }
+        // The widest line still starts at 0, and the text is as wide as before.
+        let left = t.layout(PARAGRAPH, &STYLE, Some(150.0));
+        assert_eq!(s.size, left.size);
+        assert!(spans.iter().any(|&(a, _)| a.abs() < 0.01));
+        // Same glyphs, same lines: only x moves.
+        assert_eq!(s.glyphs.len(), left.glyphs.len());
+        assert!(s.glyphs.iter().zip(&left.glyphs).all(|(a, b)| a.pos.y == b.pos.y && a.pos.x >= b.pos.x));
+    }
+
+    #[test]
+    fn end_aligned_lines_share_a_right_edge() {
+        let t = shaped();
+        let s = t.layout(PARAGRAPH, &STYLE.align(Align::End), Some(150.0));
+        for (_, b) in line_spans(&s) {
+            assert!((b - s.size.w).abs() < 0.01, "right edge {b} against {}", s.size.w);
+        }
+    }
+
+    #[test]
+    fn estimate_centres_lines_too() {
+        let style = TextStyle::new(0, 10.0, 12.0).centered();
+        let s = EstimateText::default().layout("abcd ef", &style, Some(30.0));
+        // "abcd" is 22 wide, "ef" 11: "ef" starts 5.5 in.
+        assert_eq!(s.size.w, 22.0);
+        assert_eq!(s.glyphs[4].pos.x, 5.5);
+    }
+
+    #[test]
+    fn balance_evens_lines_and_keeps_the_count() {
+        let t = shaped();
+        let text = "one two three four five six seven eight nine ten eleven";
+        let width = t.layout("one two three four five six seven", &STYLE, None).size.w + 1.0;
+        let greedy = line_spans(&t.layout(text, &STYLE, Some(width)));
+        let even = line_spans(&t.layout(text, &STYLE.balanced(), Some(width)));
+        assert_eq!(greedy.len(), even.len());
+        let spread = |l: &[(f32, f32)]| {
+            let w: Vec<f32> = l.iter().map(|(a, b)| b - a).collect();
+            w.iter().cloned().fold(0.0, f32::max) - w.iter().cloned().fold(f32::INFINITY, f32::min)
+        };
+        assert!(spread(&even) < 0.5 * spread(&greedy), "{even:?} against {greedy:?}");
+        assert!(even.iter().all(|(_, b)| *b <= width + FIT_TOLERANCE));
+        // One line stays one line.
+        assert_eq!(t.layout("one two", &STYLE.balanced(), Some(width)), t.layout("one two", &STYLE, Some(width)));
+    }
+
+    #[test]
+    fn align_in_moves_the_block_into_a_wider_box() {
+        let t = shaped();
+        let mut s = t.layout("hello", &STYLE.centered(), None);
+        let (w, x0) = (s.size.w, s.glyphs[0].pos.x);
+        s.align_in(Align::Center, w + 40.0);
+        assert!((s.glyphs[0].pos.x - x0 - 20.0).abs() < 1e-4);
+        assert_eq!(s.size.w, w + 40.0);
+        let mut left = t.layout("hello", &STYLE, None);
+        left.align_in(Align::Start, w + 40.0);
+        assert_eq!(left.glyphs[0].pos.x, x0);
+    }
+
+    #[test]
+    fn objects_take_their_width_and_wrap_like_words() {
+        let t = shaped();
+        let text = format!("ab {OBJECT_TEXT} cd");
+        let plain = t.layout("ab cd", &STYLE, None);
+        let s = t.layout_objects(&text, &STYLE, None, &[30.0]);
+        let obj = s.glyphs.iter().find(|g| g.glyph == OBJECT_GLYPH).expect("a placeholder");
+        assert_eq!(obj.advance, 30.0);
+        assert_eq!(obj.cluster, 3);
+        let space = plain.glyphs[2].pos.x - plain.glyphs[1].pos.x - plain.glyphs[1].advance;
+        assert!((s.size.w - plain.size.w - 30.0 - space).abs() < 0.01, "{} {}", s.size.w, plain.size.w);
+        // A wide object goes to the next line like a word.
+        let width = t.layout("ab", &STYLE, None).size.w + 5.0;
+        let wrapped = t.layout_objects(&text, &STYLE, Some(width + 30.0), &[width + 20.0]);
+        let obj = wrapped.glyphs.iter().find(|g| g.glyph == OBJECT_GLYPH).unwrap();
+        assert_eq!(obj.pos.x, 0.0);
+        assert!(obj.pos.y > wrapped.glyphs[0].pos.y);
+        // The estimate does the same.
+        let e = EstimateText::default().layout_objects(&text, &STYLE, None, &[30.0]);
+        assert_eq!(e.glyphs.iter().find(|g| g.glyph == OBJECT_GLYPH).unwrap().advance, 30.0);
+    }
+
+    #[test]
+    fn lines_report_their_glyphs_extent_and_baseline() {
+        let t = shaped();
+        let s = t.layout(PARAGRAPH, &STYLE.centered(), Some(150.0));
+        assert!(s.lines.len() >= 3);
+        assert_eq!(s.lines.first().unwrap().glyphs.start, 0);
+        assert_eq!(s.lines.last().unwrap().glyphs.end, s.glyphs.len());
+        for (l, (a, b)) in s.lines.iter().zip(line_spans(&s)) {
+            assert!((l.x - a).abs() < 0.01 && (l.x + l.width - b).abs() < 0.01, "{l:?} {a} {b}");
+            assert!(s.glyphs[l.glyphs.clone()].iter().all(|g| (g.pos.y - l.baseline).abs() < 0.5));
+        }
+        let mut wide = s.clone();
+        wide.align_in(Align::Center, s.size.w + 20.0);
+        assert!((wide.lines[0].x - s.lines[0].x - 10.0).abs() < 1e-4);
+        let e = EstimateText::default().layout("ab cd", &TextStyle::new(0, 10.0, 12.0), Some(20.0));
+        assert_eq!(e.lines.len(), 2);
+        assert_eq!(e.lines[1].glyphs, 2..4);
+        assert_eq!(e.lines[1].baseline, 12.0 + 8.0);
     }
 }

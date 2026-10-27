@@ -27,6 +27,7 @@ use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
 use crate::flow::{Flow, FlowInput};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::{Glass, GlassInstance};
+use crate::inline::OBJECT_GLYPH;
 use crate::input::PointerState;
 use crate::layout::LayoutView;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
@@ -1373,11 +1374,24 @@ impl<M> Scene<M> {
                 self.glyphs(n, style.size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style, particles, .. } => {
+            Kind::LiveText { words, style, particles, inline, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 if let Some(look) = particles {
                     let pw = out.particle_words.get_or_insert_with(|| ParticleWords { t, words: Vec::new() });
                     pw.words.extend(n.words.iter().map(|w| ParticleWord { word: w.id, since: w.since, look: *look }));
+                }
+                if !inline.is_empty() {
+                    let mut shapes = Vec::new();
+                    let place = |id: u32| {
+                        let b = n.live.word_bounds(id, t, style.size)?;
+                        let (k, dx, dy) = n.word_motion(id, t);
+                        Some((Rect::new(origin.x + b.x + dx, origin.y + b.y + dy, b.w, b.h), k))
+                    };
+                    crate::inline::draw(words, inline, style.size, color, place, &mut shapes);
+                    for shape in shapes {
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        out.shapes.push(shape);
+                    }
                 }
                 // Byte offset where each word starts in the joined text.
                 let mut starts = Vec::with_capacity(words.len());
@@ -1417,7 +1431,7 @@ impl<M> Scene<M> {
                         // Where the word and glyph are on their way to the laid-out place.
                         let m = n.live.glyph(i, t);
                         let (k, dx, dy) = (k * m.opacity, dx + m.dx, dy + m.dy);
-                        if k <= 0.0 {
+                        if k <= 0.0 || g.glyph == OBJECT_GLYPH {
                             continue;
                         }
                         let (blur, dissolve, wipe) = n.word_fx(word, t);
@@ -1444,7 +1458,7 @@ impl<M> Scene<M> {
                     for gh in n.live.ghosts(t) {
                         let (k, dx, dy) = n.word_motion(gh.word, t);
                         let k = k * gh.opacity;
-                        if k <= 0.0 {
+                        if k <= 0.0 || gh.glyph == OBJECT_GLYPH {
                             continue;
                         }
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
@@ -1697,6 +1711,9 @@ impl<M> Scene<M> {
         let fx = n.text_fx(t).faded(alpha);
         let spans = (!fx.is_none() && fx.wipe > 0.0).then(|| glyph_spans(&n.shaped, size));
         for (i, g) in n.shaped.glyphs.iter().enumerate() {
+            if g.glyph == OBJECT_GLYPH {
+                continue;
+            }
             if !fx.is_none() {
                 let wipe = spans.as_ref().map_or(0.0, |s| wipe_part(fx.wipe, (0.0, n.shaped.size.w), s[i]));
                 push_glyph_fx(out, GlyphFx { wipe, ..fx });

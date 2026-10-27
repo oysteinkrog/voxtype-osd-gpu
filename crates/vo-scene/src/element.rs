@@ -391,11 +391,40 @@ pub struct TextStyle {
     /// Extra space after every character in logical units, as CSS `letter-spacing`. Negative
     /// tightens.
     pub tracking: f32,
+    /// Where each line sits across the text box (FX-002).
+    pub align: crate::text::Align,
+    /// Wrap to near-equal line lengths, as CSS `text-wrap: balance` (TY25): the narrowest
+    /// width that keeps the greedy line count.
+    pub balance: bool,
 }
 
 impl TextStyle {
-    pub fn new(font: u32, size: f32, line_height: f32) -> TextStyle {
-        TextStyle { font, size, line_height, max_lines: 0, ellipsis: false, tracking: 0.0 }
+    pub const fn new(font: u32, size: f32, line_height: f32) -> TextStyle {
+        TextStyle {
+            font,
+            size,
+            line_height,
+            max_lines: 0,
+            ellipsis: false,
+            tracking: 0.0,
+            align: crate::text::Align::Start,
+            balance: false,
+        }
+    }
+
+    /// Each line placed across the box by `align`.
+    pub fn align(self, align: crate::text::Align) -> TextStyle {
+        TextStyle { align, ..self }
+    }
+
+    /// Each line centred in the box.
+    pub fn centered(self) -> TextStyle {
+        self.align(crate::text::Align::Center)
+    }
+
+    /// Lines of near-equal length.
+    pub fn balanced(self) -> TextStyle {
+        TextStyle { balance: true, ..self }
     }
 
     /// With `tracking` logical units of extra space after every character.
@@ -448,6 +477,8 @@ pub(crate) enum Kind {
         particles: Option<WordParticles>,
         /// Caret and other live text motion (`crate::flow`).
         live: LiveMotion,
+        /// Inline objects by word id (`Element::inline_objects`, `crate::inline`).
+        inline: Vec<(u32, crate::inline::Inline)>,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -636,6 +667,7 @@ impl<M> Element<M> {
             change: Transition::NONE,
             particles: None,
             live: LiveMotion::default(),
+            inline: Vec::new(),
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
@@ -1197,6 +1229,18 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { particles, .. } => *particles = Some(look),
             _ => debug_assert!(false, "word_particles on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: inline objects (FX-063). Each id names a word whose text is
+    /// [`OBJECT_TEXT`](crate::inline::OBJECT_TEXT) (make one with `Inline::word`); the word
+    /// takes the object's width in the line, wraps like a word, springs when the width
+    /// changes, and draws the object's mark instead of a glyph.
+    pub fn inline_objects(mut self, objects: Vec<(u32, crate::inline::Inline)>) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { inline, .. } => *inline = objects,
+            _ => debug_assert!(false, "inline_objects on a node that is not live text: {}", self.key),
         }
         self
     }
