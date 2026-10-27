@@ -105,12 +105,12 @@ impl Segments {
         let clip = l.levels[lo as usize..hi as usize].iter().any(|&x| x >= self.clip_at);
         let Some((hold, fall, _)) = self.peak else { return (level, level, clip) };
         // For each level in the window, its value now: held, then falling.
-        let start = index(t - hold as f64 - 1.0 / fall.max(1e-3) as f64).clamp(0.0, n);
+        let start = index(t - hold as f64 - 1.0 / fall.max(1e-3) as f64).clamp(0.0, hi) as usize;
         let mut peak = level;
-        for i in start as usize..hi as usize {
+        for (i, &y) in followed.iter().enumerate().take(hi as usize).skip(start) {
             let at = l.first_at() + i as f64 / l.rate as f64;
             let age = (t - at) as f32;
-            peak = peak.max(followed[i] - fall * (age - hold).max(0.0));
+            peak = peak.max(y - fall * (age - hold).max(0.0));
         }
         (level, peak, clip)
     }
