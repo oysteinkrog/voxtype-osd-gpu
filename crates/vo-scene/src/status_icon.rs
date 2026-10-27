@@ -46,6 +46,10 @@ pub struct IconStyle {
     pub cancel: Color,
     /// Ring, check and X stroke width as a fraction of the box side.
     pub width: f32,
+    /// Seconds from `done` until the check is fully drawn. `None` uses the natural timing
+    /// (about 0.6 s, depending on where the spinner was); a value scales the ring springs and
+    /// the check draw to fit, for a popup that closes soon after it is done.
+    pub done_secs: Option<f32>,
 }
 
 impl Default for IconStyle {
@@ -56,6 +60,7 @@ impl Default for IconStyle {
             done: Color::hex(0x4ade80, 1.0),
             cancel: Color::hex(0x9ca3af, 1.0),
             width: 0.08,
+            done_secs: None,
         }
     }
 }
@@ -210,14 +215,10 @@ impl StatusIcon {
         let c = self.style.done;
         let at = self.story.last_start().map_or(t, |s| t.max(s));
         let e = self.story.state(at).state;
-        let (tail_s, head_s) = (Spring::critical_to_98(0.45), Spring::critical_to_98(0.40));
-        // A critically damped spring does not overshoot when the target is at least v / omega
-        // ahead, so the targets are the next whole turn past that point.
-        let lead = |ch: Ch, s: Spring| ch.x + ch.v.max(0.0) / s.omega() + 0.02;
-        let mut tail_to = lead(e.tail, tail_s).ceil();
-        if lead(e.head, head_s) > tail_to + 1.0 {
-            tail_to += 1.0;
-        }
+        // Natural timing, scaled to `done_secs` when it is set.
+        let k = self.style.done_secs.map_or(1.0, |d| self.done_scale(&e, d as f64));
+        let (tail_to, springs, lag, draw, closed) = done_plan(&e, k);
+        let (tail_s, head_s) = springs;
         let head_to = tail_to + 1.0;
         let close = move |e: &IconState, dt: f64| {
             let mut s = *e;
@@ -229,19 +230,28 @@ impl StatusIcon {
             s.head = e.head.to(head_to, head_s, dt);
             s.tint(c, Spring::SOFT, dt)
         };
-        let closed = e.tail.settle(tail_to, tail_s, 0.004).max(e.head.settle(head_to, head_s, 0.004));
-        let lag = (closed - 0.08).max(0.12);
-        const DRAW: f64 = 0.32;
         let check = move |_: &IconState, dt: f64| {
             let mut s = close(&e, dt + lag);
-            let u = (dt / DRAW).clamp(0.0, 1.0);
+            let u = (dt / draw).clamp(0.0, 1.0);
             s.check = (1.0 - (1.0 - u).powi(3)) as f32;
             s
         };
         type Boxed = Box<dyn crate::story::Step<IconState>>;
         let steps: [(&'static str, f64, Boxed); 2] = [("close", 0.0, Box::new(close)), ("check", lag, Box::new(check))];
         self.story.sequence(at, steps);
-        self.until = at + (lag + DRAW).max(closed).max(0.6);
+        self.until = at + (lag + draw).max(closed);
+    }
+
+    /// The factor that makes a done sequence entered from `e` take `secs` until the check is
+    /// drawn. The handed-over velocity makes the time not quite proportional to the factor,
+    /// so it is refined a few times.
+    fn done_scale(&self, e: &IconState, secs: f64) -> f64 {
+        let mut k = 1.0;
+        for _ in 0..4 {
+            let (_, _, lag, draw, _) = done_plan(e, k);
+            k = (k * secs / (lag + draw)).clamp(0.1, 4.0);
+        }
+        k
     }
 
     /// Cancelled: whatever is showing shrinks away while an X draws on.
@@ -308,6 +318,23 @@ impl StatusIcon {
         mark(&self.check, s.check, 0.46, p);
         mark(&self.cross, s.cross, 0.7, p);
     }
+}
+
+/// The done sequence entered from `e` with durations scaled by `k`: the tail's target turn,
+/// the tail and head springs, when the check starts, how long it draws, and when the ring has
+/// closed (seconds after done).
+fn done_plan(e: &IconState, k: f64) -> (f64, (Spring, Spring), f64, f64, f64) {
+    let (tail_s, head_s) = (Spring::critical_to_98(0.45 * k), Spring::critical_to_98(0.40 * k));
+    // A critically damped spring does not overshoot when the target is at least v / omega
+    // ahead, so the targets are the next whole turn past that point.
+    let lead = |ch: Ch, s: Spring| ch.x + ch.v.max(0.0) / s.omega() + 0.02;
+    let mut tail_to = lead(e.tail, tail_s).ceil();
+    if lead(e.head, head_s) > tail_to + 1.0 {
+        tail_to += 1.0;
+    }
+    let closed = e.tail.settle(tail_to, tail_s, 0.004).max(e.head.settle(tail_to + 1.0, head_s, 0.004));
+    let lag = (closed - 0.08 * k).max(0.12 * k);
+    (tail_to, (tail_s, head_s), lag, 0.26 * k, closed)
 }
 
 /// The spinner's tail and head in turns from 12 o'clock, with velocities in turns a second.
@@ -389,6 +416,21 @@ mod tests {
             let [a0, b0] = spinner(t);
             let [a1, b1] = spinner(t + h);
             assert!(((a1.x - a0.x) / h - a0.v).abs() < 1e-3 && ((b1.x - b0.x) / h - b0.v).abs() < 1e-3, "t={t}");
+        }
+    }
+
+    #[test]
+    fn done_secs_sets_when_the_check_is_drawn() {
+        for secs in [0.3f32, 0.45, 1.2] {
+            let mut icon = StatusIcon::new(IconStyle { done_secs: Some(secs), ..IconStyle::default() });
+            icon.record(0.0);
+            icon.stop(1.0);
+            icon.finish(1.3);
+            icon.done(2.6);
+            let at = |t: f64| icon.state(2.6 + t).state.check;
+            assert_eq!(at(secs as f64 + 0.02), 1.0, "drawn by {secs}");
+            assert!(at(secs as f64 * 0.8) < 1.0, "not long before {secs}");
+            assert!(icon.until() <= 2.6 + secs as f64 + 0.05);
         }
     }
 
