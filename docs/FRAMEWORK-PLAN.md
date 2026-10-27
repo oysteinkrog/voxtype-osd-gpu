@@ -161,7 +161,7 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 
 ## Effects notes (M4, 2026-10-26)
 
-Oystein pulled the effects work forward on 2026-10-26, to run in parallel with M2. It was planned
+The maintainer pulled the effects work forward on 2026-10-26, to run in parallel with M2. It was planned
 after M3, the macOS host, which has since been dropped.
 
 - **Two pass lists, chosen per frame.** A frame with no layer effect takes the direct path, as before:
