@@ -68,6 +68,26 @@ impl Camera {
         self.view().then(&self.proj(aspect))
     }
 
+    /// The ray through normalised device coordinates as `(o0, ox, oy, d0, dx, dy)`: the ray
+    /// at `(x, y)` (each -1 to 1, y up) starts at `o0 + x * ox + y * oy` and runs along
+    /// `d0 + x * dx + y * dy`. Linear in `x` and `y` for both projections.
+    pub fn ray_basis(&self, aspect: f32) -> [Vec3; 6] {
+        let eye = self.eye();
+        let fwd = (self.target - eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        match self.projection {
+            Projection::Perspective { fov_y } => {
+                let ty = (0.5 * fov_y).tan();
+                [eye, Vec3::ZERO, Vec3::ZERO, fwd, right * (ty * aspect), up * ty]
+            }
+            Projection::Orthographic { height } => {
+                let (h, w) = (0.5 * height, 0.5 * height * aspect);
+                [eye, right * w, up * h, fwd, Vec3::ZERO, Vec3::ZERO]
+            }
+        }
+    }
+
     /// Pixels per world unit at view depth 1 for a target `height_px` tall. A point sprite of
     /// world size `s` at view depth `z` is `s * focal_px / z` pixels across.
     pub fn focal_px(&self, height_px: f32) -> f32 {

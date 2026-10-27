@@ -29,6 +29,59 @@ pub struct Frame3d {
     pub focus: Focus,
     /// Points and orbs fade to nothing between these view distances, `(start, end)`.
     pub fog: Option<(f32, f32)>,
+    /// A glossy floor under the scene (D305): a faded mirror copy and pools of light.
+    pub floor: Option<Floor>,
+    /// Volumetric light cones (D305), additive.
+    pub cones: Vec<LightCone>,
+}
+
+/// Most pools of light on one floor.
+pub const MAX_POOLS: usize = 4;
+
+/// A horizontal glossy floor at height `y` (D305). The floor itself is not drawn: it shows
+/// as a mirrored copy of the meshes, point clouds and orbs that fades with the distance below
+/// the floor, and as pools of light lying on it. Content above the floor hides the
+/// reflection behind it; nothing shows through from under the floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Floor {
+    pub y: f32,
+    /// Brightness of the reflection right at the floor, 0 to 1.
+    pub reflect: f32,
+    /// World distance below the floor over which the reflection fades out.
+    pub fade: f32,
+    /// Soft discs of light on the floor, at most [`MAX_POOLS`]; the rest are ignored.
+    pub pools: [Option<Pool>; MAX_POOLS],
+}
+
+impl Default for Floor {
+    fn default() -> Floor {
+        Floor { y: -1.0, reflect: 0.35, fade: 1.0, pools: [None; MAX_POOLS] }
+    }
+}
+
+/// Light pooling on the floor: a gaussian disc centred under `center` (its y is ignored).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pool {
+    pub center: Vec3,
+    /// World radius at which the light has fallen to about 5%.
+    pub radius: f32,
+    pub color: Color,
+    pub intensity: f32,
+}
+
+/// A cone of light from `apex` along `dir`, drawn as a soft additive volume: brightest along
+/// its axis as seen from the camera, fading toward its far end and its edges. Depth tested,
+/// so content in front of it hides it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightCone {
+    pub apex: Vec3,
+    /// Direction of the light. It need not be normalised.
+    pub dir: Vec3,
+    /// Half the opening angle in radians.
+    pub half_angle: f32,
+    pub length: f32,
+    pub color: Color,
+    pub intensity: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

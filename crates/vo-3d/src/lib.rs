@@ -5,7 +5,7 @@
 //! - `mesh`, `text3d`: meshes (torus, box, extruded paths) and extruded 3D text from glyph
 //!   outlines (D306), and [`TurningWord`], a word whose letters turn in on springs.
 //! - `frame`: [`Frame3d`], the value an app builds from `t`: camera, light, mesh draws, point
-//!   clouds (D302) and bokeh orbs (FX16).
+//!   clouds (D302), bokeh orbs (FX16), a reflecting floor and light cones (D305).
 //! - `render`: [`Renderer3d`], one MSAA pass with a depth buffer that resolves into any
 //!   colour view (D301).
 //! - `item`: [`Source3d`] and [`ItemPainter`], 3D as an item at its place in a 2D scene.
@@ -32,7 +32,10 @@ pub mod timer;
 
 pub use camera::{Camera, Projection};
 pub use field::TextField;
-pub use frame::{Background, CloudShape, Focus, Frame3d, Light, Material, MeshDraw, MeshId, Orb, PointCloud};
+pub use frame::{
+    Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, Orb, PointCloud, Pool,
+    MAX_POOLS,
+};
 pub use item::{ItemPainter, ItemPlace, Source3d};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};

@@ -196,3 +196,75 @@ fn bokeh_orbs_blur_with_depth() {
     let px = draw(&gpu, &mut r, &frame, w, h);
     report(vec![support::check(&image("3d-bokeh", w, h, px), TOL)]);
 }
+
+/// D305: a lit ring above a glossy floor, with a pool of light and a cone. The floor changes
+/// nothing above its horizon and adds the mirrored ring and the pool below it.
+#[test]
+fn floor_reflection_and_light_cone() {
+    let gpu = support::gpu();
+    let mut r = Renderer3d::new(&gpu.device, &gpu.queue);
+    let torus = r.add_mesh(&Mesh::torus(0.8, 0.16, 64, 20));
+    let (w, h) = (320u32, 240u32);
+    let ring = Mat4::rotate_x(FRAC_PI_2).then(&Mat4::translation(Vec3::new(0.0, 0.15, 0.0)));
+    let base = Frame3d {
+        camera: Camera::orbit(Vec3::new(0.0, -0.3, 0.0), 0.3, 0.3, 4.2),
+        background: Background::Solid(Color::hex(0x0b0e16, 1.0)),
+        meshes: vec![MeshDraw {
+            mesh: torus,
+            model: ring,
+            material: Material { color: Color::hex(0x9fc8ff, 1.0), emissive: 0.4, ..Default::default() },
+        }],
+        clouds: vec![PointCloud {
+            shape: CloudShape::Torus { major: 0.8, minor: 0.3 },
+            model: ring,
+            count: 3000,
+            seed: 9,
+            color: Color::hex(0x76c6ff, 0.8),
+            color2: Color::hex(0xa98bff, 0.8),
+            size: 0.02,
+            ..Default::default()
+        }],
+        orbs: vec![Orb {
+            pos: Vec3::new(1.3, 0.5, -0.6),
+            radius: 0.06,
+            color: Color::hex(0xffc477, 1.0),
+            intensity: 2.0,
+        }],
+        ..Default::default()
+    };
+    let floor = Floor {
+        y: -0.9,
+        reflect: 0.5,
+        fade: 1.0,
+        pools: [
+            Some(Pool { center: Vec3::ZERO, radius: 1.4, color: Color::hex(0x5f8dff, 1.0), intensity: 0.6 }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let plain = draw(&gpu, &mut r, &base, w, h);
+    let with_floor = draw(&gpu, &mut r, &Frame3d { floor: Some(floor), ..base.clone() }, w, h);
+    let row = (w * 4) as usize;
+    // The floor's horizon is below the top quarter at this pitch: nothing changes there.
+    assert_eq!(plain[..row * (h as usize / 4)], with_floor[..row * (h as usize / 4)], "floor changed the sky");
+    let light = |px: &[u8], y0: u32, y1: u32| -> u64 {
+        px[row * y0 as usize..row * y1 as usize].chunks(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum()
+    };
+    let (a, b) = (light(&plain, h * 3 / 4, h), light(&with_floor, h * 3 / 4, h));
+    assert!(b > a + a / 4, "no reflection or pool below the ring: {a} -> {b}");
+
+    let cone = LightCone {
+        apex: Vec3::new(-1.0, 1.9, -0.6),
+        dir: Vec3::new(0.3, -1.0, 0.2),
+        half_angle: 0.35,
+        length: 3.2,
+        color: Color::hex(0x7aa8ff, 1.0),
+        intensity: 0.6,
+    };
+    let full = draw(&gpu, &mut r, &Frame3d { floor: Some(floor), cones: vec![cone], ..base.clone() }, w, h);
+    assert!(light(&full, 0, h / 4) > light(&plain, 0, h / 4), "the cone adds light near its apex");
+    let same = draw(&gpu, &mut r, &Frame3d { floor: Some(floor), cones: vec![cone], ..base.clone() }, w, h);
+    assert_eq!(full, same, "same frame, same pixels");
+    report(vec![support::check(&image("3d-floor", w, h, full), TOL)]);
+}

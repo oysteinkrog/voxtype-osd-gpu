@@ -24,6 +24,8 @@ struct Globals {
   bg_bottom: vec4f,
   // Field texture size in its own pixels, then target pixels per field pixel.
   field: vec4f,
+  // Floor (D305): height, fade distance below it, reflection strength, 1 when there is one.
+  floor: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -68,6 +70,16 @@ fn fog_at (d: f32) -> f32 {
     return 1.0;
   }
   return 1.0 - smoothstep (g.fog.x, g.fog.y, d);
+}
+
+// How strongly a mirrored draw shows at world height `y`: the floor's reflection strength
+// right under the floor, nothing `fade` below it, nothing above it.
+fn reflect_at (y: f32) -> f32 {
+  let below = g.floor.x - y;
+  if (below < 0.0) {
+    return 0.0;
+  }
+  return g.floor.z * (1.0 - smoothstep (0.0, max (g.floor.y, 1e-4), below));
 }
 
 // Blur disc diameter in pixels for something at view distance `d`.

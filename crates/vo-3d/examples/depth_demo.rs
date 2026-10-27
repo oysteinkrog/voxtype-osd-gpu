@@ -58,6 +58,12 @@ fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
     k * k * (3.0 - 2.0 * k)
 }
 
+/// 0 to 1 with zero slope at both ends, clamped.
+fn smooth01(x: f64) -> f32 {
+    let x = x.clamp(0.0, 1.0) as f32;
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// A made-up voice level: silence, then syllables while the words arrive.
 fn level(t: f64) -> f32 {
     let gate = smoothstep(1.7, 2.0, t) * (1.0 - smoothstep(5.6, 6.2, t));
@@ -231,6 +237,37 @@ impl Demo {
             orbs,
             focus: Focus { distance: 4.4, range: 2.6, max_blur_px: 64.0 },
             fog: Some((5.0, 10.0)),
+            // A glossy floor under the ring (D305) that fades up over the first half second,
+            // with the ring's light pooling on it and a soft cone from above.
+            floor: Some(Floor {
+                y: -0.92,
+                reflect: 0.45 * smooth01(t / 0.5),
+                fade: 1.2,
+                pools: [
+                    Some(Pool {
+                        center: Vec3::ZERO,
+                        radius: 1.9,
+                        color: Color::hex(0x5f8dff, 1.0),
+                        intensity: 0.35 + 0.5 * lv,
+                    }),
+                    Some(Pool {
+                        center: Vec3::new(0.9, 0.0, 0.3),
+                        radius: 0.9,
+                        color: Color::hex(0xa070ff, 1.0),
+                        intensity: 0.25,
+                    }),
+                    None,
+                    None,
+                ],
+            }),
+            cones: vec![LightCone {
+                apex: Vec3::new(0.0, 2.8, -1.4),
+                dir: Vec3::new(0.0, -1.0, 0.4),
+                half_angle: 0.38,
+                length: 4.4,
+                color: Color::hex(0x7aa8ff, 1.0),
+                intensity: 0.22 * smooth01(t / 0.5),
+            }],
         }
     }
 

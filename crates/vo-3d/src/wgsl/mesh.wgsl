@@ -1,5 +1,7 @@
 // Lit meshes: one directional light (Lambert plus Blinn-Phong), ambient, a Fresnel rim and an
-// emissive term. Depth tested and written. `common3d.wgsl` is prepended.
+// emissive term. Depth tested and written. A mirrored draw (the floor reflection, D305) is
+// lit as the original seen from the mirrored eye, and fades with depth below the floor.
+// `common3d.wgsl` is prepended.
 
 struct Draw {
   model: mat4x4f,
@@ -7,7 +9,7 @@ struct Draw {
   normal_m: mat4x4f,
   // Linear, premultiplied.
   color: vec4f,
-  // Emissive, specular, shininess.
+  // Emissive, specular, shininess, 1 for a mirrored draw.
   params: vec4f,
 };
 
@@ -29,12 +31,24 @@ struct MeshOut {
 }
 
 @fragment fn fs_mesh (in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+  let mirrored = d.params.w > 0.5;
+  var k = 1.0;
+  var l = g.light_dir.xyz;
+  var eye = g.eye.xyz;
+  if (mirrored) {
+    k = reflect_at (in.world.y);
+    if (k <= 0.0) {
+      discard;
+    }
+    l.y = -l.y;
+    eye.y = 2.0 * g.floor.x - eye.y;
+  }
+  // Mirroring flips the winding, so a mirrored face toward the camera reads as a back face.
   var n = normalize (in.normal);
-  if (!front) {
+  if (front == mirrored) {
     n = -n;
   }
-  let l = g.light_dir.xyz;
-  let v = normalize (g.eye.xyz - in.world);
+  let v = normalize (eye - in.world);
   let a = max (d.color.a, 1e-6);
   let base = d.color.rgb / a;
   let diffuse = max (dot (n, l), 0.0);
@@ -46,5 +60,5 @@ struct MeshOut {
     + g.light_color.rgb * spec
     + mix (base, vec3f (1.0), 0.5) * g.light_color.rgb * (rim * 0.35)
     + base * d.params.x;
-  return finish (vec4f (lit * d.color.a, d.color.a));
+  return finish (vec4f (lit * d.color.a, d.color.a) * k);
 }

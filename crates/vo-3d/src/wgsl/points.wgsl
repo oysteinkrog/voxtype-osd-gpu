@@ -14,7 +14,7 @@ struct Cloud {
   motion: vec4f,
   // reach_px, push_px, glow, min_px.
   react: vec4f,
-  // seed, count, defocus.
+  // seed, count, defocus, 1 for a mirrored draw (D305).
   ids: vec4u,
 };
 
@@ -86,7 +86,10 @@ fn cloud_point (i: u32) -> vec3f {
 
   let mixk = rand01 (c.ids.x, i, 5u, 0u);
   let rgb = mix (c.color.rgb, c.color2.rgb, mixk);
-  let a = c.color.a * energy * fog_at (depth);
+  var a = c.color.a * energy * fog_at (depth);
+  if (c.ids.w != 0u) {
+    a *= reflect_at (w.y);
+  }
 
   let radius = 0.5 * size;
   let corner = vec2f (f32 (vi & 1u), f32 (vi >> 1u)) * 2.0 - 1.0;

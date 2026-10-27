@@ -1,6 +1,11 @@
 //! [`Renderer3d`]: draws a [`Frame3d`] into a colour texture in one 4x MSAA pass with its own
 //! depth buffer, in the D304 order: background, meshes (depth test and write), point clouds,
-//! then orbs (both depth tested, no depth write, additive).
+//! light cones, then orbs (all three depth tested, no depth write, additive).
+//!
+//! With a floor (D305), a mirrored copy of the meshes, clouds and orbs comes first, right
+//! after the background. Then the floor pass writes the floor plane's depth over it and adds
+//! the pools of light, so the copy shows only below the floor line and the real scene draws
+//! over it as usual.
 //!
 //! The pass resolves into the caller's view, so it is a layer like any other for whatever
 //! comes after it (2D display lists, text, post effects).
@@ -12,7 +17,8 @@ use vo_render::color::linear_premul;
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_scene::geom::Color;
 
-use crate::frame::{Background, CloudShape, Frame3d, MeshId};
+use crate::frame::{Background, CloudShape, Frame3d, MeshId, MAX_POOLS};
+use crate::math::{Mat4, Vec3};
 use crate::mesh::{Mesh, Vertex};
 
 const COMMON: &str = include_str!("wgsl/common3d.wgsl");
@@ -20,6 +26,8 @@ const MESH: &str = include_str!("wgsl/mesh.wgsl");
 const POINTS: &str = include_str!("wgsl/points.wgsl");
 const ORBS: &str = include_str!("wgsl/orbs.wgsl");
 const BACKGROUND: &str = include_str!("wgsl/background.wgsl");
+const FLOOR: &str = include_str!("wgsl/floor.wgsl");
+const CONE: &str = include_str!("wgsl/cone.wgsl");
 
 pub const SAMPLES: u32 = 4;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -27,8 +35,8 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SLOT: u64 = 256;
 
 /// The shader sources, `common3d.wgsl` prepended, for naga checks and tools.
-pub fn shader_sources() -> [(&'static str, String); 4] {
-    [("mesh", MESH), ("points", POINTS), ("orbs", ORBS), ("background", BACKGROUND)]
+pub fn shader_sources() -> [(&'static str, String); 6] {
+    [("mesh", MESH), ("points", POINTS), ("orbs", ORBS), ("background", BACKGROUND), ("floor", FLOOR), ("cone", CONE)]
         .map(|(n, s)| (n, [COMMON, s].join("\n")))
 }
 
@@ -47,6 +55,7 @@ struct Globals {
     bg_top: [f32; 4],
     bg_bottom: [f32; 4],
     field: [f32; 4],
+    floor: [f32; 4],
 }
 
 #[repr(C)]
@@ -68,6 +77,22 @@ struct CloudBlock {
     motion: [f32; 4],
     react: [f32; 4],
     ids: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct FloorBlock {
+    ray: [[f32; 4]; 6],
+    pool_at: [[f32; 4]; MAX_POOLS],
+    pool_color: [[f32; 4]; MAX_POOLS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct ConeBlock {
+    apex: [f32; 4],
+    axis: [f32; 4],
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -97,6 +122,8 @@ struct Pipelines {
     mesh: wgpu::RenderPipeline,
     points: wgpu::RenderPipeline,
     orbs: wgpu::RenderPipeline,
+    floor: wgpu::RenderPipeline,
+    cone: wgpu::RenderPipeline,
 }
 
 /// Where [`Renderer3d::encode_with`] resolves to.
@@ -141,7 +168,7 @@ pub struct Renderer3d {
     globals_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
-    modules: Option<[wgpu::ShaderModule; 4]>,
+    modules: Option<[wgpu::ShaderModule; 6]>,
     pipelines: Option<Pipelines>,
     meshes: Vec<GpuMesh>,
     globals: wgpu::Buffer,
@@ -328,7 +355,7 @@ impl Renderer3d {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
         };
-        let [mesh, points, orbs, bg] = &*modules;
+        let [mesh, points, orbs, bg, floor, cone] = &*modules;
         let pipelines = Pipelines {
             format,
             background: make(bg, "vs_bg", "fs_bg", &[], Topo::TriangleList, PREMULTIPLIED_OVER, false, Cmp::Always),
@@ -344,6 +371,8 @@ impl Renderer3d {
             ),
             points: make(points, "vs_point", "fs_point", &[], Topo::TriangleStrip, add, false, Cmp::LessEqual),
             orbs: make(orbs, "vs_orb", "fs_orb", &[Some(orb_layout)], Topo::TriangleStrip, add, false, Cmp::LessEqual),
+            floor: make(floor, "vs_floor", "fs_floor", &[], Topo::TriangleList, add, true, Cmp::Always),
+            cone: make(cone, "vs_cone", "fs_cone", &[], Topo::TriangleStrip, add, false, Cmp::LessEqual),
         };
         self.pipelines = Some(pipelines);
         self.pipeline_time += start.elapsed();
@@ -407,6 +436,7 @@ impl Renderer3d {
             bg_top,
             bg_bottom,
             field: field.as_ref().map_or([1.0, 1.0, 1.0, 0.0], |f| [f.size[0] as f32, f.size[1] as f32, f.scale, 0.0]),
+            floor: frame.floor.map_or([0.0; 4], |f| [f.y, f.fade, f.reflect, 1.0]),
         };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -422,35 +452,63 @@ impl Renderer3d {
             ],
         });
 
-        // Per-draw blocks: meshes first, then clouds.
+        // Per-draw blocks: meshes, clouds, then with a floor their mirrored copies and the
+        // floor block, then cones.
         self.staging.clear();
-        for d in &frame.meshes {
-            let m = &d.material;
-            let block = DrawBlock {
-                model: d.model.cols,
-                normal_m: d.model.normal_matrix().cols,
-                color: lin(m.color),
-                params: [m.emissive, m.specular, m.shininess, 0.0],
-            };
+        let mirror = frame.floor.map(|f| mirror_y(f.y));
+        let passes = std::iter::once(None).chain(mirror.map(Some));
+        for m4 in passes {
+            for d in &frame.meshes {
+                let m = &d.material;
+                let model = m4.map_or(d.model, |r| d.model.then(&r));
+                let block = DrawBlock {
+                    model: model.cols,
+                    normal_m: model.normal_matrix().cols,
+                    color: lin(m.color),
+                    params: [m.emissive, m.specular, m.shininess, m4.is_some() as u32 as f32],
+                };
+                push_slot(&mut self.staging, bytemuck::bytes_of(&block));
+            }
+            for c in &frame.clouds {
+                let straight = |col: Color| {
+                    let p = lin(Color { a: 1.0, ..col });
+                    [p[0], p[1], p[2], col.a]
+                };
+                let (kind, a, b) = match c.shape {
+                    CloudShape::Torus { major, minor } => (0.0, major, minor),
+                    CloudShape::Ball { radius } => (1.0, radius, 0.0),
+                };
+                let block = CloudBlock {
+                    model: m4.map_or(c.model, |r| c.model.then(&r)).cols,
+                    color: straight(c.color),
+                    color2: straight(c.color2),
+                    shape: [kind, a, b, c.size],
+                    motion: [c.t, c.speed, c.level, c.level_amp],
+                    react: [c.reach_px, c.push_px, c.glow, c.min_px],
+                    ids: [c.seed, c.count, c.defocus as u32, m4.is_some() as u32],
+                };
+                push_slot(&mut self.staging, bytemuck::bytes_of(&block));
+            }
+        }
+        if let Some(f) = &frame.floor {
+            let ray = cam.ray_basis(w / h).map(|v| [v.x, v.y, v.z, 0.0]);
+            let mut block = FloorBlock { ray, ..Default::default() };
+            for (i, p) in f.pools.iter().enumerate() {
+                if let Some(p) = p {
+                    let c = lin(p.color);
+                    block.pool_at[i] = [p.center.x, p.center.z, p.radius, 0.0];
+                    block.pool_color[i] = [c[0] * p.intensity, c[1] * p.intensity, c[2] * p.intensity, 0.0];
+                }
+            }
             push_slot(&mut self.staging, bytemuck::bytes_of(&block));
         }
-        for c in &frame.clouds {
-            let straight = |col: Color| {
-                let p = lin(Color { a: 1.0, ..col });
-                [p[0], p[1], p[2], col.a]
-            };
-            let (kind, a, b) = match c.shape {
-                CloudShape::Torus { major, minor } => (0.0, major, minor),
-                CloudShape::Ball { radius } => (1.0, radius, 0.0),
-            };
-            let block = CloudBlock {
-                model: c.model.cols,
-                color: straight(c.color),
-                color2: straight(c.color2),
-                shape: [kind, a, b, c.size],
-                motion: [c.t, c.speed, c.level, c.level_amp],
-                react: [c.reach_px, c.push_px, c.glow, c.min_px],
-                ids: [c.seed, c.count, c.defocus as u32, 0],
+        for k in &frame.cones {
+            let c = lin(k.color);
+            let axis = k.dir.normalize();
+            let block = ConeBlock {
+                apex: [k.apex.x, k.apex.y, k.apex.z, k.length],
+                axis: [axis.x, axis.y, axis.z, k.half_angle.tan()],
+                color: [c[0] * k.intensity, c[1] * k.intensity, c[2] * k.intensity, 0.0],
             };
             push_slot(&mut self.staging, bytemuck::bytes_of(&block));
         }
@@ -483,18 +541,28 @@ impl Renderer3d {
             }
         }
 
-        // Orbs.
-        let orbs: Vec<OrbInstance> = frame
-            .orbs
-            .iter()
-            .map(|o| {
-                let c = linear_premul(o.color, 1.0);
-                OrbInstance {
-                    pos: [o.pos.x, o.pos.y, o.pos.z, o.radius],
-                    color: [c[0] * o.intensity, c[1] * o.intensity, c[2] * o.intensity, c[3] * o.intensity.min(1.0)],
+        // Orbs, then with a floor their mirrored copies, faded on the CPU by
+        // `reflect_at` in common3d.wgsl.
+        let orb = |o: &crate::frame::Orb, y: f32, k: f32| {
+            let c = linear_premul(o.color, 1.0);
+            let i = o.intensity * k;
+            OrbInstance {
+                pos: [o.pos.x, y, o.pos.z, o.radius],
+                color: [c[0] * i, c[1] * i, c[2] * i, c[3] * i.min(1.0)],
+            }
+        };
+        let mut orbs: Vec<OrbInstance> = frame.orbs.iter().map(|o| orb(o, o.pos.y, 1.0)).collect();
+        let real_orbs = orbs.len() as u32;
+        if let Some(f) = &frame.floor {
+            for o in &frame.orbs {
+                let y = 2.0 * f.y - o.pos.y;
+                let below = f.y - y;
+                let k = if below < 0.0 { 0.0 } else { f.reflect * (1.0 - smoothstep(0.0, f.fade.max(1e-4), below)) };
+                if k > 0.0 {
+                    orbs.push(orb(o, y, k));
                 }
-            })
-            .collect();
+            }
+        }
         if !orbs.is_empty() {
             let bytes: &[u8] = bytemuck::cast_slice(&orbs);
             if self.orbs.as_ref().is_none_or(|b| b.size() < bytes.len() as u64) {
@@ -537,22 +605,38 @@ impl Renderer3d {
             pass.set_pipeline(&p.background);
             pass.draw(0..3, 0..1);
         }
-        let mut slot = 0u32;
-        pass.set_pipeline(&p.mesh);
-        for d in &frame.meshes {
-            let mesh = &self.meshes[d.mesh.0 as usize];
-            pass.set_bind_group(1, draws, &[slot * SLOT as u32]);
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.count, 0, 0..1);
-            slot += 1;
+        let (n_mesh, n_cloud) = (frame.meshes.len() as u32, frame.clouds.len() as u32);
+        let at = |slot: u32| [slot * SLOT as u32];
+        let draw_scene = |pass: &mut wgpu::RenderPass<'_>, first: u32| {
+            pass.set_pipeline(&p.mesh);
+            for (i, d) in frame.meshes.iter().enumerate() {
+                let mesh = &self.meshes[d.mesh.0 as usize];
+                pass.set_bind_group(1, draws, &at(first + i as u32));
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.count, 0, 0..1);
+            }
+            pass.set_pipeline(&p.points);
+            for (i, c) in frame.clouds.iter().enumerate() {
+                pass.set_bind_group(1, draws, &at(first + n_mesh + i as u32));
+                pass.draw(0..4, 0..c.count);
+            }
+        };
+        let mut next = n_mesh + n_cloud;
+        if frame.floor.is_some() {
+            draw_scene(&mut pass, next);
+            next += n_mesh + n_cloud;
+            if let (true, Some(buf)) = (orbs.len() as u32 > real_orbs, &self.orbs) {
+                pass.set_pipeline(&p.orbs);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..4, real_orbs..orbs.len() as u32);
+            }
+            pass.set_pipeline(&p.floor);
+            pass.set_bind_group(1, draws, &at(next));
+            pass.draw(0..3, 0..1);
+            next += 1;
         }
-        pass.set_pipeline(&p.points);
-        for c in &frame.clouds {
-            pass.set_bind_group(1, draws, &[slot * SLOT as u32]);
-            pass.draw(0..4, 0..c.count);
-            slot += 1;
-        }
+        draw_scene(&mut pass, 0);
         if let Some(extra) = extra {
             let info = PassInfo {
                 view_proj: cam.view_proj(w / h),
@@ -566,10 +650,18 @@ impl Renderer3d {
             pass.set_bind_group(0, &globals_bind, &[]);
             pass.set_bind_group(1, draws, &[0]);
         }
-        if let (false, Some(buf)) = (orbs.is_empty(), &self.orbs) {
+        if !frame.cones.is_empty() {
+            pass.set_pipeline(&p.cone);
+            for i in 0..frame.cones.len() as u32 {
+                pass.set_bind_group(1, draws, &at(next + i));
+                pass.draw(0..2 * (CONE_SEGMENTS + 1), 0..1);
+            }
+            pass.set_bind_group(1, draws, &[0]);
+        }
+        if let (true, Some(buf)) = (real_orbs > 0, &self.orbs) {
             pass.set_pipeline(&p.orbs);
             pass.set_vertex_buffer(0, buf.slice(..));
-            pass.draw(0..4, 0..orbs.len() as u32);
+            pass.draw(0..4, 0..real_orbs);
         }
     }
 
@@ -594,6 +686,21 @@ impl Renderer3d {
         self.attachments =
             Some(Attachments { size, format, color: tex("vo3d-msaa", format), depth: tex("vo3d-depth", DEPTH_FORMAT) });
     }
+}
+
+/// Segments around a light cone; `SEGMENTS` in cone.wgsl.
+const CONE_SEGMENTS: u32 = 48;
+
+/// Reflection in the plane `y = floor`.
+fn mirror_y(floor: f32) -> Mat4 {
+    Mat4::translation(Vec3::new(0.0, -floor, 0.0))
+        .then(&Mat4::scale(Vec3::new(1.0, -1.0, 1.0)))
+        .then(&Mat4::translation(Vec3::new(0.0, floor, 0.0)))
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn push_slot(buf: &mut Vec<u8>, bytes: &[u8]) {
@@ -622,5 +729,7 @@ mod tests {
     fn blocks_fit_one_slot() {
         assert!(std::mem::size_of::<DrawBlock>() as u64 <= SLOT);
         assert!(std::mem::size_of::<CloudBlock>() as u64 <= SLOT);
+        assert!(std::mem::size_of::<FloorBlock>() as u64 <= SLOT);
+        assert!(std::mem::size_of::<ConeBlock>() as u64 <= SLOT);
     }
 }
