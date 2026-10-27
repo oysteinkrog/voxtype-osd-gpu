@@ -9,7 +9,8 @@
 //! - Compositing is in linear light with premultiplied alpha, then sRGB encoded, as the GPU
 //!   writes to an sRGB swapchain.
 //! - Not exact: offscreen layers draw as direct layers (group opacity per instance), only the
-//!   nearest clip applies, and emitters, glows, shadows and bloom are skipped.
+//!   nearest clip applies, and emitters, glows, shadows and bloom are skipped. Masks are not
+//!   applied: a layer under an alpha mask is hidden, one under an inverted mask unmasked.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
-use vo_scene::display::{BlendMode, DisplayList, GlyphInstance, ItemKind, Paint, ShapeInstance};
+use vo_scene::display::{BlendMode, DisplayList, GlyphInstance, ItemKind, LayerTarget, Paint, ShapeInstance};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 
@@ -140,7 +141,7 @@ impl CpuRenderer {
             None => parent.clip,
         };
         let opacity = parent.opacity * layer.opacity;
-        if opacity <= 0.0 {
+        if opacity <= 0.0 || hidden_by_mask(list, li) {
             return;
         }
         let st = State { to_px, from_px, ppu, opacity, blend: layer.blend, clip };
@@ -428,6 +429,19 @@ fn glyph_path(face: &Face, glyph: u32) -> Option<tiny_skia::Path> {
     let mut pen = PathPen(tiny_skia::PathBuilder::new());
     outline.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
     pen.0.finish()
+}
+
+/// Masks (FX04) are not drawn here. A mask layer is never drawn, and a layer under an alpha
+/// mask is hidden for the frame rather than shown unmasked; one under an inverted mask draws
+/// unmasked.
+fn hidden_by_mask(list: &DisplayList, li: u32) -> bool {
+    if matches!(list.layers[li as usize].target, LayerTarget::Mask(_)) {
+        return true;
+    }
+    list.layer_items(li)
+        .iter()
+        .filter(|i| i.kind == ItemKind::Layer)
+        .any(|i| matches!(list.layers[i.start as usize].target, LayerTarget::Mask(m) if !m.invert))
 }
 
 #[cfg(test)]

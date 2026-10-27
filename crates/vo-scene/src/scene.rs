@@ -975,13 +975,20 @@ impl<M> Scene<M> {
         items.push(Item { kind: ItemKind::Layer, start: index, len: 1 });
         let transform = m.then(&out.layers[layer as usize].transform);
         let (blend, clip, clip_fade, target, group, inside) = match n.kind {
-            Kind::Layer { blend, clip, offscreen, fade } => {
+            Kind::Layer { blend, clip, offscreen, fade, mask } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
                 let bloom = n.has(Slot::BloomStrength as u8).then(|| Bloom {
                     strength: n.value(Slot::BloomStrength as u8, t).max(0.0) as f32,
                     radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
                 });
-                let target = if offscreen { LayerTarget::Offscreen { bloom } } else { LayerTarget::Direct };
+                // A layer with a mask child is composited through the mask, so it is offscreen.
+                let masked =
+                    n.children.iter().any(|c| matches!(self.nodes[*c].kind, Kind::Layer { mask: Some(_), .. }));
+                let target = match mask {
+                    Some(m) => LayerTarget::Mask(m),
+                    None if offscreen || masked => LayerTarget::Offscreen { bloom },
+                    None => LayerTarget::Direct,
+                };
                 (blend, clip, fade, target, alpha * opacity, 1.0)
             }
             _ => (BlendMode::Normal, None, [0.0; 4], LayerTarget::Direct, 1.0, alpha * opacity),

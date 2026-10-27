@@ -52,7 +52,7 @@ fn bloom_makes_an_offscreen_layer_with_its_values() {
     let list = scene.sample(10.0);
     let bloom = list.layers.iter().find_map(|l| match l.target {
         LayerTarget::Offscreen { bloom } => bloom,
-        LayerTarget::Direct => None,
+        LayerTarget::Direct | LayerTarget::Mask(_) => None,
     });
     let b = bloom.expect("a bloom layer");
     assert!((b.strength - 1.5).abs() < 1e-3 && (b.radius - 12.0).abs() < 1e-3, "{b:?}");
@@ -157,4 +157,25 @@ fn rim_orbits_at_thirty_fps_and_sheen_sweeps_once() {
     calm.apply(root(vec![pill()]), 0.0);
     assert_eq!(calm.sample(0.25).shapes.len(), 2);
     assert_eq!(calm.next_wake(1.0), None);
+}
+
+#[test]
+fn a_mask_makes_its_layer_offscreen_and_covers_its_box() {
+    use vo_scene::display::Mask;
+    let mut scene = Scene::new();
+    let layer = Element::layer("card")
+        .size(120.0, 40.0)
+        .child(Element::shape("fill", ShapeKind::RRect).size(120.0, 40.0).fill(Color::WHITE))
+        .child(Element::mask("m").invert_mask().child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0)));
+    scene.apply(root(vec![Element::panel("pad").size(30.0, 30.0), layer]), 0.0);
+    let list = scene.sample(1.0);
+    let card = list.layers.iter().position(|l| matches!(l.target, LayerTarget::Offscreen { .. })).expect("offscreen");
+    let mask = list.layers.iter().find(|l| matches!(l.target, LayerTarget::Mask(_))).expect("a mask layer");
+    assert_eq!(mask.target, LayerTarget::Mask(Mask { luma: false, invert: true }));
+    assert_eq!(mask.parent, Some(card as u32));
+    // The mask sits on the card's box, not on the root's.
+    let m = scene.find(&["root", "card", "m"]).unwrap();
+    let s = scene.sampled(m, 1.0).unwrap();
+    assert_eq!((s.size.w, s.size.h), (120.0, 40.0));
+    assert_eq!((s.transform.e, s.transform.f), (0.0, 30.0));
 }

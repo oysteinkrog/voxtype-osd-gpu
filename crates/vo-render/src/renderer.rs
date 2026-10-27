@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use skrifa::GlyphId;
-use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget};
+use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget, Mask};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 use vo_scene::path::PATH_FONT;
@@ -221,6 +221,7 @@ struct LayerUniform {
     src: [f32; 4],
     smear: [f32; 4],
     clip_fade: [f32; 4],
+    mask: [f32; 4],
 }
 
 /// One block of `Fx` in `bloom.wgsl`.
@@ -253,6 +254,8 @@ struct LayerState {
     scissor: [f32; 4],
     /// Motion blur smear in target pixels, this layer's own plus its parents'.
     smear: [f32; 2],
+    /// Inside a mask's content (FX04): 1 writes coverage, 2 luminance; 0 elsewhere.
+    mask_out: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +267,8 @@ enum Pipe {
     Vector,
     Glass,
     CompositeBloom,
+    /// Composites a masked layer through its mask's texture (FX04).
+    CompositeMask,
     Down,
     Up,
     Final,
@@ -316,11 +321,34 @@ struct Surface {
     tex: Option<usize>,
     bloom: Option<BloomPlan>,
     trail: Option<TrailPlan>,
+    /// The surface of this layer's mask, and how it masks.
+    mask: Option<(usize, Mask)>,
+    /// A mask's own surface: an R8 texture of coverage, never composited.
+    r8: bool,
 }
 
 impl Surface {
     fn new() -> Surface {
-        Surface { cmds: Vec::new(), bounds: EMPTY, origin: [0, 0], size: [0, 0], tex: None, bloom: None, trail: None }
+        Surface {
+            cmds: Vec::new(),
+            bounds: EMPTY,
+            origin: [0, 0],
+            size: [0, 0],
+            tex: None,
+            bloom: None,
+            trail: None,
+            mask: None,
+            r8: false,
+        }
+    }
+
+    /// The texture format the surface draws into, given the frame's layer format.
+    fn format(&self, layers: wgpu::TextureFormat) -> wgpu::TextureFormat {
+        if self.r8 {
+            wgpu::TextureFormat::R8Unorm
+        } else {
+            layers
+        }
     }
 
     /// The texture's rectangle in target pixels.
@@ -394,6 +422,8 @@ pub struct Renderer {
     atlas_gpu: SlugAtlasGpu,
     layer_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
+    /// A masked layer's composite: its texture and its mask's.
+    mask_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
     modules: [Option<wgpu::ShaderModule>; 8],
@@ -472,6 +502,10 @@ impl Renderer {
             label: Some("vo-composite"),
             entries: &[texture_entry(0, false)],
         });
+        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo-composite-mask"),
+            entries: &[texture_entry(0, false), texture_entry(1, false)],
+        });
         Renderer {
             device: device.clone(),
             queue: queue.clone(),
@@ -485,6 +519,7 @@ impl Renderer {
             atlas_gpu: SlugAtlasGpu::new(device),
             layer_layout,
             composite_layout,
+            mask_layout,
             fx: None,
             modules: [None, None, None, None, None, None, None, None],
             pipelines: Vec::new(),
@@ -659,6 +694,7 @@ impl Renderer {
                 clip: None,
                 scissor: full,
                 smear: [0.0; 2],
+                mask_out: 0.0,
             };
             let frame = Frame { list, scale, effects, encode_srgb: encode_srgb as u32 as f32, target: [w, h] };
             self.visit(&frame, 0, &top, 0);
@@ -705,8 +741,29 @@ impl Renderer {
         if scissor[2] <= scissor[0] || scissor[3] <= scissor[1] {
             return;
         }
+        let in_mask = parent.mask_out != 0.0;
+        let mut mask_out = parent.mask_out;
+        // Where this layer's composite went, to send it through a mask found later.
+        let mut composite_at = None;
         let (draw_surface, opacity, blend) = match layer.target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
+            // Inside a mask everything draws straight into the mask.
+            LayerTarget::Offscreen { .. } if in_mask => (surface, parent.opacity * layer.opacity, BlendMode::Normal),
+            LayerTarget::Mask(m) => {
+                let masks_parent = layer
+                    .parent
+                    .is_some_and(|p| matches!(f.list.layers[p as usize].target, LayerTarget::Offscreen { .. }));
+                if in_mask || !masks_parent || self.surfaces[surface].mask.is_some() {
+                    return;
+                }
+                // The mask gets its surface even when it draws nothing: an empty alpha mask
+                // hides its layer.
+                let child = self.surfaces.len();
+                self.surfaces.push(Surface { r8: true, ..Surface::new() });
+                self.surfaces[surface].mask = Some((child, m));
+                mask_out = if m.luma { 2.0 } else { 1.0 };
+                (child, parent.opacity * layer.opacity, BlendMode::Normal)
+            }
             LayerTarget::Offscreen { bloom } => {
                 let opacity = parent.opacity * layer.opacity;
                 if opacity <= 0.0 {
@@ -723,6 +780,7 @@ impl Renderer {
                 }
                 self.surfaces.push(s);
                 let pipe = if self.surfaces[child].bloom.is_some() { Pipe::CompositeBloom } else { Pipe::Composite };
+                composite_at = Some(self.surfaces[surface].cmds.len());
                 self.surfaces[surface].cmds.push(Cmd {
                     pipe,
                     range: child as u32..child as u32 + 1,
@@ -740,7 +798,7 @@ impl Renderer {
         let mb = layer.motion_blur;
         let smear =
             [parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y), parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y)];
-        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear };
+        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear, mask_out };
         // Content reaches half the smear further either way.
         let reach = |b: [f32; 4]| {
             let (hx, hy) = (0.5 * smear[0].abs(), 0.5 * smear[1].abs());
@@ -796,7 +854,12 @@ impl Renderer {
                     }
                     self.push_cmd(draw_surface, Pipe::Glyph, start..self.glyphs.len() as u32, uniform, blend, scissor);
                     let words = &f.list.glyphs[range];
-                    if let Some((r, b)) = self.particles.place_words(words, &to_px, opacity, draw_surface) {
+                    let placed = if mask_out == 0.0 {
+                        self.particles.place_words(words, &to_px, opacity, draw_surface)
+                    } else {
+                        None
+                    };
+                    if let Some((r, b)) = placed {
                         grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                         self.push_cmd(draw_surface, Pipe::Particles, r, uniform, blend, scissor);
                     }
@@ -818,6 +881,8 @@ impl Renderer {
                         scissor,
                     );
                 }
+                // Particles, glass and GPU items have their own pipelines: not in a mask.
+                ItemKind::Emitters | ItemKind::Glass | ItemKind::Gpu if mask_out != 0.0 => {}
                 ItemKind::Emitters => {
                     let mut placed: Option<Range<u32>> = None;
                     for i in range {
@@ -882,6 +947,15 @@ impl Renderer {
             }
         }
         if draw_surface != surface {
+            if let Some((mask, _)) = self.surfaces[draw_surface].mask {
+                // A masked layer draws no bloom: put the bloom on a layer around it. An empty
+                // inverted mask hides nothing, so the plain composite stays.
+                self.surfaces[draw_surface].bloom = None;
+                if let Some(ci) = composite_at {
+                    let drew = self.surfaces[mask].size[0] != 0;
+                    self.surfaces[surface].cmds[ci].pipe = if drew { Pipe::CompositeMask } else { Pipe::Composite };
+                }
+            }
             self.close_surface(draw_surface, surface, parent.scissor, f.target);
         }
     }
@@ -889,8 +963,17 @@ impl Renderer {
     /// Sizes an offscreen layer's texture from what it drew, and adds the part its parent
     /// shows to the parent's bounds.
     fn close_surface(&mut self, child: usize, parent: usize, parent_scissor: [f32; 4], target: [u32; 2]) {
+        // An alpha mask hides everything outside what it draws, so the layer needs no texture
+        // there.
+        let mask_bounds = match self.surfaces[child].mask {
+            Some((m, mask)) if !mask.invert => Some(self.surfaces[m].bounds),
+            _ => None,
+        };
         let s = &mut self.surfaces[child];
-        let b = s.bounds;
+        let b = match mask_bounds {
+            Some(m) if s.trail.is_none() => intersect(s.bounds, m),
+            _ => s.bounds,
+        };
         let [w, h] = if s.trail.is_some() {
             // A trail keeps what earlier frames drew anywhere, so it covers the whole target
             // even when nothing draws this frame.
@@ -919,6 +1002,10 @@ impl Renderer {
             if p.levels > fit {
                 (p.levels, p.top) = (fit, 1.0);
             }
+        }
+        if s.r8 {
+            // A mask is read by its layer's composite, not drawn into the parent.
+            return;
         }
         let shown = intersect(s.rect(), parent_scissor);
         grow(&mut self.surfaces[parent].bounds, shown);
@@ -991,7 +1078,7 @@ impl Renderer {
             smear,
             m: [m.a, m.b, m.c, m.d],
             t: [m.e, m.f, st.ppu, opacity],
-            viewport: [0.0, 0.0, f.encode_srgb, 0.0],
+            viewport: [0.0, 0.0, f.encode_srgb, st.mask_out],
             ..Default::default()
         };
         if let Some(c) = &st.clip {
@@ -1021,8 +1108,12 @@ impl Renderer {
                 u.viewport[0] = tex_size[0] as f32;
                 u.viewport[1] = tex_size[1] as f32;
                 u.origin = [origin[0] as f32, origin[1] as f32, 0.0, 0.0];
-                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom) {
+                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask) {
                     let child = &self.surfaces[c.range.start as usize];
+                    if let (Pipe::CompositeMask, Some((m, mask))) = (c.pipe, child.mask) {
+                        let o = self.surfaces[m].origin;
+                        u.mask = [o[0] as f32, o[1] as f32, mask.invert as u32 as f32, 0.0];
+                    }
                     u.origin[2] = child.origin[0] as f32;
                     u.origin[3] = child.origin[1] as f32;
                     u.src = [
@@ -1046,7 +1137,7 @@ impl Renderer {
                     self.surfaces[si].trail.as_mut().unwrap().fade = fade;
                     tex
                 }
-                None => self.acquire(w, h, format),
+                None => self.acquire(w, h, self.surfaces[si].format(format)),
             };
             self.surfaces[si].tex = Some(tex);
             if self.surfaces[si].bloom.is_none() {
@@ -1296,7 +1387,7 @@ impl Renderer {
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
             for c in s.cmds.iter().filter(|c| !matches!(c.pipe, Pipe::Particles | Pipe::Gpu)) {
-                let key = (format, c.pipe, c.blend);
+                let key = (s.format(format), c.pipe, c.blend);
                 if !needed.contains(&key) {
                     needed.push(key);
                 }
@@ -1356,7 +1447,7 @@ impl Renderer {
             let mut cmds = &s.cmds[..];
             loop {
                 let split = cmds.iter().position(|c| c.pipe.breaks_pass()).unwrap_or(cmds.len());
-                self.run(&mut pass, s, &cmds[..split], format);
+                self.run(&mut pass, s, &cmds[..split], s.format(format));
                 if split == cmds.len() {
                     break;
                 }
@@ -1462,7 +1553,7 @@ impl Renderer {
         let layers = &self.uniform_buf.as_ref().expect("uploaded").1;
         for c in cmds {
             let mut sc = c.scissor;
-            let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom)
+            let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask)
                 .then(|| &self.surfaces[c.range.start as usize]);
             if let Some(child) = child {
                 if child.size[0] == 0 {
@@ -1512,6 +1603,21 @@ impl Renderer {
                     let fx = self.fx.as_ref().expect("effect frame");
                     let bloom = child.bloom.as_ref().unwrap().result();
                     let bind = self.sampled_bind(fx, child.tex.unwrap(), bloom);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                Pipe::CompositeMask => {
+                    let child = child.unwrap();
+                    let mask = &self.surfaces[child.mask.expect("masked").0];
+                    let view = |s: &Surface| wgpu::BindingResource::TextureView(&self.pool[s.tex.unwrap()].view);
+                    let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("vo-composite-mask"),
+                        layout: &self.mask_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: view(child) },
+                            wgpu::BindGroupEntry { binding: 1, resource: view(mask) },
+                        ],
+                    });
                     pass.set_bind_group(0, &bind, &[]);
                     pass.draw(0..3, 0..1);
                 }
@@ -1576,7 +1682,7 @@ impl Renderer {
         let slot = match pipe {
             Pipe::Shape => 0,
             Pipe::Glyph => 1,
-            Pipe::Composite | Pipe::CompositeBloom => 2,
+            Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             // The particle layer and the painters have their own pipelines.
             Pipe::Particles | Pipe::Gpu => return,
@@ -1596,6 +1702,7 @@ impl Renderer {
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
             Pipe::Composite => [Some(&self.composite_layout), Some(&self.layer_layout)],
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
+            Pipe::CompositeMask => [Some(&self.mask_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
@@ -1613,6 +1720,7 @@ impl Renderer {
             Pipe::Glass => ("vs_glass", "fs_glass", vec![Some(GlassGpu::layout())]),
             Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
             Pipe::CompositeBloom => ("vs_composite", "fs_composite_bloom", vec![]),
+            Pipe::CompositeMask => ("vs_composite", "fs_composite_mask", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),

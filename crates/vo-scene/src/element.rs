@@ -18,7 +18,7 @@ use vo_core::spring::Spring;
 use vo_core::words::Word;
 
 use crate::canvas::{CanvasDraw, Painter};
-use crate::display::{BlendMode, ShapeKind};
+use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::geom::{Color, Rect};
@@ -379,6 +379,8 @@ pub(crate) enum Kind {
         offscreen: bool,
         /// Edge fades of the clip: left, top, right, bottom.
         fade: [f32; 4],
+        /// A mask for the parent layer element (`Element::mask`).
+        mask: Option<Mask>,
     },
     /// Live dictation text: lays out the words like a label, tags each glyph with its word
     /// id, and moves each word by its own channels. A new id enters from `enter`; a kept id
@@ -690,8 +692,53 @@ impl<M> Element<M> {
     /// A container drawn as its own layer: group transform, blend mode, optional clip to
     /// its rounded box, optional offscreen target. Laid out as a flex column.
     pub fn layer(key: impl Into<Key>) -> Element<M> {
-        let kind = Kind::Layer { blend: BlendMode::Normal, clip: false, offscreen: false, fade: [0.0; 4] };
+        let kind = Kind::Layer { blend: BlendMode::Normal, clip: false, offscreen: false, fade: [0.0; 4], mask: None };
         Element::new(key, kind, Element::<M>::flex(FlexDirection::Column))
+    }
+
+    /// A mask (FX04) for the parent element, which must be a [`Element::layer`]: the parent
+    /// shows only where the mask's children draw, by their alpha. The mask itself is not
+    /// drawn, and its children may move, scale and fade like any others. It covers the
+    /// parent's box and takes no space in its layout; `.layout(..)` changes that. Use
+    /// [`Element::luma_mask`] and [`Element::invert_mask`] for the other modes. Only shapes,
+    /// text, vectors and dots count in a mask.
+    pub fn mask(key: impl Into<Key>) -> Element<M> {
+        use taffy::style::{LengthPercentageAuto, Position};
+        let kind = Kind::Layer {
+            blend: BlendMode::Normal,
+            clip: false,
+            offscreen: false,
+            fade: [0.0; 4],
+            mask: Some(Mask::default()),
+        };
+        let mut style = Element::<M>::flex(FlexDirection::Column);
+        style.position = Position::Absolute;
+        style.inset = taffy::Rect {
+            left: LengthPercentageAuto::length(0.0),
+            top: LengthPercentageAuto::length(0.0),
+            right: LengthPercentageAuto::length(0.0),
+            bottom: LengthPercentageAuto::length(0.0),
+        };
+        Element::new(key, kind, style)
+    }
+
+    /// On a mask: mask by luminance, so white shows the parent and black hides it.
+    pub fn luma_mask(mut self) -> Element<M> {
+        match &mut self.kind {
+            Kind::Layer { mask: Some(m), .. } => m.luma = true,
+            _ => debug_assert!(false, "luma_mask on a node that is not a mask: {}", self.key),
+        }
+        self
+    }
+
+    /// On a mask: show the parent where the mask is empty and hide it where the mask draws,
+    /// as a knockout.
+    pub fn invert_mask(mut self) -> Element<M> {
+        match &mut self.kind {
+            Kind::Layer { mask: Some(m), .. } => m.invert = true,
+            _ => debug_assert!(false, "invert_mask on a node that is not a mask: {}", self.key),
+        }
+        self
     }
 
     pub fn key(&self) -> &Key {
@@ -712,13 +759,25 @@ impl<M> Element<M> {
     // Children.
 
     pub fn child(mut self, child: Element<M>) -> Element<M> {
+        self.adopt(&child);
         self.children.push(child);
         self
     }
 
     pub fn children(mut self, children: impl IntoIterator<Item = Element<M>>) -> Element<M> {
-        self.children.extend(children);
+        for c in children {
+            self = self.child(c);
+        }
         self
+    }
+
+    /// A mask is placed over its parent's box: the parent becomes its containing block, as
+    /// `position: relative` does in CSS, which leaves the parent's own place unchanged.
+    fn adopt(&mut self, child: &Element<M>) {
+        let is_mask = matches!(child.kind, Kind::Layer { mask: Some(_), .. });
+        if is_mask && self.style.position == taffy::style::Position::Static {
+            self.style.position = taffy::style::Position::Relative;
+        }
     }
 
     // Layout. Lengths are logical units.

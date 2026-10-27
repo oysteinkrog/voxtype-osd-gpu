@@ -28,6 +28,7 @@ fn layer_texel (frag: vec2f) -> vec2i {
 
 // A layer with bloom: the layer plus `layer.src.z` times its blurred copy, both premultiplied,
 // alpha saturated; in light mode (`layer.src.w`) the copy is a dark shadow under the layer. Only on the effect path, where every texture is linear Rgba16Float.
+// Binding 1 is the bloom for `fs_composite_bloom` and the mask for `fs_composite_mask`.
 @group(0) @binding(1) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(2) var bloom_samp: sampler;
 
@@ -41,4 +42,18 @@ fn layer_texel (frag: vec2f) -> vec2i {
     c = base + (1.0 - base.a) * vec4f (0.0, 0.0, 0.0, min (layer.src.z * glow.a, 0.85));
   }
   return vec4f (c.rgb, min (c.a, 1.0)) * (layer.t.w * clip_coverage (frag.xy));
+}
+
+// A masked layer (FX04): the layer times its mask at the same target pixel, or one minus the
+// mask when inverted. The mask is an R8 texture with its top left at `layer.mask.xy` in
+// target pixels; outside it the mask is empty.
+@fragment fn fs_composite_mask (@builtin(position) frag: vec4f) -> @location(0) vec4f {
+  let c = textureLoad (layer_tex, layer_texel (frag.xy), 0);
+  let p = vec2i (floor (frag.xy + layer.origin.xy - layer.mask.xy));
+  var m = 0.0;
+  if (all (p >= vec2i (0)) && all (p < vec2i (textureDimensions (bloom_tex)))) {
+    m = textureLoad (bloom_tex, p, 0).r;
+  }
+  m = select (m, 1.0 - m, layer.mask.z != 0.0);
+  return c * (m * layer.t.w * clip_coverage (frag.xy));
 }

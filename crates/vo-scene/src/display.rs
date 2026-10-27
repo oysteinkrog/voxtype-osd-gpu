@@ -133,6 +133,21 @@ pub enum LayerTarget {
     /// Drawn into its own texture, then composited. Needed for exact group opacity and for
     /// effects. A layer with `bloom` puts the whole frame on the renderer's effect path.
     Offscreen { bloom: Option<Bloom> },
+    /// A mask (FX04) for its parent layer, which must be offscreen. The mask's content is not
+    /// drawn: its coverage multiplies the parent where the parent is composited, after the
+    /// parent's bloom and trail. Shapes, glyphs, vectors and dots count; particles, glass
+    /// and GPU items do not. An offscreen layer inside a mask draws as a direct one, and a
+    /// mask inside a mask is skipped.
+    Mask(Mask),
+}
+
+/// How a mask layer masks its parent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Mask {
+    /// Mask by the content's luminance (white shows, black hides) instead of its alpha.
+    pub luma: bool,
+    /// Show the parent where the mask is empty and hide it where the mask is full.
+    pub invert: bool,
 }
 
 /// Bloom on an offscreen layer: the layer's content is the light source, and a blurred copy

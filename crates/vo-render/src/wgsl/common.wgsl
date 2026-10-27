@@ -30,6 +30,9 @@ struct Layer {
   smear: vec4f,
   // Edge fades of the clip in clip units: left, top, right, bottom; zero for a hard edge.
   clip_fade: vec4f,
+  // A masked layer's composite (FX04): where the mask texture's top left sits in target
+  // pixels (xy), and 1 in z when the mask is inverted.
+  mask: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;
@@ -84,6 +87,12 @@ fn srgb_encode (c: vec3f) -> vec3f {
 
 // Last step of every content fragment shader.
 fn finish (c: vec4f) -> vec4f {
+  // A mask's content (viewport.w 1 or 2) writes its coverage or its luminance; on the R8
+  // mask texture, premultiplied over then gives the union of what the mask draws.
+  if (layer.viewport.w != 0.0) {
+    let v = select (c.a, dot (c.rgb, vec3f (0.2126, 0.7152, 0.0722)), layer.viewport.w == 2.0);
+    return vec4f (v, v, v, c.a);
+  }
   if (layer.viewport.z == 0.0 || c.a <= 0.0) {
     return c;
   }
