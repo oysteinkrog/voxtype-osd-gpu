@@ -268,7 +268,10 @@ impl Frame {
 impl<M> Element<M> {
     /// A cut panel frame filling the box: see [`Frame`].
     pub fn frame(key: impl Into<Key>, frame: Frame) -> Element<M> {
-        Element::new(key, Kind::Frame(frame), taffy::Style::default())
+        let mut e = Element::new(key, Kind::Frame(frame), taffy::Style::default());
+        // The outline fully drawn unless `.trim` says otherwise, so a presence trim draws it on.
+        e.targets.push((Slot::TrimEnd as u8, 1.0));
+        e
     }
 }
 
@@ -544,5 +547,18 @@ mod tests {
         assert!(matches!(list.vectors[0].paint, VectorPaint::Stripes { .. }));
         // Marching stripes keep the scene awake.
         assert_eq!(scene.next_wake(5.0), Some(5.0));
+    }
+
+    #[test]
+    fn a_presence_trim_draws_the_outline_on_without_a_trim_of_its_own() {
+        use crate::element::Transition;
+        let f = Frame::chamfer(8.0).stroke(2.0, Color::WHITE);
+        let e =
+            Element::<()>::frame("f", f).size(120.0, 60.0).presence(Transition::NONE.trim(0.0, 0.0), Transition::NONE);
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(120.0, 60.0), 1.0);
+        scene.apply(e, 0.0);
+        assert!(scene.sample(0.0).vectors.is_empty());
+        assert_eq!(scene.sample(5.0).vectors.len(), 1);
     }
 }

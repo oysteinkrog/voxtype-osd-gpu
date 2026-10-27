@@ -190,6 +190,8 @@ impl<M> Element<M> {
     fn repeat(key: impl Into<Key>, w: f32, h: f32, repeat: Repeat) -> Element<M> {
         let targets = repeat.targets();
         let mut e = Element::new(key, Kind::Repeat(repeat), taffy::Style::default()).size(w, h);
+        // Ticks fully drawn unless `.trim` says otherwise, so a presence trim draws them on.
+        e.targets.push((Slot::TrimEnd as u8, 1.0));
         for (slot, v) in [Slot::RepeatA, Slot::RepeatB, Slot::RepeatC].into_iter().zip(targets) {
             e.targets.push((slot as u8, v as f64));
         }
@@ -578,5 +580,18 @@ mod tests {
         let id = scene.find(&["root", "rail", "b"]).unwrap();
         let p = scene.sampled(id, 0.0).unwrap().transform.apply(Point::new(5.0, 5.0));
         assert!((p.x - 100.0).abs() < 1e-3 && (p.y - 50.0).abs() < 1e-3, "{p:?}");
+    }
+
+    #[test]
+    fn a_presence_trim_draws_the_ticks_on_without_a_trim_of_its_own() {
+        use crate::element::Transition;
+        let ring = Element::<()>::polar("ring", 200.0, 200.0, 80.0, 0.0, TAU)
+            .ticks(Ticks::new(60, 6.0, 1.0, Color::WHITE))
+            .presence(Transition::NONE.trim(0.0, 0.0), Transition::NONE);
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(200.0, 200.0), 1.0);
+        scene.apply(ring, 0.0);
+        assert_eq!(scene.sample(0.0).shapes.len(), 0);
+        assert_eq!(scene.sample(5.0).shapes.len(), 60);
     }
 }
