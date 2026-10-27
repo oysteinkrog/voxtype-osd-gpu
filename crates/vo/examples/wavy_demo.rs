@@ -1,5 +1,5 @@
 //! Wavy underline demo (T06): a wavy line draws on under a word in 250 ms; when the word
-//! is confirmed the wave straightens and the line fades in 200 ms. The second line changes
+//! is confirmed the wave straightens, then the line fades in 200 ms. The second line changes
 //! its wavelength on a spring, the third drifts its phase.
 //!
 //!   cargo run --release -p vo --example wavy_demo -- [--out DIR] [--check]
@@ -84,7 +84,8 @@ impl App for Demo {
                 if i == 2 {
                     line = line.wave_phase((self.t * 1.5) as f32);
                 }
-                if done {
+                // The line straightens first, then fades.
+                if self.t >= confirmed + 0.2 {
                     line = line.opacity(0.0);
                 }
                 word = word.child(line);
@@ -108,7 +109,7 @@ fn fonts() -> FontRegistry {
 }
 
 /// Frames for the contact sheet.
-const SHEET_AT: [f64; 8] = [0.45, 0.55, 1.4, 2.05, 2.15, 2.8, 3.75, 4.5];
+const SHEET_AT: [f64; 8] = [0.45, 0.6, 1.4, 2.08, 2.2, 2.32, 2.9, 4.75];
 
 /// Thumbnails in a 4 by 2 grid with an 8 px gutter, at half size.
 fn contact_sheet(frames: &[Frame]) -> Frame {
