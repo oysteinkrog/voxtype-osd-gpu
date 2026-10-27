@@ -71,8 +71,13 @@ fn item_composites_at_its_rect() {
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    let at =
-        ItemPlace { rect: [60.0, 40.0, 200.0, 120.0], surface: [W, H], opacity: 0.8, size: Size::new(200.0, 120.0) };
+    let at = ItemPlace {
+        rect: [60.0, 40.0, 200.0, 120.0],
+        surface: [W, H],
+        opacity: 0.8,
+        size: Size::new(200.0, 120.0),
+        scissor: None,
+    };
     painter.paint(&mut enc, &view, FORMAT, &Ring, 1.0, &at);
     gpu.queue.submit([enc.finish()]);
     let px = readback::read_rgba(&gpu.device, &gpu.queue, target.texture());

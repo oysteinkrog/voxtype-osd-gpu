@@ -77,6 +77,8 @@ pub struct ItemPlace {
     pub opacity: f32,
     /// Logical size of the item, for the source.
     pub size: Size,
+    /// x, y, w, h in surface pixels: the item is only drawn inside it.
+    pub scissor: Option<[u32; 4]>,
 }
 
 impl ItemPainter {
@@ -179,6 +181,9 @@ impl ItemPainter {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some([x, y, w, h]) = at.scissor {
+            pass.set_scissor_rect(x, y, w, h);
+        }
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..4, 0..1);

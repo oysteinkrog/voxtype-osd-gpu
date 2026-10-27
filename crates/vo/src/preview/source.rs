@@ -30,6 +30,10 @@ pub(crate) trait Source {
     /// Moves to `t` without drawing; for the seek bench.
     fn seek(&mut self, t: f64);
     fn seek_stats(&self) -> Option<SeekStats>;
+    /// Sets up a renderer made for this source (`Options::configure` for an app).
+    fn configure(&self, r: &mut Renderer) {
+        let _ = r;
+    }
     /// Draws the frame at `t` into `target`, `scale` physical pixels per logical unit.
     fn draw(&mut self, t: f64, scale: f32, r: &mut Renderer, target: &mut Target);
     /// Node boxes and moving-channel lines at the last drawn `t`. Empty without a scene.
@@ -83,6 +87,10 @@ impl<A: App> Source for AppSource<A> {
 
     fn seek_stats(&self) -> Option<SeekStats> {
         Some(self.player.stats())
+    }
+
+    fn configure(&self, r: &mut Renderer) {
+        self.player.options().configure(r);
     }
 
     fn draw(&mut self, t: f64, scale: f32, r: &mut Renderer, target: &mut Target) {

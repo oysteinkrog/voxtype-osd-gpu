@@ -59,7 +59,14 @@ pub struct Options<M> {
     pub quality: vo_render::Quality,
     /// Light-mode shading (`Renderer::set_light`). Default: `VO_LIGHT=1` in the environment.
     pub light: bool,
+    /// Runs on every renderer made for this app (live, offline, preview), after the quality
+    /// and light settings: for example to add a painter for GPU elements, such as
+    /// `vo_3d::install`.
+    pub renderer_setup: Option<RendererSetup>,
 }
+
+/// See [`Options::renderer_setup`].
+pub type RendererSetup = std::sync::Arc<dyn Fn(&mut vo_render::Renderer) + Send + Sync>;
 
 impl<M> Default for Options<M> {
     fn default() -> Self {
@@ -74,15 +81,19 @@ impl<M> Default for Options<M> {
             reduced_motion: env_flag("VO_REDUCED_MOTION"),
             quality: vo_render::Quality::from_env().unwrap_or_default(),
             light: env_flag("VO_LIGHT"),
+            renderer_setup: None,
         }
     }
 }
 
 impl<M> Options<M> {
-    /// Applies the quality tier and light mode to a renderer.
+    /// Applies the quality tier, light mode and `renderer_setup` to a renderer.
     pub(crate) fn configure(&self, r: &mut vo_render::Renderer) {
         r.set_quality(self.quality);
         r.set_light(self.light);
+        if let Some(setup) = &self.renderer_setup {
+            setup(r);
+        }
     }
 
     /// The scene with the text layout these options ask for.

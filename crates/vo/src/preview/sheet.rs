@@ -54,6 +54,7 @@ pub(crate) fn render_sheet(source: &mut dyn Source, spec: &SheetSpec) -> Result<
     let fonts: FontRegistry = source.fonts();
     let label_font = fonts.add_system("monospace").ok();
     let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
+    source.configure(&mut off.renderer);
     let size = source.size();
     let scale = spec.thumb_w as f32 / size.w;
     let (tw, th) = (spec.thumb_w, (size.h * scale).round().max(1.0) as u32);

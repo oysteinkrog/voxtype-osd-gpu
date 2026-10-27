@@ -486,7 +486,9 @@ impl HostApp for Window {
             }
         };
         self.surface = id;
-        self.renderer = Some(Renderer::with_fonts(&gpu.device, &gpu.queue, self.fonts.clone()));
+        let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, self.fonts.clone());
+        self.p.configure(&mut r);
+        self.renderer = Some(r);
         self.comp = Some(Compositor::new(&gpu.device, &gpu.queue));
         if let Some(path) = &self.setup.control {
             match control::listen(path, host.waker()) {
