@@ -591,6 +591,7 @@ impl Flow {
         self.accent = motion.settle.and_then(|s| s.accent);
         let mut old = std::mem::take(&mut self.words);
         let scroll = front_scroll(&old, words, &placed);
+        let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
         // Words that left from the front, which scroll out with the rest.
         let front: Vec<WordId> = match scroll {
             Some(_) => old.iter().map(|o| o.id).take_while(|id| words.iter().all(|w| w.id != *id)).collect(),
@@ -608,7 +609,7 @@ impl Flow {
             let prev = old.iter().position(|o| o.id == w.id).map(|i| old.remove(i));
             let Some(p) = p else {
                 if let Some(o) = prev {
-                    self.ghost_word(o, t, retention);
+                    self.ghost_word(&o, t, retention);
                 }
                 continue;
             };
@@ -676,6 +677,7 @@ impl Flow {
                 o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                 o.spread = false;
             }
+            let shifted = line_shift;
             line_shift = (o.line == p.line).then(|| (p.line, p.x - o.x.target() as f32));
             let look = stage.look(p.line);
             if let Some(dy) = scroll.filter(|&dy| in_block(&o, &p, dy)) {
@@ -685,6 +687,22 @@ impl Flow {
                 let dy = if reduced { 0.0 } else { dy };
                 o.x = make.to(p.x + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
                 o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
+                move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
+            } else if o.line != p.line && front_drop {
+                // A front drop that reflows the text: a gliding word would cut across the
+                // lines it passes, so the word fades out where it is and in at its place,
+                // sliding there with the words before it on its new line.
+                self.ghost_word(&o, t, retention);
+                let back = match shifted {
+                    Some((line, dx)) if line == p.line && !reduced => dx,
+                    _ => 0.0,
+                };
+                o.x = make.to(p.x - back, p.x, FLIP, Rest::PIXELS);
+                line_shift = Some((p.line, back));
+                o.y = make.ch(p.y, REWRAP, Rest::PIXELS);
+                for g in &mut o.glyphs {
+                    g.opacity = make.to(0.0, 1.0, CROSSFADE, Rest::UNIT);
+                }
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
             } else if o.line != p.line {
                 let at = t + REWRAP_STAGGER * stagger as f64;
@@ -709,7 +727,7 @@ impl Flow {
         for o in old {
             arrived = true;
             let id = o.id;
-            self.ghost_word(o, t, retention);
+            self.ghost_word(&o, t, retention);
             if let Some(dy) = scroll.filter(|_| front.contains(&id) && !reduced) {
                 for g in self.ghosts.iter_mut().filter(|g| g.word == id) {
                     let rise = g.rise.value(t) as f32;
@@ -957,14 +975,14 @@ impl Flow {
     }
 
     /// Fades out every glyph of a word that left the screen, where it is at `t`.
-    fn ghost_word(&mut self, o: FlowWord, t: f64, retention: f64) {
+    fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64) {
         let at = (o.x.value(t) as f32, o.y.value(t) as f32 + o.roll.value(t) as f32);
         for g in self.ghosts.iter_mut().filter(|g| g.word == o.id && g.fixed.is_none()) {
             let k = if g.width > 0.0 { o.width.value(t) as f32 / g.width } else { 1.0 };
             g.x *= k;
             g.fixed = Some(at);
         }
-        let s = stretch(&o, t);
+        let s = stretch(o, t);
         for g in &o.glyphs {
             let k = g.opacity.value(t) * o.look_opacity.value(t);
             if k > 0.0 {

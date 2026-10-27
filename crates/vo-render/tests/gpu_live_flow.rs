@@ -219,3 +219,42 @@ fn front_drop_golden() {
     let img = strip(&mut off, &fonts, "live-front-drop", &steps, &[0.9, 1.03, 1.06, 1.1, 1.16, 1.6]);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+/// A line cap that drops one word at a time from the front, with "…" on the new first word,
+/// as the popup does: the text reflows on every new word, and words that change line fade
+/// across instead of gliding over the other words.
+#[test]
+fn line_cap_reflow_golden() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let text = "open the configuration file and set the popup theme to swiss so the dictation window shows";
+    let all: Vec<(u32, &str)> = text.split(' ').enumerate().map(|(i, w)| (i as u32 + 1, w)).collect();
+    let lines = |shown: &[Word]| {
+        let mut probe = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+        probe.set_viewport(0.0, Size::new(W, H), 1.0);
+        probe.apply(view(shown), 0.0);
+        let mut ys: Vec<f32> = probe.sample(5.0).glyphs.iter().map(|g| g.pos.y).collect();
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        ys.len()
+    };
+    let capped = |n: usize| {
+        let mut start = 0;
+        loop {
+            let mut shown = words(&all[start..n]);
+            if start > 0 {
+                shown[0].text = format!("…{}", shown[0].text);
+            }
+            if lines(&shown) <= 2 || start + 1 == n {
+                return shown;
+            }
+            start += 1;
+        }
+    };
+    let steps: Vec<(f64, Vec<Word>)> = (1..=all.len()).map(|n| (n as f64 * 0.12, capped(n))).collect();
+    let last = all.len() as f64 * 0.12;
+    let times = [last - 0.13, last - 0.1, last - 0.07, last - 0.01, last + 0.03, last + 0.6];
+    let img = strip(&mut off, &fonts, "live-line-cap", &steps, &times);
+    support::check(&img, Tolerance::default()).unwrap();
+}

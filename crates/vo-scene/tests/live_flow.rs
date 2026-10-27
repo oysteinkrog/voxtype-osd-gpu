@@ -430,3 +430,56 @@ fn with_an_accent_new_words_arrive_in_it_and_mix_to_the_text_colour() {
     s.apply(accent_view(&words(&[(1, "settled")])), 2.0);
     assert!(c(&s, 2.0).g < 0.01);
 }
+
+/// Words as an app with a line cap shows them: the newest that fit in `lines` lines, the
+/// first marked with "…" when words were dropped.
+fn capped(all: &[(u32, &str)], width: f32, lines: usize) -> Vec<Word> {
+    let mut start = 0;
+    loop {
+        let mut shown = words(&all[start..]);
+        if start > 0 {
+            shown[0].text = format!("…{}", shown[0].text);
+        }
+        let mut probe = scene();
+        probe.apply(view(&shown, Some(width), false), 0.0);
+        let list = probe.sample(0.0);
+        let mut ys: Vec<f32> = list.glyphs.iter().map(|g| g.pos.y).collect();
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        if ys.len() <= lines || start + 1 == all.len() {
+            return shown;
+        }
+        start += 1;
+    }
+}
+
+#[test]
+fn with_a_line_cap_no_word_glides_across_the_other_lines() {
+    let text = "open the configuration file and set the popup theme to swiss so the dictation \
+                window shows the live words in the middle of the screen with the waveform above \
+                them then press the key again to stop";
+    let all: Vec<(u32, &str)> = text.split(' ').enumerate().map(|(i, w)| (i as u32 + 1, w)).collect();
+    let mut s = scene();
+    // Words arrive every 120 ms; once the text fills three lines each one drops a front word
+    // and the rest reflow.
+    for n in 1..=all.len() {
+        let t = n as f64 * 0.12;
+        let shown = capped(&all[..n], 260.0, 3);
+        s.apply(view(&shown, Some(260.0), false), t);
+        let mut fresh = scene();
+        fresh.apply(view(&shown, Some(260.0), false), 0.0);
+        let target = fresh.sample(0.0);
+        for dt in [0.02, 0.05, 0.08, 0.11] {
+            let now = s.sample(t + dt);
+            // Every glyph that shows sits on a text row: the text may scroll as a whole, so
+            // all rows may be off by the same amount, but no word travels up or down on its
+            // own, across the words between.
+            let base = first(&target, shown[0].id).1;
+            let rows: Vec<f32> =
+                now.glyphs.iter().filter(|g| g.color.a > 0.1).map(|g| (g.pos.y - base).rem_euclid(26.0)).collect();
+            let r0 = rows[0];
+            let off = |r: f32| ((r - r0).rem_euclid(26.0)).min((r0 - r).rem_euclid(26.0));
+            let spread = rows.iter().map(|&r| off(r)).fold(0.0, f32::max);
+            assert!(spread < 2.0, "{n} words at +{dt}: a glyph is {spread} px off the rows");
+        }
+    }
+}
