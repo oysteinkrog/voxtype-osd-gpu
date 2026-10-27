@@ -250,8 +250,9 @@ struct Shaped {
 impl ShapedLayout {
     /// Shapes `text` run by run: each run is a stretch of characters the same face has. A
     /// character goes to the first face of `style.font` and its fallbacks that has it.
-    /// Whitespace and combining marks stay in the run they are in, so a space between two
-    /// Japanese words does not split the run and an accent stays with its letter.
+    /// Combining marks stay in the run they are in, so an accent stays with its letter, and
+    /// so does whitespace the run's face has, so a space between two Japanese words does not
+    /// split the run.
     fn shape_runs(&self, text: &str, style: &TextStyle, primary: &ShaperFont<'_, '_>, k: f32) -> Vec<Shaped> {
         let runs = self.runs(text, style.font);
         let mut out = Vec::with_capacity(text.len());
@@ -292,7 +293,8 @@ impl ShapedLayout {
         let mut runs: Vec<(Range<usize>, FontId)> = Vec::new();
         for (at, c) in text.char_indices() {
             let font = match runs.last() {
-                Some(&(_, f)) if c.is_whitespace() || joins(c) => f,
+                Some(&(_, f)) if joins(c) => f,
+                Some(&(_, f)) if c.is_whitespace() && self.fonts.get(f).is_some_and(|face| face.has(c)) => f,
                 _ => self.fonts.face_for(primary, c),
             };
             match runs.last_mut() {

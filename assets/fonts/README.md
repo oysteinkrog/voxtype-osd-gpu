@@ -18,7 +18,7 @@ fonts a machine has installed. Every subset keeps all layout features.
 | `jp-labels-bold` | `NotoSansJP-Bold-Labels.otf` | Noto Sans CJK JP Bold 2.004 | 2014-2021 Adobe |
 
 The Latin files cover ASCII, Latin-1, Latin Extended-A (Norwegian and most European
-letters), dashes, quotes, the ellipsis and the euro sign. The Japanese files cover kana,
+letters), dashes, quotes, the ellipsis and the euro sign. The Japanese files cover the space, kana,
 CJK punctuation, full-width forms and about 100 kanji for theme labels. They are for
 labels a theme writes, not for dictated Japanese: for that, add a system face as a
 fallback, for example `fonts.add_system(":lang=ja")`.
