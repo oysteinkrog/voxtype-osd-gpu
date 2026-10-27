@@ -237,6 +237,8 @@ pub struct LiveMotion {
     pub letters: Option<letter_physics::LetterPhysics>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
+    /// Per-word typographic channels (MO-03).
+    pub typo: Option<crate::typo::Typos>,
 }
 
 /// What `Flow::update` needs from the node.
@@ -1139,6 +1141,13 @@ impl Flow {
         let ox = self.spans.get(w.line as usize).map_or(0.0, |sp| sp.0 + self.origin * (sp.1 - sp.0));
         let oy = w.y.value(t) as f32 - 0.28 * self.size;
         (Point::new(ox + (pen.x - ox) * s, oy + (pen.y - oy) * s + roll), s)
+    }
+
+    /// Whether word `id` is on the newest line, where the reading-line envelope holds. True
+    /// before the first layout.
+    pub(crate) fn on_reading_line(&self, id: WordId) -> bool {
+        let Some(last) = self.words.last() else { return true };
+        self.words.iter().find(|w| w.id == id).is_none_or(|w| w.line == last.line)
     }
 
     /// The newest line's box at `t` in the text box's space, when the text has a reading

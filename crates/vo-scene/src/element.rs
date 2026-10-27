@@ -1310,6 +1310,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: per-word typographic channels (MO-03): ink, weight, tracking, baseline and
+    /// fill per word, each on a spring, clamped by the reading-line envelope on the newest
+    /// line. See [`crate::typo`].
+    pub fn word_typo(mut self, typos: crate::typo::Typos) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.typo = Some(typos),
+            _ => debug_assert!(false, "word_typo on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: the words the recogniser marks stable. With settling ink, a word not in the
     /// list keeps its arrival ink until it is. Without this call every word settles by age.
     pub fn stable_words(mut self, ids: &[u32]) -> Element<M> {

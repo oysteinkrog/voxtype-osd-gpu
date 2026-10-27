@@ -13,7 +13,9 @@
 // - dissolve keeps the parts where a value noise fixed to the glyph's em space is above a
 //   threshold that rises with the amount;
 // - wipe hides the glyph from the right edge of its ink box, with a soft front;
-// - chromatic offset takes the red and blue coverage a few pixels left and right.
+// - chromatic offset takes the red and blue coverage a few pixels left and right;
+// - weight (MO-03, `fx3.w`) grows each edge that many pixels, or thins it when negative:
+//   coverage from the signed distance to the outline, moved by the weight.
 //
 // A material (FX15, `materials.wgsl`, appended) gets the glyph's colour, its coverage and its
 // em coordinates; `fx2.y` holds the material id, `fx2.z` a seed per glyph and `fx2.w` em units
@@ -28,7 +30,7 @@
   let det0 = g.lin.x * g.lin.w - g.lin.z * g.lin.y;
   let inv = mat2x2f (vec2f (g.lin.w, -g.lin.y), vec2f (-g.lin.z, g.lin.x)) * (1.0 / det0);
   // A blur tap reaches half the blur plus half its window, a halo twice that per radius.
-  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x + length (g.fx3.xy) + 0.5 * g.fx3.z;
+  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x + length (g.fx3.xy) + 0.5 * g.fx3.z + max (g.fx3.w, 0.0);
   let em_per_px = abs (inv[0]) + abs (inv[1]);
   let grow = 0.5 * abs (inv * layer.smear.zw) + reach_px * em_per_px;
   let em = mix (g.ext.xy - grow, g.ext.zw + grow, c);
@@ -109,7 +111,7 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   // Plain glyphs take Slug's own path, unchanged. Sharing the derivatives below with Slug's
   // `fwidth` changes rotated text by a few pixels on some drivers. The branch is uniform
   // over a quad in practice: every lane of it belongs to one instance.
-  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && in.fx3.z == 0.0 && in.fx2.y == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
+  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && all (in.fx3.zw == vec2f (0.0)) && in.fx2.y == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
     return finish (in.color * (hb_gpu_draw (in.tc, in.loc) * clip_coverage (in.clip.xy)));
   }
   let ppe = 1.0 / fwidth (in.tc);
@@ -130,6 +132,11 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   }
   if (in.fx3.z > 0.0) {
     cov = clamp (0.5 * in.fx3.z + 0.5 - edge_distance_px (in.tc, in.loc, ppe), 0.0, 1.0);
+  } else if (in.fx3.w != 0.0 && !blurred) {
+    // Signed distance, outside positive, with the side from the coverage itself.
+    let d = edge_distance_px (in.tc, in.loc, ppe);
+    let s = select (d, -d, cov > 0.5);
+    cov = clamp (0.5 - s + in.fx3.w, 0.0, 1.0);
   }
   var c = in.color * cov;
   if (in.fx.w != 0.0) {

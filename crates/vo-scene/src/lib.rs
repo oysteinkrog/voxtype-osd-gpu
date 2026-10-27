@@ -44,6 +44,8 @@
 //! - `hearing`: the popup hears before it reads: pre-echo blobs per onset, pause ticks that
 //!   gather into a hollow comma, and the exhale in long quiet (MO-11, MO-12, MO-30).
 //! - `lines`: live text broken into lines whose look follows their age (teleprompter).
+//! - `typo`: per-word typographic channels on live text: ink, weight, tracking, baseline and
+//!   fill on springs, clamped on the reading line (MO-03).
 //! - `swap`: word swap, a label that changes word by word, shared words sliding in place.
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `stage`: 2D layers as planes in one perspective camera: rotate_x, rotate_y,
@@ -99,6 +101,7 @@ pub mod swap;
 pub mod text;
 pub mod timed;
 pub mod trace;
+pub mod typo;
 
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
 pub use taffy;

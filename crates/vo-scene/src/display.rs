@@ -525,6 +525,9 @@ pub struct GlyphFx {
     pub outline: f32,
     /// Material id (FX15) from `DisplayList::add_material`, 0 for none.
     pub material: u32,
+    /// Weight (MO-03): each edge of the glyph grows this far, or shrinks for a negative
+    /// value. The advance does not change.
+    pub weight: f32,
 }
 
 impl GlyphFx {
@@ -536,6 +539,7 @@ impl GlyphFx {
             && (self.halo.a <= 0.0 || self.halo_radius <= 0.0)
             && self.outline <= 0.0
             && self.material == 0
+            && self.weight == 0.0
     }
 
     /// The effects with the halo faded by `alpha`, as the glyph's colour is.

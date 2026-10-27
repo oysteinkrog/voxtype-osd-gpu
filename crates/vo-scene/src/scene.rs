@@ -33,6 +33,7 @@ use crate::input::PointerState;
 use crate::layout::LayoutView;
 use crate::material::Material;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
+use crate::typo::Envelope;
 use vo_core::signals::{SignalBlock, SignalsCell};
 
 new_key_type! {
@@ -121,6 +122,8 @@ pub(crate) struct Node<M> {
     pub reduced: bool,
     /// Ambient loops and ripples (FX-203, FX-101).
     pub ambient: crate::ambient::NodeAmbient,
+    /// Live text: per-word typographic channels (MO-03).
+    pub typo: crate::typo::TypoState,
 }
 
 /// One live-text word's motion: opacity, an offset from its laid-out place, and its text
@@ -260,18 +263,21 @@ impl<M> Node<M> {
 
     fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| w.channels());
-        self.chans.iter().map(|(_, c)| c).chain(words).map(|c| c.settled_at()).fold(f64::NEG_INFINITY, f64::max)
+        let chans = self.chans.iter().map(|(_, c)| c).chain(words).map(|c| c.settled_at());
+        chans.fold(self.typo.settled_at(), f64::max)
     }
 
     /// Live text: matches the word motions to `words` at `t`. A new id starts from `enter`, a
     /// kept id with new text jumps to `change`, and both spring to rest (opacity 1, no
     /// offset, no text effect). Returns whether any motion started or a word went.
     fn sync_words(&mut self, t: f64, retention: f64) -> bool {
-        let Kind::LiveText { words, enter, change, .. } = &self.kind else {
+        let Kind::LiveText { words, enter, change, live, .. } = &self.kind else {
             let had = !self.words.is_empty();
             self.words.clear();
             return had;
         };
+        let ids: Vec<u32> = words.iter().map(|w| w.id).collect();
+        let typo_changed = self.typo.sync(t, &ids, live.typo.as_ref(), self.reduced, retention);
         let spring =
             |prop: Prop| match self.motion.iter().find(|(p, _)| *p == prop).map_or(self.default_motion, |m| m.1) {
                 Motion::Spring(s) => s,
@@ -347,7 +353,7 @@ impl<M> Node<M> {
             self.words_at = t;
         }
         self.words = next;
-        changed
+        changed || typo_changed
     }
 
     /// Live text: a word's `(opacity, dx, dy)` at `t`.
@@ -386,6 +392,7 @@ impl<M> Node<M> {
             halo_offset: Point::new(v(Slot::TextShadowX), v(Slot::TextShadowY)),
             outline: v(Slot::TextOutline).max(0.0),
             material: 0,
+            weight: 0.0,
         }
     }
 
@@ -699,6 +706,7 @@ impl<M> Scene<M> {
                 || (n.alive(t) && self.bound_moving(n, t))
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
                 || n.live.settled_at() > t
+                || n.typo.settled_at() > t
                 || (n.alive(t) && n.sheen_progress(t).is_some())
                 || (n.alive(t)
                     && match &n.kind {
@@ -884,6 +892,7 @@ impl<M> Scene<M> {
             default_motion: self.inherited_motion(default_motion, parent),
             reduced: self.reduced_motion,
             ambient: Default::default(),
+            typo: Default::default(),
         };
         node.sync_words(t, self.retention);
         let enter = presence.map_or(Transition::NONE, |(enter, _)| enter);
@@ -1482,26 +1491,46 @@ impl<M> Scene<M> {
                     let fx = n.text_fx(t).faded(alpha);
                     let spans = glyph_spans(&n.shaped, style.size);
                     // Each word wipes over its own span, from its first glyph to its last.
-                    let mut word_spans: Vec<(u32, f32, f32)> = Vec::new();
+                    // With it, for the typographic channels, how many glyphs each word has and
+                    // the middle of its ink run.
+                    let mut word_spans: Vec<(u32, f32, f32, usize, f32, f32)> = Vec::new();
                     for (g, &(x0, x1)) in n.shaped.glyphs.iter().zip(&spans) {
                         let word = word_of(g.cluster);
+                        let (p0, p1) = (g.pos.x, g.pos.x + g.advance);
                         match word_spans.iter_mut().find(|w| w.0 == word) {
-                            Some(w) => (w.1, w.2) = (w.1.min(x0), w.2.max(x1)),
-                            None => word_spans.push((word, x0, x1)),
+                            Some(w) => {
+                                (w.1, w.2, w.3) = (w.1.min(x0), w.2.max(x1), w.3 + 1);
+                                (w.4, w.5) = (w.4.min(p0), w.5.max(p1));
+                            }
+                            None => word_spans.push((word, x0, x1, 1, p0, p1)),
                         }
                     }
+                    let mut letter = (NO_WORD, 0usize);
                     for (i, (g, &span)) in n.shaped.glyphs.iter().zip(&spans).enumerate() {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
                         // Where the word and glyph are on their way to the laid-out place.
                         let m = n.live.glyph(i, t);
-                        let (k, dx, dy) = (k * m.opacity, dx + m.dx, dy + m.dy);
+                        let (mut k, mut dx, mut dy) = (k * m.opacity, dx + m.dx, dy + m.dy);
+                        letter = if letter.0 == word { (word, letter.1 + 1) } else { (word, 0) };
+                        let ws = word_spans.iter().find(|w| w.0 == word).copied();
+                        let mut weight = 0.0;
+                        if let Some(v) = n.typo.sample(word, t) {
+                            let v = if n.live.on_reading_line(word) { Envelope::READING.clamp(v) } else { v };
+                            let (count, middle) = ws.map_or((1, g.pos.x), |w| (w.3, 0.5 * (w.4 + w.5)));
+                            k *= v.letter_ink(letter.1, count);
+                            // Tracking spreads the letters about the word's middle.
+                            dx += (v.tracking - 1.0) * (g.pos.x + 0.5 * g.advance - middle);
+                            dy -= v.baseline;
+                            weight = v.weight;
+                        }
                         if k <= 0.0 || g.glyph == OBJECT_GLYPH {
                             continue;
                         }
                         let (blur, dissolve, wipe) = n.word_fx(word, t);
-                        let word_span = word_spans.iter().find(|w| w.0 == word).map_or(span, |w| (w.1, w.2));
+                        let word_span = ws.map_or(span, |w| (w.1, w.2));
                         let e = GlyphFx {
+                            weight: fx.weight + weight,
                             blur: fx.blur + blur,
                             dissolve: fx.dissolve.max(dissolve),
                             wipe: wipe_part(fx.wipe, (0.0, n.shaped.size.w), span)
