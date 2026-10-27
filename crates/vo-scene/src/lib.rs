@@ -26,6 +26,7 @@
 //! - `spectrum`: a radial spectrum, bars round a ring from the signal bus's mel bands.
 //! - `container`: a dot, pill or card container whose size and radius spring, content clipped.
 //! - `meters`: a progress hairline that never moves backwards, and a dismiss countdown ring.
+//! - `reveal`: a frame that draws on from its corners, hairlines and brackets, then content.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -76,6 +77,7 @@ pub mod meters;
 pub mod path;
 pub mod reach;
 pub mod repeat;
+pub mod reveal;
 pub mod ribbon;
 pub mod roll;
 pub mod scene;

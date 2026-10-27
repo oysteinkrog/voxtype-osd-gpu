@@ -256,3 +256,49 @@ fn meters_golden() {
     let img = sheet("story-meters", 150.0, 56.0, vec![lines(line), lines(thick), rings]);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+#[test]
+fn reveal_golden() {
+    use vo_scene::path::StrokeStyle;
+    use vo_scene::reveal::FrameReveal;
+    let accent = Color::hex(0x7dd3fc, 1.0);
+    let reveal = Arc::new(FrameReveal {
+        start: 0.0,
+        border: StrokeStyle::solid(1.5, Color::hex(0xffffff, 0.7)),
+        hairlines: vec![0.36],
+        brackets: Some((10.0, 6.0, StrokeStyle::solid(2.0, accent))),
+        ..FrameReveal::default()
+    });
+    let frames: Vec<Frame> = [0.0, 0.03, 0.08, 0.14, 0.2, 0.28, 0.36, 0.45, 0.7]
+        .iter()
+        .map(|&t| {
+            let f = reveal.clone();
+            Arc::new(move |r: Rect, p: &mut Painter| {
+                let frame = Rect::new(r.x + 16.0, r.y + 14.0, r.w - 32.0, r.h - 28.0);
+                f.paint(t, frame, p);
+                // Content: a status dot and two lines of text, entering once the frame closed.
+                let a = f.content_alpha(t);
+                if a > 0.0 {
+                    use vo_scene::display::{Paint, ShapeInstance};
+                    use vo_scene::geom::RRect;
+                    let dy = 4.0 * (1.0 - a);
+                    let c = |c: Color| Paint::solid(c.fade(a));
+                    let (x, y) = (frame.x + 14.0, frame.y + 12.0 + dy);
+                    p.shape(ShapeInstance::circle(Point::new(x + 4.0, y + 4.0), 4.0, c(Color::hex(0xef4444, 1.0))));
+                    p.shape(ShapeInstance::rrect(RRect::new(Rect::new(x + 14.0, y, 60.0, 8.0), 4.0), c(Color::WHITE)));
+                    for (i, w) in [0.8f32, 0.55].iter().enumerate() {
+                        let ly = frame.y + frame.h * 0.36 + 10.0 + i as f32 * 14.0 + dy;
+                        let lw = (frame.w - 28.0) * w;
+                        p.shape(ShapeInstance::rrect(
+                            RRect::new(Rect::new(x, ly, lw, 7.0), 3.5),
+                            c(Color::hex(0x9ca3af, 1.0)),
+                        ));
+                    }
+                }
+            }) as Frame
+        })
+        .collect();
+    let rows = vec![frames[..5].to_vec(), frames[4..].to_vec()];
+    let img = sheet("story-reveal", 200.0, 110.0, rows);
+    support::check(&img, Tolerance::default()).unwrap();
+}
