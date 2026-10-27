@@ -1348,7 +1348,7 @@ impl<M> Scene<M> {
             push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
         } else {
             // Lines leaving live text (MO-33) go under it, their shadows over it.
-            let leaving = (matches!(n.kind, Kind::LiveText { .. }) && !n.live.leaving().is_empty()).then(|| {
+            let leaving = (matches!(n.kind, Kind::LiveText { .. }) && n.live.has_extras()).then(|| {
                 let zoom = n.value(Slot::TextZoom as u8, t) as f32;
                 let color = n.color(Slot::Text, t).fade(alpha);
                 crate::flow::overflow::Place { origin: Point::new(m.e, m.f), zoom, color, layer }
@@ -1359,6 +1359,7 @@ impl<M> Scene<M> {
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
             if let Some(at) = &leaving {
                 crate::flow::overflow::emit_shadows(n.live.leaving(), t, at, items, out);
+                crate::flow::margin::emit(&n.live, t, at, alpha, items, out);
             }
         }
         for &c in &n.children {

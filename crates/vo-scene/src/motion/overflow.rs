@@ -185,6 +185,14 @@ fn ease_out(p: f32) -> f32 {
     1.0 - (1.0 - p) * (1.0 - p)
 }
 
+impl super::Flow {
+    /// Whether the node draws anything beside its words: a leaving line (MO-33) or a margin
+    /// mark (MO-32).
+    pub(crate) fn has_extras(&self) -> bool {
+        !self.leaving.is_empty() || self.has_margin()
+    }
+}
+
 /// Where a node's leaving lines are drawn: the node's place in its layer and its text.
 pub(crate) struct Place {
     /// The text box's origin in the current layer, and the text zoom.

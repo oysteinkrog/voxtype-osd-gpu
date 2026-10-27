@@ -1269,6 +1269,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: a mark in the left margin beside the newest line that splits when the
+    /// text wraps, one half staying with the previous line and one going to the new line
+    /// (MO-32). See [`crate::flow::margin`].
+    pub fn margin_mark(mut self, m: crate::flow::margin::MarginMark) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.margin = Some(m),
+            _ => debug_assert!(false, "margin_mark on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {

@@ -237,6 +237,8 @@ pub struct LiveMotion {
     pub letters: Option<letter_physics::LetterPhysics>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
+    /// A mark beside the newest line that splits when the text wraps (MO-32).
+    pub margin: Option<margin::MarginMark>,
     /// Per-word typographic channels (MO-03).
     pub typo: Option<crate::typo::Typos>,
 }
@@ -782,6 +784,7 @@ impl Flow {
         }
         self.words = next;
         self.index = index;
+        self.update_margin(t, motion.margin, reduced);
         self.ghosts.retain(|g| g.opacity.target() > 0.0 || g.opacity.settled_at() > t);
         self.leaving.retain(|l| l.done_at() > t);
         if arrived {
@@ -1263,7 +1266,7 @@ impl Flow {
         let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale, &g.slide]);
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
-        let leaving = self.leaving.iter().map(|l| l.done_at()).fold(f64::NEG_INFINITY, f64::max);
+        let leaving = self.leaving.iter().map(|l| l.done_at()).fold(self.margin_settled_at(), f64::max);
         let leaving = leaving.max(self.letters_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
     }
@@ -1294,6 +1297,9 @@ impl Flow {
 #[path = "motion/overflow.rs"]
 pub mod overflow;
 
+#[path = "motion/margin.rs"]
+pub mod margin;
+
 /// The live text motion state of one node.
 #[derive(Default)]
 pub(crate) struct Flow {
@@ -1305,6 +1311,8 @@ pub(crate) struct Flow {
     ghosts: Vec<Ghost>,
     /// Lines that left from the front, folding or thinning away (MO-33).
     leaving: Vec<overflow::Leaving>,
+    /// The margin mark (MO-32).
+    margin: margin::Margin,
     /// Caret `(x, y)` on the baseline, and its bar size `(width, ascent, descent)`.
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.
