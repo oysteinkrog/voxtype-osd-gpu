@@ -689,6 +689,8 @@ impl State {
                 return;
             }
         };
+        // Cleared before the app runs, so a request_frame made inside cpu_frame is kept.
+        self.surfaces[i].want_frame = false;
         self.in_frame = Some(id);
         let mut cpu = CpuFrame { id, t, frame, size: [w, h], scale: scale as f32, stride, pixels: canvas };
         let drawn = app.cpu_frame(self, &mut cpu);
@@ -706,9 +708,7 @@ impl State {
             gpu_wl.commit();
         }
         if !drawn {
-            let s = &mut self.surfaces[i];
-            s.shm = Some(stage);
-            s.want_frame = false;
+            self.surfaces[i].shm = Some(stage);
             return;
         }
         role.frame(&self.qh, role.clone());
@@ -724,7 +724,6 @@ impl State {
         let s = &mut self.surfaces[i];
         s.shm = Some(stage);
         s.cpu_callback_pending = true;
-        s.want_frame = false;
         s.frames += 1;
         if s.frames == 1 {
             self.stage("first present call");
@@ -786,6 +785,8 @@ impl State {
         }
         self.surfaces[i].first_gpu.get_or_insert(frame);
         let size = [tex.texture.width(), tex.texture.height()];
+        // Cleared before the app runs, so a request_frame made inside frame is kept.
+        self.surfaces[i].want_frame = false;
         self.in_frame = Some(id);
         app.frame(self, &Frame { id, t, frame, size, scale, texture: &tex.texture });
         self.in_frame = None;
@@ -802,7 +803,6 @@ impl State {
         self.hand_over(i);
         let s = &mut self.surfaces[i];
         s.callback_pending = true;
-        s.want_frame = false;
         s.frames += 1;
         let (first, first_gpu) = (s.frames == 1, s.first_gpu == Some(s.frames - 1));
         if first {
