@@ -22,7 +22,7 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
-use crate::flow::{Caret, LiveMotion, Revise};
+use crate::flow::{Caret, CaseChange, LiveMotion, Revise};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
 use crate::path::{Morph, Outline, StrokeStyle};
@@ -1072,12 +1072,22 @@ impl<M> Element<M> {
         self
     }
 
-    /// Live text: what a word whose text changes does with its glyphs. `Revise::Swap` by
-    /// default.
+    /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
+    /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.revise = r,
             _ => debug_assert!(false, "word_revise on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: how `Revise::Glyphs` shows a letter whose case changed. `CaseChange::Roll`
+    /// by default.
+    pub fn word_case(mut self, c: CaseChange) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.case = c,
+            _ => debug_assert!(false, "word_case on a node that is not live text: {}", self.key),
         }
         self
     }

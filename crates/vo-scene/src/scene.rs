@@ -1293,7 +1293,7 @@ impl<M> Scene<M> {
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + g.pos.x + dx, origin.y + g.pos.y + dy),
-                            size: style.size,
+                            size: style.size * m.scale,
                             font: g.font,
                             glyph: g.glyph,
                             word,
@@ -1309,7 +1309,7 @@ impl<M> Scene<M> {
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + gh.pos.x + dx, origin.y + gh.pos.y + dy),
-                            size: style.size,
+                            size: style.size * gh.scale,
                             font: style.font,
                             glyph: gh.glyph,
                             word: gh.word,

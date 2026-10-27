@@ -2,9 +2,9 @@
 //! that change line glide there in reading order, and a caret follows the last word.
 
 use vo_core::words::Word;
-use vo_scene::display::DisplayList;
+use vo_scene::display::{DisplayList, GlyphInstance};
 use vo_scene::element::{Element, TextStyle};
-use vo_scene::flow::{caret_alpha, Caret, Revise, CARET_HOLD, REWRAP_STAGGER};
+use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
 use vo_scene::Scene;
@@ -161,4 +161,91 @@ fn caret_blink_shape() {
     assert_eq!(caret_alpha(CARET_HOLD + 0.8 * period), 0.0);
     let fading = caret_alpha(CARET_HOLD + 0.6 * period + 0.06);
     assert!(fading > 0.0 && fading < 1.0);
+}
+
+fn glyph_view(w: &[Word], case: CaseChange) -> Element<()> {
+    let live = Element::live_text("live", w).text_style(style()).word_revise(Revise::Glyphs).word_case(case);
+    Element::column("root").child(live)
+}
+
+/// The glyphs of `word` in draw order: current glyphs first, then ghosts.
+fn of(list: &DisplayList, word: u32) -> Vec<GlyphInstance> {
+    list.glyphs.iter().filter(|g| g.word == word).copied().collect()
+}
+
+#[test]
+fn a_case_fix_rolls_only_the_changed_letter() {
+    let mut s = scene();
+    s.apply(glyph_view(&words(&[(1, "hello"), (2, "there")]), CaseChange::Roll), 0.0);
+    let before = s.sample(1.0);
+    s.apply(glyph_view(&words(&[(1, "Hello"), (2, "there")]), CaseChange::Roll), 1.0);
+    let settled = s.sample(5.0);
+    let base_y = of(&before, 1)[0].pos.y;
+
+    let mid = of(&s.sample(1.06), 1);
+    assert_eq!(mid.len(), 6, "five glyphs and the old h on its way out");
+    let (new_h, old_h) = (mid[0], mid[5]);
+    assert!(new_h.pos.y > base_y && new_h.color.a < 1.0, "new H comes in from below: {new_h:?}");
+    assert!(old_h.pos.y < base_y && old_h.color.a < 1.0, "old h leaves upward: {old_h:?}");
+    // The kept letters stay opaque and only slide, toward their new places.
+    let (old, new) = (of(&before, 1), of(&settled, 1));
+    for ((g, a), b) in mid[1..5].iter().zip(&old[1..5]).zip(&new[1..5]) {
+        assert_eq!(g.color.a, 1.0);
+        assert_eq!(g.pos.y, base_y);
+        let (a, b) = (a.pos.x, b.pos.x);
+        assert!(g.pos.x >= a.min(b) - 1e-3 && g.pos.x <= a.max(b) + 1e-3);
+    }
+    // At the change nothing jumps: the new H is still transparent, so the first glyph drawn
+    // is the "e", where it was.
+    let at = of(&s.sample(1.0), 1);
+    assert_eq!(at[0].pos, of(&before, 1)[1].pos);
+    assert_eq!(of(&settled, 1).len(), 5);
+}
+
+#[test]
+fn an_inserted_comma_pops_in_from_the_baseline_and_pushes_the_next_word() {
+    let mut s = scene();
+    s.apply(glyph_view(&words(&[(1, "hello"), (2, "there")]), CaseChange::Roll), 0.0);
+    let before = s.sample(1.0);
+    s.apply(glyph_view(&words(&[(1, "hello,"), (2, "there")]), CaseChange::Roll), 1.0);
+    let sizes: Vec<f32> = (0..30).map(|i| of(&s.sample(1.0 + i as f64 * 0.01), 1)[5].size).collect();
+    assert!(sizes[1] < 20.0 * 0.8, "starts small: {sizes:?}");
+    let peak = sizes.iter().copied().fold(0.0, f32::max);
+    assert!(peak > 20.0 * 1.02 && peak < 20.0 * 1.2, "small overshoot: {peak}");
+    assert!((sizes[29] - 20.0).abs() < 0.1, "settles at full size: {sizes:?}");
+    // The comma sits on the baseline the whole way.
+    let base_y = of(&before, 1)[0].pos.y;
+    assert!((0..20).all(|i| of(&s.sample(1.0 + i as f64 * 0.01), 1)[5].pos.y == base_y));
+    // The next word slides right by the comma's advance, without a jump.
+    assert_eq!(first(&s.sample(1.0), 2), first(&before, 2));
+    assert!(first(&s.sample(5.0), 2).0 > first(&before, 2).0 + 2.0);
+    // The other letters of "hello" never move or fade.
+    let mid = of(&s.sample(1.05), 1);
+    for (g, old) in mid[..5].iter().zip(of(&before, 1)) {
+        assert_eq!(g.pos, old.pos);
+        assert_eq!(g.color.a, 1.0);
+    }
+}
+
+#[test]
+fn case_grow_scales_the_letter_from_x_height() {
+    let mut s = scene();
+    s.apply(glyph_view(&words(&[(1, "word")]), CaseChange::Grow), 0.0);
+    s.apply(glyph_view(&words(&[(1, "Word")]), CaseChange::Grow), 1.0);
+    let at = of(&s.sample(1.0001), 1);
+    assert!((at[0].size - 20.0 * X_TO_CAP).abs() < 0.05, "new W starts at x-height: {}", at[0].size);
+    let mid = of(&s.sample(1.05), 1);
+    let ghost = mid.last().unwrap();
+    assert!(ghost.size > 20.0 && mid[0].size < 20.0, "old grows, new grows to full: {mid:?}");
+    assert_eq!(of(&s.sample(5.0), 1)[0].size, 20.0);
+}
+
+#[test]
+fn a_mostly_new_word_crossfades_instead() {
+    let mut s = scene();
+    s.apply(glyph_view(&words(&[(1, "cat")]), CaseChange::Roll), 0.0);
+    s.apply(glyph_view(&words(&[(1, "dog")]), CaseChange::Roll), 1.0);
+    let mid = of(&s.sample(1.05), 1);
+    assert_eq!(mid.len(), 6);
+    assert!(mid.iter().all(|g| g.color.a > 0.0 && g.color.a < 1.0));
 }
