@@ -34,7 +34,7 @@ use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point};
 use vo_scene::gpu::GpuSource;
 
-use crate::glyph_sdf::{GlyphSdf, glyph_sdf};
+use crate::glyph_sdf::{glyph_sdf, GlyphSdf};
 
 const FX_WGSL: &str = include_str!("wgsl/glyph_fx.wgsl");
 const ATLAS: u32 = 2048;
@@ -185,22 +185,39 @@ impl FxGlyph {
 }
 
 /// What a glyph field element draws. Build a new one when the glyphs change.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GlyphFx {
     pub effect: Effect,
     pub glyphs: Vec<FxGlyph>,
     /// The voice, for the light's position and strength and the ink's reach.
     pub signals: Option<SignalsCell>,
     pub reduced: bool,
+    /// Where the glyph outlines come from: the registry the app's text uses.
+    pub fonts: Option<FontRegistry>,
+}
+
+impl std::fmt::Debug for GlyphFx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlyphFx")
+            .field("effect", &self.effect)
+            .field("glyphs", &self.glyphs.len())
+            .field("reduced", &self.reduced)
+            .finish()
+    }
 }
 
 impl GlyphFx {
     pub fn new(effect: Effect, glyphs: Vec<FxGlyph>) -> GlyphFx {
-        GlyphFx { effect, glyphs, signals: None, reduced: false }
+        GlyphFx { effect, glyphs, signals: None, reduced: false, fonts: None }
     }
 
     pub fn signals(mut self, s: SignalsCell) -> GlyphFx {
         self.signals = Some(s);
+        self
+    }
+
+    pub fn fonts(mut self, fonts: FontRegistry) -> GlyphFx {
+        self.fonts = Some(fonts);
         self
     }
 
@@ -402,9 +419,10 @@ struct Pipes {
     mask: wgpu::RenderPipeline,
 }
 
-/// Draws [`GlyphFx`] elements. Add it with [`install`].
+/// Draws [`GlyphFx`] elements. `vo_3d::install` adds one, or add it with [`install`]. The
+/// atlas keys glyphs by font id, so one painter serves one font registry.
+#[derive(Default)]
 pub struct GlyphFxPainter {
-    fonts: FontRegistry,
     atlas: Option<Atlas>,
     pipes: Option<Pipes>,
     sampler: Option<wgpu::Sampler>,
@@ -414,11 +432,6 @@ pub struct GlyphFxPainter {
 }
 
 impl GlyphFxPainter {
-    /// A painter that reads glyph outlines from `fonts`: the registry the app's text uses.
-    pub fn new(fonts: FontRegistry) -> GlyphFxPainter {
-        GlyphFxPainter { fonts, atlas: None, pipes: None, sampler: None, mask: None, blank: None }
-    }
-
     fn pipes(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if self.pipes.as_ref().is_some_and(|p| p.format == format) {
             return;
@@ -573,6 +586,7 @@ impl GpuPainter for GlyphFxPainter {
         let [x0, y0, x1, y1] = cx.rect_px();
         let scale = (cx.to_px.a * cx.to_px.a + cx.to_px.b * cx.to_px.b).sqrt();
         let origin = cx.to_px.apply(Point::new(cx.rect.x, cx.rect.y));
+        let Some(fonts) = &src.fonts else { return true };
         let atlas = self.atlas.get_or_insert_with(|| Atlas::new(cx.device));
 
         // Glyphs in surface pixels, with the time since their start.
@@ -593,7 +607,7 @@ impl GpuPainter for GlyphFxPainter {
             if !live || g.color.a <= 0.0 {
                 continue;
             }
-            let Some(slot) = atlas.get(cx.queue, &self.fonts, g.font, g.glyph) else { continue };
+            let Some(slot) = atlas.get(cx.queue, fonts, g.font, g.glyph) else { continue };
             let pen = Point::new(origin.x + g.pos.x * scale, origin.y + g.pos.y * scale);
             let ppe = g.size * scale;
             let part = match g.part {
@@ -814,9 +828,9 @@ impl GpuPainter for GlyphFxPainter {
     }
 }
 
-/// Adds a [`GlyphFxPainter`] over `fonts` to `renderer`.
-pub fn install(renderer: &mut Renderer, fonts: FontRegistry) {
-    renderer.add_painter(Box::new(GlyphFxPainter::new(fonts)));
+/// Adds a [`GlyphFxPainter`] to `renderer`.
+pub fn install(renderer: &mut Renderer) {
+    renderer.add_painter(Box::new(GlyphFxPainter::default()));
 }
 
 #[cfg(test)]

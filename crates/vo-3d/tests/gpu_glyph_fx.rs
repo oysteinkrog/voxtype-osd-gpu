@@ -1,6 +1,6 @@
 //! Glyph field effects (`vo_3d::glyph_fx`): ink diffusion (MO-82), light through letters
 //! (MO-84) and liquid morph (MO-87), each as a strip of frames over its moment, drawn by the
-//! painter `glyph_fx::install` adds over real Slug text.
+//! painter `vo_3d::install` adds over real Slug text.
 //!
 //! GPU test: `just test-gpu glyph_fx`. With `GLYPH_FX_SHEET=DIR` the strips are also written
 //! to DIR, and each effect's GPU time per frame is printed.
@@ -9,15 +9,15 @@
 mod support;
 
 use support::{Image, Tolerance};
-use vo_3d::glyph_fx::{self, Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
+use vo_3d::glyph_fx::{Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
 use vo_render::{Renderer, Target};
-use vo_scene::Scene;
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::taffy;
 use vo_scene::taffy::prelude::{auto, length};
 use vo_scene::text::{ShapedLayout, TextLayout};
+use vo_scene::Scene;
 
 const W: u32 = 600;
 const H: u32 = 300;
@@ -133,7 +133,7 @@ fn differ(a: &[u8], b: &[u8], tol: u8) -> f64 {
 fn renderer(fonts: &FontRegistry) -> Renderer {
     let gpu = gpu();
     let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
-    glyph_fx::install(&mut r, fonts.clone());
+    vo_3d::install(&mut r);
     r
 }
 
@@ -142,7 +142,9 @@ fn ink_blooms_out_of_each_letter() {
     let (fonts, font) = fonts();
     let mut r = renderer(&fonts);
     let text = "Ink";
-    let fx = |reduced| GlyphFx::new(Effect::Ink(Ink::default()), glyphs(&fonts, font, text, 1.0)).reduced(reduced);
+    let fx = |reduced| {
+        GlyphFx::new(Effect::Ink(Ink::default()), glyphs(&fonts, font, text, 1.0)).fonts(fonts.clone()).reduced(reduced)
+    };
     let plain = render(&mut r, &fonts, view(font, Some(text), None, None), 1.0);
     let mut frames = Vec::new();
     for age in [0.0, 0.085, 0.17, 0.255, 0.34, 1.2] {
@@ -172,9 +174,13 @@ fn light_casts_shadows_and_caustics() {
         .map(|g| FxGlyph { pos: Point::new(g.pos.x + TEXT.0, g.pos.y + TEXT.1), ..g })
         .collect();
     let light = Light::default();
-    let under = |reduced| GlyphFx::new(Effect::Light(light, Side::Under), moved.clone()).reduced(reduced);
-    let over =
-        |reduced| GlyphFx::new(Effect::Light(light, Side::Over), glyphs(&fonts, font, text, 0.0)).reduced(reduced);
+    let under =
+        |reduced| GlyphFx::new(Effect::Light(light, Side::Under), moved.clone()).fonts(fonts.clone()).reduced(reduced);
+    let over = |reduced| {
+        GlyphFx::new(Effect::Light(light, Side::Over), glyphs(&fonts, font, text, 0.0))
+            .fonts(fonts.clone())
+            .reduced(reduced)
+    };
     let plain = render(&mut r, &fonts, view(font, Some(text), None, None), 1.0);
     let mut frames = Vec::new();
     for t in [0.5, 3.5, 7.0, 10.5] {
@@ -206,7 +212,7 @@ fn morph_flows_from_old_word_to_new() {
     gs.extend(a[1..].iter().map(|g| g.part(Part::Old, 0)));
     gs.extend(b[1..].iter().map(|g| g.part(Part::New, 0)));
     let m = Morph::default();
-    let fx = |reduced| GlyphFx::new(Effect::Morph(m), gs.clone()).reduced(reduced);
+    let fx = |reduced| GlyphFx::new(Effect::Morph(m), gs.clone()).fonts(fonts.clone()).reduced(reduced);
     let plain_old = render(&mut r, &fonts, view(font, Some(old), None, None), 1.0);
     let plain_new = render(&mut r, &fonts, view(font, Some(new), None, None), 1.0);
     let mut frames = Vec::new();

@@ -1451,7 +1451,7 @@ impl<M> Scene<M> {
                 self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style, particles, inline, .. } => {
+            Kind::LiveText { words, style, particles, inline, live, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 let z = n.value(Slot::TextZoom as u8, t) as f32;
                 if let Some(look) = particles {
@@ -1528,7 +1528,7 @@ impl<M> Scene<M> {
                             dy -= v.baseline;
                             weight = v.weight;
                         }
-                        if k <= 0.0 || g.glyph == OBJECT_GLYPH {
+                        if k <= 0.0 || g.glyph == OBJECT_GLYPH || live.elsewhere.contains(&word) {
                             continue;
                         }
                         let (blur, dissolve, wipe) = n.word_fx(word, t);

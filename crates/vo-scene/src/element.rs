@@ -1353,6 +1353,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: these words keep their place in the line but draw no glyphs, because
+    /// something else draws them for now: a GPU element that morphs a revised word, for
+    /// example (`vo_3d::glyph_fx`).
+    pub fn words_drawn_elsewhere(mut self, ids: &[u32]) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.elsewhere = ids.to_vec(),
+            _ => debug_assert!(false, "words_drawn_elsewhere on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: each new or changed word forms from particles and hands over to the solid
     /// glyphs. A word is readable about 110 ms after it arrives; on a revision only the
     /// changed glyphs scatter and re-form. Drawn by the renderer; word ids must be unique

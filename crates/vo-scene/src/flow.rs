@@ -246,6 +246,9 @@ pub struct LiveMotion {
     pub margin: Option<margin::MarginMark>,
     /// Per-word typographic channels (MO-03).
     pub typo: Option<crate::typo::Typos>,
+    /// Words whose glyphs something else draws for now, such as a GPU effect that morphs a
+    /// revised word (`Element::words_drawn_elsewhere`). They keep their place in the line.
+    pub elsewhere: Vec<WordId>,
 }
 
 /// What `Flow::update` needs from the node.
