@@ -288,6 +288,16 @@ impl Signals {
         self.frames.back().map(|p| p.at)
     }
 
+    /// The audio clock heard at scene time `t`, that is `playout` earlier: the clock of the
+    /// frame playing then plus the time since it started, at most one frame. It stops at the
+    /// newest frame when the stream stops. None before the first frame.
+    pub fn clock_at(&self, t: f64) -> Option<f64> {
+        let s = t - self.playout;
+        let n = self.frames.partition_point(|p| p.at <= s);
+        let p = self.frames.get(n.checked_sub(1)?)?;
+        Some(p.frame.clock + (s - p.at).min(FRAME_SECS))
+    }
+
     /// The frames with their scene times, oldest first. For recording.
     pub fn frames(&self) -> impl Iterator<Item = (f64, &SignalFrame)> + '_ {
         self.frames.iter().map(|p| (p.at, &p.frame))
@@ -849,6 +859,15 @@ mod tests {
         let at: Vec<f64> = s.frames().map(|(at, _)| at).collect();
         assert_eq!(at.len(), 20, "{at:?}");
         assert!((at[19] - 2.1).abs() < 1e-3, "{at:?}");
+    }
+
+    #[test]
+    fn clock_at_follows_playout_and_stops_with_the_stream() {
+        let s = Signals::recorded((0..10).map(|i| frame(3.0 + i as f64 * FRAME_SECS, -20.0)), 1.0).with_playout(0.05);
+        assert_eq!(s.clock_at(1.0), None);
+        assert!((s.clock_at(1.075).unwrap() - 3.025).abs() < 1e-9);
+        // The newest frame starts at 1.09 and plays one frame.
+        assert!((s.clock_at(5.0).unwrap() - 3.1).abs() < 1e-9);
     }
 
     #[test]

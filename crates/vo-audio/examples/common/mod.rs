@@ -63,6 +63,36 @@ pub fn load(path: Option<&PathBuf>) -> (Vec<SignalFrame>, Vec<f64>) {
     (frames, seams)
 }
 
+/// The `"words"` of the same file as `[text, start, end]`, or stand-in words from the level
+/// when there are none.
+pub fn load_words(path: Option<&PathBuf>, frames: &[SignalFrame]) -> Vec<vo_audio::TimedWord> {
+    let listed: Vec<(String, f32, f32)> = path
+        .and_then(|p| {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
+            serde_json::from_value(v["words"].clone()).ok()
+        })
+        .unwrap_or_default();
+    if !listed.is_empty() {
+        return listed
+            .into_iter()
+            .enumerate()
+            .map(|(i, (text, start, end))| vo_audio::TimedWord { id: i as u32, text, start, end })
+            .collect();
+    }
+    const SAY: [&str; 12] =
+        ["Book", "the", "train", "to", "Bergen", "for", "Thursday", "morning,", "and", "pack", "the", "folder."];
+    vo_audio::level_spans(frames, -45.0, 0.06)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (s, e))| vo_audio::TimedWord {
+            id: i as u32,
+            text: SAY[i % SAY.len()].into(),
+            start: s as f32,
+            end: e as f32,
+        })
+        .collect()
+}
+
 /// Premultiplied frames of one size stacked in a column over a mid grey.
 pub fn sheet(path: &Path, frames: &[Vec<u8>], w: u32, h: u32) {
     let gap = 8u32;
@@ -92,7 +122,18 @@ fn stats(v: &mut [f64]) -> (f64, f64) {
 /// Prints sample, encode and GPU time per frame (p50 / p95 over 240 frames from `t0`) for the
 /// scene `make` builds at 600 x 300 and at 1920 x 1080.
 pub fn bench(g: &Gpu, setup: impl Fn(&mut Renderer), make: impl Fn(Size) -> Scene, t0: f64) {
-    let mut renderer = Renderer::new(&g.device, &g.queue);
+    bench_with_fonts(g, vo_scene::font::FontRegistry::new(), setup, make, t0)
+}
+
+/// [`bench`] with a renderer that shares the scene's fonts, for scenes with text.
+pub fn bench_with_fonts(
+    g: &Gpu,
+    fonts: vo_scene::font::FontRegistry,
+    setup: impl Fn(&mut Renderer),
+    make: impl Fn(Size) -> Scene,
+    t0: f64,
+) {
+    let mut renderer = Renderer::with_fonts(&g.device, &g.queue, fonts);
     setup(&mut renderer);
     let qs = g.timestamps.then(|| {
         g.device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 })
