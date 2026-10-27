@@ -128,6 +128,8 @@ fn main() {
             "--offline" => offline = Some(v().into()),
             "--fps" => fps = v().parse().expect("--fps takes a number"),
             "--font" => font_path = v(),
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }

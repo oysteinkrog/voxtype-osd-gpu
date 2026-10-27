@@ -213,6 +213,8 @@ fn main() {
             "--dismiss-after" => dismiss_after = v().parse().expect("--dismiss-after takes seconds"),
             "--font" => font_path = v(),
             "--cpu-first-frame" => cpu_first_frame = true,
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }

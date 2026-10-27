@@ -345,6 +345,8 @@ fn main() {
             "--bench" => return bench(),
             "--cold" => return cold(args.next().as_deref() != Some("direct"), start),
             "--live" => return live(),
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }

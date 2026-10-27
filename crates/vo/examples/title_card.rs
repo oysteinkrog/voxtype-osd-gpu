@@ -272,6 +272,8 @@ fn main() {
             "--out" => out = args.next().expect("--out needs a directory").into(),
             "--check" => check = true,
             "--png" => png = true,
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }

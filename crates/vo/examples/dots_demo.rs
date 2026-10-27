@@ -404,6 +404,8 @@ fn main() {
             "--out" => out = args.next().expect("--out needs a directory").into(),
             "--live" => live = true,
             "--scale" => scale = args.next().and_then(|s| s.parse().ok()).expect("--scale needs a number"),
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }

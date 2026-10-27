@@ -28,6 +28,7 @@
 //!   surface, so the overlay is click-through until the first GPU frame.
 
 mod blur;
+pub mod guard;
 mod handlers;
 
 use std::ptr::NonNull;
@@ -389,6 +390,8 @@ pub struct WaylandHost {
 impl WaylandHost {
     /// Connects to `$WAYLAND_DISPLAY` and binds the globals the host uses.
     pub fn connect() -> Result<WaylandHost, HostError> {
+        // Examples and the preview tool stay off the real desktop unless asked (`guard`).
+        guard::check(&guard::DisplayFacts::current()).map_err(HostError::Connect)?;
         let origin = monotonic();
         let exec_to_origin = since_exec();
         let conn = Connection::connect_to_env().map_err(|e| HostError::Connect(e.to_string()))?;

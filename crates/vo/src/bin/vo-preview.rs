@@ -32,6 +32,9 @@ USAGE:
       Drive a running window: seek T, play, pause, step N, speed S, marker NAME,
       loop A B, loop off, overlay NAME on|off, fit, 1:1, size W H, shot PATH, state, quit.
 
+The window refuses the real desktop (WAYLAND_DISPLAY unset, wayland-N, or the session's
+socket) unless --real-display or VO_REAL_DISPLAY=1 is given; use a nested compositor.
+
 ENVIRONMENT:
   VO_PREVIEW_BUILD     the cargo command, split on spaces (default `cargo`)
   VO_PREVIEW_CONTROL   control socket (default $XDG_RUNTIME_DIR/vo-preview.sock)
@@ -275,6 +278,9 @@ fn stop(sock: &Path, r: &mut Running) {
 }
 
 fn run(args: &[String]) -> Result<u8, String> {
+    // The window would refuse anyway; say so before the build. `--real-display` passes through.
+    #[cfg(feature = "wayland")]
+    vo_host_wayland::guard::check(&vo_host_wayland::guard::DisplayFacts::current())?;
     let t = target(args)?;
     let root = workspace_root()?;
     let roots = watch_roots(&root, &t)?;

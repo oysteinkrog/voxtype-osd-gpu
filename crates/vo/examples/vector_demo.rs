@@ -577,6 +577,8 @@ fn args() -> Args {
             "--check" => a.check = true,
             "--bench" => a.bench = true,
             "--live" => a.live = true,
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             other => panic!("unknown argument {other}"),
         }
     }

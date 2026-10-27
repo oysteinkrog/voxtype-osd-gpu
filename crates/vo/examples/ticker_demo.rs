@@ -144,6 +144,8 @@ fn main() {
         match a.as_str() {
             "--out" => out = args.next().expect("--out needs a directory").into(),
             "--check" => check = true,
+            // Read by the host: open on the real desktop on purpose.
+            "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
     }
