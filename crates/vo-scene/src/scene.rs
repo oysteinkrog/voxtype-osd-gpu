@@ -708,6 +708,7 @@ impl<M> Scene<M> {
                         Kind::Canvas(c) => c.moving(t),
                         Kind::Gpu(g) => t < g.0.until(),
                         Kind::StrokePath(a) => a.head.is_some(),
+                        Kind::Frame(f) => f.moving(),
                         _ => false,
                     })
         });
@@ -1598,6 +1599,10 @@ impl<M> Scene<M> {
             }
             Kind::Repeat(r) => {
                 crate::repeat::draw(r, n, t, origin, size, alpha, items, out);
+                None
+            }
+            Kind::Frame(f) => {
+                crate::frame::draw(f, n, t, origin, size, alpha, items, out);
                 None
             }
             Kind::Stack => None,

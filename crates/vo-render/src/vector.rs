@@ -87,6 +87,19 @@ impl GpuVector {
                     2
                 }
             }
+            VectorPaint::Stripes { normal, period, duty, phase } => {
+                // Stripe position u = dot(p, n) / period in layer units is dot(q, n') - o in
+                // pixels, with n' = M^-T n / period and o = dot(T, n') for q = M p + T.
+                let m = to_px;
+                let det = m.a * m.d - m.b * m.c;
+                if det.abs() < 1e-12 || period <= 0.0 {
+                    return None;
+                }
+                let (nx, ny) = (normal.x / period, normal.y / period);
+                let n = [(m.d * nx - m.b * ny) / det, (m.a * ny - m.c * nx) / det];
+                g.a = [n[0], n[1], m.e * n[0] + m.f * n[1] + phase, duty.clamp(0.0, 1.0)];
+                4
+            }
         };
         match v.kind {
             VectorKind::Blob => {

@@ -5,6 +5,8 @@
 //! - **polar**: a gauge of ticks drawing on, and markers on a ring sliding along the arc when
 //!   one goes.
 //! - **along_path**: ticks and chevrons along an S-curve, the chevrons turned along it.
+//! - **frame**: cut panels: a cyberpunk panel whose outline draws on over marching stripes,
+//!   and a mecha plate with notched corners, tabs and cut-out windows.
 //!
 //! `cargo run -p vo --example hud_kit -- [--out DIR] [--bench]` writes `contact-sheet.png`
 //! (rows of frames per board) to DIR, or with `--bench` prints the GPU time per frame of
@@ -18,7 +20,7 @@ use std::time::Instant;
 use vo::scene::element::Element;
 use vo::scene::geom::{Color, Point, Size};
 use vo::scene::path::Contour;
-use vo::scene::{surface_for, Orient, Prop, Scene, Ticks};
+use vo::scene::{surface_for, Corner, Edge, Frame, Notch, Orient, Prop, Scene, Stripes, Ticks};
 use vo_core::spring::Spring;
 use vo_render::offscreen::write_png;
 use vo_render::{Offscreen, Renderer, Target};
@@ -54,6 +56,13 @@ fn boards() -> Vec<Board> {
             times: &[0.0, 0.1, 0.25, 1.0],
         },
         Board { name: "along_path: S-curve", view: snake, then: None, times: &[0.0] },
+        Board {
+            name: "frame: cyberpunk, drawing on",
+            view: |s| cyber(s, 0.0),
+            then: Some((0.0, |s| cyber(s, 1.0))),
+            times: &[0.08, 0.2, 0.4, 1.5],
+        },
+        Board { name: "frame: mecha plate", view: mecha, then: None, times: &[0.0] },
     ]
 }
 
@@ -146,6 +155,39 @@ fn snake(size: Size) -> Element<()> {
     centred(size, Element::layer("snake").size(440.0, 220.0).child(rail).child(chevrons))
 }
 
+// Frames.
+
+/// Uneven chamfers, a slanted notch, marching stripes, a hatched band and a glowing outline
+/// trimmed to `drawn`.
+fn cyber(size: Size, drawn: f32) -> Element<()> {
+    let yellow = Color::hex(0xf5e642, 1.0);
+    let frame = Frame::new()
+        .corners([Corner::Chamfer(28.0), Corner::Chamfer(8.0), Corner::Chamfer(36.0), Corner::Chamfer(8.0)])
+        .notch(Notch::new(Edge::Top, 0.64, 70.0, 9.0).slant(9.0))
+        .fill(Color::hex(0x0d0f1a, 0.92))
+        .stripes(Stripes::new(-1.05, 14.0, 0.3, Color::hex(0xf5e642, 0.05)).speed(14.0))
+        .hatch(10.0, Stripes::hatch(-1.05, 6.0, 2.0, Color::hex(0xf5e642, 0.5)))
+        .stroke(2.0, yellow)
+        .glow(4.0);
+    let panel = Element::frame("cyber", frame).size(340.0, 180.0).trim(0.0, drawn).motion(Prop::Trim, Spring::SOFT);
+    centred(size, panel)
+}
+
+/// Notched corners, tabs on the left, a slanted notch below and two cut-out windows.
+fn mecha(size: Size) -> Element<()> {
+    let frame = Frame::new()
+        .corners([Corner::Notch(12.0), Corner::Chamfer(22.0), Corner::Notch(12.0), Corner::Round(16.0)])
+        .notch(Notch::new(Edge::Left, 0.35, 22.0, -6.0))
+        .notch(Notch::new(Edge::Left, 0.65, 22.0, -6.0))
+        .notch(Notch::new(Edge::Bottom, 0.5, 60.0, 8.0).slant(8.0))
+        .cut_rect(250.0, 30.0, 50.0, 16.0, 4.0)
+        .cut_rect(250.0, 54.0, 50.0, 16.0, 4.0)
+        .fill(Color::hex(0x1c2430, 1.0))
+        .hatch(6.0, Stripes::hatch(0.8, 5.0, 1.0, Color::hex(0x9fb3c8, 0.25)))
+        .stroke(3.0, Color::hex(0x9fb3c8, 1.0));
+    centred(size, Element::frame("mecha", frame).size(340.0, 180.0))
+}
+
 /// Takes the element out of flow at its parent's top left, so siblings stack.
 fn overlay(s: &mut vo::scene::taffy::Style) {
     use vo::scene::taffy::{LengthPercentageAuto, Position};
@@ -169,9 +211,7 @@ fn centred(size: Size, child: Element<()>) -> Element<()> {
 fn board_list(b: &Board, size: Size, scale: f32, t: f64) -> vo::scene::DisplayList {
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, size, scale);
-    let root = |view: View| {
-        Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child(view(size))
-    };
+    let root = |view: View| Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child(view(size));
     scene.apply(root(b.view), 0.0);
     if let Some((at, view)) = b.then {
         if t >= at {

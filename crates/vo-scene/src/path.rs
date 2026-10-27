@@ -70,6 +70,10 @@ pub enum VectorPaint {
     /// The angle around `centre` as a fraction of a turn, 0 at `start` radians (clockwise on
     /// screen). With `mirror` it goes 0, 1, 0 around the turn, so there is no seam.
     Conic { centre: Point, start: f32, mirror: bool },
+    /// Stripes across `normal` (a unit vector), one every `period` logical units, each
+    /// `duty` of the period wide, shifted by `phase` periods: 1 on a stripe, 0 between,
+    /// with an antialiased edge. Use a ramp from 0 to 1.
+    Stripes { normal: Point, period: f32, duty: f32, phase: f32 },
 }
 
 /// `VectorInstance::flags` bit: the stroke is one physical pixel wide at any scale.

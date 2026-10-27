@@ -16,6 +16,7 @@ const PAINT_ALONG: u32 = 0u;
 const PAINT_LINEAR: u32 = 1u;
 const PAINT_CONIC: u32 = 2u;
 const PAINT_CONIC_MIRROR: u32 = 3u;
+const PAINT_STRIPES: u32 = 4u;
 
 // Three texels per segment: p0.xy p1.xy, then p2.xy s0 s1, then the width factors w0 w1.
 @group(0) @binding(0) var<storage, read> segs: array<vec4f>;
@@ -202,6 +203,17 @@ fn mix_color (c0: vec4f, c1: vec4f, k: f32) -> vec4f {
 
 // Where `p` sits along the paint: arc length `s`, or the linear or conic position.
 fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
+  if (kind == PAINT_STRIPES) {
+    // g: the normal over the period in pixels, the offset in periods, the duty. The
+    // distance into the nearest stripe in pixels gives a one-pixel edge.
+    let f = fract (dot (p, g.xy) - g.z);
+    let period = 1.0 / max (length (g.xy), 1e-6);
+    var d = -min (f - g.w, 1.0 - f);
+    if (f < g.w) {
+      d = min (f, g.w - f);
+    }
+    return clamp (0.5 + d * period, 0.0, 1.0);
+  }
   if (kind == PAINT_LINEAR) {
     let d = g.zw - g.xy;
     return dot (p - g.xy, d) / max (dot (d, d), 1e-12);

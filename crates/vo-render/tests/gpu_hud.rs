@@ -13,7 +13,7 @@ use vo_render::Offscreen;
 use vo_scene::element::Element;
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::path::Contour;
-use vo_scene::{surface_for, Insets, Orient, Scene, Ticks};
+use vo_scene::{surface_for, Corner, Edge, Frame, Insets, Notch, Orient, Scene, Stripes, Ticks};
 
 /// Renders `view` at t on a surface of `size` and returns the premultiplied RGBA bytes.
 fn render(view: Element<()>, size: Size, t: f64) -> Image {
@@ -139,5 +139,45 @@ fn ring_and_path_repeaters() {
     let view = Element::row("board").size(size.w, size.h).pad(10.0).gap(20.0).child(dial()).child(snake());
     let mut img = render(view, size, 0.0);
     img.name = "hud-repeat".into();
+    support::check(&img, Tolerance::default()).unwrap();
+}
+
+/// A cyberpunk panel: uneven chamfers, a slanted notch in the top edge, a faint striped
+/// fill, a hatched band inside the edge and a glowing stroke.
+fn cyber_panel() -> Element<()> {
+    let yellow = Color::hex(0xf5e642, 1.0);
+    let frame = Frame::new()
+        .corners([Corner::Chamfer(18.0), Corner::Chamfer(6.0), Corner::Chamfer(24.0), Corner::Chamfer(6.0)])
+        .notch(Notch::new(Edge::Top, 0.62, 40.0, 6.0).slant(6.0))
+        .fill(Color::hex(0x0d0f1a, 0.92))
+        .stripes(Stripes::new(-1.05, 10.0, 0.35, Color::hex(0xf5e642, 0.05)))
+        .hatch(7.0, Stripes::hatch(-1.05, 5.0, 1.5, Color::hex(0xf5e642, 0.55)))
+        .stroke(1.5, yellow)
+        .glow(3.0);
+    Element::frame("cyber", frame).size(160.0, 110.0)
+}
+
+/// A mecha plate: notched corners, tabs on the left edge, two cut-out windows and a thick
+/// stroke.
+fn mecha_plate() -> Element<()> {
+    let steel = Color::hex(0x9fb3c8, 1.0);
+    let frame = Frame::new()
+        .corners([Corner::Notch(8.0), Corner::Chamfer(14.0), Corner::Notch(8.0), Corner::Round(10.0)])
+        .notch(Notch::new(Edge::Left, 0.35, 14.0, -4.0))
+        .notch(Notch::new(Edge::Left, 0.65, 14.0, -4.0))
+        .notch(Notch::new(Edge::Bottom, 0.5, 30.0, 5.0).slant(5.0))
+        .cut_rect(110.0, 20.0, 30.0, 10.0, 3.0)
+        .cut_rect(110.0, 36.0, 30.0, 10.0, 3.0)
+        .fill(Color::hex(0x1c2430, 1.0))
+        .stroke(3.0, steel);
+    Element::frame("mecha", frame).size(160.0, 110.0)
+}
+
+#[test]
+fn cut_panel_frames() {
+    let size = Size::new(380.0, 150.0);
+    let view = Element::row("board").size(size.w, size.h).pad(20.0).gap(20.0).child(cyber_panel()).child(mecha_plate());
+    let mut img = render(view, size, 0.0);
+    img.name = "hud-frames".into();
     support::check(&img, Tolerance::default()).unwrap();
 }

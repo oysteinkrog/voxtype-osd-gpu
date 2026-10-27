@@ -552,6 +552,8 @@ pub(crate) enum Kind {
     WavyLine(StrokeStyle),
     /// Children and ticks around a ring or along a path (`crate::repeat`).
     Repeat(crate::repeat::Repeat),
+    /// A cut panel frame filling the box (`crate::frame`).
+    Frame(crate::frame::Frame),
 }
 
 /// What `Element::stroke_path` draws. Compared by identity of the outline.
