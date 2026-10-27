@@ -4,7 +4,7 @@
 use vo_core::words::Word;
 use vo_scene::display::{DisplayList, GlyphInstance};
 use vo_scene::element::{Element, TextStyle};
-use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, SettleInk, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
+use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, Rewrap, SettleInk, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::Color;
 use vo_scene::text::ShapedLayout;
@@ -88,16 +88,22 @@ fn a_removed_word_fades_out_where_it_was() {
     assert!(s.sample(3.0).glyphs.iter().all(|g| g.word != 2));
 }
 
+/// Live text 300 wide whose words glide to a new line (T11).
+fn glide(w: &[Word]) -> Element<()> {
+    let live = Element::live_text("live", w).text_style(style()).word_revise(Revise::Crossfade);
+    Element::column("root").child(live.word_rewrap(Rewrap::Glide).width(300.0))
+}
+
 #[test]
 fn words_that_change_line_glide_in_reading_order() {
     let mut s = scene();
     let a = words(&[(1, "aaa"), (2, "bbb"), (3, "ccc"), (4, "ddd")]);
     // Wide enough for all four on one line.
-    s.apply(view(&a, Some(300.0), false), 0.0);
+    s.apply(glide(&a), 0.0);
     let before = s.sample(1.0);
     // A longer first word pushes the last two onto the second line.
     let b = words(&[(1, "aaaaaaaaaaaaaaaaaaaaa"), (2, "bbb"), (3, "ccc"), (4, "ddd")]);
-    s.apply(view(&b, Some(300.0), false), 1.0);
+    s.apply(glide(&b), 1.0);
     let settled = s.sample(5.0);
     let line2 = first(&settled, 1).1 + 26.0;
     let moved: Vec<u32> = (2..=4).filter(|&w| (first(&settled, w).1 - line2).abs() < 1e-3).collect();
@@ -452,6 +458,18 @@ fn capped(all: &[(u32, &str)], width: f32, lines: usize) -> Vec<Word> {
     }
 }
 
+/// Every glyph that shows sits on a text row 26 apart from `base`. The text may scroll as a
+/// whole, so all rows may be off by the same amount, but no word travels up or down on its
+/// own, across the words between.
+fn on_rows(list: &DisplayList, base: f32, what: &str) {
+    let rows: Vec<f32> =
+        list.glyphs.iter().filter(|g| g.color.a > 0.1).map(|g| (g.pos.y - base).rem_euclid(26.0)).collect();
+    let r0 = rows[0];
+    let off = |r: f32| ((r - r0).rem_euclid(26.0)).min((r0 - r).rem_euclid(26.0));
+    let spread = rows.iter().map(|&r| off(r)).fold(0.0, f32::max);
+    assert!(spread < 2.0, "{what}: a glyph is {spread} px off the rows");
+}
+
 #[test]
 fn with_a_line_cap_no_word_glides_across_the_other_lines() {
     let text = "open the configuration file and set the popup theme to swiss so the dictation \
@@ -470,16 +488,25 @@ fn with_a_line_cap_no_word_glides_across_the_other_lines() {
         let target = fresh.sample(0.0);
         for dt in [0.02, 0.05, 0.08, 0.11] {
             let now = s.sample(t + dt);
-            // Every glyph that shows sits on a text row: the text may scroll as a whole, so
-            // all rows may be off by the same amount, but no word travels up or down on its
-            // own, across the words between.
-            let base = first(&target, shown[0].id).1;
-            let rows: Vec<f32> =
-                now.glyphs.iter().filter(|g| g.color.a > 0.1).map(|g| (g.pos.y - base).rem_euclid(26.0)).collect();
-            let r0 = rows[0];
-            let off = |r: f32| ((r - r0).rem_euclid(26.0)).min((r0 - r).rem_euclid(26.0));
-            let spread = rows.iter().map(|&r| off(r)).fold(0.0, f32::max);
-            assert!(spread < 2.0, "{n} words at +{dt}: a glyph is {spread} px off the rows");
+            on_rows(&now, first(&target, shown[0].id).1, &format!("{n} words at +{dt}"));
+        }
+    }
+}
+
+#[test]
+fn words_pushed_to_another_line_by_a_revision_stay_on_the_rows() {
+    // The second word grows and shrinks every 120 ms, pushing the words after it back and
+    // forth across line ends.
+    let mut s = scene();
+    let rest = [(3, "the"), (4, "popup"), (5, "theme"), (6, "to"), (7, "swiss"), (8, "so"), (9, "the"), (10, "words")];
+    for (n, second) in ["set", "settings", "set", "settle", "settled", "set"].iter().enumerate() {
+        let mut all = vec![(1, "and"), (2, *second)];
+        all.extend(rest);
+        let t = 0.12 * n as f64;
+        s.apply(view(&words(&all), Some(200.0), false), t);
+        let base = first(&s.sample(5.0 + t), 1).1;
+        for dt in [0.02, 0.05, 0.08, 0.11] {
+            on_rows(&s.sample(t + dt), base, &format!("{second} at +{dt}"));
         }
     }
 }

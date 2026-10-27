@@ -15,9 +15,11 @@
 //!   letters rise in and removed ones rise out. When less than half the word is kept it
 //!   crossfades instead.
 //! - **Removal.** A word that goes fades out where it was in 120 ms.
-//! - **Rewrap travel (T11).** A word that lands on another line glides there with a 220 ms
-//!   spring. Words that change line start 12 ms apart in reading order. The wrap is decided
-//!   once per change, by the layout, and never moves during the glide.
+//! - **Rewrap.** A word that lands on another line fades out where it was and in at its new
+//!   place, sliding with the words before it there, so it never crosses other words. With
+//!   `Rewrap::Glide` (T11) it glides there with a 220 ms spring instead, words that change
+//!   line 12 ms apart in reading order. The wrap is decided once per change, by the layout,
+//!   and never moves during the glide.
 //! - **Settling ink (T03, F1).** With `SettleInk`, the newest words arrive lighter and a
 //!   little looser and settle to full ink in 300 to 600 ms, slower for words revised often.
 //!   A revision starts the settle again; a stable list from the recogniser holds a word
@@ -49,6 +51,8 @@ pub const FLIP: Spring = Spring::critical_to_98(0.200);
 pub const REWRAP: Spring = Spring::SOFT;
 /// Delay between words that change line, in reading order.
 pub const REWRAP_STAGGER: f64 = 0.012;
+/// A word inserted between kept words starts to fade in this long after they start to move.
+pub const INSERT_DELAY: f64 = 0.1;
 /// When words leave from the front, the rest scroll up together in about 220 ms.
 pub const SCROLL: Spring = Spring::SOFT;
 /// Old and new glyphs of a revised word cross in about 120 ms.
@@ -94,6 +98,19 @@ impl Default for Caret {
     fn default() -> Caret {
         Caret { width: 2.0, gap: 2.0, color: None, gradient: None }
     }
+}
+
+/// How a word moves to another line when the text reflows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rewrap {
+    /// It fades out where it is and in at its new place, sliding there with the words before
+    /// it on its new line, so it never crosses the text between.
+    #[default]
+    Fade,
+    /// It glides to its new place in about 220 ms, words in reading order a few ms apart
+    /// (T11). Calm for a single change; with words arriving faster than the glide, words
+    /// in flight cross the lines between. A front drop always fades.
+    Glide,
 }
 
 /// What a word whose text changes does with its glyphs.
@@ -205,6 +222,7 @@ impl Reading {
 pub struct LiveMotion {
     pub caret: Option<Caret>,
     pub revise: Revise,
+    pub rewrap: Rewrap,
     pub case: CaseChange,
     pub settle: Option<SettleInk>,
     /// The words the recogniser marks stable, when it says. With a list, a word not on it
@@ -624,7 +642,17 @@ impl Flow {
                     Some((line, dx)) if line == p.line && !reduced => dx,
                     _ => 0.0,
                 };
-                let glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
+                let mut glyphs: Vec<FlowGlyph> =
+                    p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
+                // A word inserted before kept words shows once they have moved out of its way.
+                let after = words.iter().skip_while(|v| v.id != w.id).skip(1);
+                let inserted = !reduced && after.into_iter().any(|v| old.iter().any(|o| o.id == v.id));
+                if inserted {
+                    for g in &mut glyphs {
+                        g.opacity = make.ch(0.0, CROSSFADE, Rest::UNIT);
+                        g.opacity.retarget(t + INSERT_DELAY, 1.0);
+                    }
+                }
                 next.push(FlowWord {
                     id: w.id,
                     text: w.text.clone(),
@@ -688,9 +716,9 @@ impl Flow {
                 o.x = make.to(p.x + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
                 o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
-            } else if o.line != p.line && front_drop {
-                // A front drop that reflows the text: a gliding word would cut across the
-                // lines it passes, so the word fades out where it is and in at its place,
+            } else if o.line != p.line && (front_drop || motion.rewrap == Rewrap::Fade) {
+                // A gliding word would cut across the lines it passes, so the word fades out
+                // where it is and in at its place,
                 // sliding there with the words before it on its new line.
                 self.ghost_word(&o, t, retention);
                 let back = match shifted {

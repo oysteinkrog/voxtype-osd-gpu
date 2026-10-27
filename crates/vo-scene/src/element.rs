@@ -23,7 +23,7 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
-use crate::flow::{Caret, CaseChange, LiveMotion, Revise, SettleInk};
+use crate::flow::{Caret, CaseChange, LiveMotion, Revise, Rewrap, SettleInk};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
 use crate::material::Material;
@@ -1253,6 +1253,16 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.revise = r,
             _ => debug_assert!(false, "word_revise on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: how a word moves to another line when the text reflows. `Rewrap::Fade` by
+    /// default; `Rewrap::Glide` glides it there (T11).
+    pub fn word_rewrap(mut self, r: Rewrap) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.rewrap = r,
+            _ => debug_assert!(false, "word_rewrap on a node that is not live text: {}", self.key),
         }
         self
     }

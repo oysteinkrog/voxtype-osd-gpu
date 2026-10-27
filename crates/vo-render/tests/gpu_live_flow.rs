@@ -10,7 +10,7 @@ use support::{Image, Tolerance};
 use vo_core::words::Word;
 use vo_render::Offscreen;
 use vo_scene::element::{Element, TextStyle};
-use vo_scene::flow::{Caret, CaseChange, Revise, SettleInk};
+use vo_scene::flow::{Caret, CaseChange, Revise, Rewrap, SettleInk};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::{Color, Size};
 use vo_scene::text::ShapedLayout;
@@ -32,6 +32,7 @@ fn view_with(w: &[Word], revise: Revise, case: CaseChange) -> Element<()> {
         .text_style(TextStyle::new(0, 22.0, 28.0))
         .color(Color::hex(0xf2f3f5, 1.0))
         .word_revise(revise)
+        .word_rewrap(Rewrap::Glide)
         .word_case(case)
         .word_enter(Transition::fade())
         .caret(Caret { color: Some(Color::hex(0x6cb6ff, 1.0)), ..Caret::default() })
@@ -256,5 +257,28 @@ fn line_cap_reflow_golden() {
     let last = all.len() as f64 * 0.12;
     let times = [last - 0.13, last - 0.1, last - 0.07, last - 0.01, last + 0.03, last + 0.6];
     let img = strip(&mut off, &fonts, "live-line-cap", &steps, &times);
+    support::check(&img, Tolerance::default()).unwrap();
+}
+
+/// The default rewrap: after a revision, words that change line fade across instead of
+/// gliding over the text between. The same change as `live-rewrap`.
+#[test]
+fn rewrap_fade_golden() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let steps = [
+        (0.0, words(&[(1, "a"), (2, "short"), (3, "line"), (4, "of"), (5, "words")])),
+        (1.0, words(&[(1, "a"), (2, "considerably"), (6, "longer"), (3, "line"), (4, "of"), (5, "words")])),
+    ];
+    let img = strip_with(&mut off, &fonts, "live-rewrap-fade", &steps, &[0.9, 1.02, 1.05, 1.08, 1.13, 1.6], |w| {
+        let live = Element::live_text("live", w)
+            .text_style(TextStyle::new(0, 22.0, 28.0))
+            .color(Color::hex(0xf2f3f5, 1.0))
+            .word_enter(Transition::fade())
+            .width(W - 32.0);
+        Element::panel("panel").pad(16.0).radius(12.0).fill(Color::hex(0x1d1f24, 1.0)).width(W).height(H).child(live)
+    });
     support::check(&img, Tolerance::default()).unwrap();
 }
