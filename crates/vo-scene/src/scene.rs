@@ -800,6 +800,12 @@ impl<M> Scene<M> {
 
     // Reconcile.
 
+    /// A node's default motion: its element's own, else its parent's (already resolved,
+    /// since parents are reconciled first), else the scene's.
+    fn inherited_motion(&self, own: Option<Motion>, parent: Option<NodeId>) -> Motion {
+        own.or_else(|| parent.and_then(|p| self.nodes.get(p)).map(|p| p.default_motion)).unwrap_or(self.default_motion)
+    }
+
     fn create(&mut self, parent: Option<NodeId>, el: Element<M>, t: f64) -> NodeId {
         let Element {
             key,
@@ -811,6 +817,7 @@ impl<M> Scene<M> {
             inside,
             glass,
             motion,
+            default_motion,
             binds,
             signals: _,
             presence,
@@ -848,7 +855,7 @@ impl<M> Scene<M> {
             words: Vec::new(),
             words_at: t,
             live: Flow::default(),
-            default_motion: self.default_motion,
+            default_motion: self.inherited_motion(default_motion, parent),
             reduced: self.reduced_motion,
             ambient: Default::default(),
         };
@@ -888,6 +895,7 @@ impl<M> Scene<M> {
             inside,
             glass,
             motion,
+            default_motion,
             binds,
             signals: _,
             presence,
@@ -896,7 +904,10 @@ impl<M> Scene<M> {
             loops,
         } = el;
         let retention = self.retention;
+        // Before the targets below, so they retarget with this subtree's default.
+        let effective = self.inherited_motion(default_motion, self.nodes[id].parent);
         let n = &mut self.nodes[id];
+        n.default_motion = effective;
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;

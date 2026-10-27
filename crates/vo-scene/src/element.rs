@@ -563,6 +563,9 @@ pub struct Element<M = ()> {
     /// Drawn as a glass panel under the content (FX06).
     pub(crate) glass: Option<Glass>,
     pub(crate) motion: Vec<(Prop, Motion)>,
+    /// How this node and its descendants move when no `.motion()` names a property
+    /// (`Element::default_motion`); `None` takes the parent's.
+    pub(crate) default_motion: Option<Motion>,
     /// Signal bus bindings (`crate::bind`).
     pub(crate) binds: Vec<crate::bind::Bound>,
     /// The signal store for the scene, on the root element (`Element::signals`).
@@ -586,6 +589,7 @@ impl<M> Element<M> {
             inside: false,
             glass: None,
             motion: Vec::new(),
+            default_motion: None,
             binds: Vec::new(),
             signals: None,
             presence: None,
@@ -1424,6 +1428,15 @@ impl<M> Element<M> {
     }
 
     // Motion.
+
+    /// How properties of this node and of every node below it move when no `.motion()` names
+    /// them, in place of the scene's default (`Scene::with_default_motion`). A descendant's
+    /// own `default_motion` wins inside its subtree. For several designs in one scene, such
+    /// as the cells of a theme wall: one cell snaps, the next springs.
+    pub fn default_motion(mut self, motion: impl Into<Motion>) -> Element<M> {
+        self.default_motion = Some(motion.into());
+        self
+    }
 
     /// How `prop` moves to new targets on this node.
     pub fn motion(mut self, prop: Prop, motion: impl Into<Motion>) -> Element<M> {
