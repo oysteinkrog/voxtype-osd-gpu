@@ -4,7 +4,7 @@
 // target; a layer texture sized to its bounds moves the result by its origin.
 //
 // Glyph effects (TY17) come from the coverage itself, with no offscreen pass:
-// - blur averages 12 coverage samples on a disc as wide as the blur (a Vogel spiral), each
+// - blur averages 12 to 24 coverage samples on a disc as wide as the blur (a Vogel spiral), each
 //   with Slug's antialiasing window widened to a third of it, so the taps blend smoothly;
 // - a halo is the same soft coverage, as wide as its radius, in its own colour, under the
 //   glyph;
@@ -71,20 +71,32 @@ fn glyph_coverage (tc: vec2f, loc: u32, ppe: vec2f, k: f32, smear_em: vec2f, ext
   return cov / f32 (n);
 }
 
-// Coverage softened over a disc `width` pixels across: 12 taps on a Vogel spiral, each
-// with a window a third of the width, single sample (the blur makes Slug's small-size
-// supersampling pointless). `px_x` and `px_y` are one pixel in em units.
-fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y: vec2f, ext: vec4f) -> f32 {
+// Coverage softened over a disc `width` pixels across: 12 to 24 taps on a Vogel spiral,
+// more for a wider disc, each with a window a third of the width, single sample (the blur
+// makes Slug's small-size supersampling pointless). A tap outside the ink box, grown by the
+// window, is empty: Slug coverage there is not valid and shows as streaks. The spiral turns
+// by `turn` radians, a different amount per pixel, so the taps' pattern shows as fine grain
+// instead of streaks. `px_x` and `px_y` are one pixel in em units.
+fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y: vec2f, ext: vec4f, turn: f32) -> f32 {
   let k = 1.0 + width / 3.0;
   let r = 0.5 * width;
+  let margin = 0.5 * k / ppe;
+  let n = clamp (i32 (ceil (width / 2.0)), 12, 24);
   var cov = 0.0;
-  for (var i = 0; i < 12; i++) {
-    let d = r * sqrt ((f32 (i) + 0.5) / 12.0);
-    let a = f32 (i) * 2.3999632;
+  for (var i = 0; i < n; i++) {
+    let d = r * sqrt ((f32 (i) + 0.5) / f32 (n));
+    let a = f32 (i) * 2.3999632 + turn;
     let p = tc + px_x * (d * cos (a)) + px_y * (d * sin (a));
-    cov += _hb_gpu_slug_single (p, ppe / k, loc);
+    if (all (p >= ext.xy - margin) && all (p <= ext.zw + margin)) {
+      cov += _hb_gpu_slug_single (p, ppe / k, loc);
+    }
   }
-  return cov / 12.0;
+  return cov / f32 (n);
+}
+
+// Interleaved gradient noise in 0..1 at pixel `p`.
+fn glyph_ign (p: vec2f) -> f32 {
+  return fract (52.9829189 * fract (dot (p, vec2f (0.06711056, 0.00583715))));
 }
 
 // Value noise in 0..1 on a unit grid, smooth between lattice points.
@@ -119,11 +131,12 @@ fn hash21 (p: vec2f) -> f32 {
   let ext = vec4f (hb_gpu_fetch (i32 (in.loc))) * HB_GPU_INV_UNITS;
 
   let py_em = dpdy (in.tc);
+  let turn = 6.2831853 * glyph_ign (floor (in.clip.xy));
   let blurred = in.fx.x > 0.75;
   let k = select (1.0 + max (in.fx.x, 0.0), 1.0, blurred);
   var cov: f32;
   if (blurred) {
-    cov = soft_coverage (in.tc, in.loc, ppe, in.fx.x, px_em, py_em, ext);
+    cov = soft_coverage (in.tc, in.loc, ppe, in.fx.x, px_em, py_em, ext, turn);
   } else {
     cov = glyph_coverage (in.tc, in.loc, ppe, k, smear_em, ext);
   }
@@ -134,8 +147,8 @@ fn hash21 (p: vec2f) -> f32 {
     var r: f32;
     var b: f32;
     if (blurred) {
-      r = soft_coverage (in.tc + off, in.loc, ppe, in.fx.x, px_em, py_em, ext);
-      b = soft_coverage (in.tc - off, in.loc, ppe, in.fx.x, px_em, py_em, ext);
+      r = soft_coverage (in.tc + off, in.loc, ppe, in.fx.x, px_em, py_em, ext, turn);
+      b = soft_coverage (in.tc - off, in.loc, ppe, in.fx.x, px_em, py_em, ext, turn);
     } else {
       r = glyph_coverage (in.tc + off, in.loc, ppe, k, smear_em, ext);
       b = glyph_coverage (in.tc - off, in.loc, ppe, k, smear_em, ext);
@@ -144,7 +157,7 @@ fn hash21 (p: vec2f) -> f32 {
     c = vec4f (rgb, in.color.a * max (cov, max (r, b)));
   }
   if (in.fx2.x > 0.0 && in.halo.a > 0.0) {
-    let h = soft_coverage (in.tc, in.loc, ppe, 2.0 * in.fx2.x, px_em, py_em, ext);
+    let h = soft_coverage (in.tc, in.loc, ppe, 2.0 * in.fx2.x, px_em, py_em, ext, turn);
     c = c + in.halo * h * (1.0 - c.a);
   }
   var keep = 1.0;
