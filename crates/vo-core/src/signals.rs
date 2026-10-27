@@ -26,6 +26,7 @@
 //! base; the signal multiplies, adds or mixes on top.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -434,6 +435,43 @@ impl Signals {
     }
 }
 
+/// The live store, shared between the host that pushes frames and the parts of a scene that
+/// read them (dot sources, emitters, canvases). Each read takes a snapshot, so a frame being
+/// sampled never sees a half-pushed store.
+#[derive(Clone, Debug, Default)]
+pub struct SignalsCell(Arc<RwLock<Arc<Signals>>>);
+
+/// Two cells are equal when they share one store.
+impl PartialEq for SignalsCell {
+    fn eq(&self, other: &SignalsCell) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl SignalsCell {
+    pub fn new(signals: Signals) -> SignalsCell {
+        SignalsCell(Arc::new(RwLock::new(Arc::new(signals))))
+    }
+
+    /// The current snapshot.
+    pub fn get(&self) -> Arc<Signals> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replaces the store, for a recording.
+    pub fn set(&self, signals: Arc<Signals>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = signals;
+    }
+
+    /// Adds a frame that arrived at scene time `arrived` (see [`Signals::push`]) and returns
+    /// the new snapshot.
+    pub fn push(&self, frame: SignalFrame, arrived: f64) -> Arc<Signals> {
+        let mut guard = self.0.write().unwrap_or_else(|e| e.into_inner());
+        Arc::make_mut(&mut guard).push(frame, arrived);
+        guard.clone()
+    }
+}
+
 /// History entries in [`SignalBlock::ring`].
 pub const SIGNAL_RING: usize = 64;
 
@@ -757,6 +795,16 @@ mod tests {
         assert_eq!(f.len(), SIGNAL_BLOCK_FLOATS);
         assert_eq!(f[16 + MEL_BANDS], b.ring[0]);
         assert_eq!(SignalBlock::default().head[3], NO_ONSET);
+    }
+
+    #[test]
+    fn cell_snapshots_do_not_change_under_a_reader() {
+        let cell = SignalsCell::default();
+        let before = cell.get();
+        let after = cell.push(frame(0.0, -20.0), 1.0);
+        assert!(before.is_empty());
+        assert_eq!(after.len(), 1);
+        assert_eq!(cell.get().len(), 1);
     }
 
     #[test]

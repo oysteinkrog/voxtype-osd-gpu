@@ -534,6 +534,10 @@ pub struct Element<M = ()> {
     /// Drawn as a glass panel under the content (FX06).
     pub(crate) glass: Option<Glass>,
     pub(crate) motion: Vec<(Prop, Motion)>,
+    /// Signal bus bindings (`crate::bind`).
+    pub(crate) binds: Vec<crate::bind::Bound>,
+    /// The signal store for the scene, on the root element (`Element::signals`).
+    pub(crate) signals: Option<vo_core::signals::SignalsCell>,
     pub(crate) presence: Option<(Transition, Transition)>,
     pub(crate) handlers: Handlers<M>,
     pub(crate) children: Vec<Element<M>>,
@@ -551,6 +555,8 @@ impl<M> Element<M> {
             inside: false,
             glass: None,
             motion: Vec::new(),
+            binds: Vec::new(),
+            signals: None,
             presence: None,
             handlers: Handlers::default(),
             children: Vec::new(),

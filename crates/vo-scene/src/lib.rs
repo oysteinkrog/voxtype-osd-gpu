@@ -19,6 +19,7 @@
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
+//! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `emitter`: particle emitters and particle words, simulated by the renderer.
 //! - `gpu`: elements drawn by app GPU code, such as a 3D scene.
@@ -32,6 +33,7 @@
 
 pub mod assets;
 pub mod bars;
+pub mod bind;
 pub mod canvas;
 pub mod display;
 pub mod dots;
@@ -62,6 +64,7 @@ pub mod trace;
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
 pub use taffy;
 
+pub use bind::Param;
 pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};

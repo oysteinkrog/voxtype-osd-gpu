@@ -16,6 +16,7 @@ use taffy::prelude::AvailableSpace;
 use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
+use crate::bind::Bound;
 use crate::display::{
     BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
@@ -29,6 +30,7 @@ use crate::glass::{Glass, GlassInstance};
 use crate::input::PointerState;
 use crate::layout::LayoutView;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
+use vo_core::signals::{SignalBlock, SignalsCell};
 
 new_key_type! {
     /// A retained node. Stable for as long as its key path stays in the view.
@@ -82,6 +84,9 @@ pub(crate) struct Node<M> {
     /// Sorted by slot.
     pub chans: Vec<(u8, Channel)>,
     pub motion: Vec<(Prop, Motion)>,
+    /// Signal bus bindings, and the store they read (set only when there are bindings).
+    pub binds: Vec<Bound>,
+    pub signals: Option<SignalsCell>,
     pub presence: Option<(Transition, Transition)>,
     pub gradient: bool,
     pub hairline: bool,
@@ -132,10 +137,15 @@ impl WordAnim {
 
 impl<M> Node<M> {
     pub fn value(&self, slot: u8, t: f64) -> f64 {
-        match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
+        let v = match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
             Ok(i) => self.chans[i].1.value(t),
             Err(_) => Slot::default_value(slot),
+        };
+        if self.binds.is_empty() {
+            return v;
         }
+        let signals = self.signals.as_ref().map(SignalsCell::get);
+        crate::bind::apply(&self.binds, signals.as_deref(), slot, v, t)
     }
 
     /// The rate of change of `slot` at `t`, per second.
@@ -443,6 +453,8 @@ pub struct Scene<M = ()> {
     /// Something drawn or hit-tested changed during the current `apply`.
     changed: bool,
     pub(crate) pointer: PointerState,
+    /// The signal bus store bound props read (`crate::bind`).
+    signals: Option<SignalsCell>,
 }
 
 impl<M> Default for Scene<M> {
@@ -468,6 +480,7 @@ impl<M> Scene<M> {
             layout_dirty: false,
             changed: false,
             pointer: PointerState::default(),
+            signals: None,
         }
     }
 
@@ -475,6 +488,23 @@ impl<M> Scene<M> {
     pub fn with_text(mut self, text: Box<dyn TextLayout>) -> Scene<M> {
         self.text = text;
         self
+    }
+
+    /// The audio feature store that bound props (`Element::bind`) and shaders read. The host
+    /// pushes frames into it; sampling stays pure in `t`, since frames sit at their audio
+    /// clock times. A root element with `Element::signals` sets it too.
+    pub fn set_signals(&mut self, cell: SignalsCell) {
+        if self.signals.as_ref() == Some(&cell) {
+            return;
+        }
+        for n in self.nodes.values_mut().filter(|n| !n.binds.is_empty()) {
+            n.signals = Some(cell.clone());
+        }
+        self.signals = Some(cell);
+    }
+
+    pub fn signals(&self) -> Option<&SignalsCell> {
+        self.signals.as_ref()
     }
 
     /// How properties move that no `.motion()` call names. `DEFAULT_MOTION` (a soft spring)
@@ -581,6 +611,9 @@ impl<M> Scene<M> {
         self.last_t = self.last_t.max(t);
         self.changed = false;
         self.drop_gone(t);
+        if let Some(cell) = view.signals.clone() {
+            self.set_signals(cell);
+        }
         match self.root {
             Some(r) if self.nodes[r].key == view.key && self.nodes[r].kind.same_variant(&view.kind) => {
                 self.revive(r);
@@ -605,9 +638,19 @@ impl<M> Scene<M> {
 
     /// The time at or after `t` from which the display list may differ from `sample(t)`:
     /// `Some(t)` while anything moves, `None` once everything has settled.
+    /// Whether `n`'s bindings still move at `t`: frames are arriving or their release runs.
+    fn bound_moving(&self, n: &Node<M>, t: f64) -> bool {
+        if n.binds.is_empty() {
+            return false;
+        }
+        let Some(c) = &self.signals else { return false };
+        c.get().active_until(crate::bind::tail(&n.binds)).is_some_and(|until| t < until)
+    }
+
     pub fn next_wake(&self, t: f64) -> Option<f64> {
         let moving = self.nodes.values().any(|n| {
             n.chans.iter().any(|(_, c)| c.settled_at() > t)
+                || (n.alive(t) && self.bound_moving(n, t))
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
                 || n.live.settled_at() > t
                 || (n.alive(t) && n.sheen_progress(t).is_some())
@@ -666,6 +709,7 @@ impl<M> Scene<M> {
         out.clear();
         out.size = self.viewport;
         out.scale = self.scale;
+        out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
         out.layers.push(Layer::root());
         let mut items = Vec::new();
         if let Some(root) = self.root {
@@ -723,6 +767,8 @@ impl<M> Scene<M> {
             inside,
             glass,
             motion,
+            binds,
+            signals: _,
             presence,
             handlers,
             children,
@@ -740,6 +786,8 @@ impl<M> Scene<M> {
             flow: Vec::new(),
             chans: Vec::new(),
             motion,
+            signals: (!binds.is_empty()).then(|| self.signals.clone()).flatten(),
+            binds,
             presence,
             gradient,
             hairline,
@@ -792,6 +840,8 @@ impl<M> Scene<M> {
             inside,
             glass,
             motion,
+            binds,
+            signals: _,
             presence,
             handlers,
             children,
@@ -801,10 +851,13 @@ impl<M> Scene<M> {
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;
+        changed |= n.binds != binds;
         changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
         n.motion = motion;
+        n.signals = (!binds.is_empty()).then(|| self.signals.clone()).flatten();
+        n.binds = binds;
         n.presence = presence;
         n.gradient = gradient;
         n.hairline = hairline;

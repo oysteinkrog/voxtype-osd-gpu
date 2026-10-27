@@ -57,6 +57,9 @@ pub struct DisplayList {
     pub glass: Vec<GlassInstance>,
     /// Content drawn by app GPU code (`crate::gpu`).
     pub gpu: Vec<GpuItem>,
+    /// The signal bus uniform for this frame (`vo_core::signals`), zero without a store.
+    #[serde(skip)]
+    pub signals: vo_core::signals::SignalBlock,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -566,6 +569,7 @@ impl DisplayList {
         self.vector_segs.clear();
         self.glass.clear();
         self.gpu.clear();
+        self.signals = Default::default();
         self.hits.clear();
     }
 
