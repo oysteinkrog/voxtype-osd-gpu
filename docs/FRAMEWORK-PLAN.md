@@ -235,7 +235,15 @@ after M3, the macOS host, which has since been dropped.
   pass. `roll::digit_roll` builds a number whose changed digits roll: each digit is a clipped, faded
   window over a column of the ten digits on a spring. The column is keyed by the text to its left, so
   a carry rolls a new column in from below while the old one leaves upward, with no history in the
-  view. R8 mask textures for arbitrary shapes are not done.
+  view.
+- **Masks (FX04).** `Element::mask(key)`, a child of a layer element, masks that layer by what it
+  draws: by alpha, by luminance (`luma_mask`) or inverted as a knockout (`invert_mask`). The mask's
+  content draws coverage into an R8 texture through the usual pipelines (`finish` writes coverage or
+  luminance when the layer block says so), and the masked layer, made offscreen, composites through
+  it. An alpha mask also trims the layer's texture to what the mask draws. Bloom and trails run
+  before the mask, so it cuts them too; a masked layer draws no bloom of its own. Inside a mask,
+  offscreen layers draw direct, and particles, glass and GPU items are left out. The CPU first frame
+  hides alpha-masked layers and draws inverted-masked ones unmasked.
 - **Text effects (TY17).** Blur, dissolve, wipe, chromatic offset and halo come from the glyph's own
   Slug coverage in the glyph shader, with no offscreen pass. Blur and halo average 12 to 24 coverage
   taps on a disc, each with a wider antialiasing window; taps outside the ink box are dropped, since
@@ -246,11 +254,17 @@ after M3, the macOS host, which has since been dropped.
   `text_chroma` and `text_halo` on `Prop::TextFx`; a label's wipe is one front along each line.
   `Transition` gains `blur`, `dissolve` and `wipe`, so live-text words blur in, form out of noise or
   wipe in as they arrive. The CPU first frame draws text without these effects.
+- **Noise (FX10).** `noise.wgsl` holds seeded, stateless noise for any shader that appends it
+  (`noise_shader_source`): the PCG hash bit for bit as `vo_core::hash`, interleaved gradient noise,
+  value noise, 2D simplex with its analytic gradient, fbm, curl and domain warp, all named `noise_*`
+  so they cannot clash. Simplex gradients turn by a phase, so an ambient loop over it repeats
+  exactly. `vo_core::noise` is the same in Rust, and a GPU test checks the two agree. The glyph
+  shader uses it; the particle and glass shaders still have their own hashes.
 - **Demos.** `glow_demo` (glow, bloom, shadow), `comet_demo` (trail, motion blur, rim, sheen),
   `ticker_demo` (edge fades, digit roll) and `textfx_demo` (text effects) each write an mp4 and a
   contact sheet, and `--check` renders twice and compares all 360 frame hashes.
 - **Not done.** The CPU first frame skips glows, shadows, bloom and text effects; it draws conic, sheen
-  and edge-fade paints. The noise library (FX10), R8 masks and the style pack (FX13) are next.
+  and edge-fade paints. Glow, shadow and bloom there, then the style pack (FX13), are next.
 ## Crates
 
 | Crate | Contents |
