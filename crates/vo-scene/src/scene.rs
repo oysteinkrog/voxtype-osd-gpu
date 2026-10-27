@@ -1229,7 +1229,7 @@ impl<M> Scene<M> {
             }),
             Kind::Label { style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
-                self.glyphs(n, style.font, style.size, origin, color, alpha, t, |_| NO_WORD, items, out);
+                self.glyphs(n, style.size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
             Kind::LiveText { words, style, particles, .. } => {
@@ -1257,7 +1257,7 @@ impl<M> Scene<M> {
                     }
                 };
                 if n.words.is_empty() || color.a <= 0.0 {
-                    self.glyphs(n, style.font, style.size, origin, color, alpha, t, word_of, items, out);
+                    self.glyphs(n, style.size, origin, color, alpha, t, word_of, items, out);
                 } else {
                     let fx = n.text_fx(t).faded(alpha);
                     let spans = glyph_spans(&n.shaped, style.size);
@@ -1294,7 +1294,7 @@ impl<M> Scene<M> {
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + g.pos.x + dx, origin.y + g.pos.y + dy),
                             size: style.size,
-                            font: style.font,
+                            font: g.font,
                             glyph: g.glyph,
                             word,
                             color: color.fade(k),
@@ -1534,7 +1534,6 @@ impl<M> Scene<M> {
     fn glyphs(
         &self,
         n: &Node<M>,
-        font: u32,
         size: f32,
         origin: Point,
         color: Color,
@@ -1558,7 +1557,7 @@ impl<M> Scene<M> {
             out.glyphs.push(GlyphInstance {
                 pos: Point::new(origin.x + g.pos.x, origin.y + g.pos.y),
                 size,
-                font,
+                font: g.font,
                 glyph: g.glyph,
                 word: word_of(g.cluster),
                 color,

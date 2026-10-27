@@ -6,26 +6,31 @@
 //! - `ShapedLayout` is the real one (plan decision 8): harfrust shapes the whole paragraph
 //!   once, unicode-linebreak finds the break opportunities, and a greedy fitter fills the
 //!   lines. Glyph ids and advances are the font's, from the shared `FontRegistry`, the same
-//!   shaping the Slug encoder's HarfBuzz output assumes. Left to right only for now: no
+//!   shaping the Slug encoder's HarfBuzz output assumes. Characters the style's font lacks
+//!   are set in the first face of its fallback chain that has them (TY05): the text is cut
+//!   into runs by face and each run is shaped on its own. Left to right only for now: no
 //!   bidi, and right-to-left scripts are laid out left to right.
 //! - `EstimateText` uses a fixed advance per character, and its glyph ids are the
 //!   characters' code points. For tests that need no font.
 
 use std::ops::Range;
 
-use harfrust::{Direction, GlyphInfo, GlyphPosition, ShaperFont};
+use harfrust::{Direction, ShaperFont};
 use skrifa::instance::{LocationRef, Size as FontSize};
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::element::TextStyle;
-use crate::font::FontRegistry;
+use crate::font::{FontId, FontRegistry};
 use crate::geom::{Point, Size};
 
 /// One placed glyph. `pos` is the pen position on the baseline, relative to the text box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlacedGlyph {
     pub glyph: u32,
+    /// The face the glyph is in: the style's font, or a fallback for a character it lacks.
+    pub font: FontId,
     pub pos: Point,
     /// Byte offset of the glyph's cluster in the source text, or `ELLIPSIS_CLUSTER`.
     pub cluster: u32,
@@ -94,6 +99,7 @@ impl TextLayout for EstimateText {
             for (i, c) in word.char_indices() {
                 glyphs.push(PlacedGlyph {
                     glyph: c as u32,
+                    font: style.font,
                     pos: Point::new(x, baseline),
                     cluster: (start + i) as u32,
                     advance: self.advance * em,
@@ -161,11 +167,10 @@ impl TextLayout for ShapedLayout {
         let upem = face.units_per_em();
         let k = style.size / upem as f32;
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
-        let run = shape(&shaper, text);
-        let (infos, pos) = (run.glyph_infos(), run.glyph_positions());
-        let mut segments = segments(text, infos, pos, k, style.tracking);
+        let glyphs = self.shape_runs(text, style, &shaper, k);
+        let mut segments = segments(text, &glyphs, style.tracking);
         if let Some(max) = max_width {
-            segments = split_long_words(text, segments, infos, pos, k, style.tracking, max);
+            segments = split_long_words(text, segments, &glyphs, style.tracking, max);
         }
         let mut lines = fit(&segments, max_width);
         let max_lines = style.max_lines as usize;
@@ -186,11 +191,11 @@ impl TextLayout for ShapedLayout {
             let start = out.glyphs.len();
             ends.clear();
             let (mut x, mut width) = (0.0f32, 0.0f32);
-            for (info, p) in infos[range.clone()].iter().zip(&pos[range]) {
-                let advance = p.x_advance as f32 * k + style.tracking;
-                if !is_space(text, info.cluster) {
-                    let at = Point::new(x + p.x_offset as f32 * k, baseline - p.y_offset as f32 * k);
-                    out.glyphs.push(PlacedGlyph { glyph: info.glyph_id, pos: at, cluster: info.cluster, advance });
+            for g in &glyphs[range] {
+                let advance = g.advance + style.tracking;
+                if !is_space(text, g.cluster) {
+                    let at = Point::new(x + g.dx, baseline - g.dy);
+                    out.glyphs.push(PlacedGlyph { glyph: g.id, font: g.font, pos: at, cluster: g.cluster, advance });
                     ends.push(x + advance);
                     width = x + advance;
                 }
@@ -214,7 +219,13 @@ impl TextLayout for ShapedLayout {
                     let at = Point::new(x + dx, baseline - dy);
                     let next = dots.get(i + 1).map_or(*dots_width, |d| d.1);
                     let advance = next - dx;
-                    out.glyphs.push(PlacedGlyph { glyph, pos: at, cluster: ELLIPSIS_CLUSTER, advance });
+                    out.glyphs.push(PlacedGlyph {
+                        glyph,
+                        font: style.font,
+                        pos: at,
+                        cluster: ELLIPSIS_CLUSTER,
+                        advance,
+                    });
                 }
                 width = x + *dots_width;
             }
@@ -222,6 +233,76 @@ impl TextLayout for ShapedLayout {
         }
         out.size = Size::new(widest, lines.len() as f32 * style.line_height);
         out
+    }
+}
+
+/// One shaped glyph, scaled to logical units, before line fitting.
+struct Shaped {
+    id: u32,
+    font: FontId,
+    /// Byte offset of its cluster in the whole text.
+    cluster: u32,
+    /// Pen advance without tracking.
+    advance: f32,
+    dx: f32,
+    dy: f32,
+}
+
+impl ShapedLayout {
+    /// Shapes `text` run by run: each run is a stretch of graphemes the same face has. A
+    /// grapheme goes to the first face of `style.font` and its fallbacks that has its first
+    /// character; whitespace stays in the run it is in, so spaces between two Japanese
+    /// words do not split the run.
+    fn shape_runs(&self, text: &str, style: &TextStyle, primary: &ShaperFont<'_, '_>, k: f32) -> Vec<Shaped> {
+        let runs = self.runs(text, style.font);
+        let mut out = Vec::with_capacity(text.len());
+        for (range, font) in runs {
+            let face = if font == style.font { None } else { self.fonts.get(font) };
+            let (buf, k) = match &face {
+                None => (shape(primary, &text[range.clone()]), k),
+                Some(face) => {
+                    let upem = face.units_per_em();
+                    let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
+                    (shape(&shaper, &text[range.clone()]), style.size / upem as f32)
+                }
+            };
+            for (info, p) in buf.glyph_infos().iter().zip(buf.glyph_positions()) {
+                out.push(Shaped {
+                    id: info.glyph_id,
+                    font,
+                    cluster: info.cluster + range.start as u32,
+                    advance: p.x_advance as f32 * k,
+                    dx: p.x_offset as f32 * k,
+                    dy: p.y_offset as f32 * k,
+                });
+            }
+        }
+        out
+    }
+
+    /// The text cut into runs by face. One run in the style's font when it has no fallbacks
+    /// or has every character.
+    fn runs(&self, text: &str, primary: FontId) -> Vec<(Range<usize>, FontId)> {
+        let chain = self.fonts.fallbacks(primary);
+        let face = self.fonts.get(primary);
+        let whole = || vec![(0..text.len(), primary)];
+        let Some(face) = face else { return whole() };
+        if chain.is_empty() || text.chars().all(|c| c.is_whitespace() || face.has(c)) {
+            return whole();
+        }
+        let mut runs: Vec<(Range<usize>, FontId)> = Vec::new();
+        for (at, g) in text.grapheme_indices(true) {
+            let c = g.chars().next().expect("a grapheme has a character");
+            let font = match runs.last() {
+                Some(&(_, f)) if c.is_whitespace() => f,
+                _ => self.fonts.face_for(primary, c),
+            };
+            match runs.last_mut() {
+                Some((r, f)) if *f == font => r.end = at + g.len(),
+                _ => runs.push((at..at + g.len(), font)),
+            }
+        }
+        runs
     }
 }
 
@@ -258,16 +339,16 @@ fn is_space(text: &str, cluster: u32) -> bool {
 
 /// Splits the shaped glyphs at the text's break opportunities. Clusters rise through the
 /// buffer because the text is shaped left to right.
-fn segments(text: &str, infos: &[GlyphInfo], pos: &[GlyphPosition], k: f32, tracking: f32) -> Vec<Segment> {
+fn segments(text: &str, glyphs: &[Shaped], tracking: f32) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut g = 0;
     for (end, op) in linebreaks(text) {
         let start = g;
         let (mut width, mut trailing) = (0.0, 0.0);
-        while g < infos.len() && (infos[g].cluster as usize) < end {
-            let advance = pos[g].x_advance as f32 * k + tracking;
+        while g < glyphs.len() && (glyphs[g].cluster as usize) < end {
+            let advance = glyphs[g].advance + tracking;
             width += advance;
-            trailing = if is_space(text, infos[g].cluster) { trailing + advance } else { 0.0 };
+            trailing = if is_space(text, glyphs[g].cluster) { trailing + advance } else { 0.0 };
             g += 1;
         }
         let hard = op == BreakOpportunity::Mandatory;
@@ -282,9 +363,7 @@ fn segments(text: &str, infos: &[GlyphInfo], pos: &[GlyphPosition], k: f32, trac
 fn split_long_words(
     text: &str,
     segments: Vec<Segment>,
-    infos: &[GlyphInfo],
-    pos: &[GlyphPosition],
-    k: f32,
+    glyphs: &[Shaped],
     tracking: f32,
     max_width: f32,
 ) -> Vec<Segment> {
@@ -301,10 +380,10 @@ fn split_long_words(
         let mut g = s.glyphs.start;
         while g < s.glyphs.end {
             let start = g;
-            let cluster = infos[g].cluster;
+            let cluster = glyphs[g].cluster;
             let mut width = 0.0;
-            while g < s.glyphs.end && infos[g].cluster == cluster {
-                width += pos[g].x_advance as f32 * k + tracking;
+            while g < s.glyphs.end && glyphs[g].cluster == cluster {
+                width += glyphs[g].advance + tracking;
                 g += 1;
             }
             let piece = if is_space(text, cluster) {
@@ -510,6 +589,57 @@ mod tests {
         let t = shaped();
         let style = TextStyle { font: 7, ..STYLE };
         assert_eq!(t.layout("ab", &style, None), EstimateText::default().layout("ab", &style, None));
+    }
+
+    fn with_japanese() -> (ShapedLayout, FontId, FontId) {
+        let fonts = FontRegistry::new();
+        let latin = fonts.asset("sans").unwrap();
+        let jp = fonts.asset("jp-labels").unwrap();
+        fonts.set_fallbacks(latin, &[jp]);
+        (ShapedLayout::new(fonts), latin, jp)
+    }
+
+    #[test]
+    fn missing_characters_fall_back_run_by_run() {
+        let (t, latin, jp) = with_japanese();
+        let text = "VOICE 音声入力 ok";
+        let s = t.layout(text, &STYLE, None);
+        let fonts: Vec<FontId> = s.glyphs.iter().map(|g| g.font).collect();
+        assert_eq!(fonts, [vec![latin; 5], vec![jp; 4], vec![latin; 2]].concat());
+        assert!(s.glyphs.iter().all(|g| g.glyph != 0), "no missing-glyph boxes");
+        // Clusters are byte offsets into the whole text, not the run.
+        assert_eq!(s.glyphs[5].cluster, 6);
+        assert_eq!(s.glyphs[9].cluster as usize, text.find("ok").unwrap());
+        // The pen runs on across runs: the first ideograph sits where any glyph after
+        // "VOICE " would, and the last run starts one space after the fourth ideograph.
+        assert!((s.glyphs[5].pos.x - t.layout("VOICE x", &STYLE, None).glyphs[5].pos.x).abs() < 1e-3);
+        let space = t.layout("x x", &STYLE, None).glyphs[1].pos.x - t.layout("x", &STYLE, None).size.w;
+        let end = s.glyphs[8].pos.x + s.glyphs[8].advance;
+        assert!((s.glyphs[9].pos.x - end - space).abs() < 1e-3);
+        let jp_face = t.fonts().get(jp).unwrap();
+        let ideograph = jp_face.skrifa().charmap().map('音').unwrap().to_u32();
+        assert_eq!(s.glyphs[5].glyph, ideograph);
+        // A full-width ideograph is one em wide.
+        assert!((s.glyphs[5].advance - 20.0).abs() < 0.5, "{}", s.glyphs[5].advance);
+    }
+
+    #[test]
+    fn fallback_text_wraps_between_ideographs() {
+        let (t, _, jp) = with_japanese();
+        let s = t.layout("音声入力中", &STYLE, Some(45.0));
+        assert_eq!(s.size.h, 3.0 * 26.0);
+        assert!(s.glyphs.iter().all(|g| g.font == jp));
+    }
+
+    #[test]
+    fn no_fallback_keeps_the_primary_and_its_missing_glyph() {
+        let t = shaped();
+        let s = t.layout("a音", &STYLE, None);
+        assert!(s.glyphs.iter().all(|g| g.font == 0));
+        assert_eq!(s.glyphs[1].glyph, 0);
+        // With fallbacks set, text the primary covers is shaped exactly as before.
+        let (f, _, _) = with_japanese();
+        assert_eq!(f.layout("the quick fox", &STYLE, Some(60.0)), t.layout("the quick fox", &STYLE, Some(60.0)));
     }
 
     #[test]

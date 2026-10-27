@@ -4,7 +4,8 @@
 //! - `scene`: the retained node arena. `apply(view, t)` reconciles by key path and retargets
 //!   channels at exactly `t`; `sample(t)` is pure; `next_wake(t)` is `None` when settled.
 //! - `layout`: taffy (flexbox and block) on the node arena through its low-level traits.
-//! - `font`: the font table that text layout and the renderer share.
+//! - `font`: the font table that text layout and the renderer share, with fallback chains.
+//! - `assets`: fonts and other small files built into the binary, by name.
 //! - `text`: text measurement behind a trait, with a width estimate for now.
 //! - `flow`: live text motion: words spring to each new layout, revisions, caret.
 //! - `input`: hit testing at the event's time and pointer messages.
@@ -25,6 +26,7 @@
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
+pub mod assets;
 pub mod bars;
 pub mod canvas;
 pub mod display;

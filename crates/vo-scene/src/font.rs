@@ -8,6 +8,7 @@
 //!
 //! The display list stays plain data: it carries ids only, never font bytes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -21,28 +22,29 @@ pub type FontId = u32;
 /// The family the overlay asks fontconfig for when nothing else is set.
 pub const DEFAULT_FAMILY: &str = "Noto Sans";
 
-/// One loaded font file (face 0), read once and shared.
+type Bytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+/// One loaded face of a font file, read once and shared.
 pub struct Face {
-    data: Arc<Vec<u8>>,
+    data: Bytes,
     index: u32,
     upem: u16,
     shaping: harfrust::Font,
 }
 
 impl Face {
-    fn new(data: Vec<u8>) -> Result<Face, ReadError> {
-        let upem = FontRef::from_index(&data, 0)?.head()?.units_per_em();
-        let data = Arc::new(data);
-        let blob: Arc<dyn AsRef<[u8]> + Send + Sync> = data.clone();
+    fn new(data: Bytes, index: u32) -> Result<Face, ReadError> {
+        let upem = FontRef::from_index((*data).as_ref(), index)?.head()?.units_per_em();
         // skrifa has already parsed the file, so harfrust only fails on something skrifa
         // accepted but cannot shape with.
-        let shaping = harfrust::Font::new(blob, 0).ok_or(ReadError::MalformedData("harfrust rejected the font"))?;
-        Ok(Face { data, index: 0, upem, shaping })
+        let shaping =
+            harfrust::Font::new(data.clone(), index).ok_or(ReadError::MalformedData("harfrust rejected the font"))?;
+        Ok(Face { data, index, upem, shaping })
     }
 
     /// The font file's bytes.
     pub fn data(&self) -> &[u8] {
-        &self.data
+        (*self.data).as_ref()
     }
 
     /// Face index in the file.
@@ -56,7 +58,12 @@ impl Face {
 
     /// A skrifa view for metrics and outlines.
     pub fn skrifa(&self) -> FontRef<'_> {
-        FontRef::from_index(&self.data, self.index).expect("parsed when added")
+        FontRef::from_index(self.data(), self.index).expect("parsed when added")
+    }
+
+    /// Whether the face has a glyph for `c`.
+    pub fn has(&self, c: char) -> bool {
+        self.skrifa().charmap().map(c).is_some_and(|g| g.to_u32() != 0)
     }
 
     /// The harfrust font for shaping.
@@ -76,11 +83,24 @@ impl Face {
 }
 
 /// The shared font table. Cloning is cheap and gives a handle to the same table.
+///
+/// Fallback (TY05): text in a font that lacks a character is set in the first face of the
+/// font's fallback chain that has it, run by run. A font's own chain (`set_fallbacks`)
+/// wins over the table's default chain (`set_default_fallbacks`).
 #[derive(Clone, Default)]
 pub struct FontRegistry {
     faces: Arc<RwLock<Vec<Arc<Face>>>>,
     /// Filled paths, drawn as glyphs of `path::PATH_FONT` (`add_path`).
     paths: Arc<RwLock<Vec<Arc<kurbo::BezPath>>>>,
+    fallback: Arc<RwLock<Fallback>>,
+}
+
+#[derive(Default)]
+struct Fallback {
+    chains: HashMap<FontId, Arc<[FontId]>>,
+    default: Arc<[FontId]>,
+    /// Ids of the built-in assets already added, by name.
+    assets: HashMap<&'static str, FontId>,
 }
 
 impl FontRegistry {
@@ -90,7 +110,12 @@ impl FontRegistry {
 
     /// Adds a font file (face 0) and returns its id.
     pub fn add(&self, data: Vec<u8>) -> Result<FontId, ReadError> {
-        let face = Arc::new(Face::new(data)?);
+        self.add_face(Arc::new(data), 0)
+    }
+
+    /// Adds face `index` of a font file or collection and returns its id.
+    pub fn add_face(&self, data: Bytes, index: u32) -> Result<FontId, ReadError> {
+        let face = Arc::new(Face::new(data, index)?);
         let mut faces = self.faces.write().expect("font table lock");
         faces.push(face);
         Ok(faces.len() as FontId - 1)
@@ -98,14 +123,65 @@ impl FontRegistry {
 
     /// Reads and adds a font file.
     pub fn add_file(&self, path: &Path) -> Result<FontId, FontError> {
-        let data = std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?;
-        self.add(data).map_err(|e| FontError::Parse(path.to_path_buf(), e))
+        self.add_file_face(path, 0)
     }
 
-    /// Finds `family` through fontconfig and adds the file it picks.
-    pub fn add_system(&self, family: &str) -> Result<FontId, FontError> {
-        let path = system_font(family).ok_or_else(|| FontError::NotFound(family.to_string()))?;
-        self.add_file(&path)
+    /// Reads and adds face `index` of a font file or collection (`.ttc`).
+    pub fn add_file_face(&self, path: &Path, index: u32) -> Result<FontId, FontError> {
+        let data = std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?;
+        self.add_face(Arc::new(data), index).map_err(|e| FontError::Parse(path.to_path_buf(), e))
+    }
+
+    /// Finds `pattern` through fontconfig and adds the face it picks. The pattern is a
+    /// family name ("Noto Sans") or any fontconfig pattern (":lang=ja" for a Japanese font).
+    pub fn add_system(&self, pattern: &str) -> Result<FontId, FontError> {
+        let (path, index) = system_face(pattern).ok_or_else(|| FontError::NotFound(pattern.to_string()))?;
+        self.add_file_face(&path, index)
+    }
+
+    /// The built-in font asset `name` (`assets::ASSETS`), added on first use. Asking again
+    /// gives the same id.
+    pub fn asset(&self, name: &str) -> Result<FontId, FontError> {
+        let asset = crate::assets::get(name)
+            .filter(|a| a.kind == crate::assets::AssetKind::Font)
+            .ok_or_else(|| FontError::NoAsset(name.to_string()))?;
+        let mut fb = self.fallback.write().expect("fallback lock");
+        if let Some(&id) = fb.assets.get(asset.name) {
+            return Ok(id);
+        }
+        let id = self
+            .add_face(Arc::new(asset.bytes), 0)
+            .map_err(|e| FontError::Parse(PathBuf::from(asset.name), e))?;
+        fb.assets.insert(asset.name, id);
+        Ok(id)
+    }
+
+    /// Sets the faces tried, in order, for characters font `primary` lacks.
+    pub fn set_fallbacks(&self, primary: FontId, chain: &[FontId]) {
+        let chain: Vec<FontId> = chain.iter().copied().filter(|&f| f != primary).collect();
+        self.fallback.write().expect("fallback lock").chains.insert(primary, chain.into());
+    }
+
+    /// Sets the faces tried for any font that has no chain of its own.
+    pub fn set_default_fallbacks(&self, chain: &[FontId]) {
+        self.fallback.write().expect("fallback lock").default = chain.into();
+    }
+
+    /// The faces tried after `primary`, in order: its own chain or the default one.
+    pub fn fallbacks(&self, primary: FontId) -> Arc<[FontId]> {
+        let fb = self.fallback.read().expect("fallback lock");
+        fb.chains.get(&primary).unwrap_or(&fb.default).clone()
+    }
+
+    /// The face text in `primary` uses for `c`: `primary` when it has the character, else
+    /// the first fallback that has it, else `primary` (which then draws its missing-glyph
+    /// box).
+    pub fn face_for(&self, primary: FontId, c: char) -> FontId {
+        let has = |id: FontId| self.get(id).is_some_and(|f| f.has(c));
+        if has(primary) {
+            return primary;
+        }
+        self.fallbacks(primary).iter().copied().find(|&id| id != primary && has(id)).unwrap_or(primary)
     }
 
     pub fn get(&self, id: FontId) -> Option<Arc<Face>> {
@@ -161,6 +237,8 @@ pub enum FontError {
     Parse(PathBuf, ReadError),
     /// fontconfig is missing or found no file for the family.
     NotFound(String),
+    /// No built-in font asset has this name.
+    NoAsset(String),
 }
 
 impl std::fmt::Display for FontError {
@@ -170,6 +248,10 @@ impl std::fmt::Display for FontError {
             FontError::Parse(p, e) => write!(f, "cannot parse font {}: {e}", p.display()),
             FontError::NotFound(family) => {
                 write!(f, "fontconfig found no font for '{family}'. Is fontconfig (fc-match) installed?")
+            }
+            FontError::NoAsset(name) => {
+                let names: Vec<_> = crate::assets::names(crate::assets::AssetKind::Font).collect();
+                write!(f, "no built-in font called '{name}'. Built-in fonts: {}", names.join(", "))
             }
         }
     }
@@ -182,12 +264,23 @@ impl std::error::Error for FontError {}
 ///
 /// `VO_FONT`, when set, is a font file path that wins over fontconfig.
 pub fn system_font(family: &str) -> Option<PathBuf> {
+    system_face(family).map(|(path, _)| path)
+}
+
+/// The file and face index fontconfig picks for `pattern`. The index matters for font
+/// collections (`.ttc`), such as Noto Sans CJK, whose faces share one file.
+///
+/// `VO_FONT`, when set, is a font file path (face 0) that wins over fontconfig.
+pub fn system_face(pattern: &str) -> Option<(PathBuf, u32)> {
     if let Some(p) = std::env::var_os("VO_FONT") {
-        return Some(PathBuf::from(p));
+        return Some((PathBuf::from(p), 0));
     }
-    let out = std::process::Command::new("fc-match").args(["-f", "%{file}", family]).output().ok()?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !path.is_empty()).then(|| PathBuf::from(path))
+    let out = std::process::Command::new("fc-match").args(["-f", "%{file}\n%{index}", pattern]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let path = lines.next()?.trim();
+    let index = lines.next().and_then(|i| i.trim().parse().ok()).unwrap_or(0);
+    (out.status.success() && !path.is_empty()).then(|| (PathBuf::from(path), index))
 }
 
 /// The Latin subset of Noto Sans in `assets/fonts`, for tests and goldens: it does not
@@ -224,6 +317,36 @@ mod tests {
         // 1362 units at 1000 / 1362 * 50 px make exactly 50 px: no rounding up.
         assert_eq!(fonts.line_height(0, 50_000.0 / 1362.0), Some(50.0));
         assert_eq!(fonts.line_height(1, 10.0), None);
+    }
+
+    #[test]
+    fn assets_load_once_by_name() {
+        let fonts = FontRegistry::new();
+        let a = fonts.asset("condensed-bold").unwrap();
+        assert_eq!(fonts.asset("condensed-bold").unwrap(), a);
+        let b = fonts.asset("jp-labels").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(fonts.len(), 2);
+        assert!(matches!(fonts.asset("nope"), Err(FontError::NoAsset(_))));
+        assert!(fonts.asset("nope").unwrap_err().to_string().contains("condensed-bold"));
+    }
+
+    #[test]
+    fn face_for_walks_the_chain() {
+        let fonts = FontRegistry::new();
+        let latin = fonts.asset("sans").unwrap();
+        let jp = fonts.asset("jp-labels").unwrap();
+        let mono = fonts.asset("mono").unwrap();
+        // No chain: the primary, even for a character it lacks.
+        assert_eq!(fonts.face_for(latin, '音'), latin);
+        fonts.set_default_fallbacks(&[mono, jp]);
+        assert_eq!(fonts.face_for(latin, 'a'), latin);
+        assert_eq!(fonts.face_for(latin, '音'), jp);
+        // A font's own chain wins over the default; none of these has U+0E01.
+        fonts.set_fallbacks(latin, &[latin, mono]);
+        assert_eq!(&*fonts.fallbacks(latin), &[mono]);
+        assert_eq!(fonts.face_for(latin, '音'), latin);
+        assert_eq!(fonts.face_for(jp, '\u{0e01}'), jp);
     }
 
     #[test]
