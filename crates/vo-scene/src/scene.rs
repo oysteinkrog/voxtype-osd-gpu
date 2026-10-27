@@ -1537,6 +1537,14 @@ impl<M> Scene<M> {
                         });
                     }
                 }
+                // Letter physics (MO-83): a faint motion vector on each letter in flight.
+                for (pen, v, c) in n.live.letter_vectors(t) {
+                    let k = (0.03 * v.x.hypot(v.y)).min(0.9 * style.size) / v.x.hypot(v.y);
+                    let tip = Point::new(origin.x + pen.x * z, origin.y + (pen.y - 0.9 * style.size) * z);
+                    let tail = Point::new(tip.x - v.x * k * z, tip.y - v.y * k * z);
+                    push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                    out.shapes.push(ShapeInstance::line(tail, tip, z, Paint::solid(c.fade(alpha))));
+                }
                 if let Some((bar, tint, blink)) = n.live.caret(t) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {

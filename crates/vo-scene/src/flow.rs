@@ -45,6 +45,9 @@ use crate::geom::{Color, Point, Rect};
 use crate::lines::LineLook;
 use crate::text::ShapedText;
 
+#[path = "motion/letter_physics.rs"]
+pub mod letter_physics;
+
 /// Words that stay on their line move to their new place in about 200 ms.
 pub const FLIP: Spring = Spring::critical_to_98(0.200);
 /// A word that changes line glides there in about 220 ms.
@@ -230,6 +233,8 @@ pub struct LiveMotion {
     pub stable: Option<Vec<WordId>>,
     /// The active-line reading stage (T14).
     pub reading: Option<Reading>,
+    /// New letters drop into the line as small rigid bodies (MO-83).
+    pub letters: Option<letter_physics::LetterPhysics>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
 }
@@ -293,6 +298,8 @@ struct FlowGlyph {
     rise: Channel,
     /// Size factor about the glyph's baseline centre.
     scale: Channel,
+    /// When the glyph came in, for letter physics.
+    born: f64,
 }
 
 /// A glyph on its way out: an old glyph of a revised word, or a glyph of a removed word.
@@ -582,6 +589,7 @@ impl Make {
             opacity: self.ch(1.0, CROSSFADE, Rest::UNIT),
             rise: self.ch(0.0, GLYPH_ROLL, Rest::PIXELS),
             scale: self.ch(1.0, GLYPH_POP, Rest::UNIT),
+            born: self.t,
         }
     }
 
@@ -609,6 +617,7 @@ impl Flow {
         (self.origin, self.staged) = (motion.reading.as_ref().map_or(0.0, |r| r.origin), motion.reading.is_some());
         self.line_height = line_height;
         self.accent = motion.settle.and_then(|s| s.accent);
+        self.letters = if reduced { None } else { motion.letters };
         let mut old = std::mem::take(&mut self.words);
         let scroll = front_scroll(&old, words, &placed);
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
@@ -1106,7 +1115,11 @@ impl Flow {
         let track = w.track.value(t) as f32 * self.size * (*gi as f32 - middle);
         let centre = 0.5 * g.advance * (1.0 - scale);
         let dx = off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + centre + track;
-        let dy = off(&w.y) + g.rise.value(t) as f32 + self.opened(w.line, t);
+        let mut dy = off(&w.y) + g.rise.value(t) as f32 + self.opened(w.line, t);
+        let mut dx = dx;
+        if let Some(l) = self.letter(w, *gi as usize, t) {
+            (dx, dy) = (dx + l.dx, dy + l.dy);
+        }
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
@@ -1185,6 +1198,52 @@ impl Flow {
         self.caret.as_ref().map(|(_, _, style, _)| style)
     }
 
+    /// Letter physics of glyph `gi` of word `w` at `t`, while it is still moving.
+    fn letter(&self, w: &FlowWord, gi: usize, t: f64) -> Option<letter_physics::LetterState> {
+        let p = self.letters.as_ref()?;
+        let last = w.glyphs.iter().map(|g| g.born).fold(f64::NEG_INFINITY, f64::max);
+        if t >= p.settled_at([last + p.stagger * w.glyphs.len() as f64]) {
+            return None;
+        }
+        let starts = p.starts(w.glyphs.iter().map(|g| g.born));
+        let newest = self.words.last().is_some_and(|l| l.line == w.line);
+        Some(p.letter(&starts, gi, t, self.size, w.id, newest))
+    }
+
+    /// When the last letter that letter physics moves is locked in place.
+    fn letters_settled_at(&self) -> f64 {
+        let Some(p) = &self.letters else { return f64::NEG_INFINITY };
+        let mut at = f64::NEG_INFINITY;
+        for w in &self.words {
+            let n = w.glyphs.len() as f64;
+            for g in &w.glyphs {
+                at = at.max(g.born + p.stagger * n + p.lock);
+            }
+        }
+        at
+    }
+
+    /// Letters of live words in flight at `t`: each one's pen position in the text box's
+    /// space, its speed, and the colour its motion vector draws in.
+    pub fn letter_vectors(&self, t: f64) -> Vec<(Point, Point, Color)> {
+        let Some(color) = self.letters.and_then(|p| p.vectors) else { return Vec::new() };
+        let mut out = Vec::new();
+        for w in &self.words {
+            for (gi, g) in w.glyphs.iter().enumerate() {
+                let Some(l) = self.letter(w, gi, t) else { break };
+                if l.vx.hypot(l.vy) < 1.0 {
+                    continue;
+                }
+                let pen = Point::new(
+                    w.x.value(t) as f32 + g.x.value(t) as f32 + l.dx + 0.5 * g.advance,
+                    w.y.value(t) as f32 + w.roll.value(t) as f32 + g.y + l.dy,
+                );
+                out.push((pen, Point::new(l.vx, l.vy), color));
+            }
+        }
+        out
+    }
+
     /// When every word, glyph, ghost and the caret's glide come to rest.
     pub fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| {
@@ -1196,6 +1255,7 @@ impl Flow {
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
         let leaving = self.leaving.iter().map(|l| l.done_at()).fold(f64::NEG_INFINITY, f64::max);
+        let leaving = leaving.max(self.letters_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
     }
 
@@ -1252,6 +1312,8 @@ pub(crate) struct Flow {
     open: Vec<(u32, Channel)>,
     /// The settling accent, if any.
     accent: Option<Color>,
+    /// Letter physics, off under reduced motion.
+    letters: Option<letter_physics::LetterPhysics>,
 }
 
 /// What the reading stage asks of every word for one layout.

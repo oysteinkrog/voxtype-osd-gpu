@@ -1258,6 +1258,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: letter physics (MO-83). New letters drop into the line as small rigid
+    /// bodies, bounce, nudge their neighbours and lock into place, within the reading-line
+    /// envelope on the newest line. See [`crate::flow::letter_physics`].
+    pub fn letter_physics(mut self, p: crate::flow::letter_physics::LetterPhysics) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.letters = Some(p),
+            _ => debug_assert!(false, "letter_physics on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
