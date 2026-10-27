@@ -379,6 +379,8 @@ pub struct State {
     exit: bool,
     waker: Waker,
     in_frame: Option<SurfaceId>,
+    /// The app closed the surface it was drawing: remove it once the frame is let go.
+    close_after_frame: bool,
 }
 
 /// The Wayland host. `connect` probes the compositor; `run` owns the thread.
@@ -473,6 +475,7 @@ impl WaylandHost {
             exit: false,
             waker: Waker::new(move || ping.ping()),
             in_frame: None,
+            close_after_frame: false,
         };
         // Output sizes arrive after the outputs are bound; `Placement::FromTop` needs them
         // before the first surface opens.
@@ -696,6 +699,10 @@ impl State {
         let drawn = app.cpu_frame(self, &mut cpu);
         self.in_frame = None;
         let Ok(i) = self.index(id) else { return };
+        if std::mem::take(&mut self.close_after_frame) {
+            self.remove(i);
+            return;
+        }
         let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
         if pending.0.is_some() || pending.1.is_some() {
             let gpu_wl = self.surfaces[i].gpu_wl().clone();
@@ -790,8 +797,14 @@ impl State {
         self.in_frame = Some(id);
         app.frame(self, &Frame { id, t, frame, size, scale, texture: &tex.texture });
         self.in_frame = None;
-        // The app may have closed the surface during the frame.
         let Ok(i) = self.index(id) else { return };
+        if std::mem::take(&mut self.close_after_frame) {
+            // The app closed this surface while drawing it. The swapchain texture goes first:
+            // wgpu panics when a surface is dropped while one of its textures is held.
+            drop(tex);
+            self.remove(i);
+            return;
+        }
         if let Some(mode) = self.surfaces[i].pending_input.take() {
             self.apply_input(&wl, &mode);
         }
@@ -1088,6 +1101,11 @@ impl HostCtl for State {
     }
 
     fn close(&mut self, id: SurfaceId) {
+        if self.in_frame == Some(id) {
+            // Closed from inside its own frame: the host still holds the frame's texture.
+            self.close_after_frame = true;
+            return;
+        }
         // The device thread may be using the surface.
         self.bg_target = None;
         self.poll_gpu(true);
