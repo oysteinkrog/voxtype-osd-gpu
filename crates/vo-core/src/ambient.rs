@@ -440,14 +440,17 @@ impl LoopRun {
         if let Phase::Coast { until, .. } = e.phase {
             return (t < until).then_some(t);
         }
-        if !self.resid.is_settled(t) {
+        if !self.resid.resting_at(t) {
             return Some(t);
         }
-        match e.phase {
+        let own = match e.phase {
             Phase::Run => Some(e.spec.next_step(e.origin, t)),
             Phase::Stop { finish_at } if t < finish_at => Some(e.spec.next_step(e.origin, t).min(finish_at)),
             Phase::Stop { .. } | Phase::Coast { .. } => None,
-        }
+        };
+        // Asked about a moment before a later event (a replay or a seek): wake for that event.
+        let later = self.epochs.iter().map(|x| x.t).find(|&et| et > t);
+        own.into_iter().chain(later).min_by(f64::total_cmp)
     }
 
     /// When the loop is at rest for good, unless declared again. Infinite while it runs.
@@ -681,6 +684,18 @@ mod tests {
             assert_eq!(a.value(t), c.value(t));
         }
         assert_eq!(a.rest_at(), c.rest_at());
+    }
+
+    #[test]
+    fn wake_answers_for_past_moments_too() {
+        let spec = Loop::pulse(1.0, 1.0);
+        let mut r = run(spec);
+        r.set(3.0, None);
+        r.set(4.5, Some(spec));
+        // At 1.0 s it was running at 30 fps, whatever came later.
+        assert!((r.wake(1.0).unwrap() - 31.0 / 30.0).abs() < 1e-12);
+        // Resting between the stop and the restart: wakes for the restart.
+        assert_eq!(r.wake(4.4), Some(4.5));
     }
 
     #[test]

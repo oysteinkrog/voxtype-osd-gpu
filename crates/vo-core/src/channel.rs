@@ -172,6 +172,13 @@ impl Channel {
         last.t0 + last.settle
     }
 
+    /// Whether the segment active at `t` has come to rest by `t`. Unlike `is_settled`, this
+    /// ignores segments that start after `t`, so it answers for any moment of the history.
+    pub fn resting_at(&self, t: f64) -> bool {
+        let s = &self.segments[self.index(t)];
+        t >= s.t0 + s.settle
+    }
+
     pub fn is_settled(&self, t: f64) -> bool {
         t >= self.settled_at()
     }
