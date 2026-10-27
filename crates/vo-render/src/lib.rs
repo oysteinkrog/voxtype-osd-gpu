@@ -25,6 +25,7 @@ pub mod offscreen;
 pub mod particle_layer;
 pub mod particle_text;
 pub mod particles;
+pub mod profile;
 pub mod renderer;
 pub mod shapes;
 pub mod text;

@@ -53,6 +53,7 @@ use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::gpu::{GpuPainter, PaintCx};
 use crate::hot::wgsl;
 use crate::particle_layer::ParticleLayer;
+use crate::profile::{BloomReport, FrameReport, FrameTimings, Profiler, Section, SurfaceKind, SurfaceReport};
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
 use crate::vector::{vector_shader_source, GpuVector};
@@ -343,6 +344,10 @@ struct Surface {
     mask: Option<(usize, Mask)>,
     /// A mask's own surface: an R8 texture of coverage, never composited.
     r8: bool,
+    /// The display list layer, for an offscreen layer or a mask (`frame_report`).
+    layer: Option<u32>,
+    /// Composited with a layer style (`frame_report`).
+    style: bool,
 }
 
 impl Surface {
@@ -357,6 +362,8 @@ impl Surface {
             trail: None,
             mask: None,
             r8: false,
+            layer: None,
+            style: false,
         }
     }
 
@@ -482,6 +489,8 @@ pub struct Renderer {
     /// Draw GPU items (`add_painter`).
     painters: Vec<Box<dyn GpuPainter>>,
     gpu_items: Vec<GpuCmd>,
+    /// GPU timestamps per section, when profiling is on.
+    profiler: Option<Profiler>,
 }
 
 struct FxShared {
@@ -531,6 +540,7 @@ impl Renderer {
             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             painters: Vec::new(),
             gpu_items: Vec::new(),
+            profiler: None,
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -630,6 +640,73 @@ impl Renderer {
     /// Whether the last frame took the effect path.
     pub fn last_frame_had_effects(&self) -> bool {
         self.scene.is_some()
+    }
+
+    /// Turns GPU timestamps per section on or off (`crate::profile`). Returns whether they
+    /// are on: the device needs `profile::timestamp_features()`.
+    pub fn set_profiling(&mut self, on: bool) -> bool {
+        self.profiler =
+            if on { self.profiler.take().or_else(|| Profiler::new(&self.device, &self.queue)) } else { None };
+        self.profiler.is_some()
+    }
+
+    /// The GPU times of the frame encoded last, once it is submitted. Blocks until the GPU
+    /// has run it. `None` without profiling, and for a frame already read.
+    pub fn last_timings(&mut self) -> Option<FrameTimings> {
+        let report = self.frame_report();
+        let label = |s: Section| match s {
+            Section::Draw { surface } => {
+                report.surfaces.get(surface).map_or((None, "?".into()), |r| (r.layer, r.label()))
+            }
+            Section::Bloom { surface } => report
+                .surfaces
+                .get(surface)
+                .map_or((None, "? bloom".into()), |r| (r.layer, format!("{} bloom", r.label()))),
+            Section::Final => (None, "final".into()),
+        };
+        self.profiler.as_mut()?.read(&self.device, label)
+    }
+
+    /// The surfaces and instance counts of the frame encoded last (`crate::profile`).
+    pub fn frame_report(&self) -> FrameReport {
+        let surfaces = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SurfaceReport {
+                kind: match (i, s.r8, self.scene.is_some()) {
+                    (0, _, false) => SurfaceKind::Target,
+                    (0, _, true) => SurfaceKind::Scene,
+                    (_, true, _) => SurfaceKind::Mask,
+                    _ => SurfaceKind::Layer,
+                },
+                layer: s.layer,
+                content: s.bounds,
+                texture: if s.size[0] == 0 { [0.0; 4] } else { s.rect() },
+                bloom: s.bloom.as_ref().map(|b| BloomReport {
+                    levels: b.levels,
+                    strength: b.strength,
+                    // Three times the radius the pyramid stands for (`bloom_levels`).
+                    reach: 3.0 * 2f32.powf(b.levels as f32 - 1.0 + b.top),
+                }),
+                trail: s.trail.is_some(),
+                style: s.style,
+                masked: s.mask.is_some(),
+                draws: s.cmds.len(),
+            })
+            .collect();
+        FrameReport {
+            effects: self.scene.is_some(),
+            size: self.surfaces.first().map_or([0, 0], |s| s.size),
+            surfaces,
+            shapes: self.shapes.len(),
+            glyphs: self.glyphs.len(),
+            dots: self.dots.len(),
+            vectors: self.vectors.len(),
+            glass: self.glass.len(),
+            gpu_items: self.gpu_items.len(),
+            pool_bytes: self.pool_bytes(),
+        }
     }
 
     /// Draws `list` into `target`, cleared to transparent first, at `list.scale` physical
@@ -739,7 +816,13 @@ impl Renderer {
         if !self.gpu_items.is_empty() {
             painters.iter_mut().for_each(|p| p.begin_frame());
         }
+        if let Some(p) = &self.profiler {
+            p.begin(enc);
+        }
         self.encode_passes(target, format, enc, &mut painters);
+        if let Some(p) = &mut self.profiler {
+            p.finish(enc);
+        }
         self.painters = painters;
         self.pool.retain(|p| p.used || self.frame - p.last_used < POOL_KEEP_FRAMES);
     }
@@ -784,7 +867,7 @@ impl Renderer {
                 // The mask gets its surface even when it draws nothing: an empty alpha mask
                 // hides its layer.
                 let child = self.surfaces.len();
-                self.surfaces.push(Surface { r8: true, ..Surface::new() });
+                self.surfaces.push(Surface { r8: true, layer: Some(li), ..Surface::new() });
                 self.surfaces[surface].mask = Some((child, m));
                 mask_out = if m.luma { 2.0 } else { 1.0 };
                 (child, parent.opacity * layer.opacity, BlendMode::Normal)
@@ -796,7 +879,7 @@ impl Renderer {
                 }
                 let uniform = self.push_uniform(f, parent, opacity);
                 let child = self.surfaces.len();
-                let mut s = Surface::new();
+                let mut s = Surface { layer: Some(li), style: layer.style.is_some(), ..Surface::new() };
                 if let Some(b) = bloom.filter(|b| f.effects && b.strength > 0.0) {
                     s.bloom = Some(bloom_plan(b, ppu));
                 }
@@ -1516,8 +1599,10 @@ impl Renderer {
                 cmds = &cmds[split + 1..];
             }
             drop(pass);
+            self.mark(enc, Section::Draw { surface: i });
             if let Some(b) = &s.bloom {
                 self.encode_bloom(enc, s, b);
+                self.mark(enc, Section::Bloom { surface: i });
             }
         }
         if let (Some(scene), Some(fx)) = (self.scene, &self.fx) {
@@ -1528,6 +1613,14 @@ impl Renderer {
             let offset = (self.fx_uniforms.len() - self.uniform_stride as usize) as u32;
             pass.set_bind_group(1, &self.fx_buf.as_ref().unwrap().1, &[offset]);
             pass.draw(0..3, 0..1);
+            drop(pass);
+            self.mark(enc, Section::Final);
+        }
+    }
+
+    fn mark(&self, enc: &mut wgpu::CommandEncoder, section: Section) {
+        if let Some(p) = &self.profiler {
+            p.mark(enc, section);
         }
     }
 

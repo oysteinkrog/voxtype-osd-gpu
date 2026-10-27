@@ -214,3 +214,37 @@ fresh private `kwin_wayland --virtual` session, hovers it and clicks its close b
 for example `--cpu-first-frame`. It needs `kwin_wayland` and a Vulkan GPU but no real display, and it
 takes about 12 s, so it is part of `just all`. A heavy build running at the same time can slow the
 cold start; the median of three runs absorbs one slow run.
+
+**GPU time per effect.** The last step runs the `effect_cost` example: the same card with one
+effect at a time, at 600x300 and at 1920x1080, 60 frames each, timed on the GPU with timestamp
+queries. It writes the table to `$VO_BUDGET_DIR/effect-cost.md` and fails when an effect takes
+more than `VO_BUDGET_EFFECT_MS` (default 2) per frame at 600x300. A device without timestamp
+queries skips it. `cargo run --release -p vo --example effect_cost` prints the full table with
+120 frames; `-- --preview` shows each case for 2 s, with markers.
+
+Measured on an RTX 3060 Ti (median GPU ms per frame; the plain card is 0.062 at 600x300 and
+0.191 at 1920x1080, and the other columns are what the effect adds):
+
+| Effect | +ms at 600x300 | +ms at 1920x1080 | Pooled textures at 1920x1080 |
+|---|---:|---:|---:|
+| glow paint | 0.007 | 0.096 | none |
+| drop shadow | 0.009 | 0.125 | none |
+| text halo | 0.152 | 2.554 | none |
+| text blur | 0.026 | 0.196 | none |
+| offscreen layer | 0.006 | 0.000 | 3.9 MB |
+| bloom, radius 18 | 0.051 | 0.168 | 42.8 MB |
+| bloom, radius 60 | 0.084 | 0.170 | 42.8 MB |
+| trail | 0.014 | 0.085 | 33.2 MB |
+| motion blur | 0.010 | 0.088 | none |
+| CRT style | 0.009 | 0.022 | 3.9 MB |
+| glitch | 0.008 | 0.009 | 3.9 MB |
+
+The text halo is the one to watch: it scales with glyph area times halo radius, and at full HD
+it is over the 2 ms frame budget on its own. Bloom and trails cost little time but a lot of
+texture memory, which the own-heap gate does not see.
+
+`Renderer::set_profiling(true)` turns the timestamps on in any renderer whose device has
+`vo_render::profile::timestamp_features()`; `Renderer::last_timings()` then gives the GPU time
+of each section of the last frame (each surface's passes, each bloom pyramid, the final pass),
+and `Renderer::frame_report()` lists its surfaces: which layer, what it covers, its texture and
+its bloom's reach.
