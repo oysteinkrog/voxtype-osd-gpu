@@ -530,6 +530,7 @@ impl<M> Scene<M> {
                             t < n.words.iter().map(|w| w.since).fold(n.words_at, f64::max) + WORD_PARTICLES_BUSY
                         }
                         Kind::Canvas(c) => c.moving(t),
+                        Kind::Gpu(g) => t < g.0.until(),
                         Kind::StrokePath(a) => a.head.is_some(),
                         _ => false,
                     })
@@ -1007,6 +1008,14 @@ impl<M> Scene<M> {
             let centre = Point::new(m.e + 0.5 * size.w, m.f + 0.5 * size.h);
             let i = crate::emitter::push_instance(out, e, id.to_bits(), n.born, t, centre, alpha);
             push_item(items, ItemKind::Emitters, i);
+        } else if let Kind::Gpu(g) = &n.kind {
+            out.gpu.push(crate::gpu::GpuItem {
+                source: g.clone(),
+                rect: Rect::new(m.e, m.f, size.w, size.h),
+                t,
+                opacity: alpha,
+            });
+            push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
         } else {
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
         }
@@ -1175,7 +1184,7 @@ impl<M> Scene<M> {
                 }
                 None
             }
-            Kind::Canvas(_) | Kind::Emitter(_) => None,
+            Kind::Canvas(_) | Kind::Emitter(_) | Kind::Gpu(_) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
                 if paint.is_visible() && view.w > 0.0 && view.h > 0.0 {

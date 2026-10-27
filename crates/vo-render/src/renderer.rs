@@ -32,7 +32,8 @@
 //! - **Offscreen layers** get a texture that covers what they draw, plus the bloom's reach,
 //!   at a whole-pixel offset so compositing stays a 1:1 copy. Sizes round up to 64 pixels so
 //!   textures are reused from a pool while a layer moves or grows.
-//! - **Emitters** are not drawn (M4).
+//! - **GPU elements** (`vo_scene::gpu`) break the surface's pass: the pass ends, the painters
+//!   draw, and a new pass resumes with `LoadOp::Load` (`crate::gpu`).
 //! - **Dots** have a pipeline of their own with 16-byte instances (`dots.rs`).
 
 use std::ops::Range;
@@ -48,6 +49,7 @@ use vo_scene::path::PATH_FONT;
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
+use crate::gpu::{GpuPainter, PaintCx};
 use crate::hot::wgsl;
 use crate::particle_layer::ParticleLayer;
 use crate::shapes::{pixels_per_unit, GpuShape};
@@ -254,6 +256,24 @@ enum Pipe {
     Fade,
     /// Particles (`crate::particle_layer`): the range is of its placements.
     Particles,
+    /// GPU items drawn by painters (`crate::gpu`): the range is of `Renderer::gpu_items`. A
+    /// pass break: the pass ends before it and resumes with `LoadOp::Load` after it.
+    Gpu,
+}
+
+impl Pipe {
+    /// Commands that run outside a render pass, between two passes on one surface.
+    fn breaks_pass(self) -> bool {
+        matches!(self, Pipe::Gpu)
+    }
+}
+
+/// A GPU item placed for this frame.
+struct GpuCmd {
+    item: vo_scene::gpu::GpuItem,
+    /// The layer's space to target pixels.
+    to_px: Affine,
+    opacity: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +416,9 @@ pub struct Renderer {
     particles: ParticleLayer,
     /// How this frame's pass on the target starts (`encode_with`).
     load: wgpu::LoadOp<wgpu::Color>,
+    /// Draw GPU items (`add_painter`).
+    painters: Vec<Box<dyn GpuPainter>>,
+    gpu_items: Vec<GpuCmd>,
 }
 
 struct FxShared {
@@ -439,6 +462,8 @@ impl Renderer {
             queue: queue.clone(),
             particles: ParticleLayer::new(fonts.clone()),
             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            painters: Vec::new(),
+            gpu_items: Vec::new(),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -553,6 +578,12 @@ impl Renderer {
         self.queue.submit([enc.finish()]);
     }
 
+    /// Adds a painter for GPU elements (`vo_scene::gpu`). Painters are asked in the order they
+    /// were added; an item no painter knows is skipped.
+    pub fn add_painter(&mut self, painter: Box<dyn GpuPainter>) {
+        self.painters.push(painter);
+    }
+
     /// Records the frame into `enc` without submitting, so a caller can add a copy after it.
     pub fn encode(&mut self, list: &DisplayList, scale: f32, target: &Target, enc: &mut wgpu::CommandEncoder) {
         self.encode_with(list, scale, target, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), enc);
@@ -584,6 +615,7 @@ impl Renderer {
         self.uniforms.clear();
         self.fx_uniforms.clear();
         self.surfaces.clear();
+        self.gpu_items.clear();
         self.frame += 1;
         for p in &mut self.pool {
             p.used = false;
@@ -633,7 +665,12 @@ impl Renderer {
         self.upload(format, target.format(), w, h);
         let surfaces = &self.surfaces;
         self.particles.prepare(w, h, format, &|i| (surfaces[i].origin, surfaces[i].size));
-        self.encode_passes(target, format, enc);
+        let mut painters = std::mem::take(&mut self.painters);
+        if !self.gpu_items.is_empty() {
+            painters.iter_mut().for_each(|p| p.begin_frame());
+        }
+        self.encode_passes(target, format, enc, &mut painters);
+        self.painters = painters;
         self.pool.retain(|p| p.used || self.frame - p.last_used < POOL_KEEP_FRAMES);
     }
 
@@ -805,6 +842,16 @@ impl Renderer {
                     }
                     grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                     self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);
+                }
+                ItemKind::Gpu => {
+                    let start = self.gpu_items.len() as u32;
+                    for g in &f.list.gpu[range] {
+                        let b = bounds(&RRect::new(g.rect, 0.0), &to_px);
+                        grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                        self.gpu_items.push(GpuCmd { item: g.clone(), to_px, opacity: opacity * g.opacity });
+                    }
+                    let end = self.gpu_items.len() as u32;
+                    self.push_cmd(draw_surface, Pipe::Gpu, start..end, uniform, BlendMode::Normal, scissor);
                 }
                 ItemKind::Layer => self.visit(f, item.start, &state, draw_surface),
             }
@@ -1223,7 +1270,7 @@ impl Renderer {
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
-            for c in s.cmds.iter().filter(|c| c.pipe != Pipe::Particles) {
+            for c in s.cmds.iter().filter(|c| !matches!(c.pipe, Pipe::Particles | Pipe::Gpu)) {
                 let key = (format, c.pipe, c.blend);
                 if !needed.contains(&key) {
                     needed.push(key);
@@ -1245,7 +1292,13 @@ impl Renderer {
         }
     }
 
-    fn encode_passes(&self, target: &Target, format: wgpu::TextureFormat, enc: &mut wgpu::CommandEncoder) {
+    fn encode_passes(
+        &self,
+        target: &Target,
+        format: wgpu::TextureFormat,
+        enc: &mut wgpu::CommandEncoder,
+        painters: &mut [Box<dyn GpuPainter>],
+    ) {
         // Surfaces are numbered in pre-order, so a child always has a higher number than its
         // parent: going from the last to the first draws every layer before it is composited.
         for i in (0..self.surfaces.len()).rev() {
@@ -1274,7 +1327,19 @@ impl Renderer {
                 None if s.tex.is_none() => begin_with(enc, view, "vo-target", self.load),
                 None => begin(enc, view, if i == 0 { "vo-scene" } else { "vo-layer" }),
             };
-            self.run(&mut pass, s, format);
+            // A pass break ends the pass, runs outside it, and resumes on what is there.
+            let mut cmds = &s.cmds[..];
+            loop {
+                let split = cmds.iter().position(|c| c.pipe.breaks_pass()).unwrap_or(cmds.len());
+                self.run(&mut pass, s, &cmds[..split], format);
+                if split == cmds.len() {
+                    break;
+                }
+                drop(pass);
+                self.run_break(enc, view, s, &cmds[split], format, painters);
+                pass = begin_load(enc, view, "vo-resume");
+                cmds = &cmds[split + 1..];
+            }
             drop(pass);
             if let Some(b) = &s.bloom {
                 self.encode_bloom(enc, s, b);
@@ -1326,11 +1391,51 @@ impl Renderer {
         })
     }
 
-    fn run(&self, pass: &mut wgpu::RenderPass<'_>, surface: &Surface, format: wgpu::TextureFormat) {
-        let [w, h] = surface.size;
-        let [ox, oy] = surface.origin.map(|v| v as f32);
+    /// A pass break command: the encoder is free and the surface's pass has ended.
+    fn run_break(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        surface: &Surface,
+        c: &Cmd,
+        format: wgpu::TextureFormat,
+        painters: &mut [Box<dyn GpuPainter>],
+    ) {
+        match c.pipe {
+            Pipe::Gpu => {
+                let Some(scissor) = surface_scissor(c.scissor, surface) else { return };
+                let [ox, oy] = surface.origin.map(|v| v as f32);
+                let encode_srgb = !format.is_srgb() && format != wgpu::TextureFormat::Rgba16Float;
+                for g in &self.gpu_items[c.range.start as usize..c.range.end as usize] {
+                    let mut cx = PaintCx {
+                        device: &self.device,
+                        queue: &self.queue,
+                        enc: &mut *enc,
+                        view,
+                        format,
+                        size: surface.size,
+                        source: &*g.item.source.0,
+                        rect: g.item.rect,
+                        t: g.item.t,
+                        to_px: g.to_px.then(&Affine::translate(-ox, -oy)),
+                        opacity: g.opacity,
+                        scissor,
+                        encode_srgb,
+                    };
+                    for p in painters.iter_mut() {
+                        if p.paint(&mut cx) {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("not a pass break"),
+        }
+    }
+
+    fn run(&self, pass: &mut wgpu::RenderPass<'_>, surface: &Surface, cmds: &[Cmd], format: wgpu::TextureFormat) {
         let layers = &self.uniform_buf.as_ref().expect("uploaded").1;
-        for c in &surface.cmds {
+        for c in cmds {
             let mut sc = c.scissor;
             let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom)
                 .then(|| &self.surfaces[c.range.start as usize]);
@@ -1340,14 +1445,8 @@ impl Renderer {
                 }
                 sc = intersect(sc, child.rect());
             }
-            let x0 = ((sc[0] - ox).floor().max(0.0) as u32).min(w);
-            let y0 = ((sc[1] - oy).floor().max(0.0) as u32).min(h);
-            let x1 = ((sc[2] - ox).ceil().max(0.0) as u32).min(w);
-            let y1 = ((sc[3] - oy).ceil().max(0.0) as u32).min(h);
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-            pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+            let Some([x, y, w, h]) = surface_scissor(sc, surface) else { continue };
+            pass.set_scissor_rect(x, y, w, h);
             if c.pipe == Pipe::Particles {
                 self.particles.draw(pass, c.range.clone());
                 continue;
@@ -1393,6 +1492,7 @@ impl Renderer {
                 }
                 Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
+                Pipe::Gpu => unreachable!("a pass break"),
             }
         }
     }
@@ -1453,8 +1553,8 @@ impl Renderer {
             Pipe::Glyph => 1,
             Pipe::Composite | Pipe::CompositeBloom => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
-            // The particle layer has its own pipelines.
-            Pipe::Particles => return,
+            // The particle layer and the painters have their own pipelines.
+            Pipe::Particles | Pipe::Gpu => return,
             Pipe::Dot => 4,
             Pipe::Vector => 5,
             Pipe::Glass => 7,
@@ -1473,7 +1573,7 @@ impl Renderer {
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
-            Pipe::Particles => unreachable!("returned above"),
+            Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -1492,7 +1592,7 @@ impl Renderer {
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
-            Pipe::Particles => unreachable!("returned above"),
+            Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
         let blend_state = match pipe {
             Pipe::Down | Pipe::Up => None,
@@ -1559,6 +1659,18 @@ struct Frame<'a> {
     /// 1 when the shaders must encode sRGB themselves.
     encode_srgb: f32,
     target: [u32; 2],
+}
+
+/// A scissor in target pixels, `x0, y0, x1, y1`, as `x, y, w, h` in the surface's pixels;
+/// `None` when nothing of it is on the surface.
+fn surface_scissor(sc: [f32; 4], surface: &Surface) -> Option<[u32; 4]> {
+    let [w, h] = surface.size;
+    let [ox, oy] = surface.origin.map(|v| v as f32);
+    let x0 = ((sc[0] - ox).floor().max(0.0) as u32).min(w);
+    let y0 = ((sc[1] - oy).floor().max(0.0) as u32).min(h);
+    let x1 = ((sc[2] - ox).ceil().max(0.0) as u32).min(w);
+    let y1 = ((sc[3] - oy).ceil().max(0.0) as u32).min(h);
+    (x1 > x0 && y1 > y0).then(|| [x0, y0, x1 - x0, y1 - y0])
 }
 
 fn bloom_of(target: &LayerTarget) -> Option<Bloom> {

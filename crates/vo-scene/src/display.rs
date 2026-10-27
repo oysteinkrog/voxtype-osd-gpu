@@ -21,6 +21,7 @@ use serde::Serialize;
 
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::GlassInstance;
+use crate::gpu::GpuItem;
 use crate::path::{VectorInstance, VectorSeg};
 
 /// Index of a layer in `DisplayList::layers`.
@@ -51,6 +52,8 @@ pub struct DisplayList {
     pub vector_segs: Vec<VectorSeg>,
     /// Glass panels (`crate::glass`), each drawn under its panel's content.
     pub glass: Vec<GlassInstance>,
+    /// Content drawn by app GPU code (`crate::gpu`).
+    pub gpu: Vec<GpuItem>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -172,6 +175,8 @@ pub enum ItemKind {
     Dots,
     Vectors,
     Glass,
+    /// GPU elements, one painter call each.
+    Gpu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -479,6 +484,7 @@ impl DisplayList {
         self.vectors.clear();
         self.vector_segs.clear();
         self.glass.clear();
+        self.gpu.clear();
         self.hits.clear();
     }
 

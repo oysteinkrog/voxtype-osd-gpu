@@ -355,6 +355,8 @@ pub(crate) enum Kind {
     },
     /// App drawing code run from the frame time (`crate::canvas`).
     Canvas(CanvasDraw),
+    /// Content an app draws with its own GPU code (`crate::gpu`).
+    Gpu(crate::gpu::GpuRef),
     /// A stroked outline fitted to the box, trimmed by the trim channels.
     StrokePath(StrokeArt),
     /// A stroked morph fitted to the box at the morph channel's progress.
@@ -551,6 +553,13 @@ impl<M> Element<M> {
     /// keeps the same node content.
     pub fn canvas_shared(key: impl Into<Key>, draw: CanvasDraw) -> Element<M> {
         Element::new(key, Kind::Canvas(draw), taffy::Style::default())
+    }
+
+    /// Content drawn by the app's own GPU code in the box (`crate::gpu`), such as a 3D scene.
+    /// The renderer needs a painter for the source's type. Give it a size: it has no content
+    /// size.
+    pub fn gpu(key: impl Into<Key>, source: std::sync::Arc<dyn crate::gpu::GpuSource>) -> Element<M> {
+        Element::new(key, Kind::Gpu(crate::gpu::GpuRef(source)), taffy::Style::default())
     }
 
     /// A stroked outline fitted to the box (`view` is its own box). Its trim is two animated
