@@ -581,21 +581,30 @@ pub mod make {
     /// eased speeds, growing to 270 degrees and shrinking to 20, while the whole thing turns.
     /// Closed form in `t`, one cycle every 1.4 s.
     pub fn spinner(centre: Point, r: f32, t: f64) -> Contour {
+        let [(start, _), (end, _)] = spinner_ends(t);
+        arc(centre, r, start as f32, (end - start) as f32)
+    }
+
+    /// The spinner's tail and head angles at `t`, in radians clockwise from +x and never
+    /// wrapped, each with its velocity in radians per second. For handing a spinner over to
+    /// something else without a jump.
+    pub fn spinner_ends(t: f64) -> [(f64, f64); 2] {
         const PERIOD: f64 = 1.4;
+        const TURN_RATE: f64 = 2.0;
+        // Smoothstep and its slope, flat outside 0..1.
         let ease = |x: f64| {
             let x = x.clamp(0.0, 1.0);
-            x * x * (3.0 - 2.0 * x)
+            (x * x * (3.0 - 2.0 * x), 6.0 * x * (1.0 - x))
         };
         let cycle = (t / PERIOD).floor();
         let u = t / PERIOD - cycle;
         let (min, max) = (20f64.to_radians(), 270f64.to_radians());
         // Each cycle the head leads by (max - min); the tail catches up in the second half.
-        let head = ease(u * 2.0) * (max - min);
-        let tail = ease(u * 2.0 - 1.0) * (max - min);
-        let base = cycle * (max - min) + t * 2.0;
-        let start = (base + tail) as f32;
-        let sweep = (head - tail + min) as f32;
-        arc(centre, r, start, sweep)
+        let (head, dhead) = ease(u * 2.0);
+        let (tail, dtail) = ease(u * 2.0 - 1.0);
+        let k = (max - min) * 2.0 / PERIOD;
+        let base = cycle * (max - min) + t * TURN_RATE;
+        [(base + tail * (max - min), TURN_RATE + dtail * k), (base + head * (max - min) + min, TURN_RATE + dhead * k)]
     }
 
     /// A sine wave across `x0..x1` around the line `y`: amplitude `amp`, `wavelength`, moved
