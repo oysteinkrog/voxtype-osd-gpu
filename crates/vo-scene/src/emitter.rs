@@ -195,6 +195,12 @@ pub trait EmitterSource: Debug + Send + Sync {
 
     /// The look at the frame time `t`. The origin is relative to the centre of the box.
     fn look(&self, t: f64) -> EmitterLook;
+
+    /// How far a particle can get from the box centre at `t`, in logical units, for the
+    /// surface margin (`crate::reach`). The default estimates it from `sim` and `look`.
+    fn reach(&self, t: f64) -> f32 {
+        crate::reach::particle_reach(&self.sim(t), &self.look(t))
+    }
 }
 
 /// An emitter element's content (`Element::emitter`).

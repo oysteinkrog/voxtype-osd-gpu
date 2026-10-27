@@ -63,6 +63,38 @@ pub struct Options<M> {
     /// and light settings: for example to add a painter for GPU elements, such as
     /// `vo_3d::install`.
     pub renderer_setup: Option<RendererSetup>,
+    /// Live only: transparent room around the view for ink outside its box, so a glow, a
+    /// shadow or particles are not cut at the surface edge. `Auto` by default.
+    pub margin: SurfaceMargin,
+}
+
+/// How a live overlay sizes the transparent margin around its view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SurfaceMargin {
+    /// From the first view: how far its glows, shadows, blooms, strokes, particles and
+    /// motion reach outside the root box (`Scene::effect_reach`). A view that already keeps
+    /// its effects inside its root gets no margin.
+    #[default]
+    Auto,
+    /// `Auto`, and at least this on every side.
+    AtLeast(vo_scene::Insets),
+    /// Exactly this.
+    Fixed(vo_scene::Insets),
+    /// None: the surface is the size the spec asks for.
+    None,
+}
+
+impl SurfaceMargin {
+    /// The margin for `scene` laid out at `t`, or `None` for no margin.
+    pub fn reach<M>(&self, scene: &vo_scene::Scene<M>, t: f64) -> Option<vo_scene::Insets> {
+        let m = match *self {
+            SurfaceMargin::Auto => scene.effect_reach(t),
+            SurfaceMargin::AtLeast(m) => scene.effect_reach(t).max(m),
+            SurfaceMargin::Fixed(m) => m,
+            SurfaceMargin::None => return None,
+        };
+        (!m.ceil().is_zero()).then_some(m)
+    }
 }
 
 /// See [`Options::renderer_setup`].
@@ -82,6 +114,7 @@ impl<M> Default for Options<M> {
             quality: vo_render::Quality::from_env().unwrap_or_default(),
             light: env_flag("VO_LIGHT"),
             renderer_setup: None,
+            margin: SurfaceMargin::default(),
         }
     }
 }

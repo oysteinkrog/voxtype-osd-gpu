@@ -166,6 +166,8 @@ pub(crate) struct Driver<A: App> {
     last_t: f64,
     /// The scene changed since the last frame, so the host needs a new one.
     pub(crate) dirty: bool,
+    /// Transparent room around the app's view for ink outside its box (`Options::margin`).
+    margin: Option<vo_scene::Insets>,
 }
 
 impl<A: App> Driver<A> {
@@ -173,10 +175,26 @@ impl<A: App> Driver<A> {
         let mut timers = Timers::default();
         let mut exit = false;
         app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit });
-        let mut d = Driver { app, scene, tokens, timers, exit, last_t: t, dirty: true };
-        let view = d.app.view(&d.tokens);
+        let mut d = Driver { app, scene, tokens, timers, exit, last_t: t, dirty: true, margin: None };
+        let view = d.view();
         d.scene.apply(view, t);
         d
+    }
+
+    /// The app's view, inside the margin when there is one.
+    fn view(&self) -> Element<A::Msg> {
+        let view = self.app.view(&self.tokens);
+        match self.margin {
+            Some(m) => Element::column("vo-margin").pad_edges(m.top, m.right, m.bottom, m.left).child(view),
+            None => view,
+        }
+    }
+
+    /// Puts the view inside a transparent margin of `m` from `t` on.
+    pub(crate) fn set_margin(&mut self, m: vo_scene::Insets, t: f64) {
+        self.margin = Some(m);
+        let view = self.view();
+        self.dirty |= self.scene.apply(view, t);
     }
 
     /// Runs `update` and the view at `t`. Times before the last event are moved up to it: the
@@ -185,7 +203,7 @@ impl<A: App> Driver<A> {
         let t = t.max(self.last_t);
         self.last_t = t;
         self.app.update(msg, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit });
-        let view = self.app.view(&self.tokens);
+        let view = self.view();
         // A message that changes nothing drawn, such as a hover that only stops a timer,
         // costs no frame.
         self.dirty |= self.scene.apply(view, t);

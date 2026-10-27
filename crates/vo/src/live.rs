@@ -86,6 +86,19 @@ impl<A: App> Live<A> {
 
     fn start_inner(&mut self, host: &mut dyn HostCtl) -> Result<(), HostError> {
         let (app, mut options) = self.pending.take().expect("start runs once");
+        // The first view sets the surface margin, so the scene comes before the surface.
+        let mut scene = options.scene().with_retention(LIVE_RETENTION);
+        let t = host.now();
+        scene.set_viewport(t, self.spec.size, 1.0);
+        let mut driver = Driver::new(app, scene, self.tokens.clone(), t);
+        if let Some(m) = options.margin.reach(&driver.scene, t) {
+            let content = self.spec.size;
+            let fit = vo_scene::surface_for(content, m);
+            self.spec.size = fit.size;
+            driver.scene.set_viewport(t, fit.size, 1.0);
+            let (right, bottom) = (fit.size.w - content.w - fit.origin.x, fit.size.h - content.h - fit.origin.y);
+            driver.set_margin(vo_scene::Insets::new(fit.origin.x, fit.origin.y, right, bottom), t);
+        }
         if options.cpu_first_frame && host.gpu_in_background() {
             self.cpu = Some(CpuRenderer::new(options.fonts.clone()));
             self.surface = host.open(&self.spec)?;
@@ -99,10 +112,7 @@ impl<A: App> Live<A> {
         if let Some(inbox) = &options.inbox {
             inbox.connect(host.waker());
         }
-        let mut scene = options.scene().with_retention(LIVE_RETENTION);
-        let t = host.now();
-        scene.set_viewport(t, self.spec.size, 1.0);
-        self.driver = Some(Driver::new(app, scene, self.tokens.clone(), t));
+        self.driver = Some(driver);
         self.options_rest = Some(options);
         self.drain_inbox(t);
         self.after_change(host);

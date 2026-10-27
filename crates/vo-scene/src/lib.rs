@@ -17,6 +17,7 @@
 //! - `segments`: segment meters in a row, a column or an arc, with peak hold and clip.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
+//! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -51,6 +52,7 @@ mod layout;
 pub mod levels;
 pub mod lines;
 pub mod path;
+pub mod reach;
 pub mod ribbon;
 pub mod roll;
 pub mod scene;
@@ -70,4 +72,5 @@ pub use bind::Param;
 pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};
+pub use reach::{surface_for, Insets};
 pub use scene::{NodeId, Presence, Scene};

@@ -124,6 +124,12 @@ pub(crate) enum Slot {
     WaveAmp = 76,
     WaveLength = 77,
     WavePhase = 78,
+    /// Ink outside the box that the app declares (`Element::declare_reach`): left, top,
+    /// right and bottom, in logical units. High numbers, clear of the effect slots.
+    ReachLeft = 200,
+    ReachTop = 201,
+    ReachRight = 202,
+    ReachBottom = 203,
 }
 
 impl Slot {
@@ -138,6 +144,7 @@ impl Slot {
 
     pub(crate) fn prop(slot: u8) -> Prop {
         match slot {
+            s if s >= Slot::ReachLeft as u8 => Slot::hud_prop(s),
             s if s <= Slot::Y as u8 => Prop::Position,
             s if s <= Slot::H as u8 => Prop::Size,
             s if s == Slot::Opacity as u8 => Prop::Opacity,
@@ -166,6 +173,9 @@ impl Slot {
     /// Whether the slot holds a value from 0 to 1 (opacity, scale, colour, angle), which
     /// settles at a finer threshold than pixels.
     pub(crate) fn is_unit(slot: u8) -> bool {
+        if slot >= Slot::ReachLeft as u8 {
+            return Slot::hud_unit(slot);
+        }
         !(slot <= Slot::H as u8
             || slot == Slot::OffsetX as u8
             || slot == Slot::OffsetY as u8
