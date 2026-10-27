@@ -37,6 +37,16 @@ impl Levels {
         Levels { levels: levels.into(), newest_at, ..Levels::default() }
     }
 
+    /// The last `n` levels from the signal bus at `t`, 100 a second on a fixed grid of
+    /// absolute time, ending at the newest frame that has arrived (or at `t`, when that is
+    /// sooner). Rebuild it as frames arrive, as with any other `Levels`.
+    pub fn from_signals(cell: &vo_core::signals::SignalsCell, t: f64, n: usize) -> Levels {
+        let signals = cell.get();
+        let t = signals.newest_at().map_or(t, |at| t.min(at + signals.playout()));
+        let (levels, newest_at) = signals.history(vo_core::signals::Sig::Level, t, 100.0, n);
+        Levels { levels: levels.into(), newest_at, rate: 100.0, ..Levels::default() }
+    }
+
     /// Whether the history still scrolls at `t`.
     pub fn moving(&self, t: f64) -> bool {
         self.levels.len() > 1 && t < self.newest_at
@@ -149,6 +159,17 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn from_signals_ends_at_the_newest_frame() {
+        use vo_core::signals::{SignalFrame, Signals, SignalsCell, FRAME_SECS};
+        let frames = (0..50).map(|i| SignalFrame { rms_dbfs: -30.0, ..SignalFrame::silent(i as f64 * FRAME_SECS) });
+        let cell = SignalsCell::new(Signals::recorded(frames, 0.0).with_playout(0.0));
+        let l = Levels::from_signals(&cell, 3.0, 20);
+        assert_eq!(l.levels.len(), 20);
+        assert!((l.newest_at - 0.49).abs() < 1e-9, "{}", l.newest_at);
+        assert!(l.levels.iter().all(|v| (v - 0.5).abs() < 1e-5));
+    }
+
     use super::*;
 
     #[test]

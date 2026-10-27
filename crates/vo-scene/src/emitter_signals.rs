@@ -11,12 +11,18 @@
 //! Element::emitter("sparks", Emitter::new(Arc::new(source), 4096, 7))
 //! ```
 //!
+//! `epoch` and `shock` are left alone: a changed epoch respawns the pool, and a shock's start
+//! must stay fixed. The path of a `Shape::Path` source is passed through.
+//!
 //! The wrapped source's own values are the base, as with bound props (`crate::bind`): a
 //! multiply or add eases back to them when the stream stops.
 
 use vo_core::signals::{Bind, SignalsCell};
 
+use std::sync::Arc;
+
 use crate::emitter::{EmitterLook, EmitterSim, EmitterSource};
+use crate::geom::Point;
 
 /// An emitter input the signal bus can drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -100,6 +106,10 @@ impl<S: EmitterSource> EmitterSource for SignalEmitter<S> {
         l.brightness = self.apply(EmitParam::Brightness, l.brightness, t);
         l.trail_alpha = self.apply(EmitParam::TrailAlpha, l.trail_alpha, t);
         l
+    }
+
+    fn path(&self) -> Option<Arc<[Point]>> {
+        self.inner.path()
     }
 }
 

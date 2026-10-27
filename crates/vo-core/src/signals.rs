@@ -94,6 +94,43 @@ impl SignalFrame {
     }
 }
 
+/// The hello a client sends on the daemon's audio socket for v3 feature frames. The daemon
+/// answers with the same 4 bytes and the frame size as a little-endian u32 (72).
+pub const WIRE_V3_HELLO: [u8; 4] = *b"VXA\x03";
+/// Bytes in one v3 frame.
+pub const WIRE_V3_BYTES: usize = 72;
+/// Samples per second of a v3 frame's `sample_clock`.
+pub const WIRE_SAMPLE_RATE: f64 = 16_000.0;
+
+impl SignalFrame {
+    /// A v3 frame from the daemon (voxtype `src/audio/levels.rs` has the layout): seq u32,
+    /// sample_clock u64, min, max, peak, rms, f0, centroid, flatness, onset f32, voiced u8,
+    /// present u8, 2 pad bytes, 24 mel bytes. `None` for a silence-pump frame (present 0) or a
+    /// short slice. The clock is the sample clock in seconds.
+    pub fn from_wire_v3(b: &[u8]) -> Option<SignalFrame> {
+        if b.len() < WIRE_V3_BYTES || b[45] == 0 {
+            return None;
+        }
+        let f = |at: usize| f32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let clock = u64::from_le_bytes(b[4..12].try_into().unwrap()) as f64 / WIRE_SAMPLE_RATE;
+        let mut mel = [0.0; MEL_BANDS];
+        for (m, &v) in mel.iter_mut().zip(&b[48..48 + MEL_BANDS]) {
+            *m = v as f32 / 255.0;
+        }
+        Some(SignalFrame {
+            clock,
+            peak_dbfs: f(20),
+            rms_dbfs: f(24),
+            f0_hz: f(28),
+            centroid_hz: f(32),
+            flatness: f(36),
+            onset: f(40),
+            voiced: b[44] != 0,
+            mel,
+        })
+    }
+}
+
 /// A physical value, for [`Sig::Raw`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
@@ -828,6 +865,23 @@ mod tests {
         assert!(v.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(v[4], s.sample(Sig::Level, 0.5));
         assert_eq!(s.history(Sig::Level, 0.509, 100.0, 5).0, v);
+    }
+
+    #[test]
+    fn parses_a_v3_wire_frame() {
+        let mut b = [0u8; WIRE_V3_BYTES];
+        b[4..12].copy_from_slice(&32_000u64.to_le_bytes());
+        for (at, v) in [(20, -6.0f32), (24, -20.0), (28, 180.0), (32, 1500.0), (36, 0.2), (40, 0.7)] {
+            b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        b[44] = 1;
+        b[48 + 3] = 255;
+        assert_eq!(SignalFrame::from_wire_v3(&b), None, "a pump frame");
+        b[45] = 1;
+        let f = SignalFrame::from_wire_v3(&b).unwrap();
+        assert_eq!((f.clock, f.peak_dbfs, f.rms_dbfs, f.f0_hz, f.centroid_hz), (2.0, -6.0, -20.0, 180.0, 1500.0));
+        assert_eq!((f.flatness, f.onset, f.voiced, f.mel[3], f.mel[0]), (0.2, 0.7, true, 1.0, 0.0));
+        assert_eq!(SignalFrame::from_wire_v3(&b[..40]), None);
     }
 
     #[test]
