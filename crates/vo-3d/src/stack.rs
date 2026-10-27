@@ -3,8 +3,9 @@
 //! 1. **Text field** (TY19), from the text list, so the scene below can react to the words.
 //! 2. **3D pass**: background, meshes with depth test and write, point clouds and bokeh with
 //!    depth test and no depth write ([`Renderer3d`]).
-//! 3. **2D vector**: a display list drawn by the normal renderer, composited over.
-//! 4. **Text**: a display list, composited over; then text planes, Slug glyphs placed in the
+//! 3. **2D vector**: a display list drawn by the normal renderer over what is there
+//!    (`Renderer::encode_with` with `LoadOp::Load`).
+//! 4. **Text**: a display list, drawn the same way; then text planes, Slug glyphs placed in the
 //!    3D scene by a model matrix and drawn with depth off, sharp under perspective (D301).
 //! 5. **Post**: a caller hook on the finished target (bloom and the like live in the effect
 //!    graph).
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 use skrifa::GlyphId;
 use vo_render::color::linear_premul;
-use vo_render::text::slug_gpu::{Atlas, GlyphInstance, SlugRenderer, Uniforms, NO_WORD, PREMULTIPLIED_OVER};
+use vo_render::text::slug_gpu::{Atlas, GlyphInstance, SlugRenderer, Uniforms, NO_WORD};
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, ItemKind};
 
@@ -25,8 +26,6 @@ use crate::frame::Frame3d;
 use crate::math::{Mat4, Vec3};
 use crate::render::Renderer3d;
 use crate::timer::GpuTimer;
-
-const STACK_WGSL: &str = include_str!("wgsl/stack.wgsl");
 
 /// Flat Slug text placed in the 3D scene.
 pub struct TextPlane<'a> {
@@ -61,9 +60,6 @@ pub struct Stack {
     pub flat: Renderer,
     pub field: TextField,
     pub timer: Option<GpuTimer>,
-    layer: Option<Target>,
-    over_layout: wgpu::BindGroupLayout,
-    over: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     slug: Option<(wgpu::TextureFormat, SlugRenderer)>,
     atlas: Atlas,
     pub pipeline_time: Duration,
@@ -72,19 +68,6 @@ pub struct Stack {
 impl Stack {
     /// A stack whose 2D renderer reads font ids from `fonts`, the scene's table.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, fonts: vo_scene::font::FontRegistry) -> Stack {
-        let over_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vo3d-over"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
         Stack {
             device: device.clone(),
             queue: queue.clone(),
@@ -92,9 +75,6 @@ impl Stack {
             flat: Renderer::with_fonts(device, queue, fonts),
             field: TextField::new(device, queue),
             timer: GpuTimer::new(device, queue),
-            layer: None,
-            over_layout,
-            over: None,
             slug: None,
             atlas: Atlas::default(),
             pipeline_time: Duration::ZERO,
@@ -105,7 +85,6 @@ impl Stack {
     pub fn prepare(&mut self, format: wgpu::TextureFormat) -> Duration {
         let start = std::time::Instant::now();
         self.scene.prepare(format);
-        self.over_pipeline(format);
         self.slug_renderer(format);
         let spent = start.elapsed();
         self.pipeline_time += spent;
@@ -151,7 +130,7 @@ impl Stack {
         for (list, label) in [(layers.vector, "vector"), (layers.text, "text")] {
             let Some(list) = list else { continue };
             let mut enc = self.device.create_command_encoder(&Default::default());
-            self.flat_over(list, scale, target, &view, &mut enc);
+            self.flat.encode_with(list, scale, target, wgpu::LoadOp::Load, &mut enc);
             self.mark(&mut enc, label);
             self.queue.submit([enc.finish()]);
         }
@@ -192,75 +171,6 @@ impl Stack {
         if let Some(t) = &mut self.timer {
             t.mark(enc, label);
         }
-    }
-
-    /// Draws `list` into the scratch layer and composites it over the target.
-    fn flat_over(
-        &mut self,
-        list: &DisplayList,
-        scale: f32,
-        target: &Target,
-        view: &wgpu::TextureView,
-        enc: &mut wgpu::CommandEncoder,
-    ) {
-        let (w, h, format) = (target.width(), target.height(), target.format());
-        if self.layer.as_ref().is_none_or(|l| l.width() != w || l.height() != h || l.format() != format) {
-            self.layer = Some(Target::new(&self.device, w, h, format));
-        }
-        let layer = self.layer.as_ref().unwrap();
-        self.flat.encode(list, scale, layer, enc);
-        let layer_view = layer.texture().create_view(&Default::default());
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo3d-over"),
-            layout: &self.over_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer_view) }],
-        });
-        let pipeline = self.over_pipeline(format);
-        let mut pass = load_pass(enc, view, "vo3d-over");
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..3, 0..1);
-    }
-
-    fn over_pipeline(&mut self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        if self.over.as_ref().is_none_or(|(f, _)| *f != format) {
-            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("vo3d-over"),
-                source: wgpu::ShaderSource::Wgsl(STACK_WGSL.into()),
-            });
-            let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("vo3d-over"),
-                bind_group_layouts: &[Some(&self.over_layout)],
-                immediate_size: 0,
-            });
-            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("vo3d-over"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs_full"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs_over"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(PREMULTIPLIED_OVER),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-            self.over = Some((format, pipeline));
-        }
-        &self.over.as_ref().unwrap().1
     }
 
     fn slug_renderer(&mut self, format: wgpu::TextureFormat) -> &mut SlugRenderer {
