@@ -56,6 +56,11 @@ impl From<std::io::Error> for OfflineError {
 }
 
 pub(crate) fn headless_gpu() -> Result<(wgpu::Device, wgpu::Queue), OfflineError> {
+    headless_gpu_for(false)
+}
+
+/// [`headless_gpu`], with GPU timestamps when `timestamps` and the adapter has them.
+pub(crate) fn headless_gpu_for(timestamps: bool) -> Result<(wgpu::Device, wgpu::Queue), OfflineError> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(desc);
@@ -66,9 +71,16 @@ pub(crate) fn headless_gpu() -> Result<(wgpu::Device, wgpu::Queue), OfflineError
         apply_limit_buckets: false,
     }))
     .map_err(|e| OfflineError::Gpu(e.to_string()))?;
-    pollster::block_on(
-        adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-offline"), ..Default::default() }),
-    )
+    let required_features = if timestamps {
+        adapter.features() & vo_render::profile::timestamp_features()
+    } else {
+        wgpu::Features::empty()
+    };
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("vo-offline"),
+        required_features,
+        ..Default::default()
+    }))
     .map_err(|e| OfflineError::Gpu(e.to_string()))
 }
 
@@ -84,7 +96,8 @@ pub fn render_offline<A: App>(
 }
 
 /// [`render_offline`] with fonts, a text measurer and tokens. `Options::inbox` and
-/// `Options::diagnostics` are not used offline.
+/// `Options::diagnostics` are not used offline; `Options::frame_timings` gets each frame's GPU
+/// time.
 pub fn render_offline_with<A: App>(
     app: A,
     scenario: &Scenario<A::Msg>,
@@ -203,13 +216,28 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     sink: &mut dyn FnMut(Frame) -> Result<(), E>,
     extra: &mut dyn FnMut(&str, Frame) -> Result<(), E>,
 ) -> Result<u64, E> {
-    let (device, queue) = headless_gpu()?;
+    let timings = options.frame_timings.clone();
+    let (device, queue) = headless_gpu_for(timings.is_some())?;
+    let profile = |r: &mut vo_render::Renderer| {
+        if timings.is_some() {
+            r.set_profiling(true);
+        }
+    };
+    // Hands the frame just encoded on `r` to the timings sink.
+    let report = |r: &mut vo_render::Renderer, surface: Option<&str>, frame: u64, t: f64, size: [u32; 2]| {
+        if let Some(sink) = &timings {
+            if let Some(tm) = r.last_timings() {
+                sink(&crate::FrameTiming { surface, frame, t, size, timings: &tm });
+            }
+        }
+    };
     let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
     options.configure(&mut off.renderer);
+    profile(&mut off.renderer);
     let mut driver = start(app, scenario, &mut options);
     // One offscreen renderer per extra surface, by key: renderer state such as particles
     // belongs to one surface.
-    let mut extra_off: Vec<(String, Offscreen)> = Vec::new();
+    let mut extra_off: Vec<(String, Offscreen, u64)> = Vec::new();
     let mut extra_list = Default::default();
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
 
@@ -226,29 +254,36 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
         advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
         driver.scene.sample_into(ft.t, &mut list);
         rendered += 1;
-        if let Some(frame) = off.submit(&list, px, scenario.scale) {
+        let ready = off.submit(&list, px, scenario.scale);
+        report(&mut off.renderer, None, n, ft.t, px);
+        if let Some(frame) = ready {
             sink(frame)?;
         }
         for e in &driver.extras.list {
-            let i = match extra_off.iter().position(|(k, _)| *k == e.key) {
+            let i = match extra_off.iter().position(|(k, _, _)| *k == e.key) {
                 Some(i) => i,
                 None => {
                     let mut o = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
                     options.configure(&mut o.renderer);
-                    extra_off.push((e.key.clone(), o));
+                    profile(&mut o.renderer);
+                    extra_off.push((e.key.clone(), o, 0));
                     extra_off.len() - 1
                 }
             };
             e.scene.sample_into(ft.t, &mut extra_list);
             let size =
                 [(e.spec.size.w * scenario.scale).round() as u32, (e.spec.size.h * scenario.scale).round() as u32];
-            if let Some(frame) = extra_off[i].1.submit(&extra_list, size, scenario.scale) {
+            let (_, o, drawn) = &mut extra_off[i];
+            let ready = o.submit(&extra_list, size, scenario.scale);
+            report(&mut o.renderer, Some(&e.key), *drawn, ft.t, size);
+            *drawn += 1;
+            if let Some(frame) = ready {
                 extra(&e.key, frame)?;
             }
         }
         for key in driver.extras.take_closed(ft.t) {
-            if let Some(i) = extra_off.iter().position(|(k, _)| *k == key) {
-                let (key, mut o) = extra_off.remove(i);
+            if let Some(i) = extra_off.iter().position(|(k, _, _)| *k == key) {
+                let (key, mut o, _) = extra_off.remove(i);
                 for frame in o.finish() {
                     extra(&key, frame)?;
                 }
@@ -261,7 +296,7 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     for frame in off.finish() {
         sink(frame)?;
     }
-    for (key, mut o) in extra_off {
+    for (key, mut o, _) in extra_off {
         for frame in o.finish() {
             extra(&key, frame)?;
         }

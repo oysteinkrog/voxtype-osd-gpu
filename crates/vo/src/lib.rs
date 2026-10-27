@@ -72,6 +72,10 @@ pub struct Options<M> {
     /// Live only: transparent room around the view for ink outside its box, so a glow, a
     /// shadow or particles are not cut at the surface edge. `Auto` by default.
     pub margin: SurfaceMargin,
+    /// Offline only: GPU timestamps for every frame of every surface, handed here as each
+    /// frame is drawn. The offline device then asks for `vo_render::profile::timestamp_features`
+    /// where the adapter has them; without them the sink is never called.
+    pub frame_timings: Option<FrameTimingsSink>,
 }
 
 /// How a live overlay sizes the transparent margin around its view.
@@ -106,6 +110,24 @@ impl SurfaceMargin {
 /// See [`Options::renderer_setup`].
 pub type RendererSetup = std::sync::Arc<dyn Fn(&mut vo_render::Renderer) + Send + Sync>;
 
+/// See [`Options::frame_timings`].
+pub type FrameTimingsSink = std::sync::Arc<dyn Fn(&FrameTiming) + Send + Sync>;
+
+/// One offline frame's GPU time, for [`Options::frame_timings`].
+#[derive(Clone, Debug)]
+pub struct FrameTiming<'a> {
+    /// The extra surface's key (`App::surfaces`), or `None` for the main surface.
+    pub surface: Option<&'a str>,
+    /// The surface's frame number, from 0.
+    pub frame: u64,
+    /// The time the frame was sampled at, in seconds.
+    pub t: f64,
+    /// The frame's size in physical pixels.
+    pub size: [u32; 2],
+    /// GPU time per section and in total.
+    pub timings: &'a vo_render::profile::FrameTimings,
+}
+
 impl<M> Default for Options<M> {
     fn default() -> Self {
         Options {
@@ -121,6 +143,7 @@ impl<M> Default for Options<M> {
             light: env_flag("VO_LIGHT"),
             renderer_setup: None,
             margin: SurfaceMargin::default(),
+            frame_timings: None,
         }
     }
 }
