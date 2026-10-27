@@ -1291,19 +1291,19 @@ impl<M> Element<M> {
         self
     }
 
-    /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
-    /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
-    /// Live text: draws glyphs on the newest line in `tint` while they break the
-    /// reading-line envelope (MO-08: ink under 70 %, more than 3 px off the baseline, scaled
-    /// or blurred), so the check is visible live. For the station and tests, not for looks.
-    pub fn envelope_tint(mut self, tint: Color) -> Element<M> {
+    /// Live text: the overflow spine (MO-34). Each line that a line cap drops leaves a strip
+    /// of word-wide blocks in the margin above the text, which close into one history
+    /// tick. See [`crate::flow::spine`].
+    pub fn overflow_spine(mut self, s: crate::flow::spine::Spine) -> Element<M> {
         match &mut self.kind {
-            Kind::LiveText { live, .. } => live.envelope_tint = Some(tint),
-            _ => debug_assert!(false, "envelope_tint on a node that is not live text: {}", self.key),
+            Kind::LiveText { live, .. } => live.spine = Some(s),
+            _ => debug_assert!(false, "overflow_spine on a node that is not live text: {}", self.key),
         }
         self
     }
 
+    /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
+    /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.revise = r,

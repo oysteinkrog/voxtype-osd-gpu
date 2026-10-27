@@ -223,13 +223,6 @@ impl Reading {
     }
 }
 
-/// Whether a glyph on the newest line breaks the reading-line envelope of the motion plan
-/// (MO-08): ink under 70 % of rest, more than 3 px off its baseline, scaled or blurred.
-/// `ink` and `scale` are relative to rest, `dy` and `blur` in layout units.
-pub(crate) fn breaks_envelope(ink: f32, dy: f32, scale: f32, blur: f32) -> bool {
-    ink < 0.7 || dy.abs() > 3.0 || (scale - 1.0).abs() > 0.01 || blur > 0.1
-}
-
 /// How live text moves, set on the element.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveMotion {
@@ -249,11 +242,10 @@ pub struct LiveMotion {
     pub magnet: Option<magnet::Magnet>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
-    /// Draws glyphs on the newest line that break the reading-line envelope in this colour
-    /// (`Element::envelope_tint`, MO-08).
-    pub envelope_tint: Option<crate::geom::Color>,
     /// A mark beside the newest line that splits when the text wraps (MO-32).
     pub margin: Option<margin::MarginMark>,
+    /// A record in the top margin of each line that left from the front (MO-34).
+    pub spine: Option<spine::Spine>,
     /// Per-word typographic channels (MO-03).
     pub typo: Option<crate::typo::Typos>,
     /// Words whose glyphs something else draws for now, such as a GPU effect that morphs a
@@ -649,6 +641,7 @@ impl Flow {
             Some(_) => old.iter().map(|o| o.id).take_while(|id| words.iter().all(|w| w.id != *id)).collect(),
             None => Vec::new(),
         };
+        self.update_spine(t, motion.spine, &old, &front, words.is_empty(), reduced);
         let mut next = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
         let (mut stagger, mut arrived) = (0u32, false);
@@ -1286,7 +1279,8 @@ impl Flow {
         let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale, &g.slide]);
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
-        let leaving = self.leaving.iter().map(|l| l.done_at()).fold(self.margin_settled_at(), f64::max);
+        let extras = self.margin_settled_at().max(self.spine_settled_at());
+        let leaving = self.leaving.iter().map(|l| l.done_at()).fold(extras, f64::max);
         let leaving = leaving.max(self.letters_settled_at()).max(self.magnet_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
     }
@@ -1320,6 +1314,9 @@ pub mod overflow;
 #[path = "motion/margin.rs"]
 pub mod margin;
 
+#[path = "motion/spine.rs"]
+pub mod spine;
+
 /// The live text motion state of one node.
 #[derive(Default)]
 pub(crate) struct Flow {
@@ -1333,6 +1330,8 @@ pub(crate) struct Flow {
     leaving: Vec<overflow::Leaving>,
     /// The margin mark (MO-32).
     margin: margin::Margin,
+    /// The overflow spine (MO-34).
+    spine: spine::Spines,
     /// Caret `(x, y)` on the baseline, and its bar size `(width, ascent, descent)`.
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.

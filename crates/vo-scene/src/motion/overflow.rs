@@ -189,7 +189,7 @@ impl super::Flow {
     /// Whether the node draws anything beside its words: a leaving line (MO-33) or a margin
     /// mark (MO-32).
     pub(crate) fn has_extras(&self) -> bool {
-        !self.leaving.is_empty() || self.has_margin()
+        !self.leaving.is_empty() || self.has_margin() || self.has_spine()
     }
 }
 
