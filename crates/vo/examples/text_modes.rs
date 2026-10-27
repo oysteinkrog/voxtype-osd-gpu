@@ -4,6 +4,11 @@
 //!   word arrives, old text fades under a 40 px mask at the left edge, and a leading "..." fades
 //!   in once the text overflows.
 //!
+//! - `telemetry` (T21, T24): readouts that arrive at 20 Hz and change on screen at most every
+//!   500 ms (`Throttle`), with the digits rolling and the decimal point and unit held still by
+//!   a right-aligned cell; and two countdowns whose digits roll down (`Roll::Down`), one by the
+//!   second and one in 0.1 s steps at 10 Hz.
+//!
 //!   cargo run --release -p vo --example text_modes -- --mode ticker [--out DIR] [--check]
 //!
 //! Writes `DIR/<mode>.mp4` and `DIR/<mode>-sheet.png` (default DIR
@@ -13,10 +18,12 @@ use std::path::PathBuf;
 
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
+use vo::scene::roll::{digit_roll, digit_roll_with, Roll};
 use vo::scene::taffy::prelude::{AlignItems, JustifyContent};
 use vo::scene::{Prop, Transition};
 use vo::{App, Cx, Export, FontRegistry, Options, Scenario, ShapedLayout, TextLayout, Video};
 use vo_core::spring::Spring;
+use vo_core::throttle::Throttle;
 use vo_core::words::Word;
 use vo_render::offscreen::{write_png, Frame};
 
@@ -39,10 +46,11 @@ fn dim_color() -> Color {
     Color::hex(0x8c93a3, 1.0)
 }
 
-/// Messages shared by every mode: a tick that carries its own time.
+/// Messages shared by every mode: a numbered tick, and a throttle flush for value `k`.
 #[derive(Clone, Debug, PartialEq)]
 enum Msg {
     Tick(usize),
+    Flush(usize),
 }
 
 /// The words a dictation delivers, one every `gap` seconds from `start`.
@@ -89,8 +97,9 @@ impl App for Ticker {
     }
 
     fn update(&mut self, msg: Msg, _: &mut Cx<Msg>) {
-        let Msg::Tick(n) = msg;
-        self.shown = n;
+        if let Msg::Tick(n) = msg {
+            self.shown = n;
+        }
     }
 
     fn view(&self, _: &vo::Tokens) -> Element<Msg> {
@@ -139,6 +148,139 @@ impl App for Ticker {
             .child(ellipsis)
             .child(window);
         bg().child(pill)
+    }
+}
+
+// T21 and T24: telemetry numbers and countdowns.
+
+/// Ticks per second of the telemetry feed.
+const FEED_HZ: f64 = 20.0;
+const TELEMETRY_SECS: f64 = 6.0;
+
+/// One readout: a label, how to format its value, its unit, and the value at `t`.
+struct Readout {
+    label: &'static str,
+    decimals: usize,
+    unit: &'static str,
+    value: fn(f64) -> f64,
+}
+
+const READOUTS: [Readout; 4] = [
+    Readout {
+        label: "LATENCY",
+        decimals: 0,
+        unit: "ms",
+        value: |t| 172.0 + 22.0 * (1.3 * t).sin() + jitter(t, 0, 14.0),
+    },
+    Readout {
+        label: "LEVEL",
+        decimals: 1,
+        unit: "dBFS",
+        value: |t| -14.0 - 7.0 * (2.1 * t).sin().abs() + jitter(t, 1, 3.0),
+    },
+    Readout { label: "VRAM", decimals: 1, unit: "/ 8.0 GB", value: |t| 2.4 + 0.1 * (t / 1.5).floor() },
+    Readout { label: "SPEED", decimals: 0, unit: "wpm", value: |t| 96.0 + 9.0 * t + jitter(t, 2, 6.0) },
+];
+
+/// A seeded jitter of `amp` around 0 for feed tick at `t`.
+fn jitter(t: f64, stream: u32, amp: f64) -> f64 {
+    (vo_core::hash::rand_f64(21, (t * FEED_HZ).round() as u32, stream, 0) - 0.5) * amp
+}
+
+struct Telemetry {
+    throttles: Vec<Throttle<f64>>,
+    flush_pending: Vec<bool>,
+    t: f64,
+}
+
+impl Telemetry {
+    fn new() -> Telemetry {
+        Telemetry {
+            throttles: READOUTS.iter().map(|_| Throttle::new(0.5)).collect(),
+            flush_pending: vec![false; READOUTS.len()],
+            t: 0.0,
+        }
+    }
+
+    fn tile(&self, k: usize) -> Element<Msg> {
+        let r = &READOUTS[k];
+        let v = self.throttles[k].shown().copied().unwrap_or(0.0);
+        let text = format!("{v:.*}", r.decimals);
+        let style = TextStyle::new(0, 34.0, 42.0);
+        // Right-aligned in a fixed cell: the decimal point and the unit never move.
+        let value = Element::row(format!("cell{k}")).width(118.0).justify(JustifyContent::FLEX_END).child(digit_roll(
+            format!("v{k}"),
+            &text,
+            style,
+            text_color(),
+            Spring::SOFT,
+        ));
+        Element::column(format!("tile{k}"))
+            .pad_xy(18.0, 14.0)
+            .gap(4.0)
+            .radius(12.0)
+            .fill(Color::hex(0x1f2433, 1.0))
+            .child(
+                Element::label(format!("l{k}"), r.label).text_style(TextStyle::new(0, 13.0, 16.0)).color(dim_color()),
+            )
+            .child(Element::row(format!("r{k}")).align_items(AlignItems::BASELINE).gap(8.0).child(value).child(
+                Element::label(format!("u{k}"), r.unit).text_style(TextStyle::new(0, 16.0, 20.0)).color(dim_color()),
+            ))
+    }
+}
+
+impl App for Telemetry {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        for i in 0..=(TELEMETRY_SECS * FEED_HZ) as usize {
+            cx.after(i as f64 / FEED_HZ, Msg::Tick(i));
+        }
+    }
+
+    fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+        let t = cx.t();
+        self.t = t;
+        match msg {
+            Msg::Tick(_) => {
+                for (k, r) in READOUTS.iter().enumerate() {
+                    if self.throttles[k].push(t, (r.value)(t)).is_none() && !self.flush_pending[k] {
+                        let due = self.throttles[k].due().expect("a value waits");
+                        cx.after(due - t, Msg::Flush(k));
+                        self.flush_pending[k] = true;
+                    }
+                }
+            }
+            Msg::Flush(k) => {
+                self.throttles[k].flush(t);
+                self.flush_pending[k] = false;
+            }
+        }
+    }
+
+    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
+        let tiles = Element::row("tiles").gap(12.0).children((0..READOUTS.len()).map(|k| self.tile(k)));
+        // Audio left counts down by the second from 4; the fade-out counts 1.5 s down in
+        // 0.1 s steps, ten a second, so its digit spring is short.
+        let secs_left = (5.0 - self.t).ceil().clamp(0.0, 4.0) as u32;
+        let fade_left = ((5.5 - self.t.max(4.0)) * 10.0).floor().clamp(0.0, 15.0) / 10.0;
+        let style = TextStyle::new(0, 18.0, 24.0);
+        let count = |key: &str, text: String, spring: Spring| {
+            digit_roll_with(key.to_string(), &text, style, text_color(), spring, Roll::Down)
+        };
+        let words = |key: &str, text: &str| {
+            Element::label(key.to_string(), text.to_string()).text_style(style).color(dim_color())
+        };
+        let status = Element::row("status")
+            .gap(6.0)
+            .child(words("fin", "Finishing ·"))
+            .child(count("left", secs_left.to_string(), Spring::SOFT))
+            .child(words("left-u", "s of audio left"))
+            .child(Element::panel("sp").width(40.0))
+            .child(words("fade", "Fading out in"))
+            .child(count("fade-n", format!("{fade_left:.1}"), Spring::critical_to_98(0.08)))
+            .child(words("fade-u", "s"));
+        bg().gap(22.0).child(tiles).child(status)
     }
 }
 
@@ -241,6 +383,9 @@ fn main() {
     let fonts = fonts();
     match mode.as_str() {
         "ticker" => run(&mode, &out, check, 7.5, &[0.6, 1.4, 2.2, 2.9, 3.0, 3.1, 4.5, 7.4], || Ticker::new(&fonts)),
-        _ => panic!("unknown mode {mode}; known: ticker"),
+        "telemetry" => {
+            run(&mode, &out, check, TELEMETRY_SECS, &[0.3, 0.55, 1.0, 1.52, 3.0, 4.02, 4.6, 5.9], Telemetry::new)
+        }
+        _ => panic!("unknown mode {mode}; known: ticker, telemetry"),
     }
 }
