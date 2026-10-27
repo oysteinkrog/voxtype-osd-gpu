@@ -11,6 +11,10 @@
 //! - `input`: hit testing at the event's time and pointer messages.
 //! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
 //! - `bars`: a bar-strip waveform over the level history, with settle and a playhead.
+//! - `levels`: the level history and colour stops the waveform elements share.
+//! - `trace`: a line trace over the level, with ghost copies and a fading horizon.
+//! - `ribbon`: glowing ribbon strands that wind round each other, swinging with the level.
+//! - `segments`: segment meters in a row, a column or an arc, with peak hold and clip.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
@@ -41,15 +45,19 @@ pub mod gpu;
 pub mod input;
 pub mod inspect;
 mod layout;
+pub mod levels;
 pub mod lines;
 pub mod path;
+pub mod ribbon;
 pub mod roll;
 pub mod scene;
+pub mod segments;
 pub mod status_icon;
 pub mod story;
 pub mod swap;
 pub mod text;
 pub mod timed;
+pub mod trace;
 
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
 pub use taffy;
