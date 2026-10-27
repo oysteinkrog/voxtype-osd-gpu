@@ -12,6 +12,8 @@
 //!    ("there" to "their", "confi" to "config"). Unpaired old words are
 //!    removed, unpaired new words get new ids.
 
+use std::collections::HashMap;
+
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 pub type WordId = u32;
@@ -23,6 +25,21 @@ pub const MIN_SIMILARITY: f32 = 0.5;
 pub struct Word {
     pub id: WordId,
     pub text: String,
+}
+
+/// What the engine knows about a word beyond its text. Every field is
+/// optional in practice: an engine without timing leaves the times None.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WordInfo {
+    /// Seconds into the recording.
+    pub start: Option<f32>,
+    pub end: Option<f32>,
+    /// The engine's confidence, 0 to 1.
+    pub conf: Option<f32>,
+    /// Preview updates the word has kept its current text.
+    pub settled: u32,
+    /// How many times the word's text changed.
+    pub changes: u32,
 }
 
 /// What happened to one word between two hypotheses.
@@ -58,6 +75,8 @@ pub struct Change {
 pub struct WordModel {
     words: Vec<Word>,
     next_id: WordId,
+    /// Engine facts per word, from `set_info`.
+    info: HashMap<WordId, WordInfo>,
 }
 
 /// Match key: lower-case letters and digits. A word with none (a lone
@@ -135,6 +154,21 @@ impl WordModel {
 
     pub fn words(&self) -> &[Word] {
         &self.words
+    }
+
+    /// Engine facts for the current words, one per word in order, after an
+    /// `update` with the same text. Ignored when the count differs.
+    pub fn set_info(&mut self, info: &[WordInfo]) {
+        if info.len() != self.words.len() {
+            return;
+        }
+        self.info = self.words.iter().map(|w| w.id).zip(info.iter().copied()).collect();
+    }
+
+    /// Engine facts for word `id`, if `set_info` gave any and the word is
+    /// still there.
+    pub fn info(&self, id: WordId) -> Option<&WordInfo> {
+        self.info.get(&id)
     }
 
     fn fresh_id(&mut self) -> WordId {
@@ -232,6 +266,8 @@ impl WordModel {
             self.gap(&mut cur, (o.end, n.end), &new_texts, &mut changes, &mut words);
         }
         self.words = words;
+        let ids: std::collections::HashSet<WordId> = self.words.iter().map(|w| w.id).collect();
+        self.info.retain(|id, _| ids.contains(id));
         changes
     }
 }
@@ -310,6 +346,23 @@ mod tests {
         // "today" and "tomorrow" share "to" only: below MIN_SIMILARITY.
         assert!(c.iter().any(|c| c.kind == ChangeKind::Removed && c.id == old));
         assert_ne!(m.words()[2].id, old);
+    }
+
+    #[test]
+    fn word_info_follows_the_word_id() {
+        let mut m = WordModel::new();
+        m.update("hello wor");
+        let info = |start, settled| WordInfo { start: Some(start), settled, ..WordInfo::default() };
+        m.set_info(&[info(0.1, 2), info(0.5, 0)]);
+        m.update("well hello world");
+        let ids = ids(&m);
+        assert_eq!(m.info(ids[1]).and_then(|i| i.start), Some(0.1));
+        assert_eq!(m.info(ids[2]).map(|i| i.settled), Some(0));
+        assert_eq!(m.info(ids[0]), None);
+        m.set_info(&[info(0.0, 0)]);
+        assert_eq!(m.info(ids[1]).and_then(|i| i.start), Some(0.1), "a count mismatch is ignored");
+        m.update("goodbye");
+        assert_eq!(m.info(ids[1]), None, "a removed word loses its info");
     }
 
     #[test]
