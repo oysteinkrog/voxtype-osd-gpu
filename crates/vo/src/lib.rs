@@ -5,6 +5,7 @@
 //!   as PNGs.
 //! - `export` (feature `export`): the same render at a fixed frame count, to PNGs and to a video
 //!   file through ffmpeg.
+//! - [`envelope`]: the reading-line envelope and GPU budget checks for motion (MO-08).
 //! - [`Diagnostics`]: startup stages since exec, memory, frames and idle checks.
 //! - `preview` (feature `preview`): the preview and scrub tool.
 //! - `record` (feature `record`, part of `preview`): record an app's messages and replay them
@@ -16,6 +17,7 @@
 
 mod app;
 mod diag;
+pub mod envelope;
 #[cfg(feature = "export")]
 mod export;
 #[cfg(feature = "wayland")]
