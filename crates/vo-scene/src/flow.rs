@@ -230,6 +230,8 @@ pub struct LiveMotion {
     pub stable: Option<Vec<WordId>>,
     /// The active-line reading stage (T14).
     pub reading: Option<Reading>,
+    /// How the top line leaves when a line cap drops it (MO-33).
+    pub overflow: overflow::Overflow,
 }
 
 /// What `Flow::update` needs from the node.
@@ -755,6 +757,10 @@ impl Flow {
         for o in old {
             arrived = true;
             let id = o.id;
+            if motion.overflow != overflow::Overflow::Scroll && !reduced && front.contains(&id) {
+                self.leave(&o, t, motion.overflow, scroll.unwrap_or(0.0));
+                continue;
+            }
             self.ghost_word(&o, t, retention);
             if let Some(dy) = scroll.filter(|_| front.contains(&id) && !reduced) {
                 for g in self.ghosts.iter_mut().filter(|g| g.word == id) {
@@ -766,6 +772,7 @@ impl Flow {
         self.words = next;
         self.index = index;
         self.ghosts.retain(|g| g.opacity.target() > 0.0 || g.opacity.settled_at() > t);
+        self.leaving.retain(|l| l.done_at() > t);
         if arrived {
             self.arrived = t;
         }
@@ -1002,6 +1009,33 @@ impl Flow {
         true
     }
 
+    /// Hands a word that left from the front to its leaving line (MO-33), as drawn at `t`.
+    fn leave(&mut self, o: &FlowWord, t: f64, style: overflow::Overflow, dy: f32) {
+        let i = match self.leaving.iter().position(|l| l.is(t, o.line)) {
+            Some(i) => i,
+            None => {
+                self.leaving.push(overflow::Leaving::new(style, t, o.line, dy, self.size, self.line_height));
+                self.leaving.len() - 1
+            }
+        };
+        let s = stretch(o, t);
+        let y = o.y.value(t) as f32 + self.opened(o.line, t);
+        for g in &o.glyphs {
+            let scale = g.scale.value(t).max(0.0) as f32;
+            let x = o.x.value(t) as f32 + g.x.value(t) as f32 * s + 0.5 * g.advance * (1.0 - scale);
+            let (pos, look) = self.on_stage(o, Point::new(x, y + g.y + g.rise.value(t) as f32), t);
+            let opacity = (g.opacity.value(t) * o.ink.value(t) * o.look_opacity.value(t)).clamp(0.0, 1.0) as f32;
+            let glyph =
+                overflow::LeavingGlyph { word: o.id, glyph: g.glyph, font: g.font, pos, scale: scale * look, opacity };
+            self.leaving[i].push(glyph, g.advance);
+        }
+    }
+
+    /// Lines on their way out (MO-33).
+    pub(crate) fn leaving(&self) -> &[overflow::Leaving] {
+        &self.leaving
+    }
+
     /// Fades out every glyph of a word that left the screen, where it is at `t`.
     fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64) {
         let at = (o.x.value(t) as f32, o.y.value(t) as f32 + o.roll.value(t) as f32);
@@ -1161,7 +1195,8 @@ impl Flow {
         let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale, &g.slide]);
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
-        words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(f64::NEG_INFINITY, f64::max)
+        let leaving = self.leaving.iter().map(|l| l.done_at()).fold(f64::NEG_INFINITY, f64::max);
+        words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
     }
 
     /// When the caret's blink next needs a frame, if there is a caret.
@@ -1187,6 +1222,9 @@ impl Flow {
     }
 }
 
+#[path = "motion/overflow.rs"]
+pub mod overflow;
+
 /// The live text motion state of one node.
 #[derive(Default)]
 pub(crate) struct Flow {
@@ -1196,6 +1234,8 @@ pub(crate) struct Flow {
     /// glyph outside any word (an ellipsis).
     index: Vec<Option<(u32, u32)>>,
     ghosts: Vec<Ghost>,
+    /// Lines that left from the front, folding or thinning away (MO-33).
+    leaving: Vec<overflow::Leaving>,
     /// Caret `(x, y)` on the baseline, and its bar size `(width, ascent, descent)`.
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.

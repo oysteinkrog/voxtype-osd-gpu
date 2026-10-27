@@ -1338,7 +1338,19 @@ impl<M> Scene<M> {
             });
             push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
         } else {
+            // Lines leaving live text (MO-33) go under it, their shadows over it.
+            let leaving = (matches!(n.kind, Kind::LiveText { .. }) && !n.live.leaving().is_empty()).then(|| {
+                let zoom = n.value(Slot::TextZoom as u8, t) as f32;
+                let color = n.color(Slot::Text, t).fade(alpha);
+                crate::flow::overflow::Place { origin: Point::new(m.e, m.f), zoom, color, layer }
+            });
+            if let Some(at) = &leaving {
+                crate::flow::overflow::emit(n.live.leaving(), t, at, &self.stage, self.viewport, items, out);
+            }
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
+            if let Some(at) = &leaving {
+                crate::flow::overflow::emit_shadows(n.live.leaving(), t, at, items, out);
+            }
         }
         for &c in &n.children {
             self.emit(c, t, m, alpha, layer, leaving, items, out);
@@ -1949,7 +1961,7 @@ fn apply_material(out: &mut DisplayList, firsts: [usize; 3], m: Material) {
     }
 }
 
-fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
+pub(crate) fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
     if let Some(last) = items.last_mut() {
         if last.kind == kind && last.start + last.len == index {
             last.len += 1;
@@ -1960,7 +1972,7 @@ fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
 }
 
 /// Moves a layer's items into the list and returns their range.
-fn close_items(items: &mut Vec<Item>, out: &mut DisplayList) -> std::ops::Range<u32> {
+pub(crate) fn close_items(items: &mut Vec<Item>, out: &mut DisplayList) -> std::ops::Range<u32> {
     let start = out.items.len() as u32;
     out.items.append(items);
     start..out.items.len() as u32

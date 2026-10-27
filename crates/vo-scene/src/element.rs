@@ -1247,6 +1247,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: how the top line leaves when the text overflows and a line cap drops it
+    /// (MO-33): it scrolls up and fades by default, or folds under or thins away where it is
+    /// while the lines below move up. See [`crate::flow::overflow`].
+    pub fn overflow(mut self, o: crate::flow::overflow::Overflow) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.overflow = o,
+            _ => debug_assert!(false, "overflow on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
