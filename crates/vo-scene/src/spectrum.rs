@@ -54,6 +54,13 @@ pub struct Spectrum {
     pub high: Color,
     /// Glow radius and strength.
     pub glow: Option<(f32, f32)>,
+    /// Up to this fraction (0 to 1) taken off each bar's energy length, a fixed amount per
+    /// bar from `seed`, so neighbouring bars differ. 0 for none.
+    pub jitter: f32,
+    pub seed: u32,
+    /// How many times a second the jitter moves to new values, eased between them; 0 keeps it
+    /// fixed. Above 0 the ring keeps redrawing.
+    pub drift: f32,
 }
 
 impl Spectrum {
@@ -74,6 +81,9 @@ impl Spectrum {
             low,
             high,
             glow: None,
+            jitter: 0.0,
+            seed: 0,
+            drift: 0.0,
         }
     }
 
@@ -112,6 +122,32 @@ impl Spectrum {
 
     pub fn curve(self, curve: f32) -> Spectrum {
         Spectrum { curve: curve.max(0.05), ..self }
+    }
+
+    /// Bars up to `amount` (0 to 1) shorter than their energy, a different amount per bar,
+    /// from `seed`. The same seed gives the same ring.
+    pub fn jitter(self, amount: f32, seed: u32) -> Spectrum {
+        Spectrum { jitter: amount.clamp(0.0, 1.0), seed, ..self }
+    }
+
+    /// The jitter moves to new values `rate` times a second, eased between them.
+    pub fn drift(self, rate: f32) -> Spectrum {
+        Spectrum { drift: rate.max(0.0), ..self }
+    }
+
+    /// Bar `i`'s jitter at `t`, 0 to 1: a hash of the bar, the seed and the drift step.
+    pub fn jitter_at(&self, i: u32, t: f64) -> f32 {
+        if self.jitter <= 0.0 {
+            return 0.0;
+        }
+        let h = |step: i64| hash(i, self.seed, step);
+        if self.drift <= 0.0 {
+            return self.jitter * h(0);
+        }
+        let x = t * self.drift as f64;
+        let (k, f) = (x.floor() as i64, x.fract() as f32);
+        let ease = f * f * (3.0 - 2.0 * f);
+        self.jitter * (h(k) + (h(k + 1) - h(k)) * ease)
     }
 
     pub fn glow(self, radius: f32, strength: f32) -> Spectrum {
@@ -155,8 +191,12 @@ impl Spectrum {
         self.start + self.sweep * i as f32 / steps as f32
     }
 
-    /// Whether the scene must keep drawing at `t`: frames are arriving or the release runs.
+    /// Whether the scene must keep drawing at `t`: frames are arriving, the release runs, or
+    /// the jitter drifts.
     pub(crate) fn moving(&self, signals: Option<&SignalsCell>, t: f64) -> bool {
+        if self.jitter > 0.0 && self.drift > 0.0 {
+            return true;
+        }
         let Bands::Signals { release, .. } = self.bands else { return false };
         let Some(cell) = signals else { return false };
         cell.get().active_until(6.0 * release as f64).is_some_and(|until| t < until)
@@ -169,6 +209,17 @@ impl<M> Element<M> {
     pub fn spectrum_ring(key: impl Into<Key>, spectrum: Spectrum) -> Element<M> {
         Element::new(key, Kind::Spectrum(spectrum), taffy::Style::default())
     }
+}
+
+/// A number from 0 to 1 for bar `i`, `seed` and drift `step` (a small integer hash).
+fn hash(i: u32, seed: u32, step: i64) -> f32 {
+    let mut x = (i as u64) ^ ((seed as u64) << 32) ^ (step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^= x >> 33;
+    (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
 fn mix(a: Color, b: Color, k: f32) -> Color {
@@ -206,7 +257,7 @@ pub(crate) fn draw(
         let k = x.floor() as usize;
         let (a, b) = (energies[k], energies[(k + 1).min(energies.len() - 1)]);
         let e = (a + (b - a) * x.fract()).clamp(0.0, 1.0).powf(s.curve);
-        let len = s.rest + e * room;
+        let len = s.rest + e * room * (1.0 - s.jitter_at(i, t));
         let (r0, r1) = if s.both_ways {
             let half = 0.5 * len.min(2.0 * (ring - 0.5 * w).max(0.0));
             (ring - half, ring + half)
@@ -297,5 +348,22 @@ mod tests {
         assert!(len[7] > 20.0 && len[0] < 1e-3, "{len:?}");
         assert_eq!(scene.next_wake(0.4), Some(0.4));
         assert_eq!(scene.next_wake(30.0), None);
+    }
+
+    #[test]
+    fn jitter_varies_bars_the_same_way_every_time() {
+        let bands: Arc<[f32]> = Arc::from([1.0f32, 1.0].as_slice());
+        let s = Spectrum::new(Color::WHITE, Color::WHITE).bands(Bands::Fixed(bands)).count(16).rest(0.0).jitter(0.5, 7);
+        let a = lengths(&ring_of(s.clone()).sample(0.0));
+        // Equal energies, unequal bars, none shorter than half.
+        let (lo, hi) = a.iter().fold((f32::MAX, 0.0f32), |(l, h), &x| (l.min(x), h.max(x)));
+        assert!(hi - lo > 0.1 * hi && lo >= 0.5 * hi - 1e-3, "{a:?}");
+        // The same seed gives the same ring, at any time; another seed a different one.
+        assert_eq!(a, lengths(&ring_of(s.clone()).sample(3.0)));
+        assert_ne!(a, lengths(&ring_of(s.clone().jitter(0.5, 8)).sample(0.0)));
+        // With drift the bars move smoothly: close together 10 ms apart.
+        let d = s.drift(2.0);
+        assert!((d.jitter_at(3, 1.0) - d.jitter_at(3, 1.01)).abs() < 0.02);
+        assert!((0..16).any(|i| (d.jitter_at(i, 0.0) - d.jitter_at(i, 0.5)).abs() > 0.05));
     }
 }
