@@ -341,3 +341,46 @@ fn energy_brightens_the_aurora() {
     let loud = sum(&render(&mut off, "loud", &aurora_card(2.0, 1.0), 1.0));
     assert!(loud * 100 > calm * 115, "energy 1 is brighter: {loud} vs {calm}");
 }
+
+/// A still frame on a phosphor trail layer: a translucent disc and a white ring, the same
+/// every frame, at `t`.
+fn still_frame(t: f64) -> DisplayList {
+    let mut list = DisplayList { size: Size::new(200.0, 120.0), scale: 1.0, ..Default::default() };
+    list.layers.push(Layer::root());
+    list.shapes.push(ShapeInstance::rrect(rr(0.0, 0.0, 200.0, 120.0, 0.0), Paint::solid(hex(0x050806))));
+    list.items.push(Item { kind: ItemKind::Shapes, start: 0, len: 1 });
+    list.items.push(Item { kind: ItemKind::Layer, start: 1, len: 1 });
+    list.layers[0].items = 0..2;
+    list.layers.push(Layer {
+        parent: Some(0),
+        target: LayerTarget::Offscreen { bloom: None },
+        trail: Some(Trail { key: 11, half_life: 0.25, t, decay: [0.24, 1.0, 0.37] }),
+        ..Layer::root()
+    });
+    let start = list.items.len() as u32;
+    let first = list.shapes.len() as u32;
+    list.shapes.push(ShapeInstance::circle(Point::new(60.0, 60.0), 30.0, Paint::solid(Color::hex(0x66ff99, 0.4))));
+    list.shapes.push(
+        ShapeInstance::circle(Point::new(140.0, 60.0), 30.0, Paint::NONE).with_stroke(Paint::solid(Color::WHITE), 1.3),
+    );
+    list.items.push(Item { kind: ItemKind::Shapes, start: first, len: 2 });
+    list.layers[1].items = start..list.items.len() as u32;
+    list
+}
+
+/// Content that holds still on a trail layer keeps its brightness: the trail never adds a
+/// frame onto the same frame again.
+#[test]
+fn a_still_frame_stays_as_bright_on_a_trail() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let frames: Vec<Image> = (0..=45).map(|i| render(&mut off, "still", &still_frame(i as f64 / 30.0), 1.0)).collect();
+    let (first, last) = (&frames[0], &frames[45]);
+    // The translucent disc's middle, and a pixel the ring's edge covers only in part.
+    for (x, y) in [(60, 60), (60, 75), (170, 60), (140, 31)] {
+        let (a, b) = (px(first, x, y), px(last, x, y));
+        for c in 0..4 {
+            assert!((a[c] as i32 - b[c] as i32).abs() <= 1, "({x}, {y}) went from {a:?} to {b:?}");
+        }
+    }
+}

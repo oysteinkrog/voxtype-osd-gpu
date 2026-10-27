@@ -66,6 +66,7 @@ const COMPOSITE_WGSL: &str = include_str!("wgsl/composite.wgsl");
 const DOTS_WGSL: &str = include_str!("wgsl/dots.wgsl");
 const BLOOM_WGSL: &str = include_str!("wgsl/bloom.wgsl");
 const NOISE_WGSL: &str = include_str!("wgsl/noise.wgsl");
+const TRAIL_WGSL: &str = include_str!("wgsl/trail.wgsl");
 
 /// The format of the scene and of every layer texture on the effect path.
 pub const EFFECT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -303,6 +304,8 @@ enum Pipe {
     Final,
     /// Fades a feedback trail's last frame by the blend constant.
     Fade,
+    /// Merges a trail's new frame into its faded pixels by the larger value per channel.
+    TrailMax,
     /// Particles (`crate::particle_layer`): the range is of its placements.
     Particles,
     /// GPU items drawn by painters (`crate::gpu`): the range is of `Renderer::gpu_items`. A
@@ -409,6 +412,10 @@ struct TrailPlan {
     fade: Option<f32>,
     /// Half-life multiplier per channel (phosphor, FX15): a channel keeps `fade^(1 / d)`.
     decay: [f32; 3],
+    /// With a fade: the pool index of the cleared texture this frame draws into before it
+    /// merges into the trail. Drawing straight over the faded pixels would add the frame
+    /// onto its own afterglow, so still content would brighten with every frame.
+    fresh: Option<usize>,
 }
 
 /// One layer's bloom for this frame.
@@ -471,7 +478,7 @@ pub struct Renderer {
     mask_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
-    modules: [Option<wgpu::ShaderModule>; 8],
+    modules: [Option<wgpu::ShaderModule>; 9],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
@@ -602,7 +609,7 @@ impl Renderer {
             composite_layout,
             mask_layout,
             fx: None,
-            modules: [None, None, None, None, None, None, None, None],
+            modules: [None, None, None, None, None, None, None, None, None],
             pipelines: Vec::new(),
             uniform_stride,
             shapes: Vec::new(),
@@ -985,8 +992,14 @@ impl Renderer {
                     s.bloom = Some(bloom_plan(b, ppu));
                 }
                 if let Some(t) = layer.trail.filter(|_| f.effects) {
-                    s.trail =
-                        Some(TrailPlan { key: t.key, half_life: t.half_life, t: t.t, fade: None, decay: t.decay });
+                    s.trail = Some(TrailPlan {
+                        key: t.key,
+                        half_life: t.half_life,
+                        t: t.t,
+                        fade: None,
+                        decay: t.decay,
+                        fresh: None,
+                    });
                 }
                 self.surfaces.push(s);
                 let pipe = match (&self.surfaces[child].bloom, layer.style) {
@@ -1408,7 +1421,9 @@ impl Renderer {
             let tex = match &self.surfaces[si].trail {
                 Some(t) => {
                     let (tex, fade) = self.acquire_trail(t.key, t.half_life, t.t, w, h, format);
-                    self.surfaces[si].trail.as_mut().unwrap().fade = fade;
+                    let fresh = fade.map(|_| self.acquire(w, h, format));
+                    let plan = self.surfaces[si].trail.as_mut().unwrap();
+                    (plan.fade, plan.fresh) = (fade, fresh);
                     tex
                 }
                 None => self.acquire(w, h, self.surfaces[si].format(format)),
@@ -1687,6 +1702,9 @@ impl Renderer {
             if s.trail.as_ref().is_some_and(|t| t.fade.is_some_and(|k| k < 1.0)) {
                 needed.push((format, Pipe::Fade, BlendMode::Normal));
             }
+            if s.trail.as_ref().is_some_and(|t| t.fresh.is_some()) {
+                needed.push((format, Pipe::TrailMax, BlendMode::Normal));
+            }
             if s.bloom.is_some() {
                 needed.push((EFFECT_FORMAT, Pipe::Down, BlendMode::Normal));
                 needed.push((EFFECT_FORMAT, Pipe::Up, BlendMode::Normal));
@@ -1718,21 +1736,15 @@ impl Renderer {
                 Some(t) => &self.pool[t].view,
                 None => &target.view,
             };
-            let fade = s.trail.as_ref().and_then(|t| t.fade);
-            let mut pass = match fade {
-                Some(k) => {
-                    let mut pass = begin_load(enc, view, "vo-trail");
-                    if k < 1.0 {
-                        pass.set_pipeline(self.cached_pipeline(format, Pipe::Fade, BlendMode::Normal));
-                        // Each channel fades by its own half life; alpha with the slowest.
-                        let d = s.trail.as_ref().map_or([1.0; 3], |t| t.decay).map(|d| d.max(1e-3) as f64);
-                        let c = |d: f64| (k as f64).powf(1.0 / d);
-                        let a = c(d[0].max(d[1]).max(d[2]));
-                        pass.set_blend_constant(wgpu::Color { r: c(d[0]), g: c(d[1]), b: c(d[2]), a });
-                        pass.draw(0..3, 0..1);
-                    }
-                    pass
-                }
+            // A trail that goes on draws this frame on its own, then merges it (below).
+            let merge = s.trail.as_ref().and_then(|t| Some((t.fade?, t.fresh?)));
+            let trail_view = view;
+            let view = match merge {
+                Some((_, f)) => &self.pool[f].view,
+                None => view,
+            };
+            let mut pass = match merge {
+                Some(_) => begin(enc, view, "vo-trail-frame"),
                 // The target itself takes the caller's load op; the effect path's scene
                 // texture and every layer texture clear.
                 None if s.tex.is_none() => begin_with(enc, view, "vo-target", self.load),
@@ -1752,6 +1764,23 @@ impl Renderer {
                 cmds = &cmds[split + 1..];
             }
             drop(pass);
+            if let Some((k, fresh)) = merge {
+                let mut pass = begin_load(enc, trail_view, "vo-trail");
+                if k < 1.0 {
+                    pass.set_pipeline(self.cached_pipeline(format, Pipe::Fade, BlendMode::Normal));
+                    // Each channel fades by its own half life; alpha with the slowest.
+                    let d = s.trail.as_ref().map_or([1.0; 3], |t| t.decay).map(|d| d.max(1e-3) as f64);
+                    let c = |d: f64| (k as f64).powf(1.0 / d);
+                    let a = c(d[0].max(d[1]).max(d[2]));
+                    pass.set_blend_constant(wgpu::Color { r: c(d[0]), g: c(d[1]), b: c(d[2]), a });
+                    pass.draw(0..3, 0..1);
+                }
+                // The larger of the afterglow and the new frame, per channel: content that holds
+                // still keeps its brightness, and what moved away fades.
+                pass.set_pipeline(self.cached_pipeline(format, Pipe::TrailMax, BlendMode::Normal));
+                pass.set_bind_group(0, &self.pool[fresh].bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
             self.mark(enc, Section::Draw { surface: i });
             if let Some(b) = &s.bloom {
                 self.encode_bloom(enc, s, b);
@@ -1939,7 +1968,9 @@ impl Renderer {
                     pass.set_bind_group(0, &bind, &[]);
                     pass.draw(0..3, 0..1);
                 }
-                Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => unreachable!("not a layer command"),
+                Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade | Pipe::TrailMax => {
+                    unreachable!("not a layer command")
+                }
                 Pipe::Particles => unreachable!("drawn above"),
                 Pipe::Gpu => unreachable!("a pass break"),
             }
@@ -1960,6 +1991,7 @@ impl Renderer {
             4 => ("vo-dots", dot_shader_source()),
             5 => ("vo-vectors", vector_shader_source_with(&self.material_fns)),
             7 => ("vo-glass", glass_layer_shader_source()),
+            8 => ("vo-trail", TRAIL_WGSL.to_string()),
             _ => ("vo-bloom", bloom_shader_source()),
         };
         self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2002,6 +2034,7 @@ impl Renderer {
             Pipe::Glyph => 1,
             Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
+            Pipe::TrailMax => 8,
             // The particle layer and the painters have their own pipelines.
             Pipe::Particles | Pipe::Gpu => return,
             Pipe::Dot => 4,
@@ -2023,6 +2056,7 @@ impl Renderer {
             Pipe::CompositeMask => [Some(&self.mask_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
+            Pipe::TrailMax => [Some(&self.composite_layout), None],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
         // The signal block is group 3 of every pipeline that draws into a layer.
@@ -2053,6 +2087,7 @@ impl Renderer {
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
+            Pipe::TrailMax => ("vs_trail", "fs_trail_max", vec![]),
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
         let blend_state = match pipe {
@@ -2070,6 +2105,18 @@ impl Renderer {
                     src_factor: wgpu::BlendFactor::Zero,
                     dst_factor: wgpu::BlendFactor::Constant,
                     operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            Pipe::TrailMax => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Max,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Max,
                 },
             }),
             _ => Some(blend_state(blend)),
