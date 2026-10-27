@@ -450,7 +450,7 @@ fn place<M>(e: Element<M>, x: f32, y: f32, w: f32, h: f32) -> Element<M> {
 /// The pre-echo blobs as absolutely placed capsules for a text box. `caret` is where the
 /// next word would start, on the baseline of the reading line, and `room` the width left
 /// on that line; unread blobs run right from there, squeezed to fit. A read blob moves to
-/// `word_box(blob.word)` (its word's box in the same coordinates) in about
+/// `word_box(blob)` (the box of the word it was handed to, in the same coordinates) in about
 /// [`HANDOFF_MORPH`] and fades; without a box it fades where it is. Keys are
 /// `pre-echo-<id>`, so a blob keeps its node from growth to hand-off.
 pub fn pre_echo<M>(
@@ -458,7 +458,7 @@ pub fn pre_echo<M>(
     look: &HearingLook,
     caret: (f32, f32),
     room: f32,
-    word_box: impl Fn(usize) -> Option<Rect>,
+    word_box: impl Fn(&Blob) -> Option<Rect>,
 ) -> Vec<Element<M>> {
     let unread: Vec<&Blob> = hearing.blobs().iter().filter(|b| b.read_at.is_none()).collect();
     let want: f32 = unread
@@ -489,7 +489,7 @@ pub fn pre_echo<M>(
             (None, Some(&(bx, w))) => place(shape.opacity(look.blob_ink), bx, y, w.max(1.0), h)
                 // A new blob grows from nothing at the caret.
                 .presence(Transition::fade().opacity(0.0), Transition::fade()),
-            _ => match word_box(b.word) {
+            _ => match word_box(b) {
                 Some(r) => place(shape.opacity(0.0).radius(r.h * 0.2), r.x, r.y, r.w.max(1.0), r.h.max(1.0)),
                 // Read with no word to go to: fade in place.
                 None => place(shape.opacity(0.0), caret.0, y, look.blob_min, h),
