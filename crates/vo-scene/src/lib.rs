@@ -94,6 +94,7 @@ pub mod ribbon;
 pub mod roll;
 pub mod scene;
 pub mod segments;
+pub mod snap;
 pub mod spectrum;
 pub mod stage;
 pub mod status_icon;
