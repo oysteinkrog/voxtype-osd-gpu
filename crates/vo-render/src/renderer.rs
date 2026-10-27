@@ -1,7 +1,7 @@
 //! Draws a `vo_scene` display list into a texture.
 //!
 //! [`Renderer::render`] walks the layers in paint order and records one command per run of
-//! shapes or glyphs, with a 256-byte layer block (transform, clip, opacity) bound at a dynamic
+//! shapes or glyphs, with a layer block (transform, clip, opacity, stage warp) bound at a dynamic
 //! offset. Shapes go through the SDF uber-shader in one instanced draw per run; glyphs go
 //! through the Slug path. Then it encodes one render pass per offscreen layer, deepest first,
 //! and one pass on the target.
@@ -2197,6 +2197,8 @@ mod tests {
 
     #[test]
     fn layer_block_fits_one_slot() {
-        assert!(std::mem::size_of::<LayerUniform>() <= 256);
+        // The stage warp (d18ae3b) took the block past 256 bytes; the stride follows its
+        // size, so two 256-byte alignment slots per layer is the limit.
+        assert!(std::mem::size_of::<LayerUniform>() <= 512);
     }
 }
