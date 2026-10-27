@@ -166,6 +166,56 @@ fn settling_ink_goldens() {
         (0.6, words(&[(1, "words"), (2, "settle"), (3, "there")])),
         (1.0, words(&[(1, "words"), (2, "settle"), (3, "their"), (4, "ink")])),
     ];
-    let img = strip_with(&mut off, &fonts, "live-settle-ink", &steps, &[0.29, 0.62, 0.8, 1.02, 1.2, 2.0], ink);
+    let times = [0.29, 0.62, 0.8, 1.02, 1.2, 2.0];
+    let img = strip_with(&mut off, &fonts, "live-settle-ink", &steps, &times, ink);
+    // The accent variant: new words arrive in blue and mix to the text colour as they settle.
+    let accent = strip_with(&mut off, &fonts, "live-settle-accent", &steps, &times, |w| {
+        let live = Element::live_text("live", w)
+            .text_style(TextStyle::new(0, 22.0, 28.0))
+            .color(Color::hex(0xf2f3f5, 1.0))
+            .settling_ink(SettleInk::default().accent(Color::hex(0x6cb6ff, 1.0)))
+            .width(W - 32.0);
+        Element::panel("panel").pad(16.0).radius(12.0).fill(Color::hex(0x1d1f24, 1.0)).width(W).height(H).child(live)
+    });
+    let failures: Vec<String> =
+        [img, accent].iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
+    assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}
+
+/// A line cap: when the text fills its two lines, the first line drops and the rest scroll
+/// up as one block while the next words arrive, instead of each word taking its own path.
+#[test]
+fn front_drop_golden() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let all = [
+        (1, "the"),
+        (2, "first"),
+        (3, "line"),
+        (4, "drops"),
+        (5, "away"),
+        (6, "and"),
+        (7, "the"),
+        (8, "second"),
+        (9, "line"),
+        (10, "moves"),
+        (11, "up"),
+        (12, "as"),
+        (13, "one"),
+        (14, "block"),
+        (15, "while"),
+    ];
+    // Which words the layout puts on the first line.
+    let mut probe = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    probe.set_viewport(0.0, Size::new(W, H), 1.0);
+    probe.apply(view(&words(&all[..12])), 0.0);
+    let list = probe.sample(5.0);
+    let y = |id: u32| list.glyphs.iter().find(|g| g.word == id).map(|g| g.pos.y);
+    let first_line = all.iter().take_while(|w| y(w.0) == y(1)).count();
+    assert!(first_line >= 2 && first_line < 12, "first line holds {first_line} words");
+    let steps = [(0.0, words(&all[..12])), (1.0, words(&all[first_line..]))];
+    let img = strip(&mut off, &fonts, "live-front-drop", &steps, &[0.9, 1.03, 1.06, 1.1, 1.16, 1.6]);
     support::check(&img, Tolerance::default()).unwrap();
 }

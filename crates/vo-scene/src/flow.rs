@@ -49,6 +49,8 @@ pub const FLIP: Spring = Spring::critical_to_98(0.200);
 pub const REWRAP: Spring = Spring::SOFT;
 /// Delay between words that change line, in reading order.
 pub const REWRAP_STAGGER: f64 = 0.012;
+/// When words leave from the front, the rest scroll up together in about 220 ms.
+pub const SCROLL: Spring = Spring::SOFT;
 /// Old and new glyphs of a revised word cross in about 120 ms.
 pub const CROSSFADE: Spring = Spring::SNAP;
 /// A changed letter rolls out and in, and new letters rise in, in about 180 ms.
@@ -150,11 +152,20 @@ pub struct SettleInk {
     /// Settle time of a word revised three times or more. Words the recogniser keeps
     /// changing settle slower, so the eye trusts them later.
     pub slowest: f64,
+    /// A colour a new or revised word arrives in, mixing to the text colour as it settles.
+    pub accent: Option<Color>,
+}
+
+impl SettleInk {
+    /// The same settle, with new words arriving in `color`.
+    pub fn accent(self, color: Color) -> SettleInk {
+        SettleInk { accent: Some(color), ..self }
+    }
 }
 
 impl Default for SettleInk {
     fn default() -> SettleInk {
-        SettleInk { ink: 0.55, tracking: 0.03, fastest: 0.3, slowest: 0.6 }
+        SettleInk { ink: 0.55, tracking: 0.03, fastest: 0.3, slowest: 0.6, accent: None }
     }
 }
 
@@ -235,6 +246,8 @@ struct FlowWord {
     /// Settling ink: opacity factor and extra letter spacing in ems.
     ink: Channel,
     track: Channel,
+    /// How new the word still looks, from 1 on arrival to 0 settled: the accent's share.
+    fresh: Channel,
     /// How many times the text changed.
     revisions: u32,
     /// Reading stage: vertical roll of the word's line, and its line's look.
@@ -318,10 +331,25 @@ pub(crate) struct GlyphMotion {
     pub opacity: f32,
     /// Multiplies the em size; `dx` already keeps the glyph centred.
     pub scale: f32,
+    /// The settling accent and its share, while the word is new.
+    pub tint: Option<(Color, f32)>,
 }
 
 impl GlyphMotion {
-    pub const NONE: GlyphMotion = GlyphMotion { dx: 0.0, dy: 0.0, opacity: 1.0, scale: 1.0 };
+    pub const NONE: GlyphMotion = GlyphMotion { dx: 0.0, dy: 0.0, opacity: 1.0, scale: 1.0, tint: None };
+
+    /// `base` with the settling accent mixed in; its alpha stays.
+    pub fn tint(&self, base: Color) -> Color {
+        match self.tint {
+            Some((c, k)) if k > 0.0 => Color {
+                r: base.r + (c.r - base.r) * k,
+                g: base.g + (c.g - base.g) * k,
+                b: base.b + (c.b - base.b) * k,
+                a: base.a,
+            },
+            _ => base,
+        }
+    }
 }
 
 /// A ghost glyph to draw at `t`, in the text box's space.
@@ -432,6 +460,37 @@ fn move_to(ch: &mut Channel, target: f32, at: f64, spring: Spring, reduced: bool
     }
 }
 
+/// When words left from the front and the kept words moved up together (a line cap
+/// dropping the oldest words), how far down the block was: the vertical move most kept
+/// words share with no move along their line. `None` for any other change.
+fn front_scroll(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>]) -> Option<f32> {
+    let first = old.iter().position(|o| words.iter().any(|w| w.id == o.id))?;
+    if first == 0 {
+        return None;
+    }
+    // Votes per move, in half pixels.
+    let mut votes: Vec<(i32, u32)> = Vec::new();
+    for (w, p) in words.iter().zip(placed) {
+        let (Some(p), Some(o)) = (p, old.iter().find(|o| o.id == w.id)) else { continue };
+        let (dx, dy) = (o.x.target() as f32 - p.x, o.y.target() as f32 - p.y);
+        if dx.abs() >= 0.5 || dy.abs() < 0.5 {
+            continue;
+        }
+        let key = (dy * 2.0).round() as i32;
+        match votes.iter_mut().find(|v| v.0 == key) {
+            Some(v) => v.1 += 1,
+            None => votes.push((key, 1)),
+        }
+    }
+    let (key, _) = votes.into_iter().max_by_key(|v| v.1)?;
+    Some(key as f32 / 2.0)
+}
+
+/// Whether kept word `o` moved with the scrolling block: only `dy` down from its new place.
+fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32) -> bool {
+    (o.x.target() as f32 - p.x).abs() < 0.5 && (o.y.target() as f32 - p.y - dy).abs() < 1.0
+}
+
 /// The words as the layout placed them, aligned with `words`; `None` for a word with no
 /// glyphs on screen (cut by `max_lines`).
 fn place(shaped: &ShapedText, words: &[Word]) -> Vec<Option<PlacedWord>> {
@@ -529,7 +588,14 @@ impl Flow {
         self.spans = stage.spans.clone();
         (self.origin, self.staged) = (motion.reading.as_ref().map_or(0.0, |r| r.origin), motion.reading.is_some());
         self.line_height = line_height;
+        self.accent = motion.settle.and_then(|s| s.accent);
         let mut old = std::mem::take(&mut self.words);
+        let scroll = front_scroll(&old, words, &placed);
+        // Words that left from the front, which scroll out with the rest.
+        let front: Vec<WordId> = match scroll {
+            Some(_) => old.iter().map(|o| o.id).take_while(|id| words.iter().all(|w| w.id != *id)).collect(),
+            None => Vec::new(),
+        };
         let mut next = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
         let (mut stagger, mut arrived) = (0u32, false);
@@ -562,13 +628,18 @@ impl Flow {
                     id: w.id,
                     text: w.text.clone(),
                     x: make.to(p.x - back, p.x, FLIP, Rest::PIXELS),
-                    y: make.ch(p.y, FLIP, Rest::PIXELS),
+                    // A word that arrives with a scroll comes up with the block.
+                    y: match scroll {
+                        Some(dy) if !reduced => make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS),
+                        _ => make.ch(p.y, FLIP, Rest::PIXELS),
+                    },
                     width: make.ch(p.width, FLIP, Rest::PIXELS),
                     spread: false,
                     line: p.line,
                     glyphs,
                     ink: make.ch(1.0, CROSSFADE, Rest::UNIT),
                     track: make.ch(0.0, CROSSFADE, Rest::UNIT),
+                    fresh: make.ch(0.0, CROSSFADE, Rest::UNIT),
                     revisions: 0,
                     roll: make.ch(stage.roll, FLIP, Rest::PIXELS),
                     look_scale: make.ch(stage.look(p.line).scale, FLIP, Rest::UNIT),
@@ -607,7 +678,15 @@ impl Flow {
             }
             line_shift = (o.line == p.line).then(|| (p.line, p.x - o.x.target() as f32));
             let look = stage.look(p.line);
-            if o.line != p.line {
+            if let Some(dy) = scroll.filter(|&dy| in_block(&o, &p, dy)) {
+                // Part of the block: every such word starts the same distance below its new
+                // place and takes the same spring, so the text scrolls as one piece.
+                let lag = |c: &Channel| if reduced { 0.0 } else { (c.value(t) - c.target()) as f32 };
+                let dy = if reduced { 0.0 } else { dy };
+                o.x = make.to(p.x + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
+                o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
+                move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
+            } else if o.line != p.line {
                 let at = t + REWRAP_STAGGER * stagger as f64;
                 stagger += 1;
                 move_to(&mut o.x, p.x, at, REWRAP, reduced);
@@ -629,7 +708,14 @@ impl Flow {
         }
         for o in old {
             arrived = true;
+            let id = o.id;
             self.ghost_word(o, t, retention);
+            if let Some(dy) = scroll.filter(|_| front.contains(&id) && !reduced) {
+                for g in self.ghosts.iter_mut().filter(|g| g.word == id) {
+                    let rise = g.rise.value(t) as f32;
+                    g.rise = make.to(rise, rise - dy, SCROLL, Rest::PIXELS);
+                }
+            }
         }
         self.words = next;
         self.index = index;
@@ -637,7 +723,8 @@ impl Flow {
         if arrived {
             self.arrived = t;
         }
-        self.update_caret(t, motion.caret, size, line_height, retention, reduced);
+        let glide = if scroll.is_some() { SCROLL } else { CARET_GLIDE };
+        self.update_caret(t, motion.caret, glide, retention, reduced);
     }
 
     /// FX-065: the old glyphs roll up and fade, the new ones roll in from below and fade in,
@@ -902,15 +989,8 @@ impl Flow {
         }
     }
 
-    fn update_caret(
-        &mut self,
-        t: f64,
-        caret: Option<Caret>,
-        size: f32,
-        line_height: f32,
-        retention: f64,
-        reduced: bool,
-    ) {
+    fn update_caret(&mut self, t: f64, caret: Option<Caret>, glide: Spring, retention: f64, reduced: bool) {
+        let (size, line_height) = (self.size, self.line_height);
         let Some(style) = caret else {
             self.caret = None;
             return;
@@ -923,8 +1003,8 @@ impl Flow {
         };
         match &mut self.caret {
             Some((cx, cy, s, b)) => {
-                move_to(cx, x, t, CARET_GLIDE, reduced);
-                move_to(cy, y, t, CARET_GLIDE, reduced);
+                move_to(cx, x, t, glide, reduced);
+                move_to(cy, y, t, glide, reduced);
                 (*s, *b) = (style, bar);
             }
             None => {
@@ -954,6 +1034,7 @@ impl Flow {
             dy: pos.y - pen.y + dy,
             opacity: (g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)).clamp(0.0, 1.0) as f32,
             scale: scale * look,
+            tint: self.accent.map(|c| (c, w.fresh.value(t).clamp(0.0, 1.0) as f32)),
         }
     }
 
@@ -1027,7 +1108,7 @@ impl Flow {
     /// When every word, glyph, ghost and the caret's glide come to rest.
     pub fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| {
-            [&w.x, &w.y, &w.width, &w.ink, &w.track, &w.roll, &w.look_scale, &w.look_opacity]
+            [&w.x, &w.y, &w.width, &w.ink, &w.track, &w.fresh, &w.roll, &w.look_scale, &w.look_opacity]
                 .into_iter()
                 .chain(w.glyphs.iter().flat_map(|g| [&g.x, &g.opacity, &g.rise, &g.scale]))
         });
@@ -1083,6 +1164,8 @@ pub(crate) struct Flow {
     staged: bool,
     /// Lines opened for displaced ghosts: the line and how far it opens.
     open: Vec<(u32, Channel)>,
+    /// The settling accent, if any.
+    accent: Option<Color>,
 }
 
 /// What the reading stage asks of every word for one layout.
@@ -1132,11 +1215,13 @@ fn settle(o: &mut FlowWord, fresh: bool, motion: &LiveMotion, make: &Make, reduc
     let Some(st) = motion.settle else {
         o.ink.retarget(t, 1.0);
         o.track.retarget(t, 0.0);
+        o.fresh.retarget(t, 0.0);
         return;
     };
     if fresh {
         o.ink.snap(t, st.ink as f64);
         o.track.snap(t, if reduced { 0.0 } else { st.tracking as f64 });
+        o.fresh.snap(t, 1.0);
     }
     let stable = motion.stable.as_ref().is_none_or(|ids| ids.contains(&o.id));
     if stable && o.ink.target() != 1.0 {
@@ -1144,8 +1229,10 @@ fn settle(o: &mut FlowWord, fresh: bool, motion: &LiveMotion, make: &Make, reduc
         let spring = Spring::critical_to_98(st.fastest + (st.slowest - st.fastest) * k);
         o.ink.set_spring(spring);
         o.track.set_spring(spring);
+        o.fresh.set_spring(spring);
         o.ink.retarget(t, 1.0);
         o.track.retarget(t, 0.0);
+        o.fresh.retarget(t, 0.0);
     }
 }
 

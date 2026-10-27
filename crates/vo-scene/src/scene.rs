@@ -1471,7 +1471,7 @@ impl<M> Scene<M> {
                             font: g.font,
                             glyph: g.glyph,
                             word,
-                            color: color.fade(k),
+                            color: m.tint(color).fade(k),
                         });
                     }
                     for gh in n.live.ghosts(t) {

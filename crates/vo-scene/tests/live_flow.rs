@@ -6,6 +6,7 @@ use vo_scene::display::{DisplayList, GlyphInstance};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, SettleInk, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
 use vo_scene::font::{test_font_path, FontRegistry};
+use vo_scene::geom::Color;
 use vo_scene::text::ShapedLayout;
 use vo_scene::Scene;
 
@@ -329,4 +330,103 @@ fn a_new_word_moves_with_the_words_its_line_moved() {
         let d = first(&f, 3).0 - first(&f, 2).0;
         assert!((d - gap).abs() < 0.5, "at {t} the gap is {d}, settled {gap}");
     }
+}
+
+/// Ten words over about three lines at 200 wide.
+const TEN: [(u32, &str); 10] = [
+    (1, "every"),
+    (2, "word"),
+    (3, "here"),
+    (4, "keeps"),
+    (5, "its"),
+    (6, "line"),
+    (7, "when"),
+    (8, "the"),
+    (9, "front"),
+    (10, "drops"),
+];
+
+#[test]
+fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
+    let mut s = scene();
+    s.apply(view(&words(&TEN), Some(200.0), true), 0.0);
+    let before = s.sample(1.0);
+    // Drop the whole first line, as a line cap does.
+    let y0 = first(&before, 1).1;
+    let dropped: Vec<u32> = (1..=10).filter(|&w| first(&before, w).1 == y0).collect();
+    let mut kept: Vec<(u32, &str)> = TEN.iter().copied().filter(|(id, _)| !dropped.contains(id)).collect();
+    assert!(kept.len() >= 4 && dropped.len() >= 2, "dropped {dropped:?}");
+    // A new word arrives in the same update and comes up with the block.
+    kept.push((11, "next"));
+    s.apply(view(&words(&kept), Some(200.0), true), 1.0);
+    let settled = s.sample(5.0);
+    let line = first(&before, kept[0].0).1 - first(&settled, kept[0].0).1;
+    assert!(line > 10.0, "the block moves up a line: {line}");
+
+    for t in [1.0, 1.03, 1.08, 1.15] {
+        let f = s.sample(t);
+        // Every kept word, and the new one, is the same distance below its new place, with
+        // no sideways move.
+        let offsets: Vec<(f32, f32)> = kept
+            .iter()
+            .map(|(id, _)| (first(&f, *id).0 - first(&settled, *id).0, first(&f, *id).1 - first(&settled, *id).1))
+            .collect();
+        let (_, dy) = offsets[0];
+        for (id, (ox, oy)) in kept.iter().map(|k| k.0).zip(&offsets) {
+            assert!(ox.abs() < 1e-3 && (oy - dy).abs() < 1e-3, "at {t} word {id} is off by ({ox}, {oy}), block {dy}");
+        }
+        if t == 1.0 {
+            assert!((dy - line).abs() < 1e-3, "nothing jumps at the change");
+        } else {
+            assert!(dy > 0.0 && dy < line, "at {t} the block is part way: {dy}");
+            // The dropped words scroll out with it while they fade.
+            let gone = dropped[0];
+            if let Some(g) = f.glyphs.iter().find(|g| g.word == gone) {
+                assert!((first(&before, gone).1 - g.pos.y - (line - dy)).abs() < 1e-2, "at {t}");
+            }
+        }
+    }
+    // The caret rides with the block.
+    let id = s.find(&["root", "live"]).unwrap();
+    let (c, cs) = (s.caret(id, 1.08).unwrap().0, s.caret(id, 5.0).unwrap().0);
+    let last = kept.last().unwrap().0;
+    let w = first(&s.sample(1.08), last).1 - first(&settled, last).1;
+    assert!((c.y - cs.y - w).abs() < 1e-2, "caret {c:?} settled {cs:?} block {w}");
+}
+
+#[test]
+fn a_true_rewrap_still_glides_word_by_word() {
+    // Words that leave from the front and also change the wrap of the rest: only the words
+    // that kept their place relative to the block move with it.
+    let mut s = scene();
+    s.apply(view(&words(&TEN), Some(200.0), false), 0.0);
+    let before = s.sample(1.0);
+    let kept: Vec<Word> = words(&TEN[1..]);
+    s.apply(view(&kept, Some(200.0), false), 1.0);
+    let settled = s.sample(5.0);
+    // Word 2 moves to the start of the line: a sideways glide, not a scroll.
+    assert!(first(&before, 2).0 > first(&settled, 2).0 + 10.0);
+    let mid = s.sample(1.08);
+    let x = first(&mid, 2).0;
+    assert!(x > first(&settled, 2).0 + 0.5 && x < first(&before, 2).0 - 0.5, "x {x}");
+}
+
+fn accent_view(w: &[Word]) -> Element<()> {
+    let ink = SettleInk::default().accent(Color::rgba(1.0, 0.0, 0.0, 1.0));
+    Element::column("root")
+        .child(Element::live_text("live", w).text_style(style()).color(Color::WHITE).settling_ink(ink))
+}
+
+#[test]
+fn with_an_accent_new_words_arrive_in_it_and_mix_to_the_text_colour() {
+    let mut s = scene();
+    s.apply(accent_view(&words(&[(1, "settle")])), 0.0);
+    let c = |s: &Scene<()>, t: f64| of(&s.sample(t), 1)[0].color;
+    let (c0, mid, end) = (c(&s, 0.0), c(&s, 0.15), c(&s, 1.0));
+    assert!(c0.r > 0.99 && c0.g < 0.01 && c0.b < 0.01, "arrives in the accent: {c0:?}");
+    assert!(mid.g > 0.05 && mid.g < 0.95, "mixing: {mid:?}");
+    assert!(end.g > 0.999 && end.b > 0.999, "settled to the text colour: {end:?}");
+    // A revision brings the accent back.
+    s.apply(accent_view(&words(&[(1, "settled")])), 2.0);
+    assert!(c(&s, 2.0).g < 0.01);
 }
