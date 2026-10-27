@@ -13,6 +13,7 @@ use bytemuck::{Pod, Zeroable};
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_scene::geom::Size;
 
+use crate::camera::Camera;
 use crate::frame::Frame3d;
 use crate::mesh::Mesh;
 use crate::render::Renderer3d;
@@ -79,6 +80,18 @@ pub struct ItemPlace {
     pub size: Size,
     /// x, y, w, h in surface pixels: the item is only drawn inside it.
     pub scissor: Option<[u32; 4]>,
+    /// The stage camera in surface pixels and the item's centre as seen on the surface, for
+    /// frames drawn [`crate::OnStage`].
+    pub stage: Option<StageAt>,
+}
+
+/// Where the stage camera is, for an item: `origin` and `centre` in surface pixels, and the
+/// eye `perspective` pixels in front of the surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageAt {
+    pub origin: [f32; 2],
+    pub perspective: f32,
+    pub centre: [f32; 2],
 }
 
 impl ItemPainter {
@@ -137,20 +150,45 @@ impl ItemPainter {
         t: f64,
         at: &ItemPlace,
     ) {
-        let [x, y, w, h] = at.rect;
-        let (x0, y0) = (x.floor(), y.floor());
-        let size = [(x + w).ceil() - x0, (y + h).ceil() - y0].map(|v| v.max(1.0) as u32);
+        let [_, _, w, h] = at.rect;
         if at.opacity <= 0.0 || w <= 0.0 || h <= 0.0 {
             return;
         }
+        let scale = if at.size.w > 0.0 { w / at.size.w } else { 1.0 };
         let base = self.mesh_base(source);
         let mut frame = source.frame(t, at.size);
         for d in &mut frame.meshes {
             d.mesh = MeshId(base + d.mesh.0);
         }
+        // On the stage the drawing covers the item's box grown by the overscan, about where
+        // its centre lands, cut to the scissor.
+        let [x, y, w, h] = match (frame.on_stage, at.stage) {
+            (Some(on), Some(st)) => {
+                let (gw, gh) = (w * (1.0 + 2.0 * on.overscan.max(0.0)), h * (1.0 + 2.0 * on.overscan.max(0.0)));
+                let mut r = [
+                    st.centre[0] - 0.5 * gw,
+                    st.centre[1] - 0.5 * gh,
+                    st.centre[0] + 0.5 * gw,
+                    st.centre[1] + 0.5 * gh,
+                ];
+                if let Some([sx, sy, sw, sh]) = at.scissor {
+                    let s = [sx as f32, sy as f32, (sx + sw) as f32, (sy + sh) as f32];
+                    r = [r[0].max(s[0]), r[1].max(s[1]), r[2].min(s[2]), r[3].min(s[3])];
+                }
+                r = [r[0].floor(), r[1].floor(), r[2].ceil(), r[3].ceil()];
+                if r[2] <= r[0] || r[3] <= r[1] {
+                    return;
+                }
+                let rect = [r[0], r[1], r[2] - r[0], r[3] - r[1]];
+                frame.camera = Camera::stage(st.perspective / scale, st.origin, st.centre, scale, rect);
+                rect
+            }
+            _ => at.rect,
+        };
+        let (x0, y0) = (x.floor(), y.floor());
+        let size = [(x + w).ceil() - x0, (y + h).ceil() - y0].map(|v| v.max(1.0) as u32);
         self.ensure_scratch(size, format);
         let scratch = self.scratch.as_ref().unwrap();
-        let scale = if at.size.w > 0.0 { w / at.size.w } else { 1.0 };
         let out = crate::render::Output { view: &scratch.view, size, format, scale };
         self.scene.encode_with(enc, out, &frame, None, None);
 

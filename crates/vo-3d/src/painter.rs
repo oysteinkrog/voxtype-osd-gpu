@@ -15,7 +15,7 @@ use vo_render::{GpuPainter, PaintCx, Renderer};
 use vo_scene::geom::Size;
 use vo_scene::gpu::GpuSource;
 
-use crate::item::{ItemPainter, ItemPlace, Source3d};
+use crate::item::{ItemPainter, ItemPlace, Source3d, StageAt};
 
 /// A [`Source3d`] as a GPU element's source. Make it once and keep the `Arc`: the element and
 /// the painter know it by address.
@@ -65,6 +65,15 @@ impl GpuPainter for Painter3d {
             opacity: cx.opacity,
             size: Size::new(cx.rect.w, cx.rect.h),
             scissor: Some(cx.scissor),
+            stage: Some(StageAt {
+                origin: cx.stage.origin,
+                perspective: cx.stage.perspective,
+                centre: {
+                    let c = vo_scene::geom::Point::new(0.5 * (x0 + x1), 0.5 * (y0 + y1));
+                    let c = cx.warp.map_or(c, |w| w.apply(c));
+                    [c.x, c.y]
+                },
+            }),
         };
         painter.paint(cx.enc, cx.view, cx.format, item.0.as_ref(), cx.t, &at);
         true

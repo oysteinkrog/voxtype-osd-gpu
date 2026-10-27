@@ -77,6 +77,7 @@ fn item_composites_at_its_rect() {
         opacity: 0.8,
         size: Size::new(200.0, 120.0),
         scissor: None,
+        stage: None,
     };
     painter.paint(&mut enc, &view, FORMAT, &Ring, 1.0, &at);
     gpu.queue.submit([enc.finish()]);

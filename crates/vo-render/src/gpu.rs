@@ -60,12 +60,22 @@ pub struct PaintCx<'a> {
     /// (`vo_scene::stage`), when the element is in a turned layer. `rect_px` ignores it; a
     /// painter that follows the stage draws through it or through the stage camera.
     pub warp: Option<vo_scene::stage::Warp>,
+    /// The scene's stage camera in surface pixels, for painters that draw 3D on it.
+    pub stage: StagePx,
     /// Inherited opacity, to multiply in.
     pub opacity: f32,
     /// The layer's clip as a scissor in surface pixels: `x, y, w, h`, never empty.
     pub scissor: [u32; 4],
     /// The painter must encode sRGB itself (a plain UNORM surface).
     pub encode_srgb: bool,
+}
+
+/// The stage camera (`vo_scene::stage`) in a surface's pixels: the eye is `perspective`
+/// pixels in front of `origin`, and the plane z = 0 lands on the surface 1:1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StagePx {
+    pub origin: [f32; 2],
+    pub perspective: f32,
 }
 
 impl PaintCx<'_> {

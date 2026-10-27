@@ -50,7 +50,7 @@ use vo_scene::stage::Warp;
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
-use crate::gpu::{GpuPainter, PaintCx};
+use crate::gpu::{GpuPainter, PaintCx, StagePx};
 use crate::hot::wgsl;
 use crate::particle_layer::ParticleLayer;
 use crate::profile::{BloomReport, FrameReport, FrameTimings, Profiler, Section, SurfaceKind, SurfaceReport};
@@ -312,6 +312,8 @@ struct GpuCmd {
     to_px: Affine,
     /// The stage warp in target pixels.
     warp: Option<Warp>,
+    /// The stage camera in target pixels.
+    stage: StagePx,
     opacity: f32,
 }
 
@@ -1053,7 +1055,18 @@ impl Renderer {
                     for g in &f.list.gpu[range] {
                         let b = seen(bounds(&RRect::new(g.rect, 0.0), &to_px));
                         grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
-                        self.gpu_items.push(GpuCmd { item: g.clone(), to_px, warp, opacity: opacity * g.opacity });
+                        let o = f.list.stage.origin_in(f.list.size);
+                        let stage = StagePx {
+                            origin: [o.x * f.scale, o.y * f.scale],
+                            perspective: f.list.stage.perspective * f.scale,
+                        };
+                        self.gpu_items.push(GpuCmd {
+                            item: g.clone(),
+                            to_px,
+                            warp,
+                            stage,
+                            opacity: opacity * g.opacity,
+                        });
                     }
                     let end = self.gpu_items.len() as u32;
                     self.push_cmd(draw_surface, Pipe::Gpu, start..end, uniform, BlendMode::Normal, scissor);
@@ -1693,6 +1706,7 @@ impl Renderer {
                                 [0.0, 0.0, 1.0],
                             ]))
                         }),
+                        stage: StagePx { origin: [g.stage.origin[0] - ox, g.stage.origin[1] - oy], ..g.stage },
                         opacity: g.opacity,
                         scissor,
                         encode_srgb,

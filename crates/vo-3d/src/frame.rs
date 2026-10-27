@@ -33,6 +33,26 @@ pub struct Frame3d {
     pub floor: Option<Floor>,
     /// Volumetric light cones (D305), additive.
     pub cones: Vec<LightCone>,
+    /// Draw on the scene's stage camera instead of `camera` (inside a 2D scene only, see
+    /// [`OnStage`]).
+    pub on_stage: Option<OnStage>,
+}
+
+/// A 3D item drawn with the 2D scene's stage camera (`vo_scene::stage`), so it lines up
+/// with turned 2D layers and shares their vanishing point. World units are logical pixels
+/// about the item's centre, y up and z toward the viewer: the plane z = 0 lands exactly
+/// where the 2D layout puts the item. The painter replaces the frame's `camera` with
+/// [`crate::Camera::stage`].
+///
+/// A turn of the item's own layer moves where its centre lands but does not turn the 3D
+/// content; turn the content in the frame instead. Note the sign: `Mat4::rotate_x(a)` with
+/// a > 0 brings the top toward the viewer, the opposite of `Element::rotate_x`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OnStage {
+    /// How far the drawing may reach past the item's box on each side, as a fraction of the
+    /// box (0.5: half its width left and right, half its height above and below). It is
+    /// still cut at the layer's clip and surface.
+    pub overscan: f32,
 }
 
 /// Most pools of light on one floor.

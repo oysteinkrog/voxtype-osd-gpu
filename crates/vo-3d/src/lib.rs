@@ -33,10 +33,10 @@ pub mod timer;
 pub use camera::{Camera, Projection};
 pub use field::TextField;
 pub use frame::{
-    Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, Orb, PointCloud, Pool,
-    MAX_POOLS,
+    Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, OnStage, Orb,
+    PointCloud, Pool, MAX_POOLS,
 };
-pub use item::{ItemPainter, ItemPlace, Source3d};
+pub use item::{ItemPainter, ItemPlace, Source3d, StageAt};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use painter::{install, item, Item3d, Painter3d};

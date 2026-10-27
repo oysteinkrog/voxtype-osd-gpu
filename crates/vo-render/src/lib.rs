@@ -31,6 +31,6 @@ pub mod shapes;
 pub mod text;
 pub mod vector;
 
-pub use gpu::{GpuPainter, PaintCx};
+pub use gpu::{GpuPainter, PaintCx, StagePx};
 pub use offscreen::Offscreen;
 pub use renderer::{Quality, Renderer, Target};

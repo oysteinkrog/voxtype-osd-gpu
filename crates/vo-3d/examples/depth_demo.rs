@@ -237,6 +237,7 @@ impl Demo {
             orbs,
             focus: Focus { distance: 4.4, range: 2.6, max_blur_px: 64.0 },
             fog: Some((5.0, 10.0)),
+            on_stage: None,
             // A glossy floor under the ring (D305) that fades up over the first half second,
             // with the ring's light pooling on it and a soft cone from above.
             floor: Some(Floor {
