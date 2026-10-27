@@ -10,6 +10,7 @@ pub mod event_log;
 pub mod hash;
 pub mod noise;
 pub mod spring;
+pub mod throttle;
 pub mod time;
 pub mod timeline;
 pub mod track;
