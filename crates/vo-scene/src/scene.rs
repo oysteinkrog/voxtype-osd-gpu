@@ -1492,7 +1492,16 @@ impl<M> Scene<M> {
                     if c.a > 0.0 {
                         let r = Rect::new(origin.x + bar.x * z, origin.y + bar.y * z, bar.w * z, bar.h * z);
                         push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
-                        out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * bar.w), Paint::solid(c)));
+                        let paint = match n.live.caret_style().and_then(|s| s.gradient) {
+                            Some(g) => Paint::linear(
+                                Point::new(r.x, r.y),
+                                c,
+                                Point::new(r.x, r.y + r.h),
+                                g.fade(alpha).fade(blink),
+                            ),
+                            None => Paint::solid(c),
+                        };
+                        out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * bar.w), paint));
                     }
                 }
                 None

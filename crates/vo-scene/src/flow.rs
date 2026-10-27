@@ -83,11 +83,14 @@ pub struct Caret {
     pub gap: f32,
     /// Bar colour; `None` uses the text colour.
     pub color: Option<Color>,
+    /// Colour at the bottom of the bar (FX-037): the bar fades from its colour at the top to
+    /// this. `None` is a plain bar.
+    pub gradient: Option<Color>,
 }
 
 impl Default for Caret {
     fn default() -> Caret {
-        Caret { width: 2.0, gap: 2.0, color: None }
+        Caret { width: 2.0, gap: 2.0, color: None, gradient: None }
     }
 }
 
@@ -880,6 +883,11 @@ impl Flow {
         let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32);
         let (x, y) = (x.value(t) as f32, y.value(t) as f32 + roll);
         Some((Rect::new(x, y - up, *w, up + down), style.color, alpha))
+    }
+
+    /// The caret's style, if there is a caret.
+    pub fn caret_style(&self) -> Option<&Caret> {
+        self.caret.as_ref().map(|(_, _, style, _)| style)
     }
 
     /// When every word, glyph, ghost and the caret's glide come to rest.
