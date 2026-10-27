@@ -13,7 +13,9 @@ wayland = ["dep:vo-host-wayland"]
 # Export to a PNG sequence or a video file through ffmpeg (plan decision 10).
 export = []
 # The preview and scrub tool: seek, a window with a timeline, live reload, contact sheets.
-preview = ["dep:serde", "dep:serde_json", "dep:toml", "dep:png", "dep:bytemuck"]
+preview = ["record", "dep:toml", "dep:png", "dep:bytemuck"]
+# Record an app's messages to a file and replay them as a scenario (`vo::record`).
+record = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 vo-core = { path = "../vo-core" }

@@ -7,6 +7,8 @@
 //!   file through ffmpeg.
 //! - [`Diagnostics`]: startup stages since exec, memory, frames and idle checks.
 //! - `preview` (feature `preview`): the preview and scrub tool.
+//! - `record` (feature `record`, part of `preview`): record an app's messages and replay them
+//!   as a scenario.
 //!
 //! An app is Elm-shaped: `update(msg, cx)` changes state, `view(&self, &Tokens)` describes it.
 //! Every message is applied at its own timestamp from the host clock, and the scene samples
@@ -21,6 +23,8 @@ mod live;
 mod offline;
 #[cfg(feature = "preview")]
 pub mod preview;
+#[cfg(feature = "record")]
+pub mod record;
 mod surfaces;
 
 pub use app::{channel, App, Cx, Inbox, Proxy, TimerId, Tokens};
