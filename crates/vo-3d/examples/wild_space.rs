@@ -184,6 +184,7 @@ fn sculpt_events(fonts: &FontRegistry, s: &Sculpture, until: f64) {
                 size: 44.0,
                 key: i as u64,
                 depth: 30.0 * LOUD[word_of(g.cluster as usize)],
+                run: 0,
             })
             .collect();
         s.set(t, &letters, None);
@@ -236,6 +237,9 @@ fn gpu() -> (wgpu::Device, wgpu::Queue) {
     .expect("a GPU device")
 }
 
+/// A study's display list at a time.
+type Frames<'a> = Box<dyn Fn(f64) -> DisplayList + 'a>;
+
 fn bench(fonts: FontRegistry) {
     let (device, queue) = gpu();
     let period = queue.get_timestamp_period() as f64;
@@ -249,7 +253,7 @@ fn bench(fonts: FontRegistry) {
     let target = Target::new(&device, W, H, FORMAT);
     let sculpt = sculpture(&fonts);
     sculpt_events(&fonts, &sculpt, 10.0);
-    let lists: [(&str, Box<dyn Fn(f64) -> DisplayList>); 3] = [
+    let lists: [(&str, Frames); 3] = [
         ("depth stack", Box::new(|t| stack_frame(&fonts, 1.0 + t, false))),
         ("lattice", Box::new(|t| lattice_frame(&fonts, 1.5 + t, false))),
         ("sculpture", Box::new(|t| sculpt_view(&fonts, &sculpt, 0.5 + t))),

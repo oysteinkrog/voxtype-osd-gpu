@@ -238,7 +238,7 @@ impl LatticeLook {
                 let y = a.baseline + self.drop + self.stem + 1.0;
                 root = root.child(
                     Element::label(format!("{}-t{i}", key.0), text)
-                        .text_style(style.clone())
+                        .text_style(*style)
                         .color(self.label_color)
                         .layout(absolute(a.x - 2.0, y)),
                 );

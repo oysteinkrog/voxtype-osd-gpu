@@ -89,6 +89,10 @@ pub struct Letter {
     pub key: u64,
     /// The depth this letter should reach, in logical pixels.
     pub depth: f32,
+    /// The run of text the letter moves with, such as its line. A new letter in a run that
+    /// is still moving starts as far from its place as the run's other letters, so it
+    /// arrives with them.
+    pub run: u64,
 }
 
 struct Body {
@@ -155,12 +159,28 @@ impl Sculpture {
         let channel =
             |v: f32, spring: Spring| Channel::new(t, v as f64, spring).with_rest(Rest::PIXELS).with_retention(4.0);
         let mut until = s.until;
+        // How far each run still has to go, from a letter of it seen before.
+        let mut lag: HashMap<u64, (f64, f64)> = HashMap::new();
         for l in letters {
-            let mut body = old.remove(&l.key).unwrap_or_else(|| Body {
-                letter: *l,
-                depth: channel(0.0, spring),
-                x: channel(l.pos.x, moves.unwrap_or(spring)),
-                y: channel(l.pos.y, moves.unwrap_or(spring)),
+            if let Some(b) = old.get(&l.key) {
+                let off = (b.x.value(t) - l.pos.x as f64, b.y.value(t) - l.pos.y as f64);
+                lag.entry(l.run).or_insert(off);
+            }
+        }
+        for l in letters {
+            let mut body = old.remove(&l.key).unwrap_or_else(|| {
+                let m = moves.unwrap_or(spring);
+                let (dx, dy) = lag.get(&l.run).copied().filter(|_| moves.is_some()).unwrap_or((0.0, 0.0));
+                let mut x = channel(l.pos.x, m);
+                let mut y = channel(l.pos.y, m);
+                // Start where the run is now and move in with it.
+                if dx != 0.0 || dy != 0.0 {
+                    x.snap(t, l.pos.x as f64 + dx);
+                    x.retarget(t, l.pos.x as f64);
+                    y.snap(t, l.pos.y as f64 + dy);
+                    y.retarget(t, l.pos.y as f64);
+                }
+                Body { letter: *l, depth: channel(0.0, spring), x, y }
             });
             if (body.depth.target() - l.depth as f64).abs() > 1e-3 {
                 body.depth.retarget(t, l.depth as f64);
@@ -271,7 +291,7 @@ mod tests {
     }
 
     fn letter(font: FontId, glyph: u32, key: u64, depth: f32) -> Letter {
-        Letter { glyph, font, pos: Point::new(10.0 * key as f32, 30.0), size: 24.0, key, depth }
+        Letter { glyph, font, pos: Point::new(10.0 * key as f32, 30.0), size: 24.0, key, depth, run: 0 }
     }
 
     #[test]
@@ -300,6 +320,25 @@ mod tests {
         assert!((y(1.0) - 0.0).abs() < 1e-3);
         assert!(y(1.1) > 1.0 && y(1.1) < 53.0, "moving: {}", y(1.1));
         assert!((y(2.0) - 54.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn a_new_letter_in_a_moving_run_starts_with_the_run() {
+        let (s, font, a) = sculpture();
+        let roll = Spring::critical_to_98(0.3);
+        s.set(0.0, &[letter(font, a, 1, 16.0)], Some(roll));
+        // The run moves 40 px left at 1 s and a new letter joins it.
+        let mut moved = letter(font, a, 1, 16.0);
+        moved.pos.x -= 40.0;
+        let mut new = letter(font, a, 2, 16.0);
+        new.pos.x -= 40.0;
+        s.set(1.0, &[moved, new], Some(roll));
+        let size = Size::new(200.0, 60.0);
+        let xs = |t: f64| -> Vec<f32> {
+            s.frame_at(t, size).meshes.iter().map(|m| m.model.transform_point(Vec3::new(0.0, 0.0, 0.5))[0]).collect()
+        };
+        let at = xs(1.1);
+        assert!((at[1] - at[0] - 10.0).abs() < 0.01, "the new letter keeps its place in the run: {at:?}");
     }
 
     #[test]
