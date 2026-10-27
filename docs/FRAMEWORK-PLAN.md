@@ -263,8 +263,20 @@ after M3, the macOS host, which has since been dropped.
 - **Demos.** `glow_demo` (glow, bloom, shadow), `comet_demo` (trail, motion blur, rim, sheen),
   `ticker_demo` (edge fades, digit roll) and `textfx_demo` (text effects) each write an mp4 and a
   contact sheet, and `--check` renders twice and compares all 360 frame hashes.
-- **Not done.** The CPU first frame skips glows, shadows, bloom and text effects; it draws conic, sheen
-  and edge-fade paints. Glow, shadow and bloom there, then the style pack (FX13), are next.
+- **Layer styles (FX13).** `chromatic`, `glitch`, `scanlines`, `crt`, `vignette` and `flicker` on a
+  layer element make it offscreen and composite it through one style pass laid out on the layer's
+  box: curvature, glitch slices and colour fringes move where the texture is read, and scanlines,
+  vignette and flicker scale its colour (not its alpha, so they show over a clear desktop). Glitch
+  slices change 15 times a second; flicker takes a seeded level 6 times a second, so it flashes at
+  most three times a second and dims by at most 0.2. Reduced motion turns both off and keeps the
+  still looks. A layer with bloom or a mask composites without its style.
+- **CPU first frame.** Glows and drop shadows run the shape shader's halo maths per pixel. A bloom
+  layer is drawn alone and its blur added through a Rust copy of the GPU pyramid at the same levels,
+  and an effect-path frame gets the same tone map. A test keeps the glow, shadow and bloom scenes
+  within 10 levels of the GPU. Still not drawn there: text effects, masks (an alpha-masked layer is
+  hidden), layer styles and light mode's dark bloom.
+- **Not done.** Masks and styles on the same layer as bloom; the particle and glass shaders' own
+  hashes moving to the noise library.
 ## Crates
 
 | Crate | Contents |
