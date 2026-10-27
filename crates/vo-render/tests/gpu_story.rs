@@ -302,3 +302,64 @@ fn reveal_golden() {
     let img = sheet("story-reveal", 200.0, 110.0, rows);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+#[test]
+fn erase_golden() {
+    use vo_scene::display::GlyphInstance;
+    use vo_scene::erase::Erase;
+    use vo_scene::font::FontRegistry;
+    use vo_scene::text::{ShapedLayout, TextLayout};
+    use vo_scene::TextStyle;
+    let fonts = FontRegistry::new();
+    fonts.add_file(std::path::Path::new(FONT)).unwrap();
+    let layout = ShapedLayout::new(fonts.clone());
+    let text = "send the draft to the team before noon";
+    let style = TextStyle::new(0, 15.0, 20.0);
+    let shaped = layout.layout(text, &style, Some(190.0));
+    // Words from the glyph clusters: a new word starts after a space.
+    let mut words: Vec<(Rect, Vec<usize>)> = Vec::new();
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices(' ').map(|(i, _)| i + 1)).collect();
+    for (gi, g) in shaped.glyphs.iter().enumerate() {
+        let w = starts.iter().rposition(|&s| s as u32 <= g.cluster).unwrap();
+        if text.as_bytes()[g.cluster as usize] == b' ' {
+            continue;
+        }
+        while words.len() <= w {
+            words.push((Rect::new(g.pos.x, g.pos.y - 15.0, 0.0, 20.0), Vec::new()));
+        }
+        let r = &mut words[w].0;
+        r.w = g.pos.x + g.advance - r.x;
+        words[w].1.push(gi);
+    }
+    let glyphs = Arc::new(shaped.glyphs);
+    let words = Arc::new(words);
+    let frames: Vec<Frame> = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.42, 0.55]
+        .iter()
+        .map(|&t| {
+            let (glyphs, words) = (glyphs.clone(), words.clone());
+            Arc::new(move |r: Rect, p: &mut Painter| {
+                let (ox, oy) = (r.x + 10.0, r.y + 22.0);
+                let boxes = words.iter().map(|(b, _)| Rect::new(b.x + ox, b.y + oy, b.w, b.h)).collect();
+                let e = Erase { start: 0.0, words: boxes, ..Erase::default() };
+                for (i, (_, gs)) in words.iter().enumerate() {
+                    let s = e.word(i, t);
+                    for &gi in gs {
+                        let g = glyphs[gi];
+                        p.glyph(GlyphInstance {
+                            pos: Point::new(g.pos.x + ox, g.pos.y + oy + s.dy),
+                            size: 15.0,
+                            font: 0,
+                            glyph: g.glyph,
+                            word: i as u32,
+                            color: Color::hex(0xe5e7eb, s.opacity),
+                        });
+                    }
+                }
+                e.paint_strike(t, p);
+            }) as Frame
+        })
+        .collect();
+    let rows = vec![frames[..5].to_vec(), frames[5..].to_vec()];
+    let img = sheet_with("story-erase", 210.0, 70.0, rows, Some(fonts));
+    support::check(&img, Tolerance::default()).unwrap();
+}

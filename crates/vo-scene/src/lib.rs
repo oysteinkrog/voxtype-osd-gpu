@@ -27,6 +27,7 @@
 //! - `container`: a dot, pill or card container whose size and radius spring, content clipped.
 //! - `meters`: a progress hairline that never moves backwards, and a dismiss countdown ring.
 //! - `reveal`: a frame that draws on from its corners, hairlines and brackets, then content.
+//! - `erase`: cancel erase, a strike through the text and the words leaving last first.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -59,6 +60,7 @@ pub mod dots;
 pub mod element;
 pub mod emitter;
 pub mod emitter_signals;
+pub mod erase;
 pub mod flow;
 pub mod font;
 pub mod frame;
