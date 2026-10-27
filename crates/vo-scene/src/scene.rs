@@ -1726,6 +1726,7 @@ impl<M> Scene<M> {
             radius: 0.5 * c.size * pitch,
             snap: c.snap.clamp(0.0, 1.0),
             color: c.color.fade(alpha),
+            ring: c.ring.max(0.0) * c.size * pitch,
         }));
         for i in start..out.dots.len() {
             push_item(items, ItemKind::Dots, i as u32);

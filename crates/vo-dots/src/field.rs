@@ -329,7 +329,7 @@ impl DotField {
             if a <= 0.0 || l.size <= 0.0 {
                 continue;
             }
-            out.push(Dot { x: l.x, y: l.y, size: l.size, color: Color { a, ..l.color }, snap });
+            out.push(Dot { x: l.x, y: l.y, size: l.size, color: Color { a, ..l.color }, snap, ring: 0.0 });
         }
     }
 }

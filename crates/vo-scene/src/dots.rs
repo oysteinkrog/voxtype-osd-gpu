@@ -29,6 +29,9 @@ pub struct Dot {
     pub color: Color,
     /// 0 for a dot in flight, 1 for one at rest that should sit on whole pixels.
     pub snap: f32,
+    /// Hollow dot (FX-011): ring width as a fraction of the diameter. 0 is a filled dot, and
+    /// so is 0.5 or more; spring it up to fill a ring in.
+    pub ring: f32,
 }
 
 /// What a dot element draws.
@@ -82,7 +85,7 @@ mod tests {
 
     impl DotSource for Still {
         fn dots(&self, _: f64, out: &mut Vec<Dot>) {
-            out.push(Dot { x: 0.0, y: 0.0, size: 0.5, color: Color::WHITE, snap: 1.0 });
+            out.push(Dot { x: 0.0, y: 0.0, size: 0.5, color: Color::WHITE, snap: 1.0, ring: 0.0 });
         }
 
         fn moving(&self, _: f64) -> bool {

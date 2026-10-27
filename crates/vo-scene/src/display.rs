@@ -529,6 +529,8 @@ pub struct DotInstance {
     /// 1, when the layer maps axes to axes. 1 for dots at rest, 0 for dots in flight.
     pub snap: f32,
     pub color: Color,
+    /// Ring width in layer units; 0 (or the radius or more) draws a filled dot.
+    pub ring: f32,
 }
 
 /// Particle emitters (`crate::emitter`).

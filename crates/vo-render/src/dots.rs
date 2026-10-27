@@ -23,11 +23,14 @@ pub struct GpuDot {
     pub radius: f32,
     /// Straight-alpha sRGB, red in the low byte.
     pub color: u32,
+    /// Ring width in layer units; 0 is a filled dot.
+    pub ring: f32,
 }
 
 impl GpuDot {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Uint32];
+        const ATTRS: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Uint32, 3 => Float32];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuDot>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -45,7 +48,8 @@ impl GpuDot {
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
         let color = byte(d.color.r) | byte(d.color.g) << 8 | byte(d.color.b) << 16 | byte(a) << 24;
         let centre = snap(d.centre, d.radius, d.snap, to_px, ppu);
-        Some(GpuDot { centre: [centre.x, centre.y], radius: d.radius, color })
+        let ring = if d.ring < d.radius { d.ring } else { 0.0 };
+        Some(GpuDot { centre: [centre.x, centre.y], radius: d.radius, color, ring })
     }
 }
 
@@ -72,7 +76,7 @@ mod tests {
     use vo_scene::geom::Color;
 
     fn dot(x: f32, y: f32, r: f32, snap: f32) -> DotInstance {
-        DotInstance { centre: Point::new(x, y), radius: r, snap, color: Color::WHITE }
+        DotInstance { centre: Point::new(x, y), radius: r, snap, color: Color::WHITE, ring: 0.0 }
     }
 
     #[test]
@@ -105,6 +109,17 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_as_wide_as_the_radius_is_a_filled_dot() {
+        let ring = |w: f32| {
+            let d = DotInstance { ring: w, ..dot(0.0, 0.0, 2.0, 0.0) };
+            GpuDot::new(&d, &Affine::IDENTITY, 1.0, 1.0).unwrap().ring
+        };
+        assert_eq!(ring(0.5), 0.5);
+        assert_eq!(ring(2.0), 0.0);
+        assert_eq!(ring(0.0), 0.0);
+    }
+
+    #[test]
     fn colour_is_packed_with_opacity() {
         let d = DotInstance { color: Color::rgba(1.0, 0.0, 0.5, 0.8), ..dot(0.0, 0.0, 1.0, 0.0) };
         let g = GpuDot::new(&d, &Affine::IDENTITY, 1.0, 0.5).unwrap();
@@ -113,6 +128,6 @@ mod tests {
         assert_eq!(g.color >> 16 & 0xff, 128);
         assert_eq!(g.color >> 24, 102);
         assert_eq!(GpuDot::new(&d, &Affine::IDENTITY, 1.0, 0.0), None);
-        assert_eq!(std::mem::size_of::<GpuDot>(), 16);
+        assert_eq!(std::mem::size_of::<GpuDot>(), 20);
     }
 }

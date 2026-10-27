@@ -75,6 +75,7 @@ impl DotSource for MelField {
                     size: self.size.0 + (self.size.1 - self.size.0) * e,
                     color,
                     snap: 1.0,
+                    ring: 0.0,
                 });
             }
         }

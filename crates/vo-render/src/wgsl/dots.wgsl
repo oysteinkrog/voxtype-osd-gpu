@@ -7,6 +7,8 @@ struct DotIn {
   @location(1) radius: f32,
   // Straight-alpha sRGB bytes, red in the low byte.
   @location(2) color: u32,
+  // Ring width in layer units; 0 draws a filled dot.
+  @location(3) ring: f32,
 };
 
 struct DotOut {
@@ -15,6 +17,7 @@ struct DotOut {
   @location(0) d: vec2f,
   @location(1) @interpolate(flat) radius_px: f32,
   @location(2) @interpolate(flat) color: vec4f,
+  @location(3) @interpolate(flat) ring_px: f32,
 };
 
 fn srgb_to_linear (c: vec3f) -> vec3f {
@@ -34,6 +37,7 @@ fn srgb_to_linear (c: vec3f) -> vec3f {
   o.clip = px_to_ndc (layer_to_px (p));
   o.d = c * m * ppu;
   o.radius_px = radius_px;
+  o.ring_px = s.ring * ppu;
   let raw = unpack4x8unorm (s.color);
   o.color = vec4f (srgb_to_linear (raw.rgb) * raw.a, raw.a);
   return o;
@@ -44,6 +48,12 @@ fn srgb_to_linear (c: vec3f) -> vec3f {
   let seen = warp_scale (frag_target (in.clip.xy));
   let r = max (in.radius_px * seen, 0.5);
   let area = min (in.radius_px * seen * in.radius_px * seen / (r * r), 1.0);
-  let cov = clamp (r + 0.5 - length (in.d) * seen, 0.0, 1.0) * area;
+  var cov = clamp (r + 0.5 - length (in.d) * seen, 0.0, 1.0) * area;
+  // A hollow dot (FX-011) also fades out inside its ring; the ring is at least a pixel wide
+  // so it never breaks up.
+  if (in.ring_px > 0.0) {
+    let inner = r - max (in.ring_px * seen, 1.0);
+    cov *= clamp (length (in.d) * seen - inner + 0.5, 0.0, 1.0);
+  }
   return finish (in.color * cov * clip_coverage (in.clip.xy));
 }

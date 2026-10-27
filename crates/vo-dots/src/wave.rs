@@ -195,13 +195,14 @@ impl DotSource for DotWave {
                 size: (self.rest_size + (self.size - self.rest_size) * lit) * open,
                 color: mix(self.rest_color, color, lit),
                 snap: 1.0,
+                ring: 0.0,
             });
             for k in 1..=self.rows / 2 {
                 let b = (h - k as f32 + 1.0).clamp(0.0, 1.0);
                 if b <= 0.0 {
                     break;
                 }
-                let dot = Dot { x, y: centre - k as f32, size: self.size, color: color.fade(b), snap: 1.0 };
+                let dot = Dot { x, y: centre - k as f32, size: self.size, color: color.fade(b), snap: 1.0, ring: 0.0 };
                 out.push(dot);
                 out.push(Dot { y: centre + k as f32, ..dot });
             }
@@ -293,7 +294,7 @@ impl DotSource for DotMeter {
             let lit = (level - i as f32).clamp(0.0, 1.0).max(if i as i64 == peak { 1.0 } else { 0.0 });
             let on = ramp(&self.stops, i as f32 / (self.len.max(2) - 1) as f32);
             let (x, y) = if self.vertical { (0.0, (self.len - 1 - i) as f32) } else { (i as f32, 0.0) };
-            out.push(Dot { x, y, size: self.size, color: mix(self.unlit, on, lit), snap: 1.0 });
+            out.push(Dot { x, y, size: self.size, color: mix(self.unlit, on, lit), snap: 1.0, ring: 0.0 });
         }
     }
 
@@ -365,7 +366,14 @@ impl DotSource for DotTicker {
         if self.ghost.a > 0.0 {
             for y in 0..rows {
                 for x in 0..self.cols as i32 {
-                    out.push(Dot { x: x as f32, y: y as f32, size: self.size * 0.8, color: self.ghost, snap: 1.0 });
+                    out.push(Dot {
+                        x: x as f32,
+                        y: y as f32,
+                        size: self.size * 0.8,
+                        color: self.ghost,
+                        snap: 1.0,
+                        ring: 0.0,
+                    });
                 }
             }
         }
@@ -380,6 +388,7 @@ impl DotSource for DotTicker {
                 size: self.size,
                 color: self.color,
                 snap: if self.smooth { 0.0 } else { 1.0 },
+                ring: 0.0,
             });
         }
     }
