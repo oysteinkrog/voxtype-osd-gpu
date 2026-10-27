@@ -48,9 +48,6 @@ use crate::text::ShapedText;
 #[path = "motion/letter_physics.rs"]
 pub mod letter_physics;
 
-#[path = "motion/magnet.rs"]
-pub mod magnet;
-
 /// Words that stay on their line move to their new place in about 200 ms.
 pub const FLIP: Spring = Spring::critical_to_98(0.200);
 /// A word that changes line glides there in about 220 ms.
@@ -238,8 +235,6 @@ pub struct LiveMotion {
     pub reading: Option<Reading>,
     /// New letters drop into the line as small rigid bodies (MO-83).
     pub letters: Option<letter_physics::LetterPhysics>,
-    /// The caret as a magnet that pulls new words in, with its field drawn (MO-89).
-    pub magnet: Option<magnet::Magnet>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
     /// A mark beside the newest line that splits when the text wraps (MO-32).
@@ -627,7 +622,6 @@ impl Flow {
         self.line_height = line_height;
         self.accent = motion.settle.and_then(|s| s.accent);
         self.letters = if reduced { None } else { motion.letters };
-        (self.magnet, self.magnet_still) = (motion.magnet, reduced);
         let mut old = std::mem::take(&mut self.words);
         let scroll = front_scroll(&old, words, &placed);
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
@@ -1131,7 +1125,6 @@ impl Flow {
         if let Some(l) = self.letter(w, *gi as usize, t) {
             (dx, dy) = (dx + l.dx, dy + l.dy);
         }
-        dx += self.magnet_snap(w, t);
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
@@ -1274,7 +1267,7 @@ impl Flow {
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
         let leaving = self.leaving.iter().map(|l| l.done_at()).fold(self.margin_settled_at(), f64::max);
-        let leaving = leaving.max(self.letters_settled_at()).max(self.magnet_settled_at());
+        let leaving = leaving.max(self.letters_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
     }
 
@@ -1338,9 +1331,6 @@ pub(crate) struct Flow {
     accent: Option<Color>,
     /// Letter physics, off under reduced motion.
     letters: Option<letter_physics::LetterPhysics>,
-    /// The magnetic caret, and whether it is still (reduced motion).
-    magnet: Option<magnet::Magnet>,
-    magnet_still: bool,
 }
 
 /// What the reading stage asks of every word for one layout.

@@ -222,7 +222,7 @@ impl GlyphMorph {
                     p.stroke(&q.contour, &s);
                 }
             }
-            if ink > 0.0 && style.fill.a > 0.0 {
+            if ink > 0.0 {
                 p.glyph(g.instance(style.fill.fade(ink)));
             }
         }
