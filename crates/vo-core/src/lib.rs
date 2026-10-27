@@ -6,6 +6,7 @@
 //! Word model (phase 0): `words`. Noise (FX10): `noise`, the Rust side of the shaders' noise.
 //! Signal bus (SIG01): `signals`, audio features as a timestamped input.
 
+pub mod ambient;
 pub mod channel;
 pub mod event_log;
 pub mod hash;

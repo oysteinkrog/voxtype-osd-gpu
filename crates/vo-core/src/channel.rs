@@ -121,6 +121,13 @@ impl Channel {
         self.start_segment(t, x + by, v, target);
     }
 
+    /// From `t`, starts at `value` with `velocity` and moves toward `target`. For a hand-off
+    /// from motion the channel does not hold itself, such as an ambient loop that stops and
+    /// must carry on from where it was drawn.
+    pub fn restart(&mut self, t: f64, value: f64, velocity: f64, target: f64) {
+        self.start_segment(t, value, velocity, target);
+    }
+
     fn start_segment(&mut self, t: f64, x0: f64, v0: f64, target: f64) {
         let i = self.index(t);
         let keep = if t < self.segments[0].t0 || self.segments[i].t0 == t { i } else { i + 1 };
