@@ -105,7 +105,27 @@ pub enum Revise {
     Crossfade,
     /// Only the glyphs that changed move: a grapheme diff of the old and new word.
     Glyphs,
+    /// The old word rolls up and fades while the new one rolls in from below into the same
+    /// slot, in about 220 ms (FX-065).
+    Roll,
+    /// The old word shrinks and floats above its replacement at 35% opacity, and its line
+    /// opens to make room, for `GHOST_HOLD` before both fade back (FX-064). The opening
+    /// pushes the lines below down: leave room under the text for it.
+    Ghost,
 }
+
+/// A rolled word's travel and fade take about 220 ms.
+pub const WORD_ROLL: Spring = Spring::critical_to_98(0.220);
+/// How far a rolled word travels, in ems.
+pub const ROLL_WORD_EMS: f32 = 0.6;
+/// A displaced ghost: its size, opacity, lift above the baseline in ems, how far its line
+/// opens in ems, how long it stays, and the spring it moves on.
+pub const GHOST_SCALE: f32 = 0.62;
+pub const GHOST_ALPHA: f32 = 0.35;
+pub const GHOST_LIFT_EMS: f32 = 0.95;
+pub const GHOST_OPEN_EMS: f32 = 0.55;
+pub const GHOST_HOLD: f64 = 1.6;
+pub const GHOST_MOVE: Spring = Spring::critical_to_98(0.260);
 
 /// How `Revise::Glyphs` shows a letter whose case changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -261,6 +281,8 @@ struct Ghost {
     opacity: Channel,
     rise: Channel,
     scale: Channel,
+    /// Extra travel along the line, for a displaced ghost that centres over its word.
+    slide: Channel,
 }
 
 /// One glyph as the new layout placed it.
@@ -563,11 +585,14 @@ impl Flow {
                 arrived = true;
                 let diffed = revise == Revise::Glyphs && self.revise_glyphs(&mut o, w, &p, &graphemes, &make, motion);
                 if !diffed {
-                    if revise == Revise::Swap {
-                        o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
-                        o.spread = false;
-                    } else {
-                        self.crossfade(&mut o, &p, &graphemes, &make);
+                    match revise {
+                        Revise::Swap => {
+                            o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
+                            o.spread = false;
+                        }
+                        Revise::Roll => self.roll(&mut o, &p, &graphemes, &make, reduced),
+                        Revise::Ghost => self.displace(&mut o, &p, &graphemes, &make, reduced),
+                        Revise::Crossfade | Revise::Glyphs => self.crossfade(&mut o, &p, &graphemes, &make),
                     }
                 }
                 o.text = w.text.clone();
@@ -615,6 +640,110 @@ impl Flow {
         self.update_caret(t, motion.caret, size, line_height, retention, reduced);
     }
 
+    /// FX-065: the old glyphs roll up and fade, the new ones roll in from below and fade in,
+    /// and both spread with the word's width. Under reduced motion only the fades stay.
+    fn roll(&mut self, o: &mut FlowWord, p: &PlacedWord, graphemes: &[u32], make: &Make, reduced: bool) {
+        let t = make.t;
+        let travel = if reduced { 0.0 } else { ROLL_WORD_EMS * make.size };
+        let (s, width) = (stretch(o, t), o.width.value(t) as f32);
+        for g in &o.glyphs {
+            let k = g.opacity.value(t) as f32;
+            if k > 0.0 {
+                self.ghosts.push(Ghost {
+                    glyph: g.glyph,
+                    font: g.font,
+                    word: o.id,
+                    advance: g.advance,
+                    fixed: None,
+                    x: g.x.value(t) as f32 * s,
+                    y: g.y,
+                    width,
+                    opacity: make.to(k, 0.0, WORD_ROLL, Rest::UNIT),
+                    rise: make.to(g.rise.value(t) as f32, g.rise.value(t) as f32 - travel, WORD_ROLL, Rest::PIXELS),
+                    scale: make.ch(g.scale.value(t) as f32, GLYPH_POP, Rest::UNIT),
+                    slide: make.ch(0.0, WORD_ROLL, Rest::PIXELS),
+                });
+            }
+        }
+        o.glyphs = p
+            .glyphs
+            .iter()
+            .zip(graphemes)
+            .map(|(g, &gr)| FlowGlyph {
+                opacity: make.to(0.0, 1.0, WORD_ROLL, Rest::UNIT),
+                rise: make.to(travel, 0.0, WORD_ROLL, Rest::PIXELS),
+                ..make.rest(g, gr)
+            })
+            .collect();
+        o.spread = true;
+    }
+
+    /// FX-064: the old word shrinks to `GHOST_SCALE` and floats `GHOST_LIFT_EMS` above the
+    /// new one, centred over it, at `GHOST_ALPHA`; the new word fades in where it is, and the
+    /// line opens by `GHOST_OPEN_EMS`. After `GHOST_HOLD` the ghost fades and the line closes.
+    fn displace(&mut self, o: &mut FlowWord, p: &PlacedWord, graphemes: &[u32], make: &Make, reduced: bool) {
+        let t = make.t;
+        let s = stretch(o, t);
+        let old_width = o.width.value(t) as f32;
+        // The shrunk old word's left edge, from the new word's pen position.
+        let left = 0.5 * (p.width - old_width * GHOST_SCALE);
+        let lift = -GHOST_LIFT_EMS * make.size;
+        for g in &o.glyphs {
+            let k = g.opacity.value(t) as f32;
+            if k <= 0.0 {
+                continue;
+            }
+            let x = g.x.value(t) as f32 * s;
+            // Where the glyph's pen goes, less what the scale's own centring adds.
+            let to = left + x * GHOST_SCALE - x - 0.5 * g.advance * (1.0 - GHOST_SCALE);
+            let mut opacity = make.to(k, GHOST_ALPHA * k, GHOST_MOVE, Rest::UNIT);
+            opacity.retarget(t + GHOST_HOLD, 0.0);
+            let rise0 = g.rise.value(t) as f32;
+            let move_ = |from: f32, to: f32, rest| {
+                if reduced {
+                    make.ch(to, GHOST_MOVE, rest)
+                } else {
+                    make.to(from, to, GHOST_MOVE, rest)
+                }
+            };
+            self.ghosts.push(Ghost {
+                glyph: g.glyph,
+                font: g.font,
+                word: o.id,
+                advance: g.advance,
+                fixed: None,
+                x,
+                y: g.y,
+                width: 0.0,
+                opacity,
+                rise: move_(rise0, lift, Rest::PIXELS),
+                scale: move_(g.scale.value(t) as f32, GHOST_SCALE, Rest::UNIT),
+                slide: move_(0.0, to, Rest::PIXELS),
+            });
+        }
+        o.glyphs = p
+            .glyphs
+            .iter()
+            .zip(graphemes)
+            .map(|(g, &gr)| FlowGlyph { opacity: make.to(0.0, 1.0, CROSSFADE, Rest::UNIT), ..make.rest(g, gr) })
+            .collect();
+        o.spread = false;
+        let open = GHOST_OPEN_EMS * make.size;
+        let mut ch = if reduced {
+            make.ch(open, GHOST_MOVE, Rest::PIXELS)
+        } else {
+            make.to(0.0, open, GHOST_MOVE, Rest::PIXELS)
+        };
+        ch.retarget(t + GHOST_HOLD, 0.0);
+        self.open.retain(|(_, c)| c.target() > 0.0 || c.settled_at() > t);
+        self.open.push((p.line, ch));
+    }
+
+    /// How far the lines open above line `line` at `t`, from displaced ghosts on it or above.
+    fn opened(&self, line: u32, t: f64) -> f32 {
+        self.open.iter().filter(|(l, _)| *l <= line).map(|(_, c)| c.value(t).max(0.0) as f32).sum()
+    }
+
     /// Old glyphs fade out where they are; new ones fade in at their places, and both spread
     /// with the word's width.
     fn crossfade(&mut self, o: &mut FlowWord, p: &PlacedWord, graphemes: &[u32], make: &Make) {
@@ -635,6 +764,7 @@ impl Flow {
                     opacity: make.to(k, 0.0, CROSSFADE, Rest::UNIT),
                     rise: make.ch(g.rise.value(t) as f32, GLYPH_ROLL, Rest::PIXELS),
                     scale: make.ch(g.scale.value(t) as f32, GLYPH_POP, Rest::UNIT),
+                    slide: make.ch(0.0, GLYPH_ROLL, Rest::PIXELS),
                 });
             }
         }
@@ -687,6 +817,7 @@ impl Flow {
                 opacity: make.to(k, 0.0, spring, Rest::UNIT),
                 rise: make.to(g.rise.value(t) as f32, to.0 * size, spring, Rest::PIXELS),
                 scale: make.to(g.scale.value(t) as f32, to.1, spring, Rest::UNIT),
+                slide: make.ch(0.0, spring, Rest::PIXELS),
             });
         };
         let mut glyphs = Vec::with_capacity(p.glyphs.len());
@@ -765,6 +896,7 @@ impl Flow {
                     opacity,
                     rise: ch(g.rise.value(t), GLYPH_ROLL, Rest::PIXELS),
                     scale: ch(g.scale.value(t), GLYPH_POP, Rest::UNIT),
+                    slide: ch(0.0, GLYPH_ROLL, Rest::PIXELS),
                 });
             }
         }
@@ -814,7 +946,7 @@ impl Flow {
         let track = w.track.value(t) as f32 * self.size * (*gi as f32 - middle);
         let centre = 0.5 * g.advance * (1.0 - scale);
         let dx = off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + centre + track;
-        let dy = off(&w.y) + g.rise.value(t) as f32;
+        let dy = off(&w.y) + g.rise.value(t) as f32 + self.opened(w.line, t);
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
@@ -859,11 +991,13 @@ impl Flow {
                 None => {
                     let w = self.words.iter().find(|w| w.id == g.word)?;
                     let k = if g.width > 0.0 { w.width.value(t) as f32 / g.width } else { 1.0 };
-                    (w.x.value(t) as f32, w.y.value(t) as f32 + w.roll.value(t) as f32, g.x * k)
+                    let y = w.y.value(t) as f32 + w.roll.value(t) as f32 + self.opened(w.line, t);
+                    (w.x.value(t) as f32, y, g.x * k)
                 }
             };
             let scale = g.scale.value(t).max(0.0) as f32;
-            let pos = Point::new(x + gx + 0.5 * g.advance * (1.0 - scale), y + g.y + g.rise.value(t) as f32);
+            let x = x + gx + g.slide.value(t) as f32 + 0.5 * g.advance * (1.0 - scale);
+            let pos = Point::new(x, y + g.y + g.rise.value(t) as f32);
             Some(GhostGlyph { word: g.word, glyph: g.glyph, font: g.font, pos, opacity, scale })
         })
     }
@@ -872,7 +1006,7 @@ impl Flow {
     /// what decorations and the caret follow.
     pub fn word_bounds(&self, id: WordId, t: f64, size: f32) -> Option<Rect> {
         let w = self.words.iter().find(|w| w.id == id)?;
-        let (x, y) = (w.x.value(t) as f32, w.y.value(t) as f32 + w.roll.value(t) as f32);
+        let (x, y) = (w.x.value(t) as f32, w.y.value(t) as f32 + w.roll.value(t) as f32 + self.opened(w.line, t));
         Some(Rect::new(x, y - 0.78 * size, w.width.value(t).max(0.0) as f32, size))
     }
 
@@ -880,7 +1014,7 @@ impl Flow {
     pub fn caret(&self, t: f64) -> Option<(Rect, Option<Color>, f32)> {
         let (x, y, style, [w, up, down]) = self.caret.as_ref()?;
         let alpha = caret_alpha(t - self.arrived);
-        let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32);
+        let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32 + self.opened(w.line, t));
         let (x, y) = (x.value(t) as f32, y.value(t) as f32 + roll);
         Some((Rect::new(x, y - up, *w, up + down), style.color, alpha))
     }
@@ -897,7 +1031,8 @@ impl Flow {
                 .into_iter()
                 .chain(w.glyphs.iter().flat_map(|g| [&g.x, &g.opacity, &g.rise, &g.scale]))
         });
-        let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale]);
+        let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale, &g.slide]);
+        let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(f64::NEG_INFINITY, f64::max)
     }
@@ -946,6 +1081,8 @@ pub(crate) struct Flow {
     /// The reading stage's scale origin along a line, and whether there is a stage.
     origin: f32,
     staged: bool,
+    /// Lines opened for displaced ghosts: the line and how far it opens.
+    open: Vec<(u32, Channel)>,
 }
 
 /// What the reading stage asks of every word for one layout.
