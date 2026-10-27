@@ -714,6 +714,7 @@ impl<M> Scene<M> {
                         Kind::Gpu(g) => t < g.0.until(),
                         Kind::StrokePath(a) => a.head.is_some(),
                         Kind::Frame(f) => f.moving(),
+                        Kind::Spectrum(s) => s.moving(self.signals.as_ref(), t),
                         _ => false,
                     })
         });
@@ -1627,6 +1628,10 @@ impl<M> Scene<M> {
             }
             Kind::Repeat(r) => {
                 crate::repeat::draw(r, n, t, origin, size, alpha, items, out);
+                None
+            }
+            Kind::Spectrum(s) => {
+                crate::spectrum::draw(s, self.signals.as_ref(), t, origin, size, alpha, items, out);
                 None
             }
             Kind::Frame(f) => {

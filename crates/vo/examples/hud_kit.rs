@@ -7,6 +7,9 @@
 //! - **along_path**: ticks and chevrons along an S-curve, the chevrons turned along it.
 //! - **frame**: cut panels: a cyberpunk panel whose outline draws on over marching stripes,
 //!   and a mecha plate with notched corners, tabs and cut-out windows.
+//! - **spectrum_ring**: a radial spectrum fed by the signal bus's mel bands, here from a
+//!   recorded synthetic voice: a mirrored full ring with glow and a half ring growing both
+//!   ways.
 //!
 //! `cargo run -p vo --example hud_kit -- [--out DIR] [--bench]` writes `contact-sheet.png`
 //! (rows of frames per board) to DIR, or with `--bench` prints the GPU time per frame of
@@ -14,13 +17,14 @@
 
 use std::f32::consts::{PI, TAU};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use vo::scene::element::Element;
 use vo::scene::geom::{Color, Point, Size};
 use vo::scene::path::Contour;
-use vo::scene::{surface_for, Corner, Edge, Frame, Notch, Orient, Prop, Scene, Stripes, Ticks};
+use vo::scene::{surface_for, Corner, Edge, Frame, Notch, Orient, Prop, Scene, Spectrum, Stripes, Ticks};
+use vo_core::signals::{SignalFrame, Signals, SignalsCell};
 use vo_core::spring::Spring;
 use vo_render::offscreen::write_png;
 use vo_render::{Offscreen, Renderer, Target};
@@ -63,6 +67,12 @@ fn boards() -> Vec<Board> {
             times: &[0.08, 0.2, 0.4, 1.5],
         },
         Board { name: "frame: mecha plate", view: mecha, then: None, times: &[0.0] },
+        Board {
+            name: "spectrum_ring: from the signal bus",
+            view: spectrum,
+            then: None,
+            times: &[0.3, 0.55, 0.8, 1.05],
+        },
     ]
 }
 
@@ -188,6 +198,40 @@ fn mecha(size: Size) -> Element<()> {
     centred(size, Element::frame("mecha", frame).size(340.0, 180.0))
 }
 
+// Spectrum.
+
+/// Three seconds of a synthetic voice: two formant humps that wander, in syllables.
+fn demo_signals() -> SignalsCell {
+    static CELL: OnceLock<SignalsCell> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let frames = (0..300).map(|i| {
+            let t = i as f32 * 0.01;
+            let mut f = SignalFrame::silent(t as f64);
+            let syllable = (0.5 + 0.5 * (TAU * 2.5 * t).sin()).powf(0.7);
+            let (c1, c2) = (5.0 + 3.0 * (TAU * 0.7 * t).sin(), 14.0 + 4.0 * (TAU * 0.45 * t + 1.0).sin());
+            for (b, m) in f.mel.iter_mut().enumerate() {
+                let x = b as f32;
+                let hump = |c: f32, w: f32| (-(x - c) * (x - c) / (2.0 * w * w)).exp();
+                *m = (syllable * (0.95 * hump(c1, 2.2) + 0.65 * hump(c2, 2.6)) + 0.05).min(1.0);
+            }
+            f
+        });
+        SignalsCell::new(Signals::recorded(frames, 0.0).with_playout(0.0))
+    })
+    .clone()
+}
+
+fn spectrum(size: Size) -> Element<()> {
+    let (cyan, magenta) = (Color::hex(0x2fd8ff, 0.9), Color::hex(0xff3df0, 1.0));
+    let full = Spectrum::new(cyan, magenta).count(72).mirror().glow(5.0, 0.6);
+    let half = Spectrum::new(cyan, magenta).count(40).ring(0.7, 0.9).sweep(PI, PI).both_ways().width(0.7);
+    let rings = Element::row("rings")
+        .gap(40.0)
+        .child(Element::spectrum_ring("full", full).size(220.0, 220.0))
+        .child(Element::spectrum_ring("half", half).size(220.0, 220.0));
+    centred(size, rings)
+}
+
 /// Takes the element out of flow at its parent's top left, so siblings stack.
 fn overlay(s: &mut vo::scene::taffy::Style) {
     use vo::scene::taffy::{LengthPercentageAuto, Position};
@@ -211,6 +255,7 @@ fn centred(size: Size, child: Element<()>) -> Element<()> {
 fn board_list(b: &Board, size: Size, scale: f32, t: f64) -> vo::scene::DisplayList {
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, size, scale);
+    scene.set_signals(demo_signals());
     let root = |view: View| Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child(view(size));
     scene.apply(root(b.view), 0.0);
     if let Some((at, view)) = b.then {

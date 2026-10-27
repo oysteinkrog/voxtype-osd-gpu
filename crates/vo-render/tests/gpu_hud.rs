@@ -13,7 +13,7 @@ use vo_render::Offscreen;
 use vo_scene::element::Element;
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::path::Contour;
-use vo_scene::{surface_for, Corner, Edge, Frame, Insets, Notch, Orient, Scene, Stripes, Ticks};
+use vo_scene::{surface_for, Bands, Corner, Edge, Frame, Insets, Notch, Orient, Scene, Spectrum, Stripes, Ticks};
 
 /// Renders `view` at t on a surface of `size` and returns the premultiplied RGBA bytes.
 fn render(view: Element<()>, size: Size, t: f64) -> Image {
@@ -179,5 +179,39 @@ fn cut_panel_frames() {
     let view = Element::row("board").size(size.w, size.h).pad(20.0).gap(20.0).child(cyber_panel()).child(mecha_plate());
     let mut img = render(view, size, 0.0);
     img.name = "hud-frames".into();
+    support::check(&img, Tolerance::default()).unwrap();
+}
+
+/// 24 band energies with two humps, like a voiced vowel.
+fn vowel() -> Arc<[f32]> {
+    (0..24)
+        .map(|i| {
+            let x = i as f32;
+            let hump = |c: f32, w: f32| (-(x - c) * (x - c) / (2.0 * w * w)).exp();
+            (0.9 * hump(4.0, 2.5) + 0.6 * hump(13.0, 2.0) + 0.08).min(1.0)
+        })
+        .collect()
+}
+
+#[test]
+fn radial_spectrum() {
+    let (cyan, magenta) = (Color::hex(0x2fd8ff, 0.9), Color::hex(0xff3df0, 1.0));
+    let full = Spectrum::new(cyan, magenta).bands(Bands::Fixed(vowel())).count(64).mirror().glow(4.0, 0.6);
+    let half = Spectrum::new(cyan, magenta)
+        .bands(Bands::Fixed(vowel()))
+        .count(32)
+        .ring(0.7, 0.9)
+        .sweep(PI, PI)
+        .both_ways()
+        .width(0.7);
+    let size = Size::new(340.0, 160.0);
+    let view = Element::row("board")
+        .size(size.w, size.h)
+        .pad(10.0)
+        .gap(20.0)
+        .child(Element::spectrum_ring("full", full).size(140.0, 140.0))
+        .child(Element::spectrum_ring("half", half).size(140.0, 140.0));
+    let mut img = render(view, size, 0.0);
+    img.name = "hud-spectrum".into();
     support::check(&img, Tolerance::default()).unwrap();
 }

@@ -260,6 +260,7 @@ fn kind_reach(kind: &Kind, size: Option<Size>, t: f64) -> f32 {
         Kind::WavyLine(s) => stroke_glow_reach(s.width, s.glow),
         Kind::Repeat(r) => crate::repeat::reach(r, size),
         Kind::Frame(f) => crate::frame::reach(f),
+        Kind::Spectrum(s) => crate::spectrum::reach(s),
         _ => 0.0,
     }
 }

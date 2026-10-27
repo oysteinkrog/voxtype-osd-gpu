@@ -22,6 +22,7 @@
 //! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
 //! - `repeat`: children and ticks around a ring or along a path, sliding on springs.
 //! - `frame`: cut panel frames: chamfers, notches, cut-outs, stripes and hatching.
+//! - `spectrum`: a radial spectrum, bars round a ring from the signal bus's mel bands.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -69,6 +70,7 @@ pub mod path;
 pub mod reach;
 pub mod repeat;
 pub mod frame;
+pub mod spectrum;
 pub mod ribbon;
 pub mod roll;
 pub mod scene;
@@ -93,4 +95,5 @@ pub use font::{FontId, FontRegistry};
 pub use reach::{surface_for, Insets};
 pub use repeat::{Orient, Ticks};
 pub use frame::{Corner, Edge, Frame, Notch, Stripes};
+pub use spectrum::{Bands, Spectrum};
 pub use scene::{NodeId, Presence, Scene};

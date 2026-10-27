@@ -555,6 +555,8 @@ pub(crate) enum Kind {
     Repeat(crate::repeat::Repeat),
     /// A cut panel frame filling the box (`crate::frame`).
     Frame(crate::frame::Frame),
+    /// Bars round a ring from band energies (`crate::spectrum`).
+    Spectrum(crate::spectrum::Spectrum),
 }
 
 /// What `Element::stroke_path` draws. Compared by identity of the outline.
