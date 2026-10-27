@@ -24,6 +24,7 @@
 //! - `frame`: cut panel frames: chamfers, notches, cut-outs, stripes, hatching and grids.
 //! - `graticule`: a plot area with minor and major grids, ticks and number labels.
 //! - `spectrum`: a radial spectrum, bars round a ring from the signal bus's mel bands.
+//! - `container`: a dot, pill or card container whose size and radius spring, content clipped.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -49,6 +50,7 @@ pub mod assets;
 pub mod bars;
 pub mod bind;
 pub mod canvas;
+pub mod container;
 pub mod curve;
 pub mod display;
 pub mod dots;

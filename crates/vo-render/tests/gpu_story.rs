@@ -24,6 +24,11 @@ const CELL: u32 = 0x181b22;
 
 /// Renders rows of `w` x `h` frames on a dark sheet and checks it against golden `name`.
 fn sheet(name: &str, w: f32, h: f32, rows: Vec<Vec<Frame>>) -> Image {
+    sheet_with(name, w, h, rows, None)
+}
+
+/// [`sheet`] with fonts for frames that draw glyphs.
+fn sheet_with(name: &str, w: f32, h: f32, rows: Vec<Vec<Frame>>, fonts: Option<vo_scene::font::FontRegistry>) -> Image {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0) as f32;
     let (pad, gap) = (8.0, 6.0);
     let size =
@@ -43,7 +48,10 @@ fn sheet(name: &str, w: f32, h: f32, rows: Vec<Vec<Frame>>) -> Image {
     scene.apply(root, 0.0);
     let list = scene.sample(0.0);
     let gpu = support::gpu();
-    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let mut off = match fonts {
+        Some(f) => Offscreen::with_fonts(&gpu.device, &gpu.queue, f),
+        None => Offscreen::new(&gpu.device, &gpu.queue),
+    };
     let [pw, ph] = [size.w.ceil() as u32, size.h.ceil() as u32];
     let px = off.render_to_rgba(&list, [pw, ph], 1.0);
     Image { name: name.into(), w: pw, h: ph, channels: 4, px }
@@ -129,5 +137,87 @@ fn bars_golden() {
         [0.1, 0.33, 0.5, 0.71, 0.95].iter().flat_map(|&p| bar_frames(played(p), &[6.0])).collect(),
     ];
     let img = sheet("story-bars", 200.0, 48.0, rows);
+    support::check(&img, Tolerance::default()).unwrap();
+}
+
+const FONT: &str = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
+
+/// Lays `frames` (RGBA, `w` x `h` each) out in rows on the sheet colour.
+fn grid(name: &str, w: u32, h: u32, rows: Vec<Vec<Vec<u8>>>) -> Image {
+    let (pad, gap) = (8u32, 6u32);
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0) as u32;
+    let (gw, gh) = (2 * pad + cols * w + cols.saturating_sub(1) * gap, 2 * pad + rows.len() as u32 * (h + gap) - gap);
+    let bg = [(BG >> 16) as u8, (BG >> 8) as u8, BG as u8, 255];
+    let mut px: Vec<u8> = (0..gw * gh).flat_map(|_| bg).collect();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, f) in row.iter().enumerate() {
+            let (x0, y0) = (pad + c as u32 * (w + gap), pad + r as u32 * (h + gap));
+            for y in 0..h {
+                let src = &f[(y * w * 4) as usize..((y + 1) * w * 4) as usize];
+                let d = (((y0 + y) * gw + x0) * 4) as usize;
+                px[d..d + src.len()].copy_from_slice(src);
+            }
+        }
+    }
+    Image { name: name.into(), w: gw, h: gh, channels: 4, px }
+}
+
+#[test]
+fn container_morph_golden() {
+    use vo_scene::container::{self, Shape};
+    use vo_scene::font::FontRegistry;
+    use vo_scene::taffy::style::{AlignItems, JustifyContent};
+    use vo_scene::text::ShapedLayout;
+    use vo_scene::TextStyle;
+    let fonts = FontRegistry::new();
+    fonts.add_file(std::path::Path::new(FONT)).unwrap();
+    let content = || {
+        Element::column("content")
+            .size(260.0, 76.0)
+            .gap(4.0)
+            .child(
+                Element::row("head")
+                    .gap(8.0)
+                    .align_items(AlignItems::CENTER)
+                    .child(
+                        Element::shape("dot", vo_scene::display::ShapeKind::Circle)
+                            .size(10.0, 10.0)
+                            .fill(Color::hex(0xef4444, 1.0)),
+                    )
+                    .child(Element::label("title", "Listening").text_style(TextStyle::new(0, 15.0, 19.0))),
+            )
+            .child(
+                Element::label("body", "The quick brown fox jumps over the lazy dog.").color(Color::hex(0xc8cad0, 1.0)),
+            )
+    };
+    let view = |shape: Shape| {
+        Element::<()>::panel("screen")
+            .size(340.0, 130.0)
+            .fill(Color::hex(CELL, 1.0))
+            .align_items(AlignItems::CENTER)
+            .justify(JustifyContent::CENTER)
+            .child(container::morph("c", shape, Color::hex(0x2a2e38, 1.0), content()))
+    };
+    let (dot, pill, card) =
+        (Shape::Dot(18.0), Shape::Pill { w: 180.0, h: 40.0 }, Shape::Card { w: 300.0, h: 100.0, radius: 18.0 });
+    let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    scene.set_viewport(0.0, Size::new(340.0, 130.0), 1.0);
+    for (t, s) in [(0.0, dot), (0.3, pill), (1.0, card), (1.8, pill), (2.5, dot)] {
+        scene.apply(view(s), t);
+    }
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts);
+    let mut frames = |times: &[f64]| -> Vec<Vec<u8>> {
+        times.iter().map(|&t| off.render_to_rgba(&scene.sample(t), [340, 130], 1.0)).collect()
+    };
+    let rows = vec![
+        // Dot to pill, with the overshoot.
+        frames(&[0.3, 0.35, 0.4, 0.47, 0.8]),
+        // Pill to card: the content is uncovered from the middle.
+        frames(&[1.0, 1.05, 1.1, 1.17, 1.5]),
+        // Card to pill to dot.
+        frames(&[1.85, 1.95, 2.55, 2.62, 3.0]),
+    ];
+    let img = grid("story-container", 340, 130, rows);
     support::check(&img, Tolerance::default()).unwrap();
 }
