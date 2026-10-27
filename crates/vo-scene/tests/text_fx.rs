@@ -106,3 +106,24 @@ fn live_words_enter_with_their_own_effects() {
     assert!(wipes[0] < *wipes.last().unwrap(), "{wipes:?}");
     assert!(s.sample(10.0).glyph_fx.is_empty());
 }
+
+#[test]
+fn shadow_and_outline_reach_every_glyph() {
+    let mut s = scene();
+    let shadow = Element::label("s", "drop").text_shadow(Color::rgba(0.0, 0.0, 0.0, 0.5), 1.0, 2.0, 6.0);
+    let outline = Element::label("o", "edge").text_outline(1.5);
+    s.apply(Element::column("root").child(shadow).child(outline), 0.0);
+    let fx = fx_per_glyph(&s.sample(10.0));
+    assert_eq!(fx.len(), 8);
+    for e in &fx[..4] {
+        let e = e.expect("a shadow is a glyph effect");
+        assert!((e.halo_offset.x - 1.0).abs() < 1e-3 && (e.halo_offset.y - 2.0).abs() < 1e-3, "{e:?}");
+        // The blur is about twice the halo radius, as CSS blurs.
+        assert!((e.halo_radius - 3.0).abs() < 1e-3 && (e.halo.a - 0.5).abs() < 1e-3);
+        assert_eq!(e.outline, 0.0);
+    }
+    for e in &fx[4..] {
+        let e = e.expect("an outline is a glyph effect");
+        assert!((e.outline - 1.5).abs() < 1e-3 && e.halo_radius == 0.0, "{e:?}");
+    }
+}

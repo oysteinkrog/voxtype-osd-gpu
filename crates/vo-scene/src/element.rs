@@ -124,6 +124,11 @@ pub(crate) enum Slot {
     WaveAmp = 76,
     WaveLength = 77,
     WavePhase = 78,
+    /// Text shadow offset (FX-013) in logical units, x then y, and the outline width
+    /// (FX-018). Part of the text effects.
+    TextShadowX = 79,
+    TextShadowY = 80,
+    TextOutline = 81,
     /// Stage turns in radians and the push toward the viewer in logical units
     /// (`crate::stage`).
     RotateX = 100,
@@ -171,6 +176,7 @@ impl Slot {
             s if s <= Slot::TrimEnd as u8 => Prop::Trim,
             s if s == Slot::Morph as u8 => Prop::Morph,
             s if s <= Slot::TextHaloRadius as u8 => Prop::TextFx,
+            s if (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&s) => Prop::TextFx,
             s if s <= Slot::StyleFlicker as u8 => Prop::Style,
             _ => Prop::Wave,
         }
@@ -194,6 +200,7 @@ impl Slot {
             || slot == Slot::TextBlur as u8
             || slot == Slot::TextChroma as u8
             || slot == Slot::TextHaloRadius as u8
+            || (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&slot)
             || slot == Slot::StyleChroma as u8
             || slot == Slot::StyleScanPeriod as u8
             || slot == Slot::WaveAmp as u8
@@ -1280,6 +1287,25 @@ impl<M> Element<M> {
     pub fn text_halo(mut self, c: Color, radius: f32) -> Element<M> {
         self.set(Slot::TextHalo as u8, c);
         self.set(Slot::TextHaloRadius as u8, radius.max(0.0));
+        self
+    }
+
+    /// A drop shadow (FX-013) of `c` under the text, moved by `dx`, `dy` and softened over
+    /// about `blur`, in logical units, as CSS `text-shadow: dx dy blur c`. It is the halo
+    /// moved, so it takes the place of [`Element::text_halo`]. Drawn in the glyph shader,
+    /// with no offscreen pass.
+    pub fn text_shadow(mut self, c: Color, dx: f32, dy: f32, blur: f32) -> Element<M> {
+        self.set(Slot::TextHalo as u8, c);
+        self.set(Slot::TextHaloRadius as u8, (0.5 * blur).max(0.5));
+        self.set(Slot::TextShadowX as u8, [dx, dy]);
+        self
+    }
+
+    /// Outlined text (FX-018): each glyph's edge stroked `width` logical units wide, in the
+    /// text colour, with the inside left empty. For labels and live text; the width
+    /// animates with `Prop::TextFx`. A halo or shadow still follows the filled shape.
+    pub fn text_outline(mut self, width: f32) -> Element<M> {
+        self.set(Slot::TextOutline as u8, width.max(0.0));
         self
     }
 

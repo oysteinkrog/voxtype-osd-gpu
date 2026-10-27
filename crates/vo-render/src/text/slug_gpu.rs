@@ -135,6 +135,9 @@ pub struct GlyphInstance {
     pub fx2: [f32; 4],
     /// Halo colour: linear, premultiplied.
     pub halo: [f32; 4],
+    /// Halo offset in pixels (x, y) for a drop shadow, then the outline width in pixels (0
+    /// fills the glyph), then unused.
+    pub fx3: [f32; 4],
 }
 
 /// `GlyphInstance::word` for glyphs outside live text.
@@ -164,14 +167,15 @@ impl GlyphInstance {
             fx: [0.0; 4],
             fx2: [0.0; 4],
             halo: [0.0; 4],
+            fx3: [0.0; 4],
         }
     }
 
     /// The vertex buffer layout of the glyph shader's instance input.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Uint32, 5 => Uint32, 4 => Float32x4,
-            6 => Float32x4, 7 => Float32x4, 8 => Float32x4
+            6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GlyphInstance>() as u64,

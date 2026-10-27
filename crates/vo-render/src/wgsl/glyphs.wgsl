@@ -7,7 +7,9 @@
 // - blur averages 12 to 24 coverage samples on a disc as wide as the blur (a Vogel spiral), each
 //   with Slug's antialiasing window widened to a third of it, so the taps blend smoothly;
 // - a halo is the same soft coverage, as wide as its radius, in its own colour, under the
-//   glyph;
+//   glyph, moved by its offset for a drop shadow;
+// - an outline strokes the glyph's edge instead of filling it, where the distance to the
+//   edge (`edge_distance_px`) is under half the stroke width;
 // - dissolve keeps the parts where a value noise fixed to the glyph's em space is above a
 //   threshold that rises with the amount;
 // - wipe hides the glyph from the right edge of its ink box, with a soft front;
@@ -22,7 +24,7 @@
   let det0 = g.lin.x * g.lin.w - g.lin.z * g.lin.y;
   let inv = mat2x2f (vec2f (g.lin.w, -g.lin.y), vec2f (-g.lin.z, g.lin.x)) * (1.0 / det0);
   // A blur tap reaches half the blur plus half its window, a halo twice that per radius.
-  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x;
+  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x + length (g.fx3.xy) + 0.5 * g.fx3.z;
   let em_per_px = abs (inv[0]) + abs (inv[1]);
   let grow = 0.5 * abs (inv * layer.smear.zw) + reach_px * em_per_px;
   let em = mix (g.ext.xy - grow, g.ext.zw + grow, c);
@@ -50,6 +52,7 @@
   out.fx = g.fx;
   out.fx2 = g.fx2;
   out.halo = g.halo;
+  out.fx3 = g.fx3;
   return out;
 }
 
@@ -102,7 +105,7 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   // Plain glyphs take Slug's own path, unchanged. Sharing the derivatives below with Slug's
   // `fwidth` changes rotated text by a few pixels on some drivers. The branch is uniform
   // over a quad in practice: every lane of it belongs to one instance.
-  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
+  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && in.fx3.z == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
     return finish (in.color * (hb_gpu_draw (in.tc, in.loc) * clip_coverage (in.clip.xy)));
   }
   let ppe = 1.0 / fwidth (in.tc);
@@ -121,6 +124,9 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   } else {
     cov = glyph_coverage (in.tc, in.loc, ppe, k, smear_em, ext);
   }
+  if (in.fx3.z > 0.0) {
+    cov = clamp (0.5 * in.fx3.z + 0.5 - edge_distance_px (in.tc, in.loc, ppe), 0.0, 1.0);
+  }
   var c = in.color * cov;
   if (in.fx.w != 0.0) {
     // Red from the left, blue from the right; alpha covers all three.
@@ -138,7 +144,8 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
     c = vec4f (rgb, in.color.a * max (cov, max (r, b)));
   }
   if (in.fx2.x > 0.0 && in.halo.a > 0.0) {
-    let h = soft_coverage (in.tc, in.loc, ppe, 2.0 * in.fx2.x, px_em, py_em, ext, turn);
+    let at = in.tc - px_em * in.fx3.x - py_em * in.fx3.y;
+    let h = soft_coverage (at, in.loc, ppe, 2.0 * in.fx2.x, px_em, py_em, ext, turn);
     c = c + in.halo * h * (1.0 - c.a);
   }
   var keep = 1.0;
@@ -156,6 +163,57 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
     keep *= 1.0 - smoothstep (e - s, e, u);
   }
   return finish (c * (keep * clip_coverage (in.clip.xy)));
+}
+
+// Distance in pixels from `tc` to the glyph's outline, from the band data Slug draws with: the
+// nearest crossing along the pixel's row and along its column, taken as the distance to a
+// straight edge through both, or the nearest curve end when that is closer (outer corners,
+// where the row and the column both miss the glyph). Exact for straight edges and close for
+// curves. A corner in a band the row and the column do not touch is missed, which can nick a
+// thick stroke's corner.
+fn edge_distance_px (tc: vec2f, loc: u32, ppe: vec2f) -> f32 {
+  let gi = _hb_gpu_decode_glyph (tc, loc);
+  let far = 1e6;
+  var dh = far;
+  var dv = far;
+  var de = far;
+  let hband = hb_gpu_fetch (gi.bandBase + gi.bandIndex.y);
+  for (var ci = 0; ci < hband.r; ci++) {
+    let at = hb_gpu_fetch (gi.glyphLoc + hband.g + 32768 + ci).r + 32768;
+    let q12 = vec4f (hb_gpu_fetch (gi.glyphLoc + at)) * HB_GPU_INV_UNITS;
+    let raw3 = hb_gpu_fetch (gi.glyphLoc + at + 1);
+    let q3 = vec2f (vec2<i32> (raw3.r, raw3.g)) * HB_GPU_INV_UNITS;
+    let p12 = q12 - vec4f (tc, tc);
+    let p3 = q3 - tc;
+    de = min (de, min (length (p12.xy * ppe), length (p3 * ppe)));
+    let code = _hb_gpu_calc_root_code (p12.y, p12.w, p3.y);
+    if (code != 0u) {
+      let r = abs (_hb_gpu_solve_horiz_poly (q12.xy - q12.zw * 2.0 + q3, q12.xy - q12.zw, p12.xy)) * ppe.x;
+      if ((code & 1u) != 0u) { dh = min (dh, r.x); }
+      if (code > 1u) { dh = min (dh, r.y); }
+    }
+  }
+  let vband = hb_gpu_fetch (gi.bandBase + gi.numHBands + gi.bandIndex.x);
+  for (var ci = 0; ci < vband.r; ci++) {
+    let at = hb_gpu_fetch (gi.glyphLoc + vband.g + 32768 + ci).r + 32768;
+    let q12 = vec4f (hb_gpu_fetch (gi.glyphLoc + at)) * HB_GPU_INV_UNITS;
+    let raw3 = hb_gpu_fetch (gi.glyphLoc + at + 1);
+    let q3 = vec2f (vec2<i32> (raw3.r, raw3.g)) * HB_GPU_INV_UNITS;
+    let p12 = q12 - vec4f (tc, tc);
+    let p3 = q3 - tc;
+    de = min (de, min (length (p12.xy * ppe), length (p3 * ppe)));
+    let code = _hb_gpu_calc_root_code (p12.x, p12.z, p3.x);
+    if (code != 0u) {
+      let r = abs (_hb_gpu_solve_vert_poly (q12.xy - q12.zw * 2.0 + q3, q12.xy - q12.zw, p12.xy)) * ppe.y;
+      if ((code & 1u) != 0u) { dv = min (dv, r.x); }
+      if (code > 1u) { dv = min (dv, r.y); }
+    }
+  }
+  var d = min (dh, dv);
+  if (dh < far && dv < far) {
+    d = dh * dv / max (sqrt (dh * dh + dv * dv), 1e-6);
+  }
+  return min (d, de);
 }
 
 // Motion blur takes one sample per pixel of smear, 4 to 32 of them, so thin stems do not show

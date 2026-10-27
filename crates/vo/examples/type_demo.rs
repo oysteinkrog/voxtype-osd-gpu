@@ -1,13 +1,15 @@
-//! Type demo (WP7, FX-003, FX-004): built-in fonts by name and font fallback.
+//! Type demo, two pages.
 //!
-//! - Top: a mecha-style header in Barlow Condensed Bold whose kanji fall back to the
-//!   Japanese label face, and a body line with Norwegian letters.
-//! - Below: one line in every built-in font.
+//! - `fonts` (WP7, FX-003, FX-004): a mecha-style header in Barlow Condensed Bold whose kanji
+//!   fall back to the Japanese label face, a body line with Norwegian letters, then one line
+//!   in every built-in font.
+//! - `fx` (WP18, FX-013, FX-018): offset text shadows on a light card, and outlined text,
+//!   alone and with a glow.
 //!
 //!   cargo run --release -p vo --example type_demo -- [--out DIR] [--bench]
 //!
-//! Writes `DIR/type-demo.png` (default DIR `/var/tmp/claude/fw-fonts`). `--bench` times the
-//! frame on the GPU at 600x300 and 1920x1080.
+//! Writes `DIR/type-demo.png` and `DIR/type-fx.png` (default DIR `/var/tmp/claude/fw-fonts`).
+//! `--bench` times each page's frame on the GPU at 600x300 and 1920x1080.
 
 use std::path::PathBuf;
 
@@ -45,7 +47,70 @@ fn fonts() -> FontRegistry {
     fonts
 }
 
-fn view(fonts: &FontRegistry) -> Element<()> {
+#[derive(Clone, Copy, Debug)]
+enum Page {
+    Fonts,
+    Fx,
+    /// Parts of `Fx`, for the bench: the shadow card, the plain outline.
+    Shadow,
+    Outline,
+}
+
+fn view(fonts: &FontRegistry, page: Page) -> Element<()> {
+    match page {
+        Page::Fonts => fonts_page(fonts),
+        fx => fx_page(fonts, fx),
+    }
+}
+
+fn fx_page(fonts: &FontRegistry, page: Page) -> Element<()> {
+    let show = |part: Page| matches!(page, Page::Fx) || std::mem::discriminant(&page) == std::mem::discriminant(&part);
+    let style = |name: &str, size: f32| TextStyle::new(fonts.asset(name).unwrap(), size, size * 1.2);
+    let ink = Color::hex(0x1d1a16, 1.0);
+    let card =
+        Element::panel("card")
+            .pad(12.0)
+            .gap(2.0)
+            .radius(10.0)
+            .fill(Color::hex(0xece6da, 1.0))
+            .child(
+                Element::label("soft", "so the plan for tomorrow")
+                    .text_style(style("serif", 26.0))
+                    .color(ink)
+                    .text_shadow(Color::hex(0x000000, 0.4), 0.0, 2.0, 6.0),
+            )
+            .child(
+                Element::label("hard", "is to finish the office mirror")
+                    .text_style(style("serif", 26.0))
+                    .color(Color::hex(0xc0392b, 1.0))
+                    .text_shadow(ink.fade(0.85), -1.5, -1.5, 0.0),
+            );
+    let orange = Color::hex(0xff8a1f, 1.0);
+    let mut bg = Element::panel("bg").size(SURFACE.w, SURFACE.h).pad(14.0).gap(10.0).fill(Color::hex(0x0b0806, 1.0));
+    if show(Page::Shadow) {
+        bg = bg.child(card);
+    }
+    if show(Page::Outline) {
+        bg = bg.child(
+            Element::label("outline", "VOICE DICTATION")
+                .text_style(style("condensed-bold", 46.0))
+                .color(orange)
+                .text_outline(1.5),
+        );
+    }
+    if show(Page::Fx) {
+        bg = bg.child(
+            Element::label("neon", "LISTENING")
+                .text_style(style("condensed-bold", 46.0))
+                .color(Color::hex(0x9ff0ff, 1.0))
+                .text_outline(2.0)
+                .text_halo(Color::hex(0x2fb8ff, 0.7), 8.0),
+        );
+    }
+    bg
+}
+
+fn fonts_page(fonts: &FontRegistry) -> Element<()> {
     let orange = Color::hex(0xff8a1f, 1.0);
     let style = |name: &str, size: f32| TextStyle::new(fonts.asset(name).unwrap(), size, size * 1.25);
     let mut col = Element::column("col")
@@ -65,10 +130,10 @@ fn view(fonts: &FontRegistry) -> Element<()> {
     Element::panel("bg").size(SURFACE.w, SURFACE.h).fill(Color::hex(0x0b0806, 1.0)).child(col)
 }
 
-fn sample(fonts: &FontRegistry, size: Size, scale: f32) -> DisplayList {
+fn sample(fonts: &FontRegistry, page: Page, size: Size, scale: f32) -> DisplayList {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, size, scale);
-    scene.apply(view(fonts), 0.0);
+    scene.apply(view(fonts, page), 0.0);
     scene.sample(10.0)
 }
 
@@ -104,10 +169,13 @@ fn bench() {
     };
     let resolve = buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-    for (w, h, scale) in [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)] {
+    for (page, (w, h, scale)) in [Page::Fonts, Page::Fx, Page::Shadow, Page::Outline]
+        .into_iter()
+        .flat_map(|p| [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)].map(|s| (p, s)))
+    {
         let mut renderer = Renderer::with_fonts(&device, &queue, fonts.clone());
         let target = Target::new(&device, w, h, vo_render::offscreen::FORMAT);
-        let list = sample(&fonts, Size::new(w as f32 / scale, h as f32 / scale), scale);
+        let list = sample(&fonts, page, Size::new(w as f32 / scale, h as f32 / scale), scale);
         let mut times = Vec::new();
         for i in 0..150 {
             let mut start = device.create_command_encoder(&Default::default());
@@ -134,7 +202,7 @@ fn bench() {
         }
         times.sort_by(f64::total_cmp);
         println!(
-            "type_demo bench: {w}x{h}: {} glyphs, GPU {:.3} ms median, {:.3} ms p95 per frame",
+            "type_demo bench: {page:?} {w}x{h}: {} glyphs, GPU {:.3} ms median, {:.3} ms p95 per frame",
             list.glyphs.len(),
             times[times.len() / 2],
             times[times.len() * 95 / 100]
@@ -154,13 +222,15 @@ fn main() {
     }
     let fonts = fonts();
     let scale = 2.0;
-    let list = sample(&fonts, SURFACE, scale);
     let (device, queue) = device();
-    let mut off = Offscreen::with_fonts(&device, &queue, fonts);
-    let (w, h) = ((SURFACE.w * scale) as u32, (SURFACE.h * scale) as u32);
-    let rgba = off.render_to_rgba(&list, [w, h], scale);
+    let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
     std::fs::create_dir_all(&out).expect("create the output directory");
-    let path = out.join("type-demo.png");
-    write_png(&path, w, h, &rgba).expect("write the png");
-    println!("{}", path.display());
+    for (page, file) in [(Page::Fonts, "type-demo.png"), (Page::Fx, "type-fx.png")] {
+        let list = sample(&fonts, page, SURFACE, scale);
+        let (w, h) = ((SURFACE.w * scale) as u32, (SURFACE.h * scale) as u32);
+        let rgba = off.render_to_rgba(&list, [w, h], scale);
+        let path = out.join(file);
+        write_png(&path, w, h, &rgba).expect("write the png");
+        println!("{}", path.display());
+    }
 }

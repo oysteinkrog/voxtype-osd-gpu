@@ -24,10 +24,12 @@ struct GlyphInstance {
   @location(4) color: vec4f,
   @location(5) word: u32,
   // Glyph effects (TY17), used by the display-list stage only: blur px, dissolve, wipe,
-  // chromatic offset px; halo radius px; halo colour.
+  // chromatic offset px; halo radius px; halo colour; halo offset px (x, y) and outline
+  // width px.
   @location(6) fx: vec4f,
   @location(7) fx2: vec4f,
   @location(8) halo: vec4f,
+  @location(9) fx3: vec4f,
 };
 
 struct VsOut {
@@ -39,6 +41,7 @@ struct VsOut {
   @location(4) @interpolate(flat) fx: vec4f,
   @location(5) @interpolate(flat) fx2: vec4f,
   @location(6) @interpolate(flat) halo: vec4f,
+  @location(7) @interpolate(flat) fx3: vec4f,
 };
 
 @vertex fn vs_glyph (@builtin(vertex_index) vi: u32, g: GlyphInstance) -> VsOut {
@@ -64,6 +67,7 @@ struct VsOut {
   out.fx = g.fx;
   out.fx2 = g.fx2;
   out.halo = g.halo;
+  out.fx3 = g.fx3;
   return out;
 }
 

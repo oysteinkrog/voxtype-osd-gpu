@@ -1979,7 +1979,7 @@ fn glyph_bounds(g: &GlyphInstance) -> [f32; 4] {
     let at = |x: f32, y: f32| Point::new(l[0] * x + l[2] * y + g.offset[0], l[1] * x + l[3] * y + g.offset[1]);
     let b = corners_box([at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)]);
     // Effects reach past the ink, as the vertex stage grows the quad.
-    let e = 1.0 + 0.7 * g.fx[0] + g.fx[3].abs() + 1.4 * g.fx2[0];
+    let e = 1.0 + 0.7 * g.fx[0] + g.fx[3].abs() + 1.4 * g.fx2[0] + g.fx3[0].hypot(g.fx3[1]) + 0.5 * g.fx3[2];
     [b[0] - e, b[1] - e, b[2] + e, b[3] + e]
 }
 
@@ -1990,7 +1990,10 @@ fn apply_glyph_fx(inst: &mut GlyphInstance, e: &vo_scene::display::GlyphFx, st: 
     if e.halo.a > 0.0 && e.halo_radius > 0.0 {
         inst.fx2 = [e.halo_radius * px, 0.0, 0.0, 0.0];
         inst.halo = linear_premul(e.halo, st.opacity);
+        inst.fx3[0] = e.halo_offset.x * px;
+        inst.fx3[1] = e.halo_offset.y * px;
     }
+    inst.fx3[2] = e.outline.max(0.0) * px;
 }
 
 fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {

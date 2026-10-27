@@ -374,6 +374,8 @@ impl<M> Node<M> {
             chroma: v(Slot::TextChroma),
             halo: self.color(Slot::TextHalo, t),
             halo_radius: v(Slot::TextHaloRadius).max(0.0),
+            halo_offset: Point::new(v(Slot::TextShadowX), v(Slot::TextShadowY)),
+            outline: v(Slot::TextOutline).max(0.0),
         }
     }
 

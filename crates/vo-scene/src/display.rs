@@ -495,6 +495,11 @@ pub struct GlyphFx {
     /// Halo under the glyph: its colour (alpha is its strength) and how far it reaches.
     pub halo: Color,
     pub halo_radius: f32,
+    /// How far the halo is moved, for a drop shadow (FX-013).
+    pub halo_offset: Point,
+    /// Outline width (FX-018): the glyph's edge is stroked this wide instead of filled. 0
+    /// fills it.
+    pub outline: f32,
 }
 
 impl GlyphFx {
@@ -504,6 +509,7 @@ impl GlyphFx {
             && self.wipe <= 0.0
             && self.chroma == 0.0
             && (self.halo.a <= 0.0 || self.halo_radius <= 0.0)
+            && self.outline <= 0.0
     }
 
     /// The effects with the halo faded by `alpha`, as the glyph's colour is.
