@@ -19,7 +19,6 @@ use harfrust::{Direction, ShaperFont};
 use skrifa::instance::{LocationRef, Size as FontSize};
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::element::TextStyle;
 use crate::font::{FontId, FontRegistry};
@@ -249,10 +248,10 @@ struct Shaped {
 }
 
 impl ShapedLayout {
-    /// Shapes `text` run by run: each run is a stretch of graphemes the same face has. A
-    /// grapheme goes to the first face of `style.font` and its fallbacks that has its first
-    /// character; whitespace stays in the run it is in, so spaces between two Japanese
-    /// words do not split the run.
+    /// Shapes `text` run by run: each run is a stretch of characters the same face has. A
+    /// character goes to the first face of `style.font` and its fallbacks that has it.
+    /// Whitespace and combining marks stay in the run they are in, so a space between two
+    /// Japanese words does not split the run and an accent stays with its letter.
     fn shape_runs(&self, text: &str, style: &TextStyle, primary: &ShaperFont<'_, '_>, k: f32) -> Vec<Shaped> {
         let runs = self.runs(text, style.font);
         let mut out = Vec::with_capacity(text.len());
@@ -291,19 +290,26 @@ impl ShapedLayout {
             return whole();
         }
         let mut runs: Vec<(Range<usize>, FontId)> = Vec::new();
-        for (at, g) in text.grapheme_indices(true) {
-            let c = g.chars().next().expect("a grapheme has a character");
+        for (at, c) in text.char_indices() {
             let font = match runs.last() {
-                Some(&(_, f)) if c.is_whitespace() => f,
+                Some(&(_, f)) if c.is_whitespace() || joins(c) => f,
                 _ => self.fonts.face_for(primary, c),
             };
             match runs.last_mut() {
-                Some((r, f)) if *f == font => r.end = at + g.len(),
-                _ => runs.push((at..at + g.len(), font)),
+                Some((r, f)) if *f == font => r.end = at + c.len_utf8(),
+                _ => runs.push((at..at + c.len_utf8(), font)),
             }
         }
         runs
     }
+}
+
+/// Characters that belong to the one before them and stay in its run: combining marks,
+/// the kana voicing marks, joiners and variation selectors.
+fn joins(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0x3099..=0x309A
+        | 0x200C..=0x200D | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0xE0100..=0xE01EF)
 }
 
 fn shape(shaper: &ShaperFont<'_, '_>, text: &str) -> harfrust::Buffer {
@@ -611,9 +617,11 @@ mod tests {
         assert_eq!(s.glyphs[5].cluster, 6);
         assert_eq!(s.glyphs[9].cluster as usize, text.find("ok").unwrap());
         // The pen runs on across runs: the first ideograph sits where any glyph after
-        // "VOICE " would, and the last run starts one space after the fourth ideograph.
+        // "VOICE " would, and the last run starts one space after the fourth ideograph. That
+        // space stays in the Japanese run, so it has the Japanese face's width.
         assert!((s.glyphs[5].pos.x - t.layout("VOICE x", &STYLE, None).glyphs[5].pos.x).abs() < 1e-3);
-        let space = t.layout("x x", &STYLE, None).glyphs[1].pos.x - t.layout("x", &STYLE, None).size.w;
+        let jp_style = TextStyle { font: jp, ..STYLE };
+        let space = t.layout("入 x", &jp_style, None).glyphs[1].pos.x - t.layout("入", &jp_style, None).size.w;
         let end = s.glyphs[8].pos.x + s.glyphs[8].advance;
         assert!((s.glyphs[9].pos.x - end - space).abs() < 1e-3);
         let jp_face = t.fonts().get(jp).unwrap();
@@ -621,6 +629,17 @@ mod tests {
         assert_eq!(s.glyphs[5].glyph, ideograph);
         // A full-width ideograph is one em wide.
         assert!((s.glyphs[5].advance - 20.0).abs() < 0.5, "{}", s.glyphs[5].advance);
+    }
+
+    #[test]
+    fn marks_and_spaces_stay_in_their_run() {
+        let (t, latin, jp) = with_japanese();
+        // A voicing mark and a space after kana stay with the kana; the Latin after them
+        // goes back to the primary.
+        let text = "カ\u{3099} 入 ab";
+        let runs = t.runs(text, latin);
+        let split = text.find("ab").unwrap();
+        assert_eq!(runs, vec![(0..split, jp), (split..text.len(), latin)]);
     }
 
     #[test]
