@@ -448,6 +448,10 @@ pub struct Renderer {
     atlas: Atlas,
     atlas_gpu: SlugAtlasGpu,
     layer_layout: wgpu::BindGroupLayout,
+    /// The signal bus block (`vo_core::signals`), group 3 of every layer pipeline.
+    signals_layout: wgpu::BindGroupLayout,
+    signals_buf: wgpu::Buffer,
+    signals_bind: wgpu::BindGroup,
     composite_layout: wgpu::BindGroupLayout,
     /// A masked layer's composite: its texture and its mask's.
     mask_layout: wgpu::BindGroupLayout,
@@ -527,6 +531,30 @@ impl Renderer {
                 count: None,
             }],
         });
+        let signals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo-signals"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let signals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vo-signals"),
+            size: (vo_core::signals::SIGNAL_BLOCK_FLOATS * 4) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let signals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vo-signals"),
+            layout: &signals_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: signals_buf.as_entire_binding() }],
+        });
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vo-composite"),
             entries: &[texture_entry(0, false)],
@@ -548,6 +576,9 @@ impl Renderer {
             atlas: Atlas::default(),
             atlas_gpu: SlugAtlasGpu::new(device),
             layer_layout,
+            signals_layout,
+            signals_buf,
+            signals_bind,
             composite_layout,
             mask_layout,
             fx: None,
@@ -732,6 +763,14 @@ impl Renderer {
     }
 
     /// Records the frame into `enc` without submitting, so a caller can add a copy after it.
+    /// The layout and bind group of the signal bus block, for app GPU code (`crate::gpu`) that
+    /// wants audio in its own shaders: bind it as group 3 and paste `SIGNALS_WGSL`
+    /// (`vo_core::signals`) with `@group(3) @binding(0) var<uniform> signals: Signals;`. It holds
+    /// the block of the list being encoded.
+    pub fn signals_binding(&self) -> (&wgpu::BindGroupLayout, &wgpu::BindGroup) {
+        (&self.signals_layout, &self.signals_bind)
+    }
+
     pub fn encode(&mut self, list: &DisplayList, scale: f32, target: &Target, enc: &mut wgpu::CommandEncoder) {
         self.encode_with(list, scale, target, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), enc);
     }
@@ -748,6 +787,8 @@ impl Renderer {
         enc: &mut wgpu::CommandEncoder,
     ) {
         self.load = load;
+        // One block per encode: a second encode before the submit overwrites it.
+        self.queue.write_buffer(&self.signals_buf, 0, bytemuck::cast_slice(&list.signals.as_floats()));
         let (w, h) = (target.width(), target.height());
         let effects = self.quality == Quality::Full
             && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some());
@@ -1743,6 +1784,7 @@ impl Renderer {
             }
             pass.set_pipeline(self.cached_pipeline(format, c.pipe, c.blend));
             pass.set_bind_group(1, layers, &[c.uniform]);
+            pass.set_bind_group(3, &self.signals_bind, &[]);
             match c.pipe {
                 Pipe::Shape => {
                     pass.set_vertex_buffer(0, self.shape_buf.as_ref().unwrap().slice(..));
@@ -1881,6 +1923,9 @@ impl Renderer {
             Pipe::Fade => [None, None],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
+        // The signal block is group 3 of every pipeline that draws into a layer.
+        let signals = groups[1].filter(|l| std::ptr::eq(*l, &self.layer_layout)).map(|_| &self.signals_layout);
+        let groups = [groups[0], groups[1], None, signals];
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &groups,

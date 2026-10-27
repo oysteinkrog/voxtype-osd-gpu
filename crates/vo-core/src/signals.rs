@@ -402,6 +402,18 @@ impl Signals {
         self.newest_at().map(|n| n + self.playout + GAP_SECS + tail.max(GONE_SECS))
     }
 
+    /// `n` values of `sig` on a grid of `rate` per second, oldest first, ending at the newest
+    /// grid point at or before the read time for `t`; and the scene time of that newest value.
+    /// The grid is fixed in absolute time, so the history only steps, never shimmers. This is
+    /// the shape the level elements take (`vo_scene::levels::Levels`).
+    pub fn history(&self, sig: Sig, t: f64, rate: f64, n: usize) -> (Vec<f32>, f64) {
+        let step = 1.0 / rate.max(1e-3);
+        let newest = (self.read_at(t) / step).floor() as i64;
+        let values =
+            (0..n as i64).map(|i| self.sample_read(sig, (newest - (n as i64 - 1) + i) as f64 * step)).collect();
+        (values, newest as f64 * step + self.playout)
+    }
+
     /// The uniform block for the shaders at scene time `t`.
     pub fn block(&self, t: f64) -> SignalBlock {
         let s = self.read_at(t);
@@ -805,6 +817,17 @@ mod tests {
         assert!(before.is_empty());
         assert_eq!(after.len(), 1);
         assert_eq!(cell.get().len(), 1);
+    }
+
+    #[test]
+    fn history_is_oldest_first_on_a_fixed_grid() {
+        let s = recorded(100, |i| -60.0 + 0.6 * i as f32).with_playout(0.0);
+        let (v, newest_at) = s.history(Sig::Level, 0.505, 100.0, 5);
+        assert_eq!(v.len(), 5);
+        assert!((newest_at - 0.5).abs() < 1e-9);
+        assert!(v.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(v[4], s.sample(Sig::Level, 0.5));
+        assert_eq!(s.history(Sig::Level, 0.509, 100.0, 5).0, v);
     }
 
     #[test]

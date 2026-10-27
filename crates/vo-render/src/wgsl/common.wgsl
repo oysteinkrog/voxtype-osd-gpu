@@ -51,6 +51,28 @@ struct Layer {
 
 @group(1) @binding(0) var<uniform> layer: Layer;
 
+// The signal bus block (vo_core::signals::SIGNALS_WGSL, kept equal by a test): audio level,
+// pitch, onsets, 24 mel bands and a 0.64 s level history, for every layer pipeline.
+struct Signals {
+    head: array<vec4<f32>, 4>,
+    bands: array<vec4<f32>, 6>,
+    ring: array<vec4<f32>, 16>,
+};
+@group(3) @binding(0) var<uniform> signals: Signals;
+fn sig_presence() -> f32 { return signals.head[0].y; }
+fn sig_age() -> f32 { return signals.head[0].z; }
+fn sig_onset_age() -> f32 { return signals.head[0].w; }
+fn sig_level() -> f32 { return signals.head[1].x; }
+fn sig_peak() -> f32 { return signals.head[1].y; }
+fn sig_pitch() -> f32 { return signals.head[1].z; }
+fn sig_voiced() -> f32 { return signals.head[1].w; }
+fn sig_centroid() -> f32 { return signals.head[2].x; }
+fn sig_flatness() -> f32 { return signals.head[2].y; }
+fn sig_onset() -> f32 { return signals.head[2].z; }
+fn sig_level_smooth() -> f32 { return signals.head[2].w; }
+fn sig_band(i: u32) -> f32 { let b = min(i, 23u); return signals.bands[b / 4u][b % 4u]; }
+fn sig_ring(i: u32) -> f32 { let r = min(i, 63u); return signals.ring[r / 4u][r % 4u]; }
+
 fn layer_to_px (p: vec2f) -> vec2f {
   return vec2f (layer.m.x * p.x + layer.m.z * p.y, layer.m.y * p.x + layer.m.w * p.y) + layer.t.xy;
 }
