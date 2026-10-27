@@ -3,11 +3,12 @@
 //! Time model (M1): `time`, `spring`, `channel`, `track`, `hash`, `event_log`.
 //! Timelines (M2): `timeline`. Nothing here
 //! reads a clock; `clippy.toml` in this crate bans `Instant::now` and `SystemTime::now`.
-//! Word model (phase 0): `words`.
+//! Word model (phase 0): `words`. Noise (FX10): `noise`, the Rust side of the shaders' noise.
 
 pub mod channel;
 pub mod event_log;
 pub mod hash;
+pub mod noise;
 pub mod spring;
 pub mod time;
 pub mod timeline;

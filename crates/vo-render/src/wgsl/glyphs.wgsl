@@ -1,6 +1,6 @@
 // Display-list glyphs: the Slug vertex stage with the layer's texture origin, and a fragment
-// stage that adds the layer clip and the output encode. Appended after the Slug shader and
-// `common.wgsl`. Instances are in target pixels, and `u.mvp` is the pixel camera of the
+// stage that adds the layer clip and the output encode. Appended after the Slug shader,
+// `common.wgsl` and `noise.wgsl`. Instances are in target pixels, and `u.mvp` is the pixel camera of the
 // target; a layer texture sized to its bounds moves the result by its origin.
 //
 // Glyph effects (TY17) come from the coverage itself, with no offscreen pass:
@@ -94,29 +94,6 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   return cov / f32 (n);
 }
 
-// Interleaved gradient noise in 0..1 at pixel `p`.
-fn glyph_ign (p: vec2f) -> f32 {
-  return fract (52.9829189 * fract (dot (p, vec2f (0.06711056, 0.00583715))));
-}
-
-// Value noise in 0..1 on a unit grid, smooth between lattice points.
-fn glyph_noise (p: vec2f) -> f32 {
-  let i = floor (p);
-  let f = fract (p);
-  let u = f * f * (3.0 - 2.0 * f);
-  return mix (mix (hash21 (i), hash21 (i + vec2f (1.0, 0.0)), u.x),
-              mix (hash21 (i + vec2f (0.0, 1.0)), hash21 (i + vec2f (1.0, 1.0)), u.x), u.y);
-}
-
-fn hash21 (p: vec2f) -> f32 {
-  let q = vec2u (vec2i (p) + vec2i (4096));
-  var h = q.x * 0x27d4eb2du ^ (q.y * 0x165667b1u);
-  h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
-  h = (h ^ (h >> 12u)) * 0x297a2d39u;
-  h = h ^ (h >> 15u);
-  return f32 (h) * (1.0 / 4294967296.0);
-}
-
 @fragment fn fs_dl_glyph (in: VsOut) -> @location(0) vec4f {
   // Plain glyphs take Slug's own path, unchanged. Sharing the derivatives below with Slug's
   // `fwidth` changes rotated text by a few pixels on some drivers. The branch is uniform
@@ -131,7 +108,7 @@ fn hash21 (p: vec2f) -> f32 {
   let ext = vec4f (hb_gpu_fetch (i32 (in.loc))) * HB_GPU_INV_UNITS;
 
   let py_em = dpdy (in.tc);
-  let turn = 6.2831853 * glyph_ign (floor (in.clip.xy));
+  let turn = 6.2831853 * noise_ign (floor (in.clip.xy));
   let blurred = in.fx.x > 0.75;
   let k = select (1.0 + max (in.fx.x, 0.0), 1.0, blurred);
   var cov: f32;
@@ -162,10 +139,11 @@ fn hash21 (p: vec2f) -> f32 {
   }
   var keep = 1.0;
   if (in.fx.y > 0.0) {
-    // About 6 noise cells per em, fixed to the glyph, so it dissolves in place.
+    // About 6 noise cells per em, fixed to the glyph and seeded by it, so it dissolves in
+    // place and each glyph differently.
     let w = 0.12;
     let e = in.fx.y * (1.0 + w);
-    keep *= smoothstep (e - w, e, glyph_noise (in.tc * 6.0 + vec2f (f32 (in.loc % 97u) * 3.1)));
+    keep *= smoothstep (e - w, e, noise_value2 (in.tc * 6.0, in.loc));
   }
   if (in.fx.z > 0.0) {
     let s = 0.3;

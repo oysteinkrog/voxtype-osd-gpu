@@ -62,6 +62,7 @@ const GLYPHS_WGSL: &str = include_str!("wgsl/glyphs.wgsl");
 const COMPOSITE_WGSL: &str = include_str!("wgsl/composite.wgsl");
 const DOTS_WGSL: &str = include_str!("wgsl/dots.wgsl");
 const BLOOM_WGSL: &str = include_str!("wgsl/bloom.wgsl");
+const NOISE_WGSL: &str = include_str!("wgsl/noise.wgsl");
 
 /// The format of the scene and of every layer texture on the effect path.
 pub const EFFECT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -120,9 +121,23 @@ pub fn shape_shader_source() -> String {
     [wgsl("common.wgsl", COMMON_WGSL), wgsl("shapes.wgsl", SHAPES_WGSL)].join("\n")
 }
 
-/// The display-list glyph shader: the Slug shader, `common.wgsl` and `glyphs.wgsl`.
+/// The display-list glyph shader: the Slug shader, `common.wgsl`, `noise.wgsl` and
+/// `glyphs.wgsl`.
 pub fn glyph_shader_source() -> String {
-    [slug_gpu::shader_source().into(), wgsl("common.wgsl", COMMON_WGSL), wgsl("glyphs.wgsl", GLYPHS_WGSL)].join("\n")
+    [
+        slug_gpu::shader_source().into(),
+        wgsl("common.wgsl", COMMON_WGSL),
+        noise_shader_source(),
+        wgsl("glyphs.wgsl", GLYPHS_WGSL),
+    ]
+    .join("\n")
+}
+
+/// The noise library (FX10, `noise.wgsl`), for a shader to append: seeded hashes, value and
+/// simplex noise, fbm, curl and domain warp, all named `noise_*`. `vo_core::noise` is the
+/// same in Rust.
+pub fn noise_shader_source() -> std::borrow::Cow<'static, str> {
+    wgsl("noise.wgsl", NOISE_WGSL)
 }
 
 /// The offscreen layer composite shader: `common.wgsl` and `composite.wgsl`.
