@@ -107,6 +107,15 @@ pub(crate) enum Slot {
     TextChroma = 63,
     TextHalo = 64,
     TextHaloRadius = 68,
+    /// Layer style (FX13): chromatic aberration (logical units), glitch, scanline depth and
+    /// period, CRT curvature, vignette and flicker.
+    StyleChroma = 69,
+    StyleGlitch = 70,
+    StyleScanlines = 71,
+    StyleScanPeriod = 72,
+    StyleCurvature = 73,
+    StyleVignette = 74,
+    StyleFlicker = 75,
 }
 
 impl Slot {
@@ -140,7 +149,8 @@ impl Slot {
             s if s < Slot::TrimStart as u8 => Prop::Sheen,
             s if s <= Slot::TrimEnd as u8 => Prop::Trim,
             s if s == Slot::Morph as u8 => Prop::Morph,
-            _ => Prop::TextFx,
+            s if s <= Slot::TextHaloRadius as u8 => Prop::TextFx,
+            _ => Prop::Style,
         }
     }
 
@@ -158,7 +168,9 @@ impl Slot {
             || slot == Slot::RimWidth as u8
             || slot == Slot::TextBlur as u8
             || slot == Slot::TextChroma as u8
-            || slot == Slot::TextHaloRadius as u8)
+            || slot == Slot::TextHaloRadius as u8
+            || slot == Slot::StyleChroma as u8
+            || slot == Slot::StyleScanPeriod as u8)
     }
 }
 
@@ -198,6 +210,9 @@ pub enum Prop {
     Morph,
     /// Text blur, dissolve, wipe, chromatic offset and halo.
     TextFx,
+    /// A layer's style: chromatic aberration, glitch, scanlines, curvature, vignette and
+    /// flicker.
+    Style,
 }
 
 /// How a property moves to a new target.
@@ -1122,6 +1137,52 @@ impl<M> Element<M> {
         self.set(Slot::ShadowX as u8, [dx, dy]);
         self.set(Slot::ShadowBlur as u8, blur);
         self
+    }
+
+    /// Sets a style slot on a layer and makes it offscreen, where the style is composited.
+    fn style(mut self, slot: Slot, v: f32) -> Element<M> {
+        if let Kind::Layer { offscreen, .. } = &mut self.kind {
+            *offscreen = true;
+        } else {
+            debug_assert!(false, "a layer style on a node that is not a layer: {}", self.key);
+        }
+        self.set(slot as u8, v);
+        self
+    }
+
+    /// Chromatic aberration (FX13) on a layer: its red and blue move apart, outward from the
+    /// centre, by `v` logical units at the edge.
+    pub fn chromatic(self, v: f32) -> Element<M> {
+        self.style(Slot::StyleChroma, v)
+    }
+
+    /// Glitch (FX13) on a layer, 0 to 1: horizontal slices jump sideways, a new pattern 15
+    /// times a second. Reduced motion turns it off.
+    pub fn glitch(self, v: f32) -> Element<M> {
+        self.style(Slot::StyleGlitch, v.clamp(0.0, 1.0))
+    }
+
+    /// Scanlines (FX13) on a layer: dark lines `period` logical units apart, `depth` 0 to 1.
+    pub fn scanlines(self, depth: f32, period: f32) -> Element<M> {
+        self.style(Slot::StyleScanPeriod, period.max(1.0)).style(Slot::StyleScanlines, depth.clamp(0.0, 1.0))
+    }
+
+    /// CRT curvature (FX13) on a layer, 0 to about 0.3: the content bows out as on a curved
+    /// screen.
+    pub fn crt(self, curvature: f32) -> Element<M> {
+        self.style(Slot::StyleCurvature, curvature.clamp(0.0, 1.0))
+    }
+
+    /// A vignette (FX13) on a layer, 0 to 1: its corners darken.
+    pub fn vignette(self, v: f32) -> Element<M> {
+        self.style(Slot::StyleVignette, v.clamp(0.0, 1.0))
+    }
+
+    /// Flicker (FX13) on a layer: its brightness dips by up to `v` (at most 0.2), a new level
+    /// six times a second, so it flashes at most three times a second. Reduced motion turns
+    /// it off.
+    pub fn flicker(self, v: f32) -> Element<M> {
+        self.style(Slot::StyleFlicker, v.clamp(0.0, 0.2))
     }
 
     /// Bloom on a layer: a blurred copy of everything in it, spread over about `radius`

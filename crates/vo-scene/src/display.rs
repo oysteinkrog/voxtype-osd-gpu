@@ -90,6 +90,10 @@ pub struct Layer {
     /// A feedback trail (FX11): the layer keeps what it drew in earlier frames, faded, under
     /// what it draws now. Only on offscreen layers.
     pub trail: Option<Trail>,
+    /// A look applied when the layer is composited (FX13): chromatic aberration, glitch
+    /// slices, scanlines, CRT curvature, vignette and flicker. Only on offscreen layers
+    /// without bloom or a mask.
+    pub style: Option<LayerStyle>,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -106,9 +110,35 @@ impl Layer {
             target: LayerTarget::Direct,
             motion_blur: Point::ZERO,
             trail: None,
+            style: None,
             items: 0..0,
         }
     }
+}
+
+/// Composite-pass looks for an offscreen layer (FX13). Zero turns each one off. Lengths are
+/// in layer units.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct LayerStyle {
+    /// The box the look is laid out on: its centre, its edges for the vignette and the
+    /// curvature. In layer space.
+    pub rect: Rect,
+    /// Red and blue move apart by this much at the box's edge, outward from its centre.
+    pub chroma: f32,
+    /// Glitch, 0 to 1: how many of twelve horizontal slices shift sideways, and how far.
+    pub glitch: f32,
+    /// Which glitch pattern shows: changes at the glitch's step rate.
+    pub glitch_step: u32,
+    /// Scanline depth, 0 to 1, and the distance between two lines.
+    pub scanlines: f32,
+    pub scan_period: f32,
+    /// CRT curvature, 0 to about 0.3: the content bows out as on a curved screen, and the
+    /// corners outside it are empty.
+    pub curvature: f32,
+    /// Vignette, 0 to 1: how dark the corners get.
+    pub vignette: f32,
+    /// How far brightness dips in this flicker step, 0 to 0.2.
+    pub flicker: f32,
 }
 
 /// How a layer's content is combined with what is below it. All work with premultiplied

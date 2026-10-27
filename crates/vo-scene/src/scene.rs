@@ -17,8 +17,8 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
 use crate::display::{
-    BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget,
-    Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
+    BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
+    LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
@@ -46,6 +46,10 @@ impl NodeId {
 
 /// Frame rate of ambient loops such as an orbiting rim (FX08).
 const AMBIENT_FPS: f64 = 30.0;
+/// Glitch patterns per second (FX13).
+const GLITCH_FPS: f64 = 15.0;
+/// Flicker levels per second (FX13): six changes make at most three flashes a second.
+const FLICKER_FPS: f64 = 6.0;
 
 /// Where a node is in its life, at some time `t`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -359,6 +363,45 @@ impl<M> Node<M> {
         orbits.then(|| self.since + (((t - self.since).max(0.0) * AMBIENT_FPS).floor() + 1.0) / AMBIENT_FPS)
     }
 
+    /// The layer style (FX13) the node's slots hold at `t`, laid out on `rect`; `None` when
+    /// none is set.
+    fn style(&self, t: f64, rect: Rect) -> Option<LayerStyle> {
+        if !(Slot::StyleChroma as u8..=Slot::StyleFlicker as u8).any(|s| self.has(s)) {
+            return None;
+        }
+        let v = |s: Slot| self.value(s as u8, t) as f32;
+        let age = (t - self.since).max(0.0);
+        let moving = !self.reduced;
+        let glitch_step = (age * GLITCH_FPS).floor() as u32;
+        let flicker_step = (age * FLICKER_FPS).floor() as u32;
+        // A seeded level per step, so a seek or a replay flickers the same way.
+        let level = vo_core::hash::rand_f32(0x5f1c_4e2b, flicker_step, 0, 0);
+        Some(LayerStyle {
+            rect,
+            chroma: v(Slot::StyleChroma),
+            glitch: if moving { v(Slot::StyleGlitch).clamp(0.0, 1.0) } else { 0.0 },
+            glitch_step,
+            scanlines: v(Slot::StyleScanlines).clamp(0.0, 1.0),
+            scan_period: v(Slot::StyleScanPeriod).max(1.0),
+            curvature: v(Slot::StyleCurvature).clamp(0.0, 1.0),
+            vignette: v(Slot::StyleVignette).clamp(0.0, 1.0),
+            flicker: if moving { v(Slot::StyleFlicker).clamp(0.0, 0.2) * level } else { 0.0 },
+        })
+    }
+
+    /// When a glitch or flicker next changes, after `t`.
+    fn style_wake(&self, t: f64) -> Option<f64> {
+        if self.reduced {
+            return None;
+        }
+        let next = |fps: f64| self.since + (((t - self.since).max(0.0) * fps).floor() + 1.0) / fps;
+        let glitch = (self.has(Slot::StyleGlitch as u8) && self.value(Slot::StyleGlitch as u8, t) > 0.0)
+            .then(|| next(GLITCH_FPS));
+        let flicker = (self.has(Slot::StyleFlicker as u8) && self.value(Slot::StyleFlicker as u8, t) > 0.0)
+            .then(|| next(FLICKER_FPS));
+        glitch.into_iter().chain(flicker).min_by(f64::total_cmp)
+    }
+
     /// How far a sheen has swept at `t`, 0 to 1, while it is sweeping.
     fn sheen_progress(&self, t: f64) -> Option<f32> {
         if !self.has(Slot::SheenColor as u8) || self.reduced {
@@ -601,6 +644,7 @@ impl<M> Scene<M> {
             .filter(|n| n.alive(t) && !n.reduced && matches!(n.kind, Kind::Panel))
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
+            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
             .min_by(f64::total_cmp)
     }
 
@@ -974,6 +1018,10 @@ impl<M> Scene<M> {
         let index = out.layers.len() as u32;
         items.push(Item { kind: ItemKind::Layer, start: index, len: 1 });
         let transform = m.then(&out.layers[layer as usize].transform);
+        let style = match n.kind {
+            Kind::Layer { mask: None, .. } => n.style(t, Rect::from_size(size)),
+            _ => None,
+        };
         let (blend, clip, clip_fade, target, group, inside) = match n.kind {
             Kind::Layer { blend, clip, offscreen, fade, mask } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
@@ -1007,6 +1055,7 @@ impl<M> Scene<M> {
                 half_life: n.value(Slot::TrailHalfLife as u8, t) as f32,
                 t,
             }),
+            style,
             items: 0..0,
         });
         let mut own = Vec::new();

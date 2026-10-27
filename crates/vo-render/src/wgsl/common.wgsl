@@ -33,6 +33,12 @@ struct Layer {
   // A masked layer's composite (FX04): where the mask texture's top left sits in target
   // pixels (xy), and 1 in z when the mask is inverted.
   mask: vec4f,
+  // A styled layer's composite (FX13): the style's box in target pixels (x0, y0, x1, y1);
+  // chroma in pixels, glitch, scanline depth and period in pixels; curvature, vignette, the
+  // flicker's brightness factor and the glitch step.
+  style_box: vec4f,
+  style_a: vec4f,
+  style_b: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;

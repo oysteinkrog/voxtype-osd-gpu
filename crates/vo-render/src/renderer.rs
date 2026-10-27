@@ -140,9 +140,9 @@ pub fn noise_shader_source() -> std::borrow::Cow<'static, str> {
     wgsl("noise.wgsl", NOISE_WGSL)
 }
 
-/// The offscreen layer composite shader: `common.wgsl` and `composite.wgsl`.
+/// The offscreen layer composite shader: `common.wgsl`, `noise.wgsl` and `composite.wgsl`.
 pub fn composite_shader_source() -> String {
-    [wgsl("common.wgsl", COMMON_WGSL), wgsl("composite.wgsl", COMPOSITE_WGSL)].join("\n")
+    [wgsl("common.wgsl", COMMON_WGSL), noise_shader_source(), wgsl("composite.wgsl", COMPOSITE_WGSL)].join("\n")
 }
 
 /// The dot shader: `common.wgsl` and `dots.wgsl`.
@@ -222,6 +222,9 @@ struct LayerUniform {
     smear: [f32; 4],
     clip_fade: [f32; 4],
     mask: [f32; 4],
+    style_box: [f32; 4],
+    style_a: [f32; 4],
+    style_b: [f32; 4],
 }
 
 /// One block of `Fx` in `bloom.wgsl`.
@@ -269,6 +272,8 @@ enum Pipe {
     CompositeBloom,
     /// Composites a masked layer through its mask's texture (FX04).
     CompositeMask,
+    /// Composites a layer with a style (FX13).
+    CompositeStyle,
     Down,
     Up,
     Final,
@@ -779,7 +784,14 @@ impl Renderer {
                     s.trail = Some(TrailPlan { key: t.key, half_life: t.half_life, t: t.t, fade: None });
                 }
                 self.surfaces.push(s);
-                let pipe = if self.surfaces[child].bloom.is_some() { Pipe::CompositeBloom } else { Pipe::Composite };
+                let pipe = match (&self.surfaces[child].bloom, layer.style) {
+                    (Some(_), _) => Pipe::CompositeBloom,
+                    (None, Some(s)) => {
+                        self.set_style(uniform, &s, &to_px, ppu);
+                        Pipe::CompositeStyle
+                    }
+                    (None, None) => Pipe::Composite,
+                };
                 composite_at = Some(self.surfaces[surface].cmds.len());
                 self.surfaces[surface].cmds.push(Cmd {
                     pipe,
@@ -1011,6 +1023,18 @@ impl Renderer {
         grow(&mut self.surfaces[parent].bounds, shown);
     }
 
+    /// Writes a layer style (FX13) into the composite's layer block at `uniform`, its box and
+    /// lengths in target pixels.
+    fn set_style(&mut self, uniform: u32, s: &vo_scene::display::LayerStyle, to_px: &Affine, ppu: f32) {
+        let size = std::mem::size_of::<LayerUniform>();
+        let at = uniform as usize;
+        let mut u: LayerUniform = bytemuck::pod_read_unaligned(&self.uniforms[at..at + size]);
+        u.style_box = bounds(&RRect::new(s.rect, 0.0), to_px);
+        u.style_a = [s.chroma * ppu, s.glitch, s.scanlines, s.scan_period * ppu];
+        u.style_b = [s.curvature, s.vignette, 1.0 - s.flicker, s.glitch_step as f32];
+        self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
+    }
+
     /// Adds a draw, or extends the previous one when it continues the same run.
     fn push_cmd(
         &mut self,
@@ -1108,7 +1132,8 @@ impl Renderer {
                 u.viewport[0] = tex_size[0] as f32;
                 u.viewport[1] = tex_size[1] as f32;
                 u.origin = [origin[0] as f32, origin[1] as f32, 0.0, 0.0];
-                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask) {
+                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle)
+                {
                     let child = &self.surfaces[c.range.start as usize];
                     if let (Pipe::CompositeMask, Some((m, mask))) = (c.pipe, child.mask) {
                         let o = self.surfaces[m].origin;
@@ -1553,8 +1578,9 @@ impl Renderer {
         let layers = &self.uniform_buf.as_ref().expect("uploaded").1;
         for c in cmds {
             let mut sc = c.scissor;
-            let child = matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask)
-                .then(|| &self.surfaces[c.range.start as usize]);
+            let child =
+                matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle)
+                    .then(|| &self.surfaces[c.range.start as usize]);
             if let Some(child) = child {
                 if child.size[0] == 0 {
                     continue;
@@ -1593,7 +1619,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, self.glyph_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
-                Pipe::Composite => {
+                Pipe::Composite | Pipe::CompositeStyle => {
                     let child = child.unwrap();
                     pass.set_bind_group(0, &self.pool[child.tex.unwrap()].bind, &[]);
                     pass.draw(0..3, 0..1);
@@ -1682,7 +1708,7 @@ impl Renderer {
         let slot = match pipe {
             Pipe::Shape => 0,
             Pipe::Glyph => 1,
-            Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask => 2,
+            Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             // The particle layer and the painters have their own pipelines.
             Pipe::Particles | Pipe::Gpu => return,
@@ -1700,7 +1726,7 @@ impl Renderer {
             Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
             Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
-            Pipe::Composite => [Some(&self.composite_layout), Some(&self.layer_layout)],
+            Pipe::Composite | Pipe::CompositeStyle => [Some(&self.composite_layout), Some(&self.layer_layout)],
             Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
             Pipe::CompositeMask => [Some(&self.mask_layout), Some(&self.layer_layout)],
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
@@ -1721,6 +1747,7 @@ impl Renderer {
             Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
             Pipe::CompositeBloom => ("vs_composite", "fs_composite_bloom", vec![]),
             Pipe::CompositeMask => ("vs_composite", "fs_composite_mask", vec![]),
+            Pipe::CompositeStyle => ("vs_composite", "fs_composite_style", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),

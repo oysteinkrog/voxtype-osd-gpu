@@ -179,3 +179,33 @@ fn a_mask_makes_its_layer_offscreen_and_covers_its_box() {
     assert_eq!((s.size.w, s.size.h), (120.0, 40.0));
     assert_eq!((s.transform.e, s.transform.f), (0.0, 30.0));
 }
+
+#[test]
+fn styles_step_at_their_rates_and_reduced_motion_stills_them() {
+    let view = || {
+        root(vec![Element::layer("crt")
+            .size(100.0, 50.0)
+            .glitch(0.5)
+            .flicker(0.2)
+            .scanlines(0.4, 3.0)
+            .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE))])
+    };
+    let style_at = |scene: &Scene, t: f64| scene.sample(t).layers.iter().find_map(|l| l.style).expect("a style");
+    let mut scene = Scene::new();
+    scene.apply(view(), 0.0);
+    let s = style_at(&scene, 1.0);
+    assert!(matches!(scene.sample(1.0).layers[1].target, LayerTarget::Offscreen { .. }));
+    assert_eq!(s.glitch_step, 15);
+    assert!(s.flicker >= 0.0 && s.flicker <= 0.2);
+    assert_eq!((s.rect.w, s.rect.h), (100.0, 50.0));
+    // Glitch steps 15 times a second, flicker 6: the next wake is the glitch's.
+    let wake = scene.next_wake(1.01).unwrap();
+    assert!((wake - (1.0 + 1.0 / 15.0)).abs() < 1e-9, "{wake}");
+
+    let mut still = Scene::new().with_reduced_motion(true);
+    still.apply(view(), 0.0);
+    let s = style_at(&still, 1.0);
+    assert_eq!((s.glitch, s.flicker), (0.0, 0.0));
+    assert!(s.scanlines > 0.39, "static looks stay");
+    assert_eq!(still.next_wake(1.0), None);
+}

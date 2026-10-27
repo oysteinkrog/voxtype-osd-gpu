@@ -24,6 +24,8 @@ struct L {
     content: Vec<C>,
 }
 
+// A test tree: a large inline layer costs nothing here.
+#[allow(clippy::large_enum_variant)]
 enum C {
     Shapes(Vec<ShapeInstance>),
     Glyphs(Vec<GlyphInstance>),
