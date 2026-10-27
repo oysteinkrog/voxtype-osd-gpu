@@ -30,7 +30,7 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
   if ((tg.flags & T_ACTIVE) != 0u) {
     p.goal = tg.pos;
     p.reveal_t0 = tg.reveal_t0;
-    p.reveal_delay = tg.reveal_delay;
+    p.reveal_delay = select (tg.reveal_delay, HELD_DELAY, (tg.flags & T_HELD) != 0u);
     let persist = select (0u, W_PERSIST, (tg.flags & T_PERSIST) != 0u);
     if ((tg.flags & T_START) != 0u) {
       // A start given from outside: a dot peeling off the grid, a point leaving a shape.

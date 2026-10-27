@@ -74,6 +74,8 @@ pub struct ParticleLayer {
     text: ParticleText,
     /// Each live particle word and the change time already applied to it.
     words: Vec<(u32, f64, WordParticles)>,
+    /// The newest word, while `WordParticles::hold` keeps its last glyphs as particles.
+    held: Option<u32>,
     /// Where each slot was last drawn, in units, for the scatter of a word that went.
     slot_origins: Vec<Point>,
     t: f64,
@@ -94,6 +96,7 @@ impl ParticleLayer {
             pools: Vec::new(),
             text: ParticleText::new(WORD_SLOTS, 1.0, vo_scene::geom::Color::WHITE),
             words: Vec::new(),
+            held: None,
             slot_origins: vec![Point::ZERO; WORD_SLOTS as usize],
             t: f64::NEG_INFINITY,
             scale: 1.0,
@@ -127,6 +130,7 @@ impl ParticleLayer {
             self.pools.clear();
             self.text.clear();
             self.words.clear();
+            self.held = None;
         }
         self.t = t;
         let parts = self.parts.get_or_insert_with(|| {
@@ -197,17 +201,37 @@ impl ParticleLayer {
             self.text.remove(parts, id, t);
             self.words.retain(|w| w.0 != id);
         }
-        if changes.is_empty() {
+        // The newest word holds its last glyphs as particles while its look asks for it. A held
+        // word lets go when another word becomes the newest or the hold goes to 0, at the
+        // latest change time, so the release does not depend on when frames happen.
+        let newest = words.last().filter(|w| w.look.hold > 0.0);
+        let release = self.held.filter(|h| newest.map(|w| w.word) != Some(*h));
+        if changes.is_empty() && release.is_none() {
             return;
         }
         let runs = word_runs(&list.glyphs);
+        if let Some(h) = release {
+            self.held = None;
+            let at = words.iter().map(|w| w.since).fold(f64::NEG_INFINITY, f64::max).min(t);
+            if let (Some(run), Some(w)) = (runs.iter().find(|r| r.word == h), self.words.iter().find(|w| w.0 == h)) {
+                self.text.px_per_unit = w.2.density * self.scale;
+                self.text.dot_area = w.2.dot_area;
+                self.text.set_held(parts, at, run, run.glyphs.len());
+            }
+        }
         for w in changes {
             let Some(run) = runs.iter().find(|r| r.word == w.word) else { continue };
             self.text.px_per_unit = w.look.density * self.scale;
             self.text.dot_area = w.look.dot_area;
-            if self.text.set(parts, w.since.min(t), run) {
+            let n = run.glyphs.len();
+            let is_newest = newest.is_some_and(|x| x.word == w.word);
+            let held_from = if is_newest { n - ((w.look.hold.min(1.0) * n as f32).round() as usize).min(n) } else { n };
+            if self.text.set_held(parts, w.since.min(t), run, held_from) {
                 self.words.retain(|x| x.0 != w.word);
                 self.words.push((w.word, w.since, w.look));
+                if is_newest {
+                    self.held = Some(w.word);
+                }
             }
         }
     }

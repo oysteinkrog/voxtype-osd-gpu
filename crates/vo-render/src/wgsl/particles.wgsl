@@ -52,6 +52,10 @@ const T_CHANGED: u32 = 2u;
 const T_PERSIST: u32 = 4u;
 // The particle starts at `Target::start` instead of a cloud around its goal.
 const T_START: u32 = 8u;
+// Held as particles: the glyph forms but does not hand over until it is set again.
+const T_HELD: u32 = 16u;
+// A reveal delay that never runs out.
+const HELD_DELAY: f32 = 1.0e9;
 
 // Sprite styles.
 const ST_SOFT: u32 = 0u;

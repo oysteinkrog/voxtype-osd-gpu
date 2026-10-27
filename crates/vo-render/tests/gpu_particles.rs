@@ -7,7 +7,7 @@ mod support;
 
 use support::{Image, Tolerance};
 use vo_render::particles::{
-    tilt_x, Camera, EmitterLook, EmitterSim, EmitterSpec, FrameParams, GlyphState, MaskField, ParticleConfig,
+    tilt_x, Camera, ColorBy, EmitterLook, EmitterSim, EmitterSpec, FrameParams, GlyphState, MaskField, ParticleConfig,
     Particles, PointForm, Shape, Shock, SlotLook, SpriteStyle, WordGlyph,
 };
 use vo_render::{Renderer, Target};
@@ -828,4 +828,109 @@ fn a_river_is_the_same_at_any_frame_rate_and_flows_along_its_path() {
     let img =
         Image { name: "particles-river".into(), w: rig.w, h: rig.h * times.len() as u32, channels: 4, px: a.concat() };
     support::check(&img, Tolerance { per_pixel: 6, max_fraction: 0.004 }).unwrap();
+}
+
+/// `set_word_held`: the held glyphs stay particles with the word's light, then hand over
+/// from the release time with no change in light.
+#[test]
+fn held_glyphs_stay_dots_until_released() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let mut rig = Rig::new(&fonts, 320, 80);
+    let color = Color::hex(0x384050, 1.0);
+    let word = shape(&fonts, "polished", 30.0, Point::new(20.0, 22.0));
+    let n = word.glyphs.len();
+    let (w, h) = (rig.w, rig.h);
+    let list = |parts: &Particles, t: f64, solid: bool| {
+        let mut l = empty_list(w, h);
+        for (i, g) in word.glyphs.iter().enumerate() {
+            let a = if solid { 1.0 } else { parts.glyph_alpha(0, i, t) };
+            l.glyphs.push(GlyphInstance {
+                pos: Point::new(word.origin.x + g.pos.x, word.origin.y + g.pos.y),
+                size: g.size,
+                font: 0,
+                glyph: g.glyph,
+                word: 0,
+                color: color.fade(a),
+            });
+        }
+        l.items.push(Item { kind: ItemKind::Glyphs, start: 0, len: l.glyphs.len() as u32 });
+        l.layers[0].items = 0..1;
+        l
+    };
+    let cfg = ParticleConfig { free_capacity: 64, word_slots: 1, ..Default::default() };
+    let empty = rig.particles(&fonts, cfg);
+    let solid = total_light(&rig.frame(&list(&empty, 0.0, true), &empty));
+    let mut p = rig.particles(&fonts, cfg);
+    let held_from = n - 3;
+    p.set_word_held(0, 0.0, &word.glyphs, 1.0, 5.0, held_from);
+    let release = 1.0;
+    let mut worst = 0.0f32;
+    let mut sheet = Vec::new();
+    for i in 0..=40 {
+        let t = i as f64 * 0.04;
+        if (t - release).abs() < 1e-9 {
+            p.set_word_held(0, release, &word.glyphs, 1.0, 5.0, n);
+        }
+        // Before the release the last three glyphs have no solid text; after it they hand
+        // over like any glyph.
+        if t > 0.3 && t < release {
+            assert!((0..held_from).all(|g| p.glyph_alpha(0, g, t) > 0.99), "kept glyphs are solid at {t}");
+            assert!((held_from..n).all(|g| p.glyph_alpha(0, g, t) == 0.0), "held glyphs are dots at {t}");
+        }
+        if t > release + 0.3 {
+            assert!((0..n).all(|g| p.glyph_alpha(0, g, t) > 0.99), "all solid at {t}");
+        }
+        let look = SlotLook { style: SpriteStyle::SPARK, ..SlotLook::new(word.origin, color) };
+        p.prepare(&rig.params(t), &|_| EmitterLook::default(), &[look]);
+        let px = rig.frame(&list(&p, t, false), &p);
+        if t >= 0.06 {
+            worst = worst.max((total_light(&px) / solid - 1.0).abs());
+        }
+        if [0.2, 0.6, 1.0, 1.08, 1.2, 1.6].iter().any(|k| (k - t).abs() < 1e-9) {
+            sheet.push(px);
+        }
+    }
+    println!("held word: light differs from the solid word's by at most {:.1} %", worst * 100.0);
+    assert!(worst < 0.03, "the light changes by {worst} while held or at the release");
+    let px: Vec<u8> = sheet.concat().iter().map(|&c| c.saturating_mul(3)).collect();
+    let img = Image { name: "particles-held-word".into(), w: rig.w, h: rig.h * sheet.len() as u32, channels: 4, px };
+    support::check(&img, Tolerance { per_pixel: 6, max_fraction: 0.004 }).unwrap();
+}
+
+/// `ColorBy::X` colours by x as drawn: with the emitter turned half round, the ramp still
+/// runs left to right on screen.
+#[test]
+fn color_by_x_runs_left_to_right_as_drawn() {
+    let fonts = FontRegistry::new();
+    let mut rig = Rig::new(&fonts, 320, 80);
+    let mut p = rig.particles(&fonts, ParticleConfig { free_capacity: 2048, word_slots: 1, ..Default::default() });
+    p.add_emitter(EmitterSpec { warmup: 0.1, ..EmitterSpec::new(2048, 4) });
+    let sim =
+        |_: u32, _: f64| EmitterSim { shape: Shape::Box { half: [140.0, 20.0, 0.0] }, life: 2.0, ..Default::default() };
+    let t = 1.0;
+    p.advance(t, &sim);
+    let (s, c) = std::f32::consts::PI.sin_cos();
+    let look = EmitterLook {
+        origin: Point::new(160.0, 40.0),
+        rotation: [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+        size: 1.5,
+        ramp: [Color::hex(0xff0000, 1.0), Color::hex(0x00ff00, 1.0), Color::hex(0x0000ff, 1.0)],
+        color_by: ColorBy::X { half: 140.0 },
+        ..Default::default()
+    };
+    p.prepare(&rig.params(t), &|_| look, &[]);
+    let px = rig.frame(&empty_list(rig.w, rig.h), &p);
+    // Light-weighted mean x of red and of blue.
+    let mean_x = |ch: usize| {
+        let (mut sx, mut sw) = (0.0f64, 0.0f64);
+        for (i, q) in px.chunks(4).enumerate() {
+            let v = q[ch] as f64;
+            sx += v * (i % rig.w as usize) as f64;
+            sw += v;
+        }
+        sx / sw.max(1.0)
+    };
+    let (red, blue) = (mean_x(0), mean_x(2));
+    assert!(red < 120.0 && blue > 200.0, "red at x {red:.0}, blue at x {blue:.0}");
 }

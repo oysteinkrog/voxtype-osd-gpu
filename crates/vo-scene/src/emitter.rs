@@ -169,7 +169,7 @@ impl SpriteStyle {
 }
 
 /// What picks a free particle's colour from an emitter's ramp.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub enum ColorBy {
     /// Birth, mid-life and death.
     #[default]
@@ -177,6 +177,9 @@ pub enum ColorBy {
     /// The angle about the emitter's z axis, once round the ramp and back, so it closes.
     /// The alpha still fades by age.
     Angle,
+    /// The x position as drawn (after the look's rotation): the ramp's three colours sit at
+    /// x = -half, 0 and +half, left to right. The alpha still fades by age.
+    X { half: f32 },
 }
 
 /// An emitter's look at the frame time.
@@ -365,6 +368,11 @@ pub struct WordParticles {
     /// Pixels² of ink each particle stands for: 1.25 makes a dense swarm, 4 to 6 makes
     /// distinct dots. The particles together carry the solid word's light whatever this is.
     pub dot_area: f32,
+    /// Share of the newest word's glyphs, counted from its end, that stay as particles while
+    /// it is the newest word: 0.4 keeps the last 40 % as dots. They hand over at the normal
+    /// rate once another word arrives, or once this goes to 0 (set it to 0 with the final
+    /// text; the release then counts from the latest word change). 0 holds nothing.
+    pub hold: f32,
 }
 
 impl Default for WordParticles {
@@ -375,6 +383,7 @@ impl Default for WordParticles {
             style: SpriteStyle::Soft,
             density: 1.0,
             dot_area: 1.25,
+            hold: 0.0,
         }
     }
 }

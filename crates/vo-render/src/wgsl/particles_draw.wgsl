@@ -122,12 +122,18 @@ fn spark (corner: u32, p_px: vec2f, v_px: vec2f, r_px: f32, depth: f32, rgb: vec
   return moving (corner, p_px, v_px, radius, depth, c, vec2f (f32 (ST_SPARK), sigma));
 }
 
-// Colour of free particle `p` at life fraction `u`: by age, or by its angle about the
-// emitter's axis, seamless around the circle.
+// Colour of free particle `p` at life fraction `u`: by age, by its angle about the
+// emitter's axis (seamless around the circle), or by its x as drawn, after the rotation
+// (`trail.w` is the half width).
 fn particle_color (e: EmitDraw, local: vec3f, u: f32) -> vec4f {
   if (e.trail.z == 1.0) {
     let turn = fract (atan2 (local.y, local.x) / (2.0 * PI) + 1.0);
     let c = ramp (e, 1.0 - abs (2.0 * turn - 1.0));
+    return vec4f (c.rgb, c.a * ramp (e, u).a / max (e.c0.a, 1e-3));
+  }
+  if (e.trail.z == 2.0) {
+    let x = rotate (e, local).x;
+    let c = ramp (e, clamp (0.5 + 0.5 * x / max (e.trail.w, 1e-3), 0.0, 1.0));
     return vec4f (c.rgb, c.a * ramp (e, u).a / max (e.c0.a, 1e-3));
   }
   return ramp (e, u);
@@ -275,7 +281,7 @@ fn vs_trail (@builtin(vertex_index) vid: u32) -> VOut {
   let f = (f32 (k) + frame.alpha) / f32 (segs);
   let u = clamp (p.pos.w / p.prev.w, 0.0, 1.0);
   let fade = smoothstep (0.0, 0.1, u) * (1.0 - smoothstep (0.65, 1.0, u));
-  let c = ramp (e, u);
+  let c = particle_color (e, a_local, u);
   let a = c.a * fade * e.rot0.w * e.trail.y * pow (1.0 - f, 1.5);
   let radius = max (e.origin.w * pa.scale * e.trail.x * (1.0 - 0.7 * f), 0.5);
   return sprite (vid % 6u, 0.5 * (pa.px + pb.px), axis, 0.5 * len, radius, pa.depth, vec4f (c.rgb * a, a), vec2f (f32 (ST_SOFT), 0.0));

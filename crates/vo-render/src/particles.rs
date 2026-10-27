@@ -460,6 +460,7 @@ const T_ACTIVE: u32 = 1;
 const T_CHANGED: u32 = 2;
 const T_PERSIST: u32 = 4;
 const T_START: u32 = 8;
+const T_HELD: u32 = 16;
 const E_3D: u32 = 1;
 
 #[repr(C)]
@@ -554,6 +555,9 @@ struct SlotGlyph {
     state: GlyphState,
     /// The glyph's particles in its slot: start and count.
     range: (usize, usize),
+    /// Held as particles until the word is set again without holding it
+    /// ([`Particles::set_word_held`]).
+    held: bool,
 }
 
 #[derive(Default, Clone)]
@@ -1219,6 +1223,22 @@ impl Particles {
     /// dense swarm, 4 to 6 distinct dots. The particles carry the solid word's light
     /// together whatever the area, so the hand-over neither dims nor flashes.
     pub fn set_word_dots(&mut self, slot: u32, t: f64, glyphs: &[WordGlyph], px_per_unit: f32, dot_area: f32) {
+        self.set_word_held(slot, t, glyphs, px_per_unit, dot_area, glyphs.len());
+    }
+
+    /// [`Particles::set_word_dots`] that holds glyphs `held_from..` as particles: they form
+    /// but do not hand over to solid text. Setting the word again with a larger `held_from`
+    /// (the same glyphs, or a revision) releases them from `t` at the normal rate. A glyph that
+    /// is already solid is not held again.
+    pub fn set_word_held(
+        &mut self,
+        slot: u32,
+        t: f64,
+        glyphs: &[WordGlyph],
+        px_per_unit: f32,
+        dot_area: f32,
+        held_from: usize,
+    ) {
         let cap = self.cfg.slot_capacity;
         let dot_area = dot_area.max(0.25);
         let old = std::mem::take(&mut self.slots[slot as usize]);
@@ -1295,16 +1315,24 @@ impl Particles {
         let mut slot_glyphs = Vec::with_capacity(n_glyphs);
         let mut points = Vec::new();
         for (gi, (g, p)) in glyphs.iter().zip(&pts).enumerate() {
-            let (state, reveal_t0, reveal_delay, _) = info[gi];
+            let (state, mut reveal_t0, mut reveal_delay, old_i) = info[gi];
+            let was_held = old_i.is_some_and(|o| old.glyphs[o].held);
+            let held = gi >= held_from && (state != GlyphState::Kept || was_held);
+            if was_held && !held {
+                // Released: hand over from now.
+                reveal_t0 = t;
+                reveal_delay = 0.0;
+            }
             let range = ranges[gi];
-            slot_glyphs.push(SlotGlyph { glyph: *g, reveal_t0, reveal_delay, state, range });
+            slot_glyphs.push(SlotGlyph { glyph: *g, reveal_t0, reveal_delay, state, range, held });
             let n = range.1;
             let n_in = if p.interior.is_empty() { 0 } else { (n as f32 * interior_share).round() as usize };
             let n_c = if p.contour.is_empty() { 0 } else { n - n_in };
             let pick = |list: &[[f32; 2]], j: usize, n: usize| {
                 list[((j as f32 + 0.5) * list.len() as f32 / n as f32) as usize]
             };
-            let flags = T_ACTIVE | if state == GlyphState::Changed { T_CHANGED } else { 0 };
+            let flags =
+                T_ACTIVE | if state == GlyphState::Changed { T_CHANGED } else { 0 } | if held { T_HELD } else { 0 };
             for j in 0..n_c + n_in {
                 let q = if j < n_c { pick(&p.contour, j, n_c) } else { pick(&p.interior, j - n_c, n_in) };
                 let pos = [g.pos.x + q[0], g.pos.y + q[1]];
@@ -1392,6 +1420,7 @@ impl Particles {
             reveal_delay: form.sweep,
             state: if old.points.is_empty() { GlyphState::Fresh } else { GlyphState::Changed },
             range: (0, n),
+            held: false,
         };
         self.slots[slot as usize] = Slot {
             gen: anchor.gen,
@@ -1428,6 +1457,7 @@ impl Particles {
     /// particles form, 1 once they have handed over. Glyphs past the slot's text give 1.
     pub fn glyph_alpha(&self, slot: u32, index: usize, t: f64) -> f32 {
         match self.slots.get(slot as usize).and_then(|s| s.glyphs.get(index)) {
+            Some(g) if g.held => 0.0,
             Some(g) => reveal((t - g.reveal_t0) as f32 - g.reveal_delay),
             None => 1.0,
         }
@@ -1444,7 +1474,7 @@ impl Particles {
         self.slots[slot as usize]
             .glyphs
             .iter()
-            .map(|g| g.reveal_t0 + (g.reveal_delay + x / WORD_RATE_MIN) as f64)
+            .map(|g| if g.held { f64::INFINITY } else { g.reveal_t0 + (g.reveal_delay + x / WORD_RATE_MIN) as f64 })
             .fold(f64::NEG_INFINITY, f64::max)
     }
 
@@ -1503,7 +1533,11 @@ impl Particles {
                     ],
                     c: l.ramp.map(linear),
                     look: style_code(l.style),
-                    trail: [l.trail_width, l.trail_alpha, (l.color_by == ColorBy::Angle) as u32 as f32, 0.0],
+                    trail: match l.color_by {
+                        ColorBy::Age => [l.trail_width, l.trail_alpha, 0.0, 0.0],
+                        ColorBy::Angle => [l.trail_width, l.trail_alpha, 1.0, 0.0],
+                        ColorBy::X { half } => [l.trail_width, l.trail_alpha, 2.0, half],
+                    },
                     pool: [e.base, e.capacity, e.trail_base, if e.spec.three_d { E_3D } else { 0 }],
                     path: e.path,
                     ribbon: [ribbons as f32, l.ribbon_width, l.ribbon_alpha, 0.0],

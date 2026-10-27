@@ -55,6 +55,8 @@ struct Held {
     origin: Point,
     /// When the slot was emptied, for reuse after its particles have faded.
     freed_at: f64,
+    /// Glyphs from this index on are held as particles.
+    held_from: usize,
 }
 
 /// One particle slot per live word.
@@ -109,6 +111,13 @@ impl ParticleText {
     /// Sets one word at `t`: a new word forms, a changed one re-forms its changed glyphs, an
     /// unchanged one only moves. Returns false when no slot was free.
     pub fn set(&mut self, p: &mut Particles, t: f64, run: &WordRun) -> bool {
+        self.set_held(p, t, run, run.glyphs.len())
+    }
+
+    /// [`ParticleText::set`] that holds glyphs `held_from..` as particles
+    /// ([`Particles::set_word_held`]). Setting the same word again with a larger `held_from`
+    /// releases them from `t`.
+    pub fn set_held(&mut self, p: &mut Particles, t: f64, run: &WordRun, held_from: usize) -> bool {
         let slot = match self.slot_of(run.word) {
             Some(s) => s,
             None => match self.slots.iter().position(|h| h.word.is_none() && t - h.freed_at >= REUSE_AFTER) {
@@ -117,12 +126,19 @@ impl ParticleText {
             },
         };
         let h = &mut self.slots[slot as usize];
-        if h.word == Some(run.word) && h.glyphs == run.glyphs {
+        let held_from = held_from.min(run.glyphs.len());
+        if h.word == Some(run.word) && h.glyphs == run.glyphs && h.held_from == held_from {
             h.origin = run.origin;
             return true;
         }
-        p.set_word_dots(slot, t, &run.glyphs, self.px_per_unit, self.dot_area);
-        *h = Held { word: Some(run.word), glyphs: run.glyphs.clone(), origin: run.origin, freed_at: f64::NEG_INFINITY };
+        p.set_word_held(slot, t, &run.glyphs, self.px_per_unit, self.dot_area, held_from);
+        *h = Held {
+            word: Some(run.word),
+            glyphs: run.glyphs.clone(),
+            origin: run.origin,
+            freed_at: f64::NEG_INFINITY,
+            held_from,
+        };
         true
     }
 
@@ -131,7 +147,7 @@ impl ParticleText {
         if let Some(i) = self.slot_of(word) {
             p.set_word(i, t, &[], self.px_per_unit);
             let h = &mut self.slots[i as usize];
-            *h = Held { word: None, glyphs: Vec::new(), origin: h.origin, freed_at: t };
+            *h = Held { word: None, glyphs: Vec::new(), origin: h.origin, freed_at: t, held_from: 0 };
         }
     }
 

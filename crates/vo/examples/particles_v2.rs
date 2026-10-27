@@ -221,6 +221,8 @@ impl Popup {
                 color: Color::hex(0xbfe8ff, 1.0),
                 style: SpriteStyle::SPARK,
                 dot_area: 5.0,
+                // The newest word keeps its last glyphs as dots, as in concept 09.
+                hold: if self.concept == 24 { 0.0 } else { 0.4 },
                 ..WordParticles::default()
             })
     }
