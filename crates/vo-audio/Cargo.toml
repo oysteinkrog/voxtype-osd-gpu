@@ -1,0 +1,22 @@
+[package]
+name = "vo-audio"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Audio charts from the signal bus: mel spectrogram texture, mic health meter and other WP17 views"
+
+[dependencies]
+vo-core = { path = "../vo-core" }
+vo-scene = { path = "../vo-scene" }
+vo-render = { path = "../vo-render" }
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "vulkan"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+vo-dots = { path = "../vo-dots" }
+vo-render = { path = "../vo-render", features = ["png"] }
+pollster = "0.4"
+naga = { version = "30", features = ["wgsl-in"] }
+png = "0.18"
+serde_json = "1"

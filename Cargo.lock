@@ -1269,6 +1269,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-audio"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "png",
+ "pollster",
+ "serde_json",
+ "vo-core",
+ "vo-dots",
+ "vo-render",
+ "vo-scene",
+ "wgpu",
+]
+
+[[package]]
 name = "vo-core"
 version = "0.0.0"
 dependencies = [
