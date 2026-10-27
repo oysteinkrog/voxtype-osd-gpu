@@ -24,7 +24,12 @@ pub enum SegmentLayout {
     Column,
     /// From `start` through `sweep` radians (clockwise on screen, 0 pointing right), ticks
     /// from `inner` times the outer radius to the outer radius, `width` thick.
-    Arc { start: f32, sweep: f32, inner: f32, width: f32 },
+    Arc {
+        start: f32,
+        sweep: f32,
+        inner: f32,
+        width: f32,
+    },
 }
 
 /// See the module docs.

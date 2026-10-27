@@ -300,7 +300,10 @@ impl Bars {
                 out.push(self.bar(mirror, rr, fill));
             }
             if let Some((radius, strength)) = self.glow {
-                out.push(ShapeInstance { fill: Paint::glow(base_colour.fade(a), radius, strength), ..self.bar(body, rr, Paint::NONE) });
+                out.push(ShapeInstance {
+                    fill: Paint::glow(base_colour.fade(a), radius, strength),
+                    ..self.bar(body, rr, Paint::NONE)
+                });
             }
             out.push(self.bar(body, rr, paint(base_colour)));
             if let Some(core) = self.core {
@@ -337,7 +340,17 @@ impl Bars {
             BarColour::ByLevel(s) => s.at(level),
             BarColour::Centre { span, soft } => {
                 let d = (u - 0.5).abs() - 0.5 * span;
-                mix(self.accent, self.rest, if *soft > 0.0 { d / soft } else if d > 0.0 { 1.0 } else { 0.0 })
+                mix(
+                    self.accent,
+                    self.rest,
+                    if *soft > 0.0 {
+                        d / soft
+                    } else if d > 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                )
             }
         }
     }
@@ -481,7 +494,8 @@ mod v2_tests {
     #[test]
     fn hairline_mode_draws_one_pixel_lines_on_a_baseline() {
         let grey = Color::hex(0x444444, 1.0);
-        let b = Bars { hairline: true, baseline: Some(grey), colour: BarColour::Centre { span: 0.3, soft: 0.1 }, ..loud() };
+        let b =
+            Bars { hairline: true, baseline: Some(grey), colour: BarColour::Centre { span: 0.3, soft: 0.1 }, ..loud() };
         let out = shapes(&b);
         assert!(out.iter().all(|s| s.kind == ShapeKind::Line && s.flags & crate::display::SHAPE_HAIRLINE != 0));
         assert_eq!(out[0].geom, [0.0, 20.0, 200.0, 20.0]);

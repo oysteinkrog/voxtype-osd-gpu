@@ -29,7 +29,9 @@ use crate::path::{Contour, StrokeStyle};
 pub enum TraceMode {
     Live,
     /// `window` seconds of history across the box.
-    History { window: f32 },
+    History {
+        window: f32,
+    },
 }
 
 /// See the module docs.
@@ -223,7 +225,9 @@ mod tests {
     use crate::scene::Scene;
 
     fn speech(n: usize) -> Vec<f32> {
-        (0..n).map(|i| ((i as f32 * 0.21).sin().abs() * (0.5 + 0.5 * (i as f32 * 0.023).sin())).clamp(0.0, 1.0)).collect()
+        (0..n)
+            .map(|i| ((i as f32 * 0.21).sin().abs() * (0.5 + 0.5 * (i as f32 * 0.023).sin())).clamp(0.0, 1.0))
+            .collect()
     }
 
     fn trace(mode: TraceMode) -> Trace {

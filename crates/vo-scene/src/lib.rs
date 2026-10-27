@@ -31,8 +31,8 @@
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
-pub mod assets;
 pub mod ambient;
+pub mod assets;
 pub mod bars;
 pub mod bind;
 pub mod canvas;
@@ -65,8 +65,8 @@ pub mod trace;
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
 pub use taffy;
 
-pub use bind::Param;
 pub use ambient::{Loop, LoopProp, Ripples};
+pub use bind::Param;
 pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};

@@ -95,9 +95,9 @@ impl Ribbon {
     pub fn strand(&self, rect: Rect, t: f64, i: u32) -> (Vec<Point>, Vec<f32>) {
         let tp = t.min(self.until());
         let level = self.levels.at(tp.min(self.levels.newest_at));
-        let settle = self.settle.map_or(1.0, |s| {
-            1.0 - smoothstep(0.0, 1.0, ((tp - s) / self.settle_secs.max(1e-3) as f64) as f32)
-        });
+        let settle = self
+            .settle
+            .map_or(1.0, |s| 1.0 - smoothstep(0.0, 1.0, ((tp - s) / self.settle_secs.max(1e-3) as f64) as f32));
         let half = 0.5 * rect.h;
         let mid = rect.y + half;
         let n = self.strands.max(1);
