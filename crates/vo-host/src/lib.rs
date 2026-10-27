@@ -77,6 +77,12 @@ pub enum Placement {
     /// (0 at the top, 1 at the bottom). Where the host cannot learn the output's height it
     /// takes 1080.
     FromTop { fraction: f32 },
+    /// The whole output, over panels too (layer shell exclusive zone -1). The spec's size is
+    /// only a first guess for the app's layout; the `Configured` event brings the real one.
+    /// For a scrim or a screen-edge glow: pair it with `InputMode::None` so every click goes
+    /// through. Without a layer shell the fallback window asks to be fullscreen, which takes
+    /// focus and cannot be click-through on every compositor.
+    Fullscreen,
 }
 
 /// Which parts of a surface take pointer input. Everything else is click-through.

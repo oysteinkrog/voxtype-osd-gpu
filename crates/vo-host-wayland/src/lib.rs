@@ -919,8 +919,17 @@ impl HostCtl for State {
                     Stack::Top => Layer::Top,
                 };
                 let l = shell.create_layer_surface(&self.qh, wl, layer, Some(spec.app_id.clone()), None);
-                l.set_size(w, h);
                 match spec.placement {
+                    // Size 0 on both axes: the compositor sizes it to the output.
+                    Placement::Fullscreen => l.set_size(0, 0),
+                    _ => l.set_size(w, h),
+                }
+                match spec.placement {
+                    Placement::Fullscreen => {
+                        l.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+                        // Under panels and docks too, not only in the area they leave free.
+                        l.set_exclusive_zone(-1);
+                    }
                     Placement::Anchored { edges, margin } => {
                         let mut a = Anchor::empty();
                         a.set(Anchor::TOP, edges.top);
@@ -944,7 +953,9 @@ impl HostCtl for State {
                 let win = xdg.create_window(wl, WindowDecorations::RequestClient, &self.qh);
                 win.set_title(spec.app_id.clone());
                 win.set_app_id(spec.app_id.clone());
-                if spec.kind == SurfaceKind::Overlay {
+                if spec.placement == Placement::Fullscreen {
+                    win.set_fullscreen(None);
+                } else if spec.kind == SurfaceKind::Overlay {
                     win.set_min_size(Some((w, h)));
                     win.set_max_size(Some((w, h)));
                 }
@@ -1051,6 +1062,10 @@ impl HostCtl for State {
             }
             SurfaceChange::Size(size) => {
                 let s = &mut self.surfaces[i];
+                if s.spec.placement == Placement::Fullscreen {
+                    // The output decides its size.
+                    return Ok(());
+                }
                 s.spec.size = size;
                 let (w, h) = (size.w.round().max(1.0) as u32, size.h.round().max(1.0) as u32);
                 match &s.role {
