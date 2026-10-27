@@ -10,7 +10,7 @@ use support::{Image, Tolerance};
 use vo_core::words::Word;
 use vo_render::Offscreen;
 use vo_scene::element::{Element, TextStyle};
-use vo_scene::flow::{Caret, CaseChange, Revise};
+use vo_scene::flow::{Caret, CaseChange, Revise, SettleInk};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::{Color, Size};
 use vo_scene::text::ShapedLayout;
@@ -141,4 +141,31 @@ fn glyph_diff_goldens() {
     let failures: Vec<String> =
         [roll, grow, comma].iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
     assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}
+
+/// Settling ink (T03): each new word arrives lighter and a little looser and settles; the
+/// revised "their" starts its settle again.
+#[test]
+fn settling_ink_goldens() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let gpu = support::gpu();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let ink = |w: &[Word]| {
+        let live = Element::live_text("live", w)
+            .text_style(TextStyle::new(0, 22.0, 28.0))
+            .color(Color::hex(0xf2f3f5, 1.0))
+            .settling_ink(SettleInk::default())
+            .caret(Caret { color: Some(Color::hex(0x6cb6ff, 1.0)), ..Caret::default() })
+            .width(W - 32.0);
+        Element::panel("panel").pad(16.0).radius(12.0).fill(Color::hex(0x1d1f24, 1.0)).width(W).height(H).child(live)
+    };
+    let steps = [
+        (0.0, words(&[(1, "words")])),
+        (0.3, words(&[(1, "words"), (2, "settle")])),
+        (0.6, words(&[(1, "words"), (2, "settle"), (3, "there")])),
+        (1.0, words(&[(1, "words"), (2, "settle"), (3, "their"), (4, "ink")])),
+    ];
+    let img = strip_with(&mut off, &fonts, "live-settle-ink", &steps, &[0.29, 0.62, 0.8, 1.02, 1.2, 2.0], ink);
+    support::check(&img, Tolerance::default()).unwrap();
 }

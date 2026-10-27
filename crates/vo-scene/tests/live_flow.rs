@@ -4,7 +4,7 @@
 use vo_core::words::Word;
 use vo_scene::display::{DisplayList, GlyphInstance};
 use vo_scene::element::{Element, TextStyle};
-use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
+use vo_scene::flow::{caret_alpha, Caret, CaseChange, Revise, SettleInk, CARET_HOLD, REWRAP_STAGGER, X_TO_CAP};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
 use vo_scene::Scene;
@@ -248,4 +248,65 @@ fn a_mostly_new_word_crossfades_instead() {
     let mid = of(&s.sample(1.05), 1);
     assert_eq!(mid.len(), 6);
     assert!(mid.iter().all(|g| g.color.a > 0.0 && g.color.a < 1.0));
+}
+
+fn ink_view(w: &[Word], stable: Option<&[u32]>) -> Element<()> {
+    let mut live = Element::live_text("live", w).text_style(style()).settling_ink(SettleInk::default());
+    if let Some(ids) = stable {
+        live = live.stable_words(ids);
+    }
+    Element::column("root").child(live)
+}
+
+fn ink(list: &DisplayList, word: u32) -> f32 {
+    of(list, word)[0].color.a
+}
+
+fn spread(list: &DisplayList, word: u32) -> f32 {
+    let g = of(list, word);
+    g.last().unwrap().pos.x - g[0].pos.x
+}
+
+#[test]
+fn new_words_arrive_light_and_loose_and_settle() {
+    let mut s = scene();
+    s.apply(ink_view(&words(&[(1, "settle")]), None), 0.0);
+    let ink0 = SettleInk::default().ink;
+    assert!((ink(&s.sample(0.0), 1) - ink0).abs() < 1e-3);
+    let mid = ink(&s.sample(0.12), 1);
+    assert!(mid > ink0 && mid < 1.0, "{mid}");
+    assert_eq!(ink(&s.sample(1.0), 1), 1.0);
+    assert!(spread(&s.sample(0.0), 1) > spread(&s.sample(1.0), 1) + 0.5, "looser on arrival");
+    assert!(s.next_wake(1.0).is_none());
+}
+
+#[test]
+fn a_revision_restarts_the_settle_and_busy_words_settle_slower() {
+    let mut s = scene();
+    s.apply(ink_view(&words(&[(1, "one"), (2, "two")]), None), 0.0);
+    // Word 2 is revised three times; word 1 never.
+    for (i, text) in ["too", "tow", "two"].iter().enumerate() {
+        s.apply(ink_view(&words(&[(1, "one"), (2, text)]), None), 1.0 + i as f64);
+    }
+    assert!(ink(&s.sample(2.9), 2) > 0.999, "settled before the last revision");
+    let ink0 = SettleInk::default().ink;
+    assert!((ink(&s.sample(3.0), 2) - ink0).abs() < 1e-3, "starts again");
+    assert_eq!(ink(&s.sample(3.0), 1), 1.0, "the untouched word stays settled");
+    // A fresh word settles in about 300 ms, the busy one in about 600 ms.
+    s.apply(ink_view(&words(&[(1, "one"), (2, "two"), (3, "three")]), None), 3.0);
+    let (fresh, busy) = (ink(&s.sample(3.2), 3), ink(&s.sample(3.2), 2));
+    assert!(busy < fresh - 0.05, "busy {busy}, fresh {fresh}");
+}
+
+#[test]
+fn with_a_stable_list_a_word_holds_until_it_is_stable() {
+    let mut s = scene();
+    let w = words(&[(1, "pending")]);
+    s.apply(ink_view(&w, Some(&[])), 0.0);
+    let ink0 = SettleInk::default().ink;
+    assert!((ink(&s.sample(2.0), 1) - ink0).abs() < 1e-3, "held at arrival ink");
+    s.apply(ink_view(&w, Some(&[1])), 2.0);
+    let mid = ink(&s.sample(2.1), 1);
+    assert!(mid > ink0 && mid < 1.0);
+    assert_eq!(ink(&s.sample(3.0), 1), 1.0);
 }

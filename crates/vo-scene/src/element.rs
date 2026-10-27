@@ -22,7 +22,7 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
-use crate::flow::{Caret, CaseChange, LiveMotion, Revise};
+use crate::flow::{Caret, CaseChange, LiveMotion, Revise, SettleInk};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
 use crate::path::{Morph, Outline, StrokeStyle};
@@ -1088,6 +1088,27 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.case = c,
             _ => debug_assert!(false, "word_case on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: settling ink (T03). The newest words arrive lighter and a little looser and
+    /// settle to full ink in 300 to 600 ms, slower for words revised often. A revision starts
+    /// the settle again.
+    pub fn settling_ink(mut self, ink: SettleInk) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.settle = Some(ink),
+            _ => debug_assert!(false, "settling_ink on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: the words the recogniser marks stable. With settling ink, a word not in the
+    /// list keeps its arrival ink until it is. Without this call every word settles by age.
+    pub fn stable_words(mut self, ids: &[u32]) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.stable = Some(ids.to_vec()),
+            _ => debug_assert!(false, "stable_words on a node that is not live text: {}", self.key),
         }
         self
     }

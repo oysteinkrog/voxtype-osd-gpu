@@ -18,6 +18,10 @@
 //! - **Rewrap travel (T11).** A word that lands on another line glides there with a 220 ms
 //!   spring. Words that change line start 12 ms apart in reading order. The wrap is decided
 //!   once per change, by the layout, and never moves during the glide.
+//! - **Settling ink (T03, F1).** With `SettleInk`, the newest words arrive lighter and a
+//!   little looser and settle to full ink in 300 to 600 ms, slower for words revised often.
+//!   A revision starts the settle again; a stable list from the recogniser holds a word
+//!   until it is stable.
 //! - **Caret (T17).** A bar after the last word. Its position springs in 120 ms, it stays
 //!   solid while words arrive and for 400 ms after, then blinks at about 1 Hz.
 //!
@@ -104,12 +108,37 @@ pub enum CaseChange {
     Grow,
 }
 
+/// Settling ink (T03, F1): the newest words arrive lighter and a little looser, and
+/// settle to full ink and normal spacing. A revision starts the settle again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SettleInk {
+    /// Opacity a new or revised word arrives at.
+    pub ink: f32,
+    /// Extra space between its letters on arrival, in ems.
+    pub tracking: f32,
+    /// Settle time, in seconds, of a word on its first version.
+    pub fastest: f64,
+    /// Settle time of a word revised three times or more. Words the recogniser keeps
+    /// changing settle slower, so the eye trusts them later.
+    pub slowest: f64,
+}
+
+impl Default for SettleInk {
+    fn default() -> SettleInk {
+        SettleInk { ink: 0.55, tracking: 0.03, fastest: 0.3, slowest: 0.6 }
+    }
+}
+
 /// How live text moves, set on the element.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveMotion {
     pub caret: Option<Caret>,
     pub revise: Revise,
     pub case: CaseChange,
+    pub settle: Option<SettleInk>,
+    /// The words the recogniser marks stable, when it says. With a list, a word not on it
+    /// holds its arrival ink until it is; without one, every word settles by its age.
+    pub stable: Option<Vec<WordId>>,
 }
 
 /// What `Flow::update` needs from the node.
@@ -141,6 +170,11 @@ struct FlowWord {
     spread: bool,
     line: u32,
     glyphs: Vec<FlowGlyph>,
+    /// Settling ink: opacity factor and extra letter spacing in ems.
+    ink: Channel,
+    track: Channel,
+    /// How many times the text changed.
+    revisions: u32,
 }
 
 /// A glyph's own motion: where it sits in its word, and its enter or change.
@@ -410,6 +444,7 @@ impl Flow {
     /// Takes the new layout of the node's words at `t` and springs every word toward it.
     pub fn update(&mut self, t: f64, input: FlowInput<'_>) {
         let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade } = input;
+        self.size = size;
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
         let placed = place(shaped, words);
@@ -442,10 +477,18 @@ impl Flow {
                     spread: false,
                     line: p.line,
                     glyphs,
+                    ink: make.ch(1.0, CROSSFADE, Rest::UNIT),
+                    track: make.ch(0.0, CROSSFADE, Rest::UNIT),
+                    revisions: 0,
                 });
+                if let Some(o) = next.last_mut() {
+                    settle(o, true, motion, &make, reduced);
+                }
                 continue;
             };
-            if o.text != w.text {
+            let revised = o.text != w.text;
+            if revised {
+                o.revisions += 1;
                 arrived = true;
                 let diffed = revise == Revise::Glyphs && self.revise_glyphs(&mut o, w, &p, &graphemes, &make, motion);
                 if !diffed {
@@ -477,6 +520,7 @@ impl Flow {
             }
             move_to(&mut o.width, p.width, t, FLIP, reduced);
             o.line = p.line;
+            settle(&mut o, revised, motion, &make, reduced);
             next.push(o);
         }
         for o in old {
@@ -678,15 +722,19 @@ impl Flow {
 
     /// The motion of glyph `i` of the node's shaped text at `t`.
     pub fn glyph(&self, i: usize, t: f64) -> GlyphMotion {
-        let Some(Some((w, g))) = self.index.get(i) else { return GlyphMotion::NONE };
+        let Some(Some((w, gi))) = self.index.get(i) else { return GlyphMotion::NONE };
         let w = &self.words[*w as usize];
-        let g = &w.glyphs[*g as usize];
+        let g = &w.glyphs[*gi as usize];
         let off = |c: &Channel| (c.value(t) - c.target()) as f32;
         let scale = g.scale.value(t).max(0.0) as f32;
+        // Tracking spreads the letters about the word's middle, so the word stays in place.
+        let middle = 0.5 * (w.glyphs.len() as f32 - 1.0);
+        let track = w.track.value(t) as f32 * self.size * (*gi as f32 - middle);
+        let centre = 0.5 * g.advance * (1.0 - scale);
         GlyphMotion {
-            dx: off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + 0.5 * g.advance * (1.0 - scale),
+            dx: off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + centre + track,
             dy: off(&w.y) + g.rise.value(t) as f32,
-            opacity: g.opacity.value(t).clamp(0.0, 1.0) as f32,
+            opacity: (g.opacity.value(t) * w.ink.value(t)).clamp(0.0, 1.0) as f32,
             scale,
         }
     }
@@ -731,7 +779,7 @@ impl Flow {
     /// When every word, glyph, ghost and the caret's glide come to rest.
     pub fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| {
-            [&w.x, &w.y, &w.width]
+            [&w.x, &w.y, &w.width, &w.ink, &w.track]
                 .into_iter()
                 .chain(w.glyphs.iter().flat_map(|g| [&g.x, &g.opacity, &g.rise, &g.scale]))
         });
@@ -776,6 +824,33 @@ pub(crate) struct Flow {
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.
     arrived: f64,
+    /// Em size of the text, for tracking.
+    size: f32,
+}
+
+/// Settling ink for a word at `make.t`: a `fresh` word (new, or its text changed) starts at
+/// the arrival ink and tracking; it settles at once without a stable list, or once the list
+/// names it.
+fn settle(o: &mut FlowWord, fresh: bool, motion: &LiveMotion, make: &Make, reduced: bool) {
+    let t = make.t;
+    let Some(st) = motion.settle else {
+        o.ink.retarget(t, 1.0);
+        o.track.retarget(t, 0.0);
+        return;
+    };
+    if fresh {
+        o.ink.snap(t, st.ink as f64);
+        o.track.snap(t, if reduced { 0.0 } else { st.tracking as f64 });
+    }
+    let stable = motion.stable.as_ref().is_none_or(|ids| ids.contains(&o.id));
+    if stable && o.ink.target() != 1.0 {
+        let k = o.revisions.min(3) as f64 / 3.0;
+        let spring = Spring::critical_to_98(st.fastest + (st.slowest - st.fastest) * k);
+        o.ink.set_spring(spring);
+        o.track.set_spring(spring);
+        o.ink.retarget(t, 1.0);
+        o.track.retarget(t, 0.0);
+    }
 }
 
 /// Caret opacity `idle` seconds after words last arrived: solid for `CARET_HOLD`, then on
