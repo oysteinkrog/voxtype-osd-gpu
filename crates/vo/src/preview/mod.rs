@@ -382,7 +382,11 @@ fn run_compare(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
     load_tokens(preview.source.as_mut(), a.value("--tokens").map(PathBuf::from).as_ref())?;
     let size = preview.source.size();
     // The window's spellings work too, so a command line can move from one mode to the other.
-    let crop = a.value("--crop").or(a.value("--ref-crop")).map(|c| reference::parse_crop(c, size.w / size.h.max(1e-6))).transpose()?;
+    let crop = a
+        .value("--crop")
+        .or(a.value("--ref-crop"))
+        .map(|c| reference::parse_crop(c, size.w / size.h.max(1e-6)))
+        .transpose()?;
     let backdrop = match a.value("--backdrop").or(a.value("--ref-backdrop")) {
         Some(b) => reference::Backdrop::parse(b).ok_or_else(|| format!("backdrop '{b}': give ref or #rrggbb"))?,
         None => reference::Backdrop::Reference,

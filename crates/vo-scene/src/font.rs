@@ -136,8 +136,7 @@ impl FontRegistry {
         let data = match cached {
             Some(data) => data,
             None => {
-                let data: Bytes =
-                    Arc::new(std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?);
+                let data: Bytes = Arc::new(std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?);
                 self.files.write().expect("font file lock").insert(path.to_path_buf(), data.clone());
                 data
             }

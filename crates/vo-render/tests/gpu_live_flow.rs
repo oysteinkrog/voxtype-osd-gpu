@@ -214,7 +214,7 @@ fn front_drop_golden() {
     let list = probe.sample(5.0);
     let y = |id: u32| list.glyphs.iter().find(|g| g.word == id).map(|g| g.pos.y);
     let first_line = all.iter().take_while(|w| y(w.0) == y(1)).count();
-    assert!(first_line >= 2 && first_line < 12, "first line holds {first_line} words");
+    assert!((2..12).contains(&first_line), "first line holds {first_line} words");
     let steps = [(0.0, words(&all[..12])), (1.0, words(&all[first_line..]))];
     let img = strip(&mut off, &fonts, "live-front-drop", &steps, &[0.9, 1.03, 1.06, 1.1, 1.16, 1.6]);
     support::check(&img, Tolerance::default()).unwrap();
