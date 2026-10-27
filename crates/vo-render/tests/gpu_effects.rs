@@ -628,3 +628,59 @@ fn glyph_effect_goldens() {
     let again = render(&mut offscreen(&gpu, &data), "again", &list, 1.0);
     assert_eq!(render(&mut off, "once", &list, 1.0).px, again.px);
 }
+
+/// `list` without its glyphs, each layer's item range moved to match.
+#[cfg(all(feature = "cpu", feature = "png"))]
+fn without_glyphs(list: &DisplayList) -> DisplayList {
+    let mut out = list.clone();
+    out.items.retain(|i| i.kind != ItemKind::Glyphs);
+    let mut at = 0u32;
+    for (layer, orig) in out.layers.iter_mut().zip(&list.layers) {
+        let items = &list.items[orig.items.start as usize..orig.items.end as usize];
+        let n = items.iter().filter(|i| i.kind != ItemKind::Glyphs).count() as u32;
+        layer.items = at..at + n;
+        at += n;
+    }
+    out
+}
+
+/// The CPU first frame draws glows, shadows and bloom close to the GPU (glyphs left out:
+/// their edges differ by design). Writes `cpu-<name>-<scale>x.png`, the GPU's frame on the
+/// left and the CPU's on the right.
+#[cfg(all(feature = "cpu", feature = "png"))]
+#[test]
+fn effects_on_the_cpu_are_close_to_the_gpu() {
+    let gpu = support::gpu();
+    let data = load_font();
+    let mut off = offscreen(&gpu, &data);
+    let bloom = without_glyphs(&bloom_scene(&FontRef::new(&data).unwrap()));
+    let mut failures = Vec::new();
+    for (name, list) in [("glow", glow_scene()), ("shadow", shadow_scene()), ("bloom", bloom)] {
+        for scale in [1.0, 1.5] {
+            let img = render(&mut off, name, &list, scale);
+            let mut cpu = vo_render::cpu::CpuRenderer::new(vo_scene::font::FontRegistry::new());
+            let (w, h) = (img.w, img.h);
+            let mut got = vec![0u8; (w * h * 4) as usize];
+            cpu.draw_bgra(&list, scale, w, h, w as usize * 4, &mut got);
+            for px in got.as_chunks_mut::<4>().0 {
+                px.swap(0, 2);
+            }
+            let diffs: Vec<u8> = img.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b)).collect();
+            let max = *diffs.iter().max().unwrap();
+            let mean = diffs.iter().map(|d| *d as f64).sum::<f64>() / diffs.len() as f64;
+            let mut side = Vec::with_capacity(img.px.len() * 2);
+            for y in 0..h as usize {
+                side.extend_from_slice(&img.px[y * w as usize * 4..(y + 1) * w as usize * 4]);
+                side.extend_from_slice(&got[y * w as usize * 4..(y + 1) * w as usize * 4]);
+            }
+            let path = format!("{}/cpu-{name}-{scale}x.png", support::OUT_DIR);
+            vo_render::offscreen::write_png(path.as_ref(), 2 * w, h, &side).unwrap();
+            // Edges differ by a few levels where the GPU's quads and the CPU's pixel loop
+            // round differently; the bloom by the GPU's dither.
+            if max > 10 || mean > 0.3 {
+                failures.push(format!("{name} {scale}x: max {max}, mean {mean:.3}; see {path}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

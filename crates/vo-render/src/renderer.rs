@@ -69,13 +69,13 @@ pub const EFFECT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Layer texture sizes round up to this, so a layer that moves or grows a little keeps its
 /// pooled texture, and every bloom level is an exact half of the one above.
-const ALIGN: u32 = 64;
+pub(crate) const ALIGN: u32 = 64;
 /// Frames a pooled texture may go unused before it is freed.
 const POOL_KEEP_FRAMES: u64 = 120;
 /// Bloom levels at most, below the layer texture.
 const MAX_LEVELS: u32 = 6;
 /// How much of the lower level each bloom upsample mixes in.
-const BLOOM_MIX: f32 = 0.65;
+pub(crate) const BLOOM_MIX: f32 = 0.65;
 /// A trail starts fresh after a gap between frames longer than this, in seconds.
 const TRAIL_MAX_GAP: f64 = 0.5;
 
@@ -1816,11 +1816,17 @@ fn bloom_of(target: &LayerTarget) -> Option<Bloom> {
 /// Levels from the radius in pixels: level `l` blurs about `2^(l-1)` times as wide as level 1,
 /// whose spread is about 2 pixels. The deepest level fades in, so the radius is continuous.
 fn bloom_plan(b: Bloom, ppu: f32) -> BloomPlan {
-    let radius_px = (b.radius * ppu).max(1e-3);
-    let t = (1.0 + (radius_px / 2.0).log2()).clamp(1.0, MAX_LEVELS as f32);
+    let (levels, top) = bloom_levels(b.radius * ppu);
+    BloomPlan { strength: b.strength, levels, top, down: Vec::new(), up: Vec::new(), fx: Vec::new() }
+}
+
+/// A bloom of `radius_px` physical pixels: its pyramid levels below the layer texture, and
+/// how much of the deepest one it mixes in (0 to 1), so the radius changes smoothly.
+pub(crate) fn bloom_levels(radius_px: f32) -> (u32, f32) {
+    let t = (1.0 + (radius_px.max(1e-3) / 2.0).log2()).clamp(1.0, MAX_LEVELS as f32);
     let levels = t.ceil() as u32;
     let top = if levels == 1 { 1.0 } else { t - (levels - 1) as f32 };
-    BloomPlan { strength: b.strength, levels, top, down: Vec::new(), up: Vec::new(), fx: Vec::new() }
+    (levels, top)
 }
 
 fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {

@@ -8,9 +8,14 @@
 //!   Edges can differ by a fraction of a pixel.
 //! - Compositing is in linear light with premultiplied alpha, then sRGB encoded, as the GPU
 //!   writes to an sRGB swapchain.
+//! - Glows and drop shadows run the shape shader's halo maths per pixel. A bloom layer is
+//!   drawn alone and its blurred copy added, through the same pyramid as the GPU (13-tap
+//!   downsample with a Karis average, tent upsample, bilinear reads), at the GPU's levels.
+//!   On such a frame the effect path's tone map applies too, without its dither. Light
+//!   mode's dark bloom is not done.
 //! - Not exact: offscreen layers draw as direct layers (group opacity per instance), only the
-//!   nearest clip applies, and emitters, glows, shadows and bloom are skipped. Masks are not
-//!   applied: a layer under an alpha mask is hidden, one under an inverted mask unmasked.
+//!   nearest clip applies, and emitters are skipped. Masks are not applied: a layer under an
+//!   alpha mask is hidden, one under an inverted mask unmasked.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,11 +23,12 @@ use std::sync::Arc;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
-use vo_scene::display::{BlendMode, DisplayList, GlyphInstance, ItemKind, LayerTarget, Paint, ShapeInstance};
+use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance, ItemKind, LayerTarget, Paint, ShapeInstance};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 
 use crate::color::{linear_premul, linear_to_srgb, oklab_to_linear};
+use crate::renderer::{bloom_levels, ALIGN, BLOOM_MIX};
 use crate::shapes::{pixels_per_unit, GpuPaint, GpuShape};
 
 const KIND_CIRCLE: u32 = vo_scene::display::ShapeKind::Circle as u32;
@@ -30,6 +36,8 @@ const KIND_LINE: u32 = vo_scene::display::ShapeKind::Line as u32;
 const KIND_BAND: u32 = vo_scene::display::ShapeKind::Band as u32;
 const PAINT_NONE: u32 = vo_scene::display::PaintKind::None as u32;
 const PAINT_SOLID: u32 = vo_scene::display::PaintKind::Solid as u32;
+const PAINT_GLOW: u32 = vo_scene::display::PaintKind::Glow as u32;
+const PAINT_SHADOW: u32 = vo_scene::display::PaintKind::Shadow as u32;
 const PAINT_CONIC: u32 = vo_scene::display::PaintKind::Conic as u32;
 const PAINT_SHEEN: u32 = vo_scene::display::PaintKind::Sheen as u32;
 
@@ -43,6 +51,8 @@ pub struct CpuRenderer {
     mask: Option<tiny_skia::Mask>,
     width: u32,
     height: u32,
+    /// The GPU draws this frame on its effect path, where glows may exceed 1.
+    effects: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +83,7 @@ impl CpuRenderer {
             mask: None,
             width: 0,
             height: 0,
+            effects: false,
         }
     }
 
@@ -115,6 +126,14 @@ impl CpuRenderer {
         if list.layers.is_empty() {
             return;
         }
+        self.effects = list.layers.iter().any(|l| bloom_of(l).is_some() || l.trail.is_some());
+        self.draw_layers(list, scale);
+        if self.effects {
+            self.acc.iter_mut().for_each(tone_map);
+        }
+    }
+
+    fn draw_layers(&mut self, list: &DisplayList, scale: f32) {
         let top = State {
             to_px: Affine::IDENTITY,
             from_px: Affine::IDENTITY,
@@ -145,12 +164,19 @@ impl CpuRenderer {
             return;
         }
         let st = State { to_px, from_px, ppu, opacity, blend: layer.blend, clip };
+        // A bloom layer draws alone, so its blurred copy can be added.
+        let bloom = bloom_of(layer).filter(|_| self.effects);
+        let n = self.acc.len();
+        let below = bloom.map(|_| std::mem::replace(&mut self.acc, vec![[0.0; 4]; n]));
         for item in list.layer_items(li) {
             let range = item.start as usize..(item.start + item.len) as usize;
             match item.kind {
                 ItemKind::Shapes => {
                     for s in &list.shapes[range] {
-                        if let Some(g) = GpuShape::new(s, &to_px, ppu, opacity) {
+                        if let Some(mut g) = GpuShape::new(s, &to_px, ppu, opacity) {
+                            if !self.effects {
+                                g.clamp_glow();
+                            }
                             self.shape(&g, &st);
                         }
                     }
@@ -186,6 +212,61 @@ impl CpuRenderer {
                 ItemKind::Layer => self.visit(list, scale, item.start, &st),
             }
         }
+        if let (Some(b), Some(below)) = (bloom, below) {
+            let layer = std::mem::replace(&mut self.acc, below);
+            self.add_bloom(&layer, b, ppu, st.blend, parent.clip.as_ref());
+        }
+    }
+
+    /// Draws a bloom layer's pixels `layer` (the whole frame) over the buffer, plus
+    /// `b.strength` times their blur through the GPU's pyramid, inside `clip`.
+    fn add_bloom(&mut self, layer: &[[f32; 4]], b: Bloom, ppu: f32, blend: BlendMode, clip: Option<&Clip>) {
+        let (w, h) = (self.width as i32, self.height as i32);
+        let mut drawn = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for (i, c) in layer.iter().enumerate() {
+            if c.iter().any(|v| *v != 0.0) {
+                let (x, y) = (i as i32 % w, i as i32 / w);
+                drawn = [drawn[0].min(x), drawn[1].min(y), drawn[2].max(x + 1), drawn[3].max(y + 1)];
+            }
+        }
+        if drawn[2] <= drawn[0] {
+            return;
+        }
+        // The layer texture as the GPU sizes it: what it drew, padded by the bloom's reach,
+        // rounded up to `ALIGN`.
+        let (mut levels, mut top) = bloom_levels(b.radius * ppu);
+        let pad = 3 << levels;
+        let (ox, oy) = (drawn[0] - pad, drawn[1] - pad);
+        let tw = ((drawn[2] + pad - ox) as u32).next_multiple_of(ALIGN);
+        let th = ((drawn[3] + pad - oy) as u32).next_multiple_of(ALIGN);
+        let fit = (tw.min(th) / 4).max(1).ilog2().max(1);
+        if levels > fit {
+            (levels, top) = (fit, 1.0);
+        }
+        let mut src = Img::new(tw, th);
+        for y in 0..th as i32 {
+            for x in 0..tw as i32 {
+                let (fx, fy) = (ox + x, oy + y);
+                if (0..w).contains(&fx) && (0..h).contains(&fy) {
+                    src.px[(y as u32 * tw + x as u32) as usize] = layer[(fy * w + fx) as usize];
+                }
+            }
+        }
+        let glow = pyramid(src, levels, top);
+        for fy in oy.max(0)..(oy + th as i32).min(h) {
+            for fx in ox.max(0)..(ox + tw as i32).min(w) {
+                let base = layer[(fy * w + fx) as usize];
+                let uv = [(fx - ox) as f32 + 0.5, (fy - oy) as f32 + 0.5];
+                let g = glow.sample(uv[0] / tw as f32, uv[1] / th as f32);
+                let mut c = [0, 1, 2, 3].map(|i| base[i] + b.strength * g[i]);
+                c[3] = c[3].min(1.0);
+                if c.iter().all(|v| *v <= 0.0) {
+                    continue;
+                }
+                let k = clip_coverage(clip, Point::new(fx as f32 + 0.5, fy as f32 + 0.5));
+                self.blend(fx as u32, fy as u32, scale4(c, k), blend);
+            }
+        }
     }
 
     /// The pixel box `[x0, y0, x1, y1)` covering `r` (layer space) through `to_px`, clamped.
@@ -200,9 +281,9 @@ impl CpuRenderer {
     }
 
     fn shape(&mut self, s: &GpuShape, st: &State) {
-        // Glows and shadows are left to the GPU frames that follow.
         let fill = (s.kinds >> 8) & 0xff;
-        if fill == vo_scene::display::PaintKind::Glow as u32 || fill == vo_scene::display::PaintKind::Shadow as u32 {
+        if fill == PAINT_GLOW || fill == PAINT_SHADOW {
+            self.halo(s, st);
             return;
         }
         let kind = s.kinds & 0xff;
@@ -247,6 +328,61 @@ impl CpuRenderer {
                 let fill = scale4(paint(fill_kind, &s.fill, p), fill_cov);
                 let stroke = scale4(paint(stroke_kind, &s.stroke, p), stroke_cov);
                 let c = [0, 1, 2, 3].map(|i| stroke[i] + fill[i] * (1.0 - stroke[3]));
+                let k = clip_coverage(st.clip.as_ref(), frag);
+                self.blend(x, y, scale4(c, k), st.blend);
+            }
+        }
+    }
+
+    /// A glow or a drop shadow: the shape shader's `halo`, pixel by pixel.
+    fn halo(&mut self, s: &GpuShape, st: &State) {
+        let Some([x0, y0, x1, y1]) = self.px_box(s.quad(st.ppu), &st.to_px) else { return };
+        let kind = s.kinds & 0xff;
+        let glow = (s.kinds >> 8) & 0xff == PAINT_GLOW;
+        let (g, e, hw) = (s.geom, s.fill.ends, 0.5 * s.stroke_width);
+        let ends = (st.to_px.apply(Point::new(g[0], g[1])).x, st.to_px.apply(Point::new(g[2], g[1])).x);
+        let c0 = s.fill.c0;
+        let rgb = oklab_to_linear([c0[0], c0[1], c0[2]]).map(|v| v.clamp(0.0, 1.0));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let frag = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                let p = st.from_px.apply(frag);
+                let v = if glow {
+                    // Around a stroke the glow falls off on both sides of it.
+                    let d = sd_shape(kind, p, g, s.radii, frag.x, ends);
+                    let dd = if hw > 0.0 { d.abs() } else { d } - hw;
+                    e[1] * (-dd.max(0.0) / e[0].max(1e-4)).exp()
+                } else {
+                    // At least a quarter pixel, so a hard shadow still has an antialiased edge.
+                    let sigma = e[2].max(0.25 / st.ppu);
+                    let spread = e[3];
+                    let q = Point::new(p.x - e[0], p.y - e[1]);
+                    if kind == KIND_LINE || kind == KIND_BAND {
+                        let ds = sd_shape(kind, q, g, s.radii, frag.x - e[0] * st.ppu, ends) - hw - spread;
+                        0.5 - 0.5 * erf(ds * std::f32::consts::FRAC_1_SQRT_2 / sigma)
+                    } else {
+                        let mut rect = g;
+                        if kind == KIND_CIRCLE {
+                            rect = [g[0] - g[2], g[1] - g[2], 2.0 * g[2], 2.0 * g[2]];
+                        }
+                        let grow = spread + hw;
+                        let rect = [rect[0] - grow, rect[1] - grow, rect[2] + 2.0 * grow, rect[3] + 2.0 * grow];
+                        let (qx, qy) = (q.x - (rect[0] + 0.5 * rect[2]), q.y - (rect[1] + 0.5 * rect[3]));
+                        let r = match (qy < 0.0, qx >= 0.0) {
+                            (true, false) => s.radii[0],
+                            (true, true) => s.radii[1],
+                            (false, true) => s.radii[2],
+                            (false, false) => s.radii[3],
+                        };
+                        let corner = (r + grow).clamp(0.0, 0.5 * rect[2].min(rect[3]));
+                        box_shadow(rect, corner, q, sigma)
+                    }
+                };
+                let a = c0[3] * v.max(0.0);
+                if a <= 0.0 {
+                    continue;
+                }
+                let c = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a.min(1.0)];
                 let k = clip_coverage(st.clip.as_ref(), frag);
                 self.blend(x, y, scale4(c, k), st.blend);
             }
@@ -372,6 +508,193 @@ fn sd_rrect(p: Point, rect: [f32; 4], radii: [f32; 4]) -> f32 {
     let r = r.clamp(0.0, hx.min(hy).max(0.0));
     let (qx, qy) = (qx0.abs() - hx + r, qy0.abs() - hy + r);
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+/// The shader's `sd_shape`: signed distance to the shape at `p`; `frag_x` is the pixel centre
+/// in target pixels, for bands.
+fn sd_shape(kind: u32, p: Point, g: [f32; 4], radii: [f32; 4], frag_x: f32, ends: (f32, f32)) -> f32 {
+    match kind {
+        KIND_CIRCLE => (p.x - g[0]).hypot(p.y - g[1]) - g[2],
+        KIND_LINE => sd_segment(p, Point::new(g[0], g[1]), Point::new(g[2], g[3])),
+        KIND_BAND => sd_band(p, g, radii, frag_x, ends),
+        _ => sd_rrect(p, g, radii),
+    }
+}
+
+/// The shader's error function: the 4-term approximation (max error about 5e-4).
+fn erf(x: f32) -> f32 {
+    let a = x.abs();
+    let y = 1.0 + (0.278_393 + (0.230_389 + 0.078_108 * (a * a)) * a) * a;
+    let y = y * y;
+    x.signum() * (1.0 - 1.0 / (y * y))
+}
+
+fn gaussian(x: f32, sigma: f32) -> f32 {
+    (-(x * x) / (2.0 * sigma * sigma)).exp() / (2.506_628_3 * sigma)
+}
+
+/// The shader's `box_shadow_x`: one row of a blurred rounded box, centred on 0.
+fn box_shadow_x(x: f32, y: f32, sigma: f32, corner: f32, half: [f32; 2]) -> f32 {
+    let delta = (half[1] - corner - y.abs()).min(0.0);
+    let curved = half[0] - corner + (corner * corner - delta * delta).max(0.0).sqrt();
+    let k = std::f32::consts::FRAC_1_SQRT_2 / sigma;
+    0.5 * (erf((x + curved) * k) - erf((x - curved) * k))
+}
+
+/// The shader's `box_shadow`: a Gaussian blur of a rounded box at `p`, exact in x, four
+/// samples in y.
+fn box_shadow(rect: [f32; 4], corner: f32, p: Point, sigma: f32) -> f32 {
+    let half = [0.5 * rect[2], 0.5 * rect[3]];
+    let (qx, qy) = (p.x - (rect[0] + half[0]), p.y - (rect[1] + half[1]));
+    let (lo, hi) = (qy - half[1], qy + half[1]);
+    let start = (-3.0 * sigma).clamp(lo, hi);
+    let end = (3.0 * sigma).clamp(lo, hi);
+    let step = (end - start) / 4.0;
+    (0..4)
+        .map(|i| {
+            let y = start + (i as f32 + 0.5) * step;
+            box_shadow_x(qx, qy - y, sigma, corner, half) * gaussian(y, sigma) * step
+        })
+        .sum()
+}
+
+/// The effect path's tone map (`fs_final`): a shoulder above 0.95 of the brightest straight
+/// channel brings light above 1 back under 1 with its hue kept.
+fn tone_map(c: &mut [f32; 4]) {
+    if c[3] <= 0.0 {
+        *c = [0.0; 4];
+        return;
+    }
+    c[3] = c[3].min(1.0);
+    let k = 0.95;
+    let m = c[0].max(c[1]).max(c[2]) / c[3].max(1e-4);
+    if m > k {
+        let s = (k + (1.0 - k) * (1.0 - (-(m - k) / (1.0 - k)).exp())) / m;
+        for v in &mut c[..3] {
+            *v *= s;
+        }
+    }
+}
+
+/// The bloom of an offscreen layer, if it has one that shows.
+fn bloom_of(layer: &vo_scene::display::Layer) -> Option<Bloom> {
+    match layer.target {
+        LayerTarget::Offscreen { bloom: Some(b) } if b.strength > 0.0 => Some(b),
+        _ => None,
+    }
+}
+
+/// A linear premultiplied image for the bloom pyramid.
+struct Img {
+    w: u32,
+    h: u32,
+    px: Vec<[f32; 4]>,
+}
+
+impl Img {
+    fn new(w: u32, h: u32) -> Img {
+        Img { w, h, px: vec![[0.0; 4]; (w * h) as usize] }
+    }
+
+    /// A bilinear read at `(u, v)` in 0..1, clamped to the edge, as the GPU's sampler reads.
+    fn sample(&self, u: f32, v: f32) -> [f32; 4] {
+        let (x, y) = (u * self.w as f32 - 0.5, v * self.h as f32 - 0.5);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let at = |x: f32, y: f32| {
+            let x = (x as i32).clamp(0, self.w as i32 - 1) as u32;
+            let y = (y as i32).clamp(0, self.h as i32 - 1) as u32;
+            self.px[(y * self.w + x) as usize]
+        };
+        let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
+        [0, 1, 2, 3].map(|i| {
+            let top = a[i] + (b[i] - a[i]) * fx;
+            let bottom = c[i] + (d[i] - c[i]) * fx;
+            top + (bottom - top) * fy
+        })
+    }
+}
+
+/// `bloom.wgsl`'s pyramid on the CPU: `levels` 13-tap downsamples (a Karis average on the
+/// first), then tent upsamples that mix each level with the one below, the deepest by `top`.
+/// The result is at half the size of `src`.
+fn pyramid(src: Img, levels: u32, top: f32) -> Img {
+    let mut down: Vec<Img> = Vec::new();
+    for l in 0..levels {
+        let s = if l == 0 { &src } else { &down[l as usize - 1] };
+        down.push(downsample(s, l == 0));
+    }
+    let n = levels as usize;
+    if n == 1 {
+        return down.pop().expect("one level");
+    }
+    let mut up: Option<Img> = None;
+    for l in (0..n - 1).rev() {
+        let low = up.as_ref().unwrap_or(&down[n - 1]);
+        let weight = if l == n - 2 { BLOOM_MIX * top } else { BLOOM_MIX };
+        up = Some(upsample(&down[l], low, weight));
+    }
+    up.expect("two levels or more")
+}
+
+fn downsample(src: &Img, karis: bool) -> Img {
+    let mut dst = Img::new((src.w / 2).max(1), (src.h / 2).max(1));
+    let (tx, ty) = (1.0 / src.w as f32, 1.0 / src.h as f32);
+    let luma = |c: [f32; 4]| 1.0 / (1.0 + 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]);
+    for y in 0..dst.h {
+        for x in 0..dst.w {
+            let (u, v) = ((x as f32 + 0.5) / dst.w as f32, (y as f32 + 0.5) / dst.h as f32);
+            let tap = |dx: f32, dy: f32| src.sample(u + dx * tx, v + dy * ty);
+            let box4 = |p: [[f32; 2]; 4]| {
+                let t = p.map(|[dx, dy]| tap(dx, dy));
+                [0, 1, 2, 3].map(|i| 0.25 * (t[0][i] + t[1][i] + t[2][i] + t[3][i]))
+            };
+            let boxes = [
+                box4([[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]),
+                box4([[-2.0, -2.0], [0.0, -2.0], [-2.0, 0.0], [0.0, 0.0]]),
+                box4([[0.0, -2.0], [2.0, -2.0], [0.0, 0.0], [2.0, 0.0]]),
+                box4([[-2.0, 0.0], [0.0, 0.0], [-2.0, 2.0], [0.0, 2.0]]),
+                box4([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0], [2.0, 2.0]]),
+            ];
+            let weights = [0.5, 0.125, 0.125, 0.125, 0.125];
+            let w = weights.iter().zip(&boxes).map(|(w, b)| if karis { w * luma(*b) } else { *w });
+            let w: Vec<f32> = w.collect();
+            let total: f32 = w.iter().sum();
+            dst.px[(y * dst.w + x) as usize] =
+                [0, 1, 2, 3].map(|i| boxes.iter().zip(&w).map(|(b, w)| b[i] * w).sum::<f32>() / total);
+        }
+    }
+    dst
+}
+
+fn upsample(here: &Img, low: &Img, weight: f32) -> Img {
+    let mut dst = Img::new(here.w, here.h);
+    let (tx, ty) = (1.0 / low.w as f32, 1.0 / low.h as f32);
+    for y in 0..dst.h {
+        for x in 0..dst.w {
+            let (u, v) = ((x as f32 + 0.5) / dst.w as f32, (y as f32 + 0.5) / dst.h as f32);
+            let mut s = [0.0f32; 4];
+            for (dx, dy, k) in [
+                (0.0, 0.0, 4.0),
+                (-1.0, 0.0, 2.0),
+                (1.0, 0.0, 2.0),
+                (0.0, -1.0, 2.0),
+                (0.0, 1.0, 2.0),
+                (-1.0, -1.0, 1.0),
+                (1.0, -1.0, 1.0),
+                (-1.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0),
+            ] {
+                let c = low.sample(u + dx * tx, v + dy * ty);
+                for i in 0..4 {
+                    s[i] += c[i] * k;
+                }
+            }
+            let h = here.px[(y * dst.w + x) as usize];
+            dst.px[(y * dst.w + x) as usize] = [0, 1, 2, 3].map(|i| h[i] + (s[i] / 16.0 - h[i]) * weight);
+        }
+    }
+    dst
 }
 
 fn sd_segment(p: Point, a: Point, b: Point) -> f32 {
