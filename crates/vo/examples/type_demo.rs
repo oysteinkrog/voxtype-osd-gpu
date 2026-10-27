@@ -1,34 +1,40 @@
-//! Type demo, two pages.
+//! Type demo, three pages.
 //!
 //! - `fonts` (WP7, FX-003, FX-004): a mecha-style header in Barlow Condensed Bold whose kanji
 //!   fall back to the Japanese label face, a body line with Norwegian letters, then one line
 //!   in every built-in font.
 //! - `fx` (WP18, FX-013, FX-018): offset text shadows on a light card, and outlined text,
 //!   alone and with a glow.
+//! - `labels` (FX-005, FX-049, FX-037): vertical side labels in Japanese and Latin, the
+//!   same box autofitting short, medium and long text, and live text with a gradient caret.
 //!
 //!   cargo run --release -p vo --example type_demo -- [--out DIR] [--bench]
 //!
-//! Writes `DIR/type-demo.png` and `DIR/type-fx.png` (default DIR `/var/tmp/claude/fw-fonts`).
+//! Writes `DIR/type-demo.png`, `DIR/type-fx.png` and `DIR/type-labels.png` (default DIR
+//! `/var/tmp/claude/fw-fonts`).
 //! `--bench` times each page's frame on the GPU at 600x300 and 1920x1080.
 
 use std::path::PathBuf;
 
 use vo::scene::element::{Element, TextStyle};
+use vo::scene::flow::Caret;
 use vo::scene::geom::{Color, Size};
 use vo::scene::{DisplayList, Scene};
 use vo::{FontRegistry, ShapedLayout};
+use vo_core::words::Word;
 use vo_render::offscreen::write_png;
 use vo_render::{Offscreen, Renderer, Target};
 
 const SURFACE: Size = Size::new(600.0, 300.0);
 
-const SPECIMEN: [(&str, &str); 9] = [
+const SPECIMEN: [(&str, &str); 10] = [
     ("sans", "sans: Noto Sans, the quick brown fox"),
     ("serif", "serif: Noto Serif, the quick brown fox"),
     ("mono", "mono: JetBrains Mono 0123456789"),
     ("grotesk", "grotesk: Inter, the quick brown fox"),
     ("condensed", "CONDENSED: BARLOW CONDENSED MEDIUM"),
     ("condensed-bold", "CONDENSED-BOLD: BARLOW CONDENSED BOLD"),
+    ("extra-condensed-bold", "EXTRA-CONDENSED-BOLD: SAIRA EXTRACONDENSED EXTRABOLD"),
     ("thin", "thin: Barlow Thin, the quick brown fox"),
     ("jp-labels", "jp-labels: 音声入力 テキストに変換中"),
     ("jp-labels-bold", "jp-labels-bold: 作戦継続中 未来の都市"),
@@ -41,7 +47,7 @@ fn fonts() -> FontRegistry {
         fonts.asset(name).unwrap_or_else(|e| panic!("{e}"));
     }
     let jp = fonts.asset("jp-labels-bold").unwrap();
-    for name in ["condensed", "condensed-bold"] {
+    for name in ["condensed", "condensed-bold", "extra-condensed-bold"] {
         fonts.set_fallbacks(fonts.asset(name).unwrap(), &[jp]);
     }
     fonts
@@ -54,11 +60,13 @@ enum Page {
     /// Parts of `Fx`, for the bench: the shadow card, the plain outline.
     Shadow,
     Outline,
+    Labels,
 }
 
 fn view(fonts: &FontRegistry, page: Page) -> Element<()> {
     match page {
         Page::Fonts => fonts_page(fonts),
+        Page::Labels => labels_page(fonts),
         fx => fx_page(fonts, fx),
     }
 }
@@ -110,6 +118,52 @@ fn fx_page(fonts: &FontRegistry, page: Page) -> Element<()> {
     bg
 }
 
+fn labels_page(fonts: &FontRegistry) -> Element<()> {
+    let orange = Color::hex(0xff8a1f, 1.0);
+    let style = |name: &str, size: f32| TextStyle::new(fonts.asset(name).unwrap(), size, size * 1.15);
+    let side = |key: &'static str, text: &str, name: &str| {
+        Element::label(key, text).text_style(style(name, 18.0).vertical()).color(orange)
+    };
+    let fit = |key: &'static str, text: &str| {
+        Element::panel(key).fill(Color::hex(0x2a1a0c, 1.0)).radius(4.0).child(
+            Element::label("text", text)
+                .text_style(style("extra-condensed-bold", 40.0).fit(10.0, 2.0))
+                .size(150.0, 92.0)
+                .color(orange),
+        )
+    };
+    let words: Vec<Word> = ["live", "text", "with", "a", "gradient", "caret"]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Word { id: i as u32 + 1, text: (*s).into() })
+        .collect();
+    let live = Element::live_text("live", &words)
+        .text_style(style("grotesk", 22.0))
+        .width(470.0)
+        .color(Color::hex(0xe8ebf0, 1.0))
+        .caret(Caret {
+            width: 3.0,
+            color: Some(Color::hex(0x9ff0ff, 1.0)),
+            gradient: Some(Color::hex(0xff3fa4, 1.0)),
+            ..Caret::default()
+        });
+    let boxes = Element::row("fits")
+        .gap(8.0)
+        .child(fit("short", "REC"))
+        .child(fit("medium", "LISTENING NOW"))
+        .child(fit("long", "TRANSCRIBING THE LAST THIRTY SECONDS"));
+    let body = Element::column("body").pad(14.0).gap(14.0).child(boxes).child(live);
+    Element::panel("bg")
+        .direction_row()
+        .size(SURFACE.w, SURFACE.h)
+        .pad(14.0)
+        .gap(10.0)
+        .fill(Color::hex(0x0b0806, 1.0))
+        .child(side("jp", "音声入力録音中", "jp-labels-bold"))
+        .child(side("latin", "VOICE", "extra-condensed-bold"))
+        .child(body)
+}
+
 fn fonts_page(fonts: &FontRegistry) -> Element<()> {
     let orange = Color::hex(0xff8a1f, 1.0);
     let style = |name: &str, size: f32| TextStyle::new(fonts.asset(name).unwrap(), size, size * 1.25);
@@ -125,7 +179,7 @@ fn fonts_page(fonts: &FontRegistry) -> Element<()> {
                 .color(orange),
         );
     for (name, line) in SPECIMEN {
-        col = col.child(Element::label(name, line).text_style(style(name, 15.0)).color(Color::hex(0xe8ebf0, 1.0)));
+        col = col.child(Element::label(name, line).text_style(style(name, 14.0)).color(Color::hex(0xe8ebf0, 1.0)));
     }
     Element::panel("bg").size(SURFACE.w, SURFACE.h).fill(Color::hex(0x0b0806, 1.0)).child(col)
 }
@@ -169,7 +223,7 @@ fn bench() {
     };
     let resolve = buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-    for (page, (w, h, scale)) in [Page::Fonts, Page::Fx, Page::Shadow, Page::Outline]
+    for (page, (w, h, scale)) in [Page::Fonts, Page::Fx, Page::Shadow, Page::Outline, Page::Labels]
         .into_iter()
         .flat_map(|p| [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)].map(|s| (p, s)))
     {
@@ -225,7 +279,7 @@ fn main() {
     let (device, queue) = device();
     let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
     std::fs::create_dir_all(&out).expect("create the output directory");
-    for (page, file) in [(Page::Fonts, "type-demo.png"), (Page::Fx, "type-fx.png")] {
+    for (page, file) in [(Page::Fonts, "type-demo.png"), (Page::Fx, "type-fx.png"), (Page::Labels, "type-labels.png")] {
         let list = sample(&fonts, page, SURFACE, scale);
         let (w, h) = ((SURFACE.w * scale) as u32, (SURFACE.h * scale) as u32);
         let rgba = off.render_to_rgba(&list, [w, h], scale);
