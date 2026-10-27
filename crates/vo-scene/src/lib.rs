@@ -68,6 +68,7 @@ pub mod font;
 pub mod frame;
 pub mod geom;
 pub mod glass;
+pub mod glyph_morph;
 pub mod gpu;
 pub mod graticule;
 pub mod hearing;
