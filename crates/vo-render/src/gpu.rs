@@ -15,6 +15,11 @@
 //!
 //! Blend is premultiplied over. The layer's blend mode is not applied.
 //!
+//! What GPU items do not get, unlike the renderer's own content:
+//! - The layer clip only as a scissor: no rounded corners and no edge fades (FX04).
+//! - No motion blur smear (FX12).
+//! - Nothing on the CPU first frame (`cpu`): the item appears with the first GPU frame.
+//!
 //! Queue writes made inside `paint` run before the whole command buffer, not at the point
 //! the painter is called, so a painter that draws several items in one frame must give each
 //! its own buffers.
