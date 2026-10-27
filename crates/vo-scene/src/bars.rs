@@ -23,7 +23,7 @@
 //! - `hairline`: one-pixel lines instead of round bars, and `baseline` a hairline along the
 //!   strip.
 //! - `layout`: `Mirror` puts the newest bar in the middle with the history spreading out to
-//!   both sides. `anchor` stands bars on the bottom edge instead of the centre line, and
+//!   both sides, and `Radial` wraps the strip round a ring. `anchor` stands bars on the bottom edge instead of the centre line, and
 //!   `reflection` draws a faded mirror image under them.
 
 use std::sync::Arc;
@@ -81,13 +81,19 @@ impl Default for Taper {
 }
 
 /// Where the newest bar sits.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BarLayout {
     /// On the right, the strip scrolling left.
     #[default]
     Scroll,
     /// In the middle, the history spreading out to both sides.
     Mirror,
+    /// Round a ring (concept 02): the strip's left end at the top, running clockwise, with
+    /// the newest bar back at the top. Bars stand on a ring at `inner` times half the box's
+    /// shorter side and grow out to its edge (`Anchor::Bottom`), or both ways
+    /// (`Anchor::Centre`). Bars are round-capped lines; `core` draws a thin bright line and
+    /// `reflection` does not apply.
+    Radial { inner: f32 },
 }
 
 /// What the bars stand on.
@@ -141,6 +147,11 @@ pub struct Bars {
     /// bars then stand on a line at `1 / (1 + reflection_size)` of the height.
     pub reflection: f32,
     pub reflection_size: f32,
+    /// Band energies from 0 to 1 (for example the mel bands of the signal bus), lowest band
+    /// first. When set, the bars stand still and bar `i` shows the bands at its place across
+    /// the strip (from the middle out with `Mirror`), mixed between neighbours, in place of
+    /// the level history. `settle` still brings them down.
+    pub bands: Option<Arc<[f32]>>,
 }
 
 impl Default for Bars {
@@ -169,6 +180,7 @@ impl Default for Bars {
             anchor: Anchor::Centre,
             reflection: 0.0,
             reflection_size: 0.35,
+            bands: None,
         }
     }
 }
@@ -236,7 +248,18 @@ impl Bars {
         let mut bars: Vec<(f32, f32, f32)> = Vec::with_capacity(self.count as usize + 2);
         let mirror = self.layout == BarLayout::Mirror;
         let slots = if mirror { self.count / 2 + 1 } else { self.count } as i64;
-        for j in 0..=slots {
+        let banded = self.bands.as_deref().is_some_and(|b| !b.is_empty());
+        if let Some(bands) = self.bands.as_deref().filter(|b| !b.is_empty()) {
+            for i in 0..self.count {
+                let u = (i as f32 + 0.5) / self.count as f32;
+                let f = if mirror { (2.0 * u - 1.0).abs() } else { u };
+                let x = f * (bands.len() - 1) as f32;
+                let k = x.floor() as usize;
+                let (a, b) = (bands[k], bands[(k + 1).min(bands.len() - 1)]);
+                bars.push((rect.x + u * rect.w, (a + (b - a) * x.fract()).clamp(0.0, 1.0), 1.0));
+            }
+        }
+        for j in (0..=slots).filter(|_| !banded) {
             let at = (newest_slot - j as f64) * slot;
             let back = ((edge - at) * px_per_s) as f32;
             let level = level_at(at);
@@ -288,6 +311,10 @@ impl Bars {
                     None => Paint::solid(on),
                 }
             };
+            if let BarLayout::Radial { inner } = self.layout {
+                self.radial(rect, inner, u, level, size_k, base_colour.fade(a), out);
+                continue;
+            }
             let body = match self.anchor {
                 Anchor::Centre => Rect::new(x0, base - len, w, 2.0 * len),
                 Anchor::Bottom => Rect::new(x0, base - len, w, len),
@@ -318,6 +345,43 @@ impl Bars {
                     let fill = Paint::shadow(core.color.fade(a), Point::ZERO, core.blur * w, 0.0);
                     out.push(ShapeInstance::rrect(RRect::new(rect, 0.5 * cw), fill));
                 }
+            }
+        }
+    }
+
+    /// A bar at `u` round the ring: a round-capped line along the radius.
+    #[allow(clippy::too_many_arguments)]
+    fn radial(&self, rect: Rect, inner: f32, u: f32, level: f32, size_k: f32, c: Color, out: &mut Vec<ShapeInstance>) {
+        let centre = Point::new(rect.x + 0.5 * rect.w, rect.y + 0.5 * rect.h);
+        let outer = 0.5 * rect.w.min(rect.h);
+        let ring = outer * inner.clamp(0.0, 0.95);
+        let w = (std::f32::consts::TAU * ring / self.count.max(1) as f32 * self.width * size_k).max(0.5);
+        let room = outer - ring - 0.5 * w;
+        let (r0, r1) = match self.anchor {
+            Anchor::Bottom => (ring, ring + level * room),
+            Anchor::Centre => {
+                let half = 0.5 * level * room.min(ring - 0.5 * w).max(0.0);
+                (ring - half, ring + half)
+            }
+        };
+        let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * u;
+        let (s, co) = angle.sin_cos();
+        let at = |r: f32| Point::new(centre.x + r * co, centre.y + r * s);
+        let line = |w: f32, p: Paint| {
+            let l = ShapeInstance::line(at(r0), at(r1), w, Paint::NONE);
+            if self.hairline {
+                l.with_hairline(p)
+            } else {
+                ShapeInstance { stroke: p, ..l }
+            }
+        };
+        if let Some((radius, strength)) = self.glow {
+            out.push(ShapeInstance { fill: Paint::glow(c, radius, strength), ..line(w, Paint::NONE) });
+        }
+        out.push(line(w, Paint::solid(c)));
+        if let Some(core) = self.core {
+            if !self.hairline && r1 - r0 > 1.0 {
+                out.push(line(w * core.width, Paint::solid(core.color.fade(c.a))));
             }
         }
     }
@@ -503,6 +567,39 @@ mod v2_tests {
         let mid = out.iter().find(|s| (s.geom[0] - 100.0).abs() < 6.0 && s.geom[1] != s.geom[3]).unwrap();
         assert_eq!(mid.stroke.c0, b.accent);
         assert!((out[1].stroke.c0.r - b.rest.r).abs() < 1e-5);
+    }
+
+    #[test]
+    fn bands_set_each_bar_and_mirror_puts_the_low_bands_in_the_middle() {
+        let bands: Arc<[f32]> = Arc::from([1.0f32, 0.5, 0.0].as_slice());
+        let b = Bars { bands: Some(bands), count: 4, width: 0.05, ..loud() };
+        let out = shapes(&b);
+        assert_eq!(out.len(), 4);
+        // Bar centres at 1/8, 3/8, 5/8, 7/8 of the bands: 0.875, 0.625, 0.375, 0.125 high.
+        let heights: Vec<f32> = out.iter().map(|s| s.geom[3]).collect();
+        for (h, want) in heights.iter().zip([0.875f32, 0.625, 0.375, 0.125]) {
+            assert!((h - want * 40.0).abs() < 1e-3, "{heights:?}");
+        }
+        let m = Bars { layout: BarLayout::Mirror, ..b };
+        let hm: Vec<f32> = shapes(&m).iter().map(|s| s.geom[3]).collect();
+        assert!(hm[1] > hm[0] && hm[2] > hm[3] && (hm[1] - hm[2]).abs() < 1e-3, "{hm:?}");
+    }
+
+    #[test]
+    fn radial_bars_stand_on_a_ring() {
+        let b = Bars { layout: BarLayout::Radial { inner: 0.5 }, anchor: Anchor::Bottom, ..loud() };
+        let mut out = Vec::new();
+        b.shapes(Rect::new(0.0, 0.0, 100.0, 100.0), 3.0, 1.0, &mut out);
+        assert!(out.len() >= 20);
+        for s in &out {
+            assert_eq!(s.kind, ShapeKind::Line);
+            let r0 = (s.geom[0] - 50.0).hypot(s.geom[1] - 50.0);
+            let r1 = (s.geom[2] - 50.0).hypot(s.geom[3] - 50.0);
+            assert!((r0 - 25.0).abs() < 1e-3, "starts on the ring: {r0}");
+            assert!(r1 > r0 && r1 <= 50.0, "{r1}");
+        }
+        // The strip's ends meet at the top of the ring.
+        assert!(out.iter().any(|s| (s.geom[2] - 50.0).abs() < 8.0 && s.geom[3] < 30.0));
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! - `trace`: a line trace over the level, with ghost copies and a fading horizon.
 //! - `ribbon`: glowing ribbon strands that wind round each other, swinging with the level.
 //! - `segments`: segment meters in a row, a column or an arc, with peak hold and clip.
+//! - `svg`: a small SVG importer for icons and logos.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `curve`: glyphs on curves: text along a path, a glyph flying on an S-curve, curved arrows.
@@ -70,6 +71,7 @@ pub mod segments;
 pub mod stage;
 pub mod status_icon;
 pub mod story;
+pub mod svg;
 pub mod swap;
 pub mod text;
 pub mod timed;

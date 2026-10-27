@@ -810,6 +810,121 @@ pub mod icons {
         RoundedRect::new(6.0, 6.0, 18.0, 18.0, 2.5).to_path(0.01)
     }
 
+    /// A keyboard: a rounded body, two rows of keys as dots and a space bar.
+    pub fn keyboard() -> BezPath {
+        let mut p = RoundedRect::new(2.5, 6.0, 21.5, 18.0, 2.0).to_path(0.01);
+        for (y, xs) in [(9.5, [6.0, 9.5, 13.0, 16.5, 20.0]), (12.5, [7.5, 11.0, 14.5, 18.0, f64::NAN])] {
+            for x in xs.into_iter().filter(|x| x.is_finite()) {
+                // A key is a zero-length stroke: a round dot once stroked.
+                p.move_to((x - 0.01, y));
+                p.line_to((x + 0.01, y));
+            }
+        }
+        p.move_to((8.0, 15.0));
+        p.line_to((16.0, 15.0));
+        p
+    }
+
+    /// A chevron pointing right. Turn it with [`rotated`] for the other directions.
+    pub fn chevron() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((9.0, 5.5));
+        p.line_to((15.5, 12.0));
+        p.line_to((9.0, 18.5));
+        p
+    }
+
+    /// A clock: a dial and two hands at ten past ten.
+    pub fn clock() -> BezPath {
+        let mut p = kurbo::Circle::new((12.0, 12.0), 9.0).to_path(0.01);
+        p.move_to((12.0, 7.0));
+        p.line_to((12.0, 12.0));
+        p.line_to((15.5, 14.0));
+        p
+    }
+
+    /// A bar glyph: five vertical bars of different heights round the middle line.
+    pub fn bars() -> BezPath {
+        let mut p = BezPath::new();
+        for (x, h) in [(4.0, 3.0), (8.0, 7.0), (12.0, 10.0), (16.0, 6.0), (20.0, 2.5)] {
+            p.move_to((x, 12.0 - h));
+            p.line_to((x, 12.0 + h));
+        }
+        p
+    }
+
+    /// A lightning bolt, one closed contour.
+    pub fn lightning() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((13.5, 2.5));
+        p.line_to((5.0, 13.5));
+        p.line_to((11.5, 13.5));
+        p.line_to((10.5, 21.5));
+        p.line_to((19.0, 10.5));
+        p.line_to((12.5, 10.5));
+        p.close_path();
+        p
+    }
+
+    /// An inbox tray: a box with a dip in the top edge of its lower part.
+    pub fn tray() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((3.0, 13.0));
+        p.line_to((8.0, 13.0));
+        p.line_to((9.5, 16.0));
+        p.line_to((14.5, 16.0));
+        p.line_to((16.0, 13.0));
+        p.line_to((21.0, 13.0));
+        p.extend(RoundedRect::new(3.0, 5.0, 21.0, 19.5, 2.0).to_path(0.01));
+        p
+    }
+
+    /// A comma, for a punctuation receipt: a dot with a tail.
+    pub fn comma() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((12.0, 13.0));
+        p.line_to((12.02, 13.0));
+        p.move_to((12.5, 13.5));
+        p.quad_to((12.8, 17.0), (10.0, 19.5));
+        p
+    }
+
+    /// Swap: two arrows, right along the top and left along the bottom.
+    pub fn swap() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((4.0, 8.0));
+        p.line_to((19.0, 8.0));
+        p.move_to((15.5, 4.5));
+        p.line_to((19.0, 8.0));
+        p.line_to((15.5, 11.5));
+        p.move_to((20.0, 16.0));
+        p.line_to((5.0, 16.0));
+        p.move_to((8.5, 12.5));
+        p.line_to((5.0, 16.0));
+        p.line_to((8.5, 19.5));
+        p
+    }
+
+    /// Letter case ("Aa"): a capital A and a small a, for a casing receipt.
+    pub fn letter_case() -> BezPath {
+        let mut p = BezPath::new();
+        p.move_to((2.5, 19.0));
+        p.line_to((7.5, 5.0));
+        p.line_to((12.5, 19.0));
+        p.move_to((4.3, 14.0));
+        p.line_to((10.7, 14.0));
+        p.extend(kurbo::Ellipse::new((17.5, 15.5), (3.2, 3.5), 0.0).to_path(0.01));
+        p.move_to((20.7, 12.0));
+        p.line_to((20.7, 19.0));
+        p
+    }
+
+    /// `path` turned by `turns` (clockwise) about the middle of the 24 x 24 grid.
+    pub fn rotated(path: &BezPath, turns: f64) -> BezPath {
+        let m = kurbo::Affine::rotate_about(turns * std::f64::consts::TAU, kurbo::Point::new(12.0, 12.0));
+        m * path.clone()
+    }
+
     /// `path` stroked `width` wide with round caps and joins, as a closed outline to fill.
     pub fn outline(path: &BezPath, width: f64) -> BezPath {
         let style = Stroke::new(width).with_caps(Cap::Round).with_join(Join::Round);
