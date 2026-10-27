@@ -17,6 +17,8 @@
 //! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
 //!   loudness (MO-88).
 //! - `timer`: GPU time per stage from timestamp queries.
+//! - `glyph_sdf`, `glyph_fx`: distance fields of single glyphs, and the shader effects built
+//!   on them: ink diffusion, light through letters and liquid morph (MO-82, MO-84, MO-87).
 //!
 //! Everything is a pure function of `t` and seeds: point clouds are evaluated in closed form
 //! in the vertex shader from the point index, so there is no simulation state to replay.
@@ -24,6 +26,8 @@
 pub mod camera;
 pub mod field;
 pub mod frame;
+pub mod glyph_fx;
+pub mod glyph_sdf;
 pub mod item;
 pub mod math;
 pub mod mesh;
