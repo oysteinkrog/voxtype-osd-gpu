@@ -37,6 +37,9 @@ pub struct DisplayList {
     pub items: Vec<Item>,
     pub shapes: Vec<ShapeInstance>,
     pub glyphs: Vec<GlyphInstance>,
+    /// Glyph effects (TY17) for some glyphs, as `(index into glyphs, effects)`, sorted by
+    /// index. A glyph not listed has none.
+    pub glyph_fx: Vec<(u32, GlyphFx)>,
     pub emitters: Vec<EmitterInstance>,
     /// The sources that `emitters` point into. Not serialized.
     #[serde(skip)]
@@ -421,6 +424,33 @@ pub struct GlyphInstance {
 /// `GlyphInstance::word` for glyphs outside live text.
 pub const NO_WORD: u32 = u32::MAX;
 
+/// Effects on one glyph (TY17), drawn from its coverage in the glyph shader with no extra
+/// pass. Lengths are in layer units. The default is no effect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct GlyphFx {
+    /// Blur: the glyph's edges soften over this width.
+    pub blur: f32,
+    /// Dissolve, 0 to 1: holes from a noise fixed to the glyph grow until it is gone at 1.
+    pub dissolve: f32,
+    /// Wipe, 0 to 1: the part hidden from the right of the glyph's ink box, with a soft front.
+    pub wipe: f32,
+    /// Chromatic offset: red shifts this far left and blue this far right.
+    pub chroma: f32,
+    /// Halo under the glyph: its colour (alpha is its strength) and how far it reaches.
+    pub halo: Color,
+    pub halo_radius: f32,
+}
+
+impl GlyphFx {
+    pub fn is_none(&self) -> bool {
+        self.blur <= 0.0
+            && self.dissolve <= 0.0
+            && self.wipe <= 0.0
+            && self.chroma == 0.0
+            && (self.halo.a <= 0.0 || self.halo_radius <= 0.0)
+    }
+}
+
 /// One round dot, in layer space. Many thousands per frame are fine: the renderer draws them
 /// with a small instance of their own, not as shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -477,6 +507,7 @@ impl DisplayList {
         self.items.clear();
         self.shapes.clear();
         self.glyphs.clear();
+        self.glyph_fx.clear();
         self.emitters.clear();
         self.emitter_sources.clear();
         self.particle_words = None;

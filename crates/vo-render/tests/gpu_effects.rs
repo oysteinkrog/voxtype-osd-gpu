@@ -570,3 +570,61 @@ fn edge_fade_on_the_cpu_matches_the_gpu() {
     let max = img.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(max <= 3, "CPU differs from GPU by {max}");
 }
+
+/// One word per glyph effect (TY17), each at a few amounts, on a dark card.
+fn glyph_fx_scene(font: &FontRef) -> DisplayList {
+    use vo_scene::display::GlyphFx;
+    type Row = (&'static str, fn(f32) -> GlyphFx);
+    let rows: [Row; 5] = [
+        ("blur", |a| GlyphFx { blur: 6.0 * a, ..Default::default() }),
+        ("dissolve", |a| GlyphFx { dissolve: a, ..Default::default() }),
+        ("wipe", |a| GlyphFx { wipe: a, ..Default::default() }),
+        ("chroma", |a| GlyphFx { chroma: 3.0 * a, ..Default::default() }),
+        ("halo", |a| GlyphFx { halo: Color::rgba(0.3, 0.8, 1.0, a), halo_radius: 10.0, ..Default::default() }),
+    ];
+    let mut glyphs = Vec::new();
+    let mut fx = Vec::new();
+    for (r, (word, f)) in rows.iter().enumerate() {
+        for (c, amount) in [0.0, 0.35, 0.7].into_iter().enumerate() {
+            let run = run(font, word, 12.0 + 120.0 * c as f32, 30.0 + 34.0 * r as f32, 26.0, hex(0xf2f5fa));
+            for g in run {
+                let e = f(amount);
+                if !e.is_none() {
+                    fx.push((glyphs.len() as u32, e));
+                }
+                glyphs.push(g);
+            }
+        }
+    }
+    let mut list = Builder::new(372.0, 186.0).build(
+        vec![ShapeInstance::rrect(rr(0.0, 0.0, 372.0, 186.0, 0.0), Paint::solid(hex(0x101420)))],
+        None,
+        Vec::new(),
+    );
+    let start = list.glyphs.len() as u32;
+    fx.iter_mut().for_each(|(i, _)| *i += start);
+    list.items.push(Item { kind: ItemKind::Glyphs, start, len: glyphs.len() as u32 });
+    list.layers[0].items.end += 1;
+    list.glyphs.extend(glyphs);
+    list.glyph_fx = fx;
+    list
+}
+
+#[test]
+fn glyph_effect_goldens() {
+    let data = load_font();
+    let font = FontRef::new(&data).unwrap();
+    let gpu = support::gpu();
+    let mut off = offscreen(&gpu, &data);
+    let list = glyph_fx_scene(&font);
+    let mut failures = Vec::new();
+    for (name, scale) in [("fx-glyphs-1x", 1.0), ("fx-glyphs-1.5x", 1.5)] {
+        let img = render(&mut off, name, &list, scale);
+        assert_premultiplied(&img);
+        failures.extend(support::check(&img, Tolerance::default()).err());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    // Deterministic across renderers.
+    let again = render(&mut offscreen(&gpu, &data), "again", &list, 1.0);
+    assert_eq!(render(&mut off, "once", &list, 1.0).px, again.px);
+}

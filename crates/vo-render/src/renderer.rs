@@ -758,10 +758,20 @@ impl Renderer {
                 }
                 ItemKind::Glyphs => {
                     let start = self.glyphs.len() as u32;
-                    for g in &f.list.glyphs[range.clone()] {
+                    let fx = &f.list.glyph_fx;
+                    let mut at = fx.partition_point(|(i, _)| (*i as usize) < range.start);
+                    for (gi, g) in f.list.glyphs[range.clone()].iter().enumerate() {
                         // A word forming from particles fades its glyphs in as they converge.
                         let g = &DlGlyph { color: g.color.fade(self.particles.glyph_alpha(g)), ..*g };
-                        if let Some(inst) = self.glyph(g, &state) {
+                        let index = (range.start + gi) as u32;
+                        while at < fx.len() && fx[at].0 < index {
+                            at += 1;
+                        }
+                        let effects = (at < fx.len() && fx[at].0 == index).then(|| fx[at].1);
+                        if let Some(mut inst) = self.glyph(g, &state) {
+                            if let Some(e) = effects {
+                                apply_glyph_fx(&mut inst, &e, &state);
+                            }
                             grow(
                                 &mut self.surfaces[draw_surface].bounds,
                                 intersect(reach(glyph_bounds(&inst)), scissor),
@@ -1771,7 +1781,19 @@ fn glyph_bounds(g: &GlyphInstance) -> [f32; 4] {
     let l = g.lin;
     let at = |x: f32, y: f32| Point::new(l[0] * x + l[2] * y + g.offset[0], l[1] * x + l[3] * y + g.offset[1]);
     let b = corners_box([at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)]);
-    [b[0] - 1.0, b[1] - 1.0, b[2] + 1.0, b[3] + 1.0]
+    // Effects reach past the ink, as the vertex stage grows the quad.
+    let e = 1.0 + 0.7 * g.fx[0] + g.fx[3].abs() + 1.4 * g.fx2[0];
+    [b[0] - e, b[1] - e, b[2] + e, b[3] + e]
+}
+
+/// Glyph effects into the instance, with lengths from layer units to pixels.
+fn apply_glyph_fx(inst: &mut GlyphInstance, e: &vo_scene::display::GlyphFx, st: &LayerState) {
+    let px = st.ppu;
+    inst.fx = [e.blur.max(0.0) * px, e.dissolve.clamp(0.0, 1.0), e.wipe.clamp(0.0, 1.0), e.chroma * px];
+    if e.halo.a > 0.0 && e.halo_radius > 0.0 {
+        inst.fx2 = [e.halo_radius * px, 0.0, 0.0, 0.0];
+        inst.halo = linear_premul(e.halo, st.opacity);
+    }
 }
 
 fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {

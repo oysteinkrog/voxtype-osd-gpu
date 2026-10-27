@@ -128,6 +128,13 @@ pub struct GlyphInstance {
     pub word: u32,
     /// Linear light, premultiplied alpha, opacity already multiplied in.
     pub color: [f32; 4],
+    /// Glyph effects (TY17), zero for none: blur in pixels, dissolve 0 to 1, wipe 0 to 1
+    /// (the hidden part, from the right), chromatic offset in pixels.
+    pub fx: [f32; 4],
+    /// Halo radius in pixels, then unused.
+    pub fx2: [f32; 4],
+    /// Halo colour: linear, premultiplied.
+    pub halo: [f32; 4],
 }
 
 /// `GlyphInstance::word` for glyphs outside live text.
@@ -147,13 +154,24 @@ impl GlyphInstance {
     /// A glyph with an explicit em-to-pixel matrix (by columns), premultiplied linear
     /// `color` and word id.
     pub fn with_matrix(entry: &AtlasEntry, lin: [f32; 4], offset: [f32; 2], color: [f32; 4], word: u32) -> Self {
-        Self { ext: entry.extents, lin, offset, loc: entry.loc, word, color }
+        Self {
+            ext: entry.extents,
+            lin,
+            offset,
+            loc: entry.loc,
+            word,
+            color,
+            fx: [0.0; 4],
+            fx2: [0.0; 4],
+            halo: [0.0; 4],
+        }
     }
 
     /// The vertex buffer layout of the glyph shader's instance input.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Uint32, 5 => Uint32, 4 => Float32x4
+        const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Uint32, 5 => Uint32, 4 => Float32x4,
+            6 => Float32x4, 7 => Float32x4, 8 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GlyphInstance>() as u64,
