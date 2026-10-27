@@ -115,6 +115,28 @@ fn text_field_measures_distance_to_the_words() {
     support::check(&img, Tolerance { per_pixel: 2, max_fraction: 0.002 }).unwrap();
 }
 
+/// The field is rebuilt only when the text, the size or the scale changes.
+#[test]
+fn text_field_skips_unchanged_text() {
+    let gpu = support::gpu();
+    let fonts = fonts();
+    let text = word(&fonts, "WORDS", 64.0, W as f32, H as f32);
+    let other = word(&fonts, "OTHER", 64.0, W as f32, H as f32);
+    let mut flat = vo_render::Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
+    let mut field = TextField::new(&gpu.device, &gpu.queue);
+    let mut update = |list: &DisplayList, size: [u32; 2], scale: f32| {
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let drawn = field.update(&mut flat, list, size, scale, &mut enc);
+        gpu.queue.submit([enc.finish()]);
+        drawn
+    };
+    assert!(update(&text, [W, H], 1.0), "first");
+    assert!(!update(&text, [W, H], 1.0), "same text");
+    assert!(update(&other, [W, H], 1.0), "new text");
+    assert!(update(&other, [W * 2, H * 2], 2.0), "new size and scale");
+    assert!(!update(&other, [W * 2, H * 2], 2.0), "same again");
+}
+
 #[test]
 fn ring_moves_away_from_the_words() {
     let gpu = support::gpu();

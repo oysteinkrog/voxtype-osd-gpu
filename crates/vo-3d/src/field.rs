@@ -3,10 +3,14 @@
 //! section 3, item 8).
 //!
 //! The text display list is drawn by the normal 2D renderer (Slug coverage) at half
-//! resolution into a float target, then a jump flood finds, for every texel, the nearest
-//! inside and outside texel. The result is one `Rgba16Float` texture: signed distance in
-//! target pixels (negative inside the ink), the unit direction away from the nearest ink, and
-//! the coverage. Coverage is alpha, so text drawn at partial opacity counts as thinner ink.
+//! resolution into an `Rgba8Unorm` target, then a jump flood over 16-bit texel indices finds,
+//! for every texel, the nearest inside and outside texel. The result is one `Rgba16Float`
+//! texture: signed distance in target pixels (negative inside the ink), the unit direction
+//! away from the nearest ink, and the coverage. Coverage is alpha, so text drawn at partial
+//! opacity counts as thinner ink.
+//!
+//! [`TextField::update`] skips all of it when the list, size and scale are the same as last
+//! time, so a field over settled text costs nothing.
 
 use std::time::{Duration, Instant};
 
@@ -53,6 +57,8 @@ pub struct TextField {
     sized: Option<Sized>,
     /// Target pixels per field texel.
     downscale: f32,
+    /// What the field shows now: the list, the target size and the scale.
+    drawn: Option<(DisplayList, [u32; 2], f32)>,
     pub pipeline_time: Duration,
 }
 
@@ -95,14 +101,16 @@ impl TextField {
             params,
             sized: None,
             downscale,
+            drawn: None,
             pipeline_time: start.elapsed(),
         }
     }
 
     /// Records drawing `text` with `renderer` at `scale / downscale`, then the flood, into
-    /// `enc`. `target_size` is the size in physical pixels of the target the field will be
-    /// used with. The renderer's buffers are written now, so submit `enc` before the renderer
-    /// encodes another list.
+    /// `enc`, and returns true. `target_size` is the size in physical pixels of the target the
+    /// field will be used with. The renderer's buffers are written now, so submit `enc` before
+    /// the renderer encodes another list. Records nothing and returns false when the field
+    /// already shows this list at this size and scale.
     pub fn update(
         &mut self,
         renderer: &mut Renderer,
@@ -110,12 +118,23 @@ impl TextField {
         target_size: [u32; 2],
         scale: f32,
         enc: &mut wgpu::CommandEncoder,
-    ) {
+    ) -> bool {
+        if self.drawn.as_ref().is_some_and(|(l, s, k)| l == text && *s == target_size && *k == scale) {
+            return false;
+        }
         let size = target_size.map(|v| ((v as f32 / self.downscale).ceil() as u32).max(1));
         self.resize(size);
         let s = self.sized.as_ref().unwrap();
         renderer.encode(text, scale / self.downscale, &s.coverage, enc);
         self.encode_flood(enc);
+        match &mut self.drawn {
+            Some((l, s, k)) => {
+                l.clone_from(text);
+                (*s, *k) = (target_size, scale);
+            }
+            None => self.drawn = Some((text.clone(), target_size, scale)),
+        }
+        true
     }
 
     /// Records the seed, flood and resolve passes. The coverage must already be drawn.
@@ -157,9 +176,9 @@ impl TextField {
             })
         };
         use wgpu::TextureUsages as U;
-        let coverage = Target::new(d, size[0], size[1], wgpu::TextureFormat::Rgba16Float);
+        let coverage = Target::new(d, size[0], size[1], wgpu::TextureFormat::Rgba8Unorm);
         let ping =
-            [0, 1].map(|_| tex("vo3d-jfa", wgpu::TextureFormat::Rgba32Float, U::STORAGE_BINDING | U::TEXTURE_BINDING));
+            [0, 1].map(|_| tex("vo3d-jfa", wgpu::TextureFormat::Rgba16Uint, U::STORAGE_BINDING | U::TEXTURE_BINDING));
         let field =
             tex("vo3d-field", wgpu::TextureFormat::Rgba16Float, U::STORAGE_BINDING | U::TEXTURE_BINDING | U::COPY_SRC);
         let field_view = field.create_view(&Default::default());
