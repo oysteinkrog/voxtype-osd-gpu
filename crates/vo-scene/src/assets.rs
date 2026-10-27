@@ -47,6 +47,11 @@ pub static ASSETS: &[Asset] = &[
     font!("condensed", "BarlowCondensed-Medium-Latin.ttf", "Barlow Condensed Medium, Latin"),
     font!("condensed-bold", "BarlowCondensed-Bold-Latin.ttf", "Barlow Condensed Bold, Latin"),
     font!("thin", "Barlow-Thin-Latin.ttf", "Barlow Thin, Latin: a thin geometric sans"),
+    font!(
+        "extra-condensed-bold",
+        "SairaExtraCondensed-ExtraBold-Latin.otf",
+        "Saira ExtraCondensed ExtraBold, Latin: a heavy extra-condensed face"
+    ),
     font!("jp-labels", "NotoSansJP-Regular-Labels.otf", "Noto Sans CJK JP Regular: kana and label kanji"),
     font!("jp-labels-bold", "NotoSansJP-Bold-Labels.otf", "Noto Sans CJK JP Bold: kana and label kanji"),
 ];

@@ -24,6 +24,7 @@ sub JetBrainsMono-Regular-Latin.ttf /usr/share/fonts/TTF/JetBrainsMono-Regular.t
 sub BarlowCondensed-Medium-Latin.ttf /usr/share/fonts/ttf-barlow/BarlowCondensed-Medium.ttf 0 "$latin"
 sub BarlowCondensed-Bold-Latin.ttf /usr/share/fonts/ttf-barlow/BarlowCondensed-Bold.ttf 0 "$latin"
 sub Barlow-Thin-Latin.ttf /usr/share/fonts/ttf-barlow/Barlow-Thin.ttf 0 "$latin"
+sub SairaExtraCondensed-ExtraBold-Latin.otf /usr/share/fonts/OTF/SairaExtraCondensed-ExtraBold.otf 0 "$latin"
 # Face 0 of Inter.ttc is Inter Regular.
 sub Inter-Regular-Latin.ttf /usr/share/fonts/inter/Inter.ttc 0 "$latin"
 
