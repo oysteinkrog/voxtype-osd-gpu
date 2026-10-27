@@ -21,7 +21,8 @@
 //! - `curve`: glyphs on curves: text along a path, a glyph flying on an S-curve, curved arrows.
 //! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
 //! - `repeat`: children and ticks around a ring or along a path, sliding on springs.
-//! - `frame`: cut panel frames: chamfers, notches, cut-outs, stripes and hatching.
+//! - `frame`: cut panel frames: chamfers, notches, cut-outs, stripes, hatching and grids.
+//! - `graticule`: a plot area with minor and major grids, ticks and number labels.
 //! - `spectrum`: a radial spectrum, bars round a ring from the signal bus's mel bands.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
@@ -70,6 +71,7 @@ pub mod path;
 pub mod reach;
 pub mod repeat;
 pub mod frame;
+pub mod graticule;
 pub mod spectrum;
 pub mod ribbon;
 pub mod roll;
@@ -94,6 +96,7 @@ pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};
 pub use reach::{surface_for, Insets};
 pub use repeat::{Orient, Ticks};
-pub use frame::{Corner, Edge, Frame, Notch, Stripes};
+pub use frame::{Corner, Edge, Frame, Grid, Notch, Stripes};
+pub use graticule::{Axis, Graticule};
 pub use spectrum::{Bands, Spectrum};
 pub use scene::{NodeId, Presence, Scene};

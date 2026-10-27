@@ -13,7 +13,10 @@ use vo_render::Offscreen;
 use vo_scene::element::Element;
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::path::Contour;
-use vo_scene::{surface_for, Bands, Corner, Edge, Frame, Insets, Notch, Orient, Scene, Spectrum, Stripes, Ticks};
+use vo_scene::{
+    surface_for, Axis, Bands, Corner, Edge, Frame, Graticule, Grid, Insets, Notch, Orient, Scene, Spectrum, Stripes,
+    Ticks,
+};
 
 /// Renders `view` at t on a surface of `size` and returns the premultiplied RGBA bytes.
 fn render(view: Element<()>, size: Size, t: f64) -> Image {
@@ -213,5 +216,50 @@ fn radial_spectrum() {
         .child(Element::spectrum_ring("half", half).size(140.0, 140.0));
     let mut img = render(view, size, 0.0);
     img.name = "hud-spectrum".into();
+    support::check(&img, Tolerance::default()).unwrap();
+}
+
+/// A dot grid and a line grid in panels, and a labelled graticule in the mono asset font.
+#[test]
+fn grids_and_graticule() {
+    let mono = vo_scene::assets::get("mono").expect("the mono font asset").bytes;
+    let fonts = vo_scene::font::FontRegistry::new();
+    fonts.add(mono.to_vec()).unwrap();
+    let steel = Color::hex(0x9fb3c8, 1.0);
+    let dots = Frame::chamfer(10.0)
+        .fill(Color::hex(0x1c2430, 1.0))
+        .grid(Grid::dots(Size::new(8.0, 8.0), 1.6, Color::hex(0x9fb3c8, 0.45)).origin(Point::new(4.0, 4.0)))
+        .stroke(1.5, steel);
+    let lines = Frame::new()
+        .corners([Corner::Notch(6.0), Corner::Square, Corner::Chamfer(12.0), Corner::Square])
+        .fill(Color::hex(0x0d1420, 1.0))
+        .grid(Grid::lines(Size::new(10.0, 10.0), 0.8, Color::hex(0x35e0ff, 0.09)))
+        .grid(Grid::lines(Size::new(50.0, 50.0), 1.4, Color::hex(0x35e0ff, 0.5)))
+        .stroke(1.5, Color::hex(0x35e0ff, 1.0));
+    let style = vo_scene::element::TextStyle::new(0, 9.0, 11.0);
+    let graticule = Graticule::new(Color::hex(0xc8d4e0, 0.6), Color::hex(0xc8d4e0, 0.2))
+        .x(Axis::new(0.0, 2.0, 0.5, 0.1).format(1, "s"))
+        .y(Axis::new(-60.0, 0.0, 20.0, 5.0))
+        .minor_dots()
+        .widths(1.5, 1.0)
+        .border(1.0, Color::hex(0xc8d4e0, 0.8))
+        .labels(style, Color::hex(0xc8d4e0, 1.0), 28.0, 18.0);
+    let size = Size::new(480.0, 140.0);
+    let view = Element::row("board")
+        .size(size.w, size.h)
+        .pad(10.0)
+        .gap(16.0)
+        .child(Element::frame("dots", dots).size(110.0, 110.0))
+        .child(Element::frame("lines", lines).size(110.0, 110.0))
+        .child(graticule.view("graticule", Size::new(200.0, 120.0)));
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(vo_scene::text::ShapedLayout::new(fonts)));
+    scene.set_viewport(0.0, size, 1.0);
+    scene.apply(view, 0.0);
+    let list = scene.sample(0.0);
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    off.renderer.add_font(mono.to_vec()).unwrap();
+    let px = off.render_to_rgba(&list, [size.w as u32, size.h as u32], 1.0);
+    let img = Image { name: "hud-grids".into(), w: size.w as u32, h: size.h as u32, channels: 4, px };
     support::check(&img, Tolerance::default()).unwrap();
 }

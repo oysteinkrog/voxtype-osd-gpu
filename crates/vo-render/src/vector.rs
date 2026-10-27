@@ -121,6 +121,29 @@ impl GpuVector {
                 g.a = [n[0], n[1], m.e * n[0] + m.f * n[1] + phase, duty.clamp(0.0, 1.0)];
                 4
             }
+            VectorPaint::Grid { origin, cell, width, dots } => {
+                // Two stripe axes as above: a = the two normals over the cell in pixels,
+                // b = their offsets and the line width over the cell (negative: axis off).
+                let m = to_px;
+                let det = m.a * m.d - m.b * m.c;
+                if det.abs() < 1e-12 {
+                    return None;
+                }
+                let axis = |nx: f32, ny: f32, o: f32| {
+                    let n = [(m.d * nx - m.b * ny) / det, (m.a * ny - m.c * nx) / det];
+                    (n, m.e * n[0] + m.f * n[1] + o)
+                };
+                let (n1, o1) = if cell.x > 0.0 { axis(1.0 / cell.x, 0.0, origin.x / cell.x) } else { ([0.0; 2], 0.0) };
+                let (n2, o2) = if cell.y > 0.0 { axis(0.0, 1.0 / cell.y, origin.y / cell.y) } else { ([0.0; 2], 0.0) };
+                let duty = |c: f32| if c > 0.0 { (width / c).clamp(0.0, 1.0) } else { -1.0 };
+                g.a = [n1[0], n1[1], n2[0], n2[1]];
+                g.b = [o1, o2, duty(cell.x), duty(cell.y)];
+                if dots {
+                    6
+                } else {
+                    5
+                }
+            }
         };
         match v.kind {
             VectorKind::Blob => {

@@ -10,6 +10,8 @@
 //! - **spectrum_ring**: a radial spectrum fed by the signal bus's mel bands, here from a
 //!   recorded synthetic voice: a mirrored full ring with glow and a half ring growing both
 //!   ways.
+//! - **grids**: a dot grid and a line grid inside panels, and a graticule with minor dots,
+//!   major lines, ticks and mono labels.
 //!
 //! `cargo run -p vo --example hud_kit -- [--out DIR] [--bench]` writes `contact-sheet.png`
 //! (rows of frames per board) to DIR, or with `--bench` prints the GPU time per frame of
@@ -21,9 +23,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use vo::scene::element::Element;
+use vo::scene::element::TextStyle;
+use vo::scene::font::FontRegistry;
 use vo::scene::geom::{Color, Point, Size};
 use vo::scene::path::Contour;
-use vo::scene::{surface_for, Corner, Edge, Frame, Notch, Orient, Prop, Scene, Spectrum, Stripes, Ticks};
+use vo::scene::text::ShapedLayout;
+use vo::scene::{
+    surface_for, Axis, Corner, Edge, Frame, Graticule, Grid, Notch, Orient, Prop, Scene, Spectrum, Stripes, Ticks,
+};
 use vo_core::signals::{SignalFrame, Signals, SignalsCell};
 use vo_core::spring::Spring;
 use vo_render::offscreen::write_png;
@@ -67,6 +74,7 @@ fn boards() -> Vec<Board> {
             times: &[0.08, 0.2, 0.4, 1.5],
         },
         Board { name: "frame: mecha plate", view: mecha, then: None, times: &[0.0] },
+        Board { name: "grids and graticule", view: grids, then: None, times: &[0.0] },
         Board {
             name: "spectrum_ring: from the signal bus",
             view: spectrum,
@@ -198,6 +206,53 @@ fn mecha(size: Size) -> Element<()> {
     centred(size, Element::frame("mecha", frame).size(340.0, 180.0))
 }
 
+// Grids.
+
+fn grids(size: Size) -> Element<()> {
+    let steel = Color::hex(0x9fb3c8, 1.0);
+    let cyan = 0x35e0ff;
+    let dots = Frame::chamfer(14.0)
+        .fill(Color::hex(0x1c2430, 1.0))
+        .grid(Grid::dots(Size::new(10.0, 10.0), 2.0, Color::hex(0x9fb3c8, 0.45)).origin(Point::new(5.0, 5.0)))
+        .stroke(2.0, steel);
+    let lines = Frame::new()
+        .corners([Corner::Notch(8.0), Corner::Square, Corner::Chamfer(16.0), Corner::Square])
+        .fill(Color::hex(0x0d1420, 1.0))
+        .grid(Grid::lines(Size::new(12.0, 12.0), 1.0, Color::hex(cyan, 0.09)))
+        .grid(Grid::lines(Size::new(60.0, 60.0), 1.5, Color::hex(cyan, 0.5)))
+        .stroke(2.0, Color::hex(cyan, 1.0));
+    let style = TextStyle::new(0, 11.0, 13.0);
+    let graticule = Graticule::new(Color::hex(0xc8d4e0, 0.6), Color::hex(0xc8d4e0, 0.25))
+        .x(Axis::new(0.0, 2.0, 0.5, 0.1).format(1, "s"))
+        .y(Axis::new(-60.0, 0.0, 20.0, 5.0))
+        .minor_dots()
+        .widths(1.5, 1.0)
+        .border(1.0, Color::hex(0xc8d4e0, 0.8))
+        .labels(style, Color::hex(0xc8d4e0, 1.0), 34.0, 20.0);
+    let row = Element::row("grids")
+        .gap(20.0)
+        .child(Element::frame("dots", dots).size(130.0, 130.0))
+        .child(Element::frame("lines", lines).size(130.0, 130.0))
+        .child(graticule.view("graticule", Size::new(240.0, 150.0)));
+    centred(size, row)
+}
+
+/// The mono asset font, the only font the boards use (font 0).
+fn mono() -> &'static [u8] {
+    vo::scene::assets::get("mono").expect("the mono font asset").bytes
+}
+
+fn fonts() -> FontRegistry {
+    static FONTS: OnceLock<FontRegistry> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let f = FontRegistry::new();
+            f.add(mono().to_vec()).expect("the mono font");
+            f
+        })
+        .clone()
+}
+
 // Spectrum.
 
 /// Three seconds of a synthetic voice: two formant humps that wander, in syllables.
@@ -253,7 +308,7 @@ fn centred(size: Size, child: Element<()>) -> Element<()> {
 // Harness.
 
 fn board_list(b: &Board, size: Size, scale: f32, t: f64) -> vo::scene::DisplayList {
-    let mut scene: Scene<()> = Scene::new();
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts())));
     scene.set_viewport(0.0, size, scale);
     scene.set_signals(demo_signals());
     let root = |view: View| Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child(view(size));
@@ -294,6 +349,7 @@ fn device(timestamps: bool) -> (wgpu::Device, wgpu::Queue) {
 fn sheet(out: &std::path::Path) {
     let (device, queue) = device(false);
     let mut off = Offscreen::new(&device, &queue);
+    off.renderer.add_font(mono().to_vec()).expect("the mono font");
     let cell = Size::new(600.0, 300.0);
     let rows: Vec<Vec<Vec<u8>>> = boards()
         .iter()
@@ -328,6 +384,7 @@ fn sheet(out: &std::path::Path) {
 fn bench() {
     let (device, queue) = device(true);
     let mut r = Renderer::new(&device, &queue);
+    r.add_font(mono().to_vec()).expect("the mono font");
     let qs =
         device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
     let buf = |usage| {

@@ -74,6 +74,10 @@ pub enum VectorPaint {
     /// `duty` of the period wide, shifted by `phase` periods: 1 on a stripe, 0 between,
     /// with an antialiased edge. Use a ramp from 0 to 1.
     Stripes { normal: Point, period: f32, duty: f32, phase: f32 },
+    /// A grid: lines `width` wide every `cell.x` across and `cell.y` down, with one through
+    /// `origin`, or dots `width` across at the crossings. A cell of 0 leaves that axis out.
+    /// 1 on a line or dot, 0 between. Use a ramp from 0 to 1.
+    Grid { origin: Point, cell: Point, width: f32, dots: bool },
 }
 
 /// `VectorInstance::flags` bit: the stroke is one physical pixel wide at any scale.

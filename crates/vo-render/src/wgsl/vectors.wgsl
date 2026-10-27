@@ -18,6 +18,8 @@ const PAINT_LINEAR: u32 = 1u;
 const PAINT_CONIC: u32 = 2u;
 const PAINT_CONIC_MIRROR: u32 = 3u;
 const PAINT_STRIPES: u32 = 4u;
+const PAINT_GRID_LINES: u32 = 5u;
+const PAINT_GRID_DOTS: u32 = 6u;
 
 // Three texels per segment: p0.xy p1.xy, then p2.xy s0 s1, then the width factors w0 w1.
 @group(0) @binding(0) var<storage, read> segs: array<vec4f>;
@@ -208,7 +210,28 @@ fn mix_color (c0: vec4f, c1: vec4f, k: f32) -> vec4f {
 }
 
 // Where `p` sits along the paint: arc length `s`, or the linear or conic position.
-fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
+// Distance in pixels from `p` to the nearest grid line across normal `n` (over the cell, in
+// pixels) with offset `o`, and half the line width; `duty` below 0 turns the axis off.
+fn grid_axis (p: vec2f, n: vec2f, o: f32, duty: f32) -> vec2f {
+  let period = 1.0 / max (length (n), 1e-6);
+  if (duty < 0.0) {
+    return vec2f (1e9, 0.0);
+  }
+  return vec2f (abs (fract (dot (p, n) - o + 0.5) - 0.5) * period, 0.5 * duty * period);
+}
+
+fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f, h: vec4f) -> f32 {
+  if (kind == PAINT_GRID_LINES || kind == PAINT_GRID_DOTS) {
+    let x = grid_axis (p, g.xy, h.x, h.z);
+    let y = grid_axis (p, g.zw, h.y, h.w);
+    if (kind == PAINT_GRID_LINES) {
+      return max (clamp (0.5 + x.y - x.x, 0.0, 1.0), clamp (0.5 + y.y - y.x, 0.0, 1.0));
+    }
+    // Dots at the crossings; with one axis off, along the lines of the other.
+    let dx = select (x.x, 0.0, h.z < 0.0);
+    let dy = select (y.x, 0.0, h.w < 0.0);
+    return clamp (0.5 + max (x.y, y.y) - length (vec2f (dx, dy)), 0.0, 1.0);
+  }
   if (kind == PAINT_STRIPES) {
     // g: the normal over the period in pixels, the offset in periods, the duty. The
     // distance into the nearest stripe in pixels gives a one-pixel edge.
@@ -291,7 +314,7 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
     }
     cov = clamp (0.5 - signed * seen, 0.0, 1.0);
     outside = max (signed, 0.0);
-    k = ramp (paint_pos (in.head.w, p, best.y, in.a), in.params.zw);
+    k = ramp (paint_pos (in.head.w, p, best.y, in.a, in.b), in.params.zw);
     edge = signed;
     along = best.y;
     if (!fill) {

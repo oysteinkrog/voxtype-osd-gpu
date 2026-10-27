@@ -90,16 +90,58 @@ impl Stripes {
         Stripes { speed, ..self }
     }
 
-    fn paint(&self, t: f64) -> VectorPaint {
+    /// The paint at `t`, with the stripes fixed to the box at `origin`, so they move with it.
+    fn paint(&self, t: f64, origin: Point) -> VectorPaint {
         let (s, c) = self.angle.sin_cos();
         let period = self.period.max(0.5);
-        let phase = ((self.speed as f64 * t) / period as f64).rem_euclid(1.0) as f32;
-        VectorPaint::Stripes { normal: Point::new(-s, c), period, duty: self.duty, phase }
+        let n = Point::new(-s, c);
+        let anchor = (origin.x * n.x + origin.y * n.y) / period;
+        let phase = ((self.speed as f64 * t) / period as f64 + anchor as f64).rem_euclid(1.0) as f32;
+        VectorPaint::Stripes { normal: n, period, duty: self.duty, phase }
     }
 
-    fn style(&self, t: f64, alpha: f32) -> StrokeStyle {
+    fn style(&self, t: f64, origin: Point, alpha: f32) -> StrokeStyle {
         let c = self.color.fade(alpha);
-        StrokeStyle { paint: self.paint(t), ..StrokeStyle::solid(0.0, c).ramp(0.0, c.fade(0.0), 1.0, c) }
+        StrokeStyle { paint: self.paint(t, origin), ..StrokeStyle::solid(0.0, c).ramp(0.0, c.fade(0.0), 1.0, c) }
+    }
+}
+
+/// A grid fill: lines `width` wide, or dots `width` across, every `cell` (logical units),
+/// with a line or dot at `origin` (box space). A cell size of 0 on an axis leaves out the
+/// lines across it: `Grid::lines(Size::new(10.0, 0.0), ..)` draws vertical lines only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    pub cell: Size,
+    pub width: f32,
+    pub color: Color,
+    pub dots: bool,
+    pub origin: Point,
+}
+
+impl Grid {
+    pub fn lines(cell: Size, width: f32, color: Color) -> Grid {
+        Grid { cell, width, color, dots: false, origin: Point::ZERO }
+    }
+
+    /// Dots `diameter` across at the crossings.
+    pub fn dots(cell: Size, diameter: f32, color: Color) -> Grid {
+        Grid { dots: true, ..Grid::lines(cell, diameter, color) }
+    }
+
+    /// A line (or dot) through `origin`, in the box's space.
+    pub fn origin(self, origin: Point) -> Grid {
+        Grid { origin, ..self }
+    }
+
+    fn style(&self, origin: Point, alpha: f32) -> StrokeStyle {
+        let c = self.color.fade(alpha);
+        let paint = VectorPaint::Grid {
+            origin: Point::new(origin.x + self.origin.x, origin.y + self.origin.y),
+            cell: Point::new(self.cell.w.max(0.0), self.cell.h.max(0.0)),
+            width: self.width.max(0.0),
+            dots: self.dots,
+        };
+        StrokeStyle { paint, ..StrokeStyle::solid(0.0, c).ramp(0.0, c.fade(0.0), 1.0, c) }
     }
 }
 
@@ -120,6 +162,8 @@ pub struct Frame {
     pub glow: f32,
     /// A band this wide inside the outline, filled with these stripes.
     pub hatch: Option<(f32, Stripes)>,
+    /// Grid fills over the fill and stripes, in order (a minor grid, then a major one).
+    pub grids: Vec<Grid>,
 }
 
 impl Frame {
@@ -172,6 +216,12 @@ impl Frame {
 
     pub fn glow(mut self, radius: f32) -> Frame {
         self.glow = radius;
+        self
+    }
+
+    /// A grid of lines or dots over the fill.
+    pub fn grid(mut self, grid: Grid) -> Frame {
+        self.grids.push(grid);
         self
     }
 
@@ -375,19 +425,22 @@ pub(crate) fn draw<M>(
         // stripe colour laid over it on them.
         (Some(c), Some(s)) => {
             let (c0, c1) = (c.fade(alpha), over(s.color, c).fade(alpha));
-            let style = StrokeStyle { paint: s.paint(t), ..StrokeStyle::solid(0.0, c0).ramp(0.0, c0, 1.0, c1) };
+            let style = StrokeStyle { paint: s.paint(t, origin), ..StrokeStyle::solid(0.0, c0).ramp(0.0, c0, 1.0, c1) };
             push(push_fill(out, filled(), &style.glow(glow_fill)));
         }
         (Some(c), None) => push(push_fill(out, filled(), &StrokeStyle::solid(0.0, c.fade(alpha)).glow(glow_fill))),
-        (None, Some(s)) => push(push_fill(out, filled(), &s.style(t, alpha))),
+        (None, Some(s)) => push(push_fill(out, filled(), &s.style(t, origin, alpha))),
         (None, None) => {}
+    }
+    for g in &f.grids {
+        push(push_fill(out, filled(), &g.style(origin, alpha)));
     }
     if let Some((width, s)) = f.hatch {
         // One quad per edge between the outline and its inset, so each covers only its own
         // strip of pixels instead of the whole box.
         let inner = f.inset(size, width);
         if inner.len() == outline.len() {
-            let style = s.style(t, alpha);
+            let style = s.style(t, origin, alpha);
             let k = outline.len();
             for i in 0..k {
                 let j = (i + 1) % k;
