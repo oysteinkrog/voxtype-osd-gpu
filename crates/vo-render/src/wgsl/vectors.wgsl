@@ -219,7 +219,9 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
 
 @fragment fn fs_vector (in: VecOut) -> @location(0) vec4f {
   // Target pixels; a layer texture sized to its bounds sits at `layer.origin`.
-  let p = in.clip.xy + layer.origin.xy;
+  let p = frag_target (in.clip.xy);
+  // Pixels as seen per target pixel as laid out, for the antialiasing ramps.
+  let seen = warp_scale (p);
   var cov: f32;
   // Distance outside the shape's edge, for the glow.
   var outside: f32;
@@ -230,7 +232,7 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
     let kb = max (in.a.w, 1e-3);
     let h = clamp (0.5 + 0.5 * (d2 - d1) / kb, 0.0, 1.0);
     let dist = mix (d2, d1, h) - kb * h * (1.0 - h);
-    cov = clamp (0.5 - dist, 0.0, 1.0);
+    cov = clamp (0.5 - dist * seen, 0.0, 1.0);
     outside = max (dist, 0.0);
     k = 1.0 - h;
   } else {
@@ -261,7 +263,7 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
     if (fill && winding != 0) {
       signed = best.x;
     }
-    cov = clamp (0.5 - signed, 0.0, 1.0);
+    cov = clamp (0.5 - signed * seen, 0.0, 1.0);
     outside = max (signed, 0.0);
     k = ramp (paint_pos (in.head.w, p, best.y, in.a), in.params.zw);
   }

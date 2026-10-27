@@ -35,7 +35,11 @@
 
   var out: VsOut;
   out.clip = u.mvp * vec4f (d[0], 0.0, 1.0);
-  if (any (layer.origin.xy != vec2f (0.0)) || any (layer.viewport.xy != u.viewport)) {
+  if (warped ()) {
+    // A turned layer (vo_scene::stage): through the warp. Slug's coverage takes its window
+    // from screen derivatives, so it stays sharp in perspective.
+    out.clip = px_to_ndc (d[0]);
+  } else if (any (layer.origin.xy != vec2f (0.0)) || any (layer.viewport.xy != u.viewport)) {
     let n = (d[0] - layer.origin.xy) / layer.viewport.xy * 2.0 - 1.0;
     out.clip = vec4f (n.x, -n.y, out.clip.z, out.clip.w);
   }

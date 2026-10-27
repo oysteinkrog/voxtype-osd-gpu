@@ -45,6 +45,7 @@ use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph,
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 use vo_scene::path::PATH_FONT;
+use vo_scene::stage::Warp;
 
 use crate::color::linear_premul;
 use crate::dots::GpuDot;
@@ -225,6 +226,14 @@ struct LayerUniform {
     style_box: [f32; 4],
     style_a: [f32; 4],
     style_b: [f32; 4],
+    /// The stage warp in target pixels (`vo_scene::stage`): rows of the 3x3, and of its
+    /// inverse. `warp0[3]` is 1 when the layer is warped.
+    warp0: [f32; 4],
+    warp1: [f32; 4],
+    warp2: [f32; 4],
+    unwarp0: [f32; 4],
+    unwarp1: [f32; 4],
+    unwarp2: [f32; 4],
 }
 
 /// One block of `Fx` in `bloom.wgsl`.
@@ -259,6 +268,8 @@ struct LayerState {
     smear: [f32; 2],
     /// Inside a mask's content (FX04): 1 writes coverage, 2 luminance; 0 elsewhere.
     mask_out: f32,
+    /// The stage warp in target pixels, composed with every parent's.
+    warp: Option<Warp>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,6 +309,8 @@ struct GpuCmd {
     item: vo_scene::gpu::GpuItem,
     /// The layer's space to target pixels.
     to_px: Affine,
+    /// The stage warp in target pixels.
+    warp: Option<Warp>,
     opacity: f32,
 }
 
@@ -700,6 +713,7 @@ impl Renderer {
                 scissor: full,
                 smear: [0.0; 2],
                 mask_out: 0.0,
+                warp: None,
             };
             let frame = Frame { list, scale, effects, encode_srgb: encode_srgb as u32 as f32, target: [w, h] };
             self.visit(&frame, 0, &top, 0);
@@ -734,11 +748,17 @@ impl Renderer {
         let layer = &f.list.layers[li as usize];
         let to_px = layer.transform.then(&Affine::scale(f.scale));
         let ppu = pixels_per_unit(&to_px);
+        // A turned layer (`vo_scene::stage`): bounds as laid out, then as seen.
+        let warp = layer.warp.map(|w| w.scaled(f.scale)).filter(|w| w.invert().is_some());
+        let seen = |b: [f32; 4]| match warp {
+            Some(w) if b[2] > b[0] && b[3] > b[1] => w.bounds(b),
+            _ => b,
+        };
         let mut scissor = parent.scissor;
         let clip = match layer.clip {
             Some(rect) => {
                 let Some(from_px) = to_px.invert() else { return };
-                scissor = intersect(scissor, bounds(&rect, &to_px));
+                scissor = intersect(scissor, seen(bounds(&rect, &to_px)));
                 Some(ClipState { rect, from_px, ppu, fade: layer.clip_fade })
             }
             None => parent.clip,
@@ -810,11 +830,11 @@ impl Renderer {
         let mb = layer.motion_blur;
         let smear =
             [parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y), parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y)];
-        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear, mask_out };
-        // Content reaches half the smear further either way.
+        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear, mask_out, warp };
+        // Content reaches half the smear further either way, and is seen through the warp.
         let reach = |b: [f32; 4]| {
             let (hx, hy) = (0.5 * smear[0].abs(), 0.5 * smear[1].abs());
-            [b[0] - hx, b[1] - hy, b[2] + hx, b[3] + hy]
+            seen([b[0] - hx, b[1] - hy, b[2] + hx, b[3] + hy])
         };
         let uniform = self.push_uniform(f, &state, opacity);
         for item in f.list.layer_items(li) {
@@ -880,7 +900,7 @@ impl Renderer {
                     let start = self.vectors.len() as u32;
                     for v in &f.list.vectors[range] {
                         if let Some(g) = GpuVector::new(f.list, v, &to_px, ppu, opacity, &mut self.vector_segs) {
-                            grow(&mut self.surfaces[draw_surface].bounds, intersect(g.bbox, scissor));
+                            grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(g.bbox), scissor));
                             self.vectors.push(g);
                         }
                     }
@@ -925,7 +945,7 @@ impl Renderer {
                             self.dots.push(g);
                         }
                     }
-                    grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                    grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(b), scissor));
                     self.push_cmd(draw_surface, Pipe::Dot, start..self.dots.len() as u32, uniform, blend, scissor);
                 }
                 ItemKind::Glass => {
@@ -942,15 +962,15 @@ impl Renderer {
                         }
                         self.glass.push(GlassGpu::new(&g, opacity));
                     }
-                    grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
+                    grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(b), scissor));
                     self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);
                 }
                 ItemKind::Gpu => {
                     let start = self.gpu_items.len() as u32;
                     for g in &f.list.gpu[range] {
-                        let b = bounds(&RRect::new(g.rect, 0.0), &to_px);
+                        let b = seen(bounds(&RRect::new(g.rect, 0.0), &to_px));
                         grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
-                        self.gpu_items.push(GpuCmd { item: g.clone(), to_px, opacity: opacity * g.opacity });
+                        self.gpu_items.push(GpuCmd { item: g.clone(), to_px, warp, opacity: opacity * g.opacity });
                     }
                     let end = self.gpu_items.len() as u32;
                     self.push_cmd(draw_surface, Pipe::Gpu, start..end, uniform, BlendMode::Normal, scissor);
@@ -1098,7 +1118,21 @@ impl Renderer {
         } else {
             [0.0; 4]
         };
+        let rows = |w: &Warp, flag: f32| {
+            let m = w.0;
+            [[m[0][0], m[0][1], m[0][2], flag], [m[1][0], m[1][1], m[1][2], 0.0], [m[2][0], m[2][1], m[2][2], 0.0]]
+        };
+        let (warp, unwarp) = match st.warp.and_then(|w| Some((w, w.invert()?))) {
+            Some((w, inv)) => (rows(&w, 1.0), rows(&inv, 0.0)),
+            None => ([[0.0; 4]; 3], [[0.0; 4]; 3]),
+        };
         let mut u = LayerUniform {
+            warp0: warp[0],
+            warp1: warp[1],
+            warp2: warp[2],
+            unwarp0: unwarp[0],
+            unwarp1: unwarp[1],
+            unwarp2: unwarp[2],
             smear,
             m: [m.a, m.b, m.c, m.d],
             t: [m.e, m.f, st.ppu, opacity],
@@ -1559,6 +1593,13 @@ impl Renderer {
                         rect: g.item.rect,
                         t: g.item.t,
                         to_px: g.to_px.then(&Affine::translate(-ox, -oy)),
+                        warp: g.warp.map(|w| {
+                            Warp([[1.0, 0.0, ox], [0.0, 1.0, oy], [0.0, 0.0, 1.0]]).then(&w).then(&Warp([
+                                [1.0, 0.0, -ox],
+                                [0.0, 1.0, -oy],
+                                [0.0, 0.0, 1.0],
+                            ]))
+                        }),
                         opacity: g.opacity,
                         scissor,
                         encode_srgb,

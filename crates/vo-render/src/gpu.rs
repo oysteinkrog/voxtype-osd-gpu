@@ -15,6 +15,9 @@
 //!
 //! Blend is premultiplied over. The layer's blend mode is not applied.
 //!
+//! In a turned layer (`vo_scene::stage`) the scissor covers the item as seen and `warp`
+//! holds the layer's perspective map.
+//!
 //! What GPU items do not get, unlike the renderer's own content:
 //! - The layer clip only as a scissor: no rounded corners and no edge fades (FX04).
 //! - No motion blur smear (FX12).
@@ -51,8 +54,12 @@ pub struct PaintCx<'a> {
     pub rect: Rect,
     /// The time the frame shows.
     pub t: f64,
-    /// The layer's space to surface pixels.
+    /// The layer's space to surface pixels, as laid out.
     pub to_px: Affine,
+    /// The stage warp from surface pixels as laid out to surface pixels as seen
+    /// (`vo_scene::stage`), when the element is in a turned layer. `rect_px` ignores it; a
+    /// painter that follows the stage draws through it or through the stage camera.
+    pub warp: Option<vo_scene::stage::Warp>,
     /// Inherited opacity, to multiply in.
     pub opacity: f32,
     /// The layer's clip as a scissor in surface pixels: `x, y, w, h`, never empty.

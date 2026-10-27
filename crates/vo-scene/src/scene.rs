@@ -474,6 +474,7 @@ pub struct Scene<M = ()> {
     retention: f64,
     default_motion: Motion,
     reduced_motion: bool,
+    stage: crate::stage::Stage,
     layout_dirty: bool,
     /// Something drawn or hit-tested changed during the current `apply`.
     changed: bool,
@@ -502,6 +503,7 @@ impl<M> Scene<M> {
             retention: f64::INFINITY,
             default_motion: DEFAULT_MOTION,
             reduced_motion: false,
+            stage: crate::stage::Stage::default(),
             layout_dirty: false,
             changed: false,
             pointer: PointerState::default(),
@@ -556,6 +558,12 @@ impl<M> Scene<M> {
 
     /// Sets the surface size (logical units; zero lets the root take its content size) and
     /// the scale factor, and lays out again at `t` if the size changed.
+    /// The camera that `rotate_x`, `rotate_y` and `translate_z` are seen through
+    /// (`crate::stage`). Default: perspective 1000 logical pixels, looking at the centre.
+    pub fn set_stage(&mut self, stage: crate::stage::Stage) {
+        self.stage = stage;
+    }
+
     pub fn set_viewport(&mut self, t: f64, size: Size, scale: f32) {
         self.scale = scale;
         if size != self.viewport {
@@ -735,6 +743,7 @@ impl<M> Scene<M> {
         out.clear();
         out.size = self.viewport;
         out.scale = self.scale;
+        out.stage = self.stage;
         out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
         out.layers.push(Layer::root());
         let mut items = Vec::new();
@@ -1137,7 +1146,9 @@ impl<M> Scene<M> {
             smear = Point::new(smear.x / k, smear.y / k);
         }
         let blurred = smear.x.abs() + smear.y.abs() > 0.01;
-        if !as_layer && !blurred && m.is_translation() {
+        let tilt = [Slot::RotateX, Slot::RotateY, Slot::TranslateZ].map(|s| n.value(s as u8, t) as f32);
+        let tilted = tilt != [0.0; 3];
+        if !as_layer && !blurred && !tilted && m.is_translation() {
             self.emit_body(id, t, m, size, alpha * opacity, layer, leaving, items, out);
             return;
         }
@@ -1146,6 +1157,20 @@ impl<M> Scene<M> {
         let index = out.layers.len() as u32;
         items.push(Item { kind: ItemKind::Layer, start: index, len: 1 });
         let transform = m.then(&out.layers[layer as usize].transform);
+        // Stage turns (`crate::stage`): this layer's own warp about its box as laid out,
+        // then its parent's.
+        let parent_warp = out.layers[layer as usize].warp;
+        let own_warp = tilted
+            .then(|| {
+                let [x0, y0, x1, y1] = affine_bounds(&transform, size);
+                let rect = Rect::new(x0, y0, x1 - x0, y1 - y0);
+                self.stage.tilt(self.viewport, rect, tilt[0], tilt[1], tilt[2])
+            })
+            .flatten();
+        let warp = match (own_warp, parent_warp) {
+            (Some(o), Some(p)) => Some(o.then(&p)),
+            (o, p) => o.or(p),
+        };
         let style = match n.kind {
             Kind::Layer { mask: None, .. } => n.style(t, Rect::from_size(size)),
             _ => None,
@@ -1184,6 +1209,7 @@ impl<M> Scene<M> {
                 t,
             }),
             style,
+            warp,
             items: 0..0,
         });
         let mut own = Vec::new();
@@ -1726,6 +1752,20 @@ fn local_transform<M>(n: &Node<M>, t: f64) -> (Affine, Size, f32) {
 
 /// Appends one instance at `index` to the item list, extending the last run when it is the
 /// same kind and adjacent.
+/// The box `(0, 0, size)` through `m`, as `x0, y0, x1, y1`.
+fn affine_bounds(m: &Affine, size: Size) -> [f32; 4] {
+    let pts =
+        [Point::ZERO, Point::new(size.w, 0.0), Point::new(0.0, size.h), Point::new(size.w, size.h)].map(|p| m.apply(p));
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in pts {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    [x0, y0, x1, y1]
+}
+
 /// The product of the opacities of `layer` and every layer above it.
 /// The transform that fits `view` into the box at `origin`, centred, keeping its aspect.
 fn fit_view(view: Rect, origin: Point, size: Size) -> Affine {

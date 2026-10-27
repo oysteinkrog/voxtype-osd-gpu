@@ -39,6 +39,14 @@ struct Layer {
   style_box: vec4f,
   style_a: vec4f,
   style_b: vec4f,
+  // The stage warp (vo_scene::stage) in target pixels: rows of the 3x3 map from pixels as laid
+  // out to pixels as seen, then the rows of its inverse. warp0.w is 1 when the layer is warped.
+  warp0: vec4f,
+  warp1: vec4f,
+  warp2: vec4f,
+  unwarp0: vec4f,
+  unwarp1: vec4f,
+  unwarp2: vec4f,
 };
 
 @group(1) @binding(0) var<uniform> layer: Layer;
@@ -47,9 +55,48 @@ fn layer_to_px (p: vec2f) -> vec2f {
   return vec2f (layer.m.x * p.x + layer.m.z * p.y, layer.m.y * p.x + layer.m.w * p.y) + layer.t.xy;
 }
 
+fn warped () -> bool {
+  return layer.warp0.w != 0.0;
+}
+
+// Target pixels as laid out to clip space. A warped layer keeps the divide in w, so varyings
+// are interpolated in perspective.
 fn px_to_ndc (p: vec2f) -> vec4f {
-  let n = (p - layer.origin.xy) / layer.viewport.xy * 2.0 - 1.0;
-  return vec4f (n.x, -n.y, 0.0, 1.0);
+  if (!warped ()) {
+    let n = (p - layer.origin.xy) / layer.viewport.xy * 2.0 - 1.0;
+    return vec4f (n.x, -n.y, 0.0, 1.0);
+  }
+  let h = vec3f (p, 1.0);
+  let q = vec3f (dot (layer.warp0.xyz, h), dot (layer.warp1.xyz, h), dot (layer.warp2.xyz, h));
+  let n = (q.xy / q.z - layer.origin.xy) / layer.viewport.xy * 2.0 - 1.0;
+  return vec4f (n.x * q.z, -n.y * q.z, 0.0, q.z);
+}
+
+// The target pixel, as laid out, of a fragment at `frag_tex` in the texture drawn into.
+fn frag_target (frag_tex: vec2f) -> vec2f {
+  let f = frag_tex + layer.origin.xy;
+  if (!warped ()) {
+    return f;
+  }
+  let h = vec3f (f, 1.0);
+  let q = vec3f (dot (layer.unwarp0.xyz, h), dot (layer.unwarp1.xyz, h), dot (layer.unwarp2.xyz, h));
+  return q.xy / q.z;
+}
+
+// Pixels as seen per pixel as laid out, at target pixel `p` as laid out: 1 on a flat layer,
+// less where a warped layer recedes. Antialiasing ramps scale by it.
+fn warp_scale (p: vec2f) -> f32 {
+  if (!warped ()) {
+    return 1.0;
+  }
+  let h = vec3f (p, 1.0);
+  let w = dot (layer.warp2.xyz, h);
+  let x = dot (layer.warp0.xyz, h) / w;
+  let y = dot (layer.warp1.xyz, h) / w;
+  let j = mat2x2f (
+    vec2f (layer.warp0.x - x * layer.warp2.x, layer.warp1.x - y * layer.warp2.x) / w,
+    vec2f (layer.warp0.y - x * layer.warp2.y, layer.warp1.y - y * layer.warp2.y) / w);
+  return sqrt (abs (determinant (j)));
 }
 
 // Signed distance to a rounded rect `rect` (x, y, w, h) with corner radii TL, TR, BR, BL
@@ -73,7 +120,7 @@ fn clip_coverage (frag_tex: vec2f) -> f32 {
   if (layer.clip_t.w == 0.0) {
     return 1.0;
   }
-  let frag = frag_tex + layer.origin.xy;
+  let frag = frag_target (frag_tex);
   let p = vec2f (layer.clip_m.x * frag.x + layer.clip_m.z * frag.y,
                  layer.clip_m.y * frag.x + layer.clip_m.w * frag.y) + layer.clip_t.xy;
   let d = sd_rrect (p, layer.clip_rect, layer.clip_radii) * layer.clip_t.z;

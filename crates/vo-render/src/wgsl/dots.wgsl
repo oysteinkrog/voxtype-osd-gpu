@@ -41,8 +41,9 @@ fn srgb_to_linear (c: vec3f) -> vec3f {
 
 @fragment fn fs_dot (in: DotOut) -> @location(0) vec4f {
   // A dot smaller than a pixel keeps its area as faint coverage instead of vanishing.
-  let r = max (in.radius_px, 0.5);
-  let area = min (in.radius_px * in.radius_px / (r * r), 1.0);
-  let cov = clamp (r + 0.5 - length (in.d), 0.0, 1.0) * area;
+  let seen = warp_scale (frag_target (in.clip.xy));
+  let r = max (in.radius_px * seen, 0.5);
+  let area = min (in.radius_px * seen * in.radius_px * seen / (r * r), 1.0);
+  let cov = clamp (r + 0.5 - length (in.d) * seen, 0.0, 1.0) * area;
   return finish (in.color * cov * clip_coverage (in.clip.xy));
 }

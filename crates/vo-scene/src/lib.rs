@@ -30,6 +30,8 @@
 //! - `lines`: live text broken into lines whose look follows their age (teleprompter).
 //! - `swap`: word swap, a label that changes word by word, shared words sliding in place.
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
+//! - `stage`: 2D layers as planes in one perspective camera: rotate_x, rotate_y,
+//!   translate_z.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod ambient;
@@ -56,6 +58,7 @@ pub mod reach;
 pub mod ribbon;
 pub mod roll;
 pub mod scene;
+pub mod stage;
 pub mod segments;
 pub mod status_icon;
 pub mod story;

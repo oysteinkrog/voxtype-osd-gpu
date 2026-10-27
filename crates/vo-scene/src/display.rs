@@ -23,6 +23,7 @@ use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::GlassInstance;
 use crate::gpu::GpuItem;
 use crate::path::{VectorInstance, VectorSeg};
+use crate::stage::{Stage, Warp};
 
 /// Index of a layer in `DisplayList::layers`.
 pub type LayerIndex = u32;
@@ -33,6 +34,8 @@ pub struct DisplayList {
     pub size: Size,
     /// Physical pixels per logical unit.
     pub scale: f32,
+    /// The camera turned and pushed layers are seen through (`crate::stage`).
+    pub stage: Stage,
     pub layers: Vec<Layer>,
     pub items: Vec<Item>,
     pub shapes: Vec<ShapeInstance>,
@@ -97,6 +100,10 @@ pub struct Layer {
     /// slices, scanlines, CRT curvature, vignette and flicker. Only on offscreen layers
     /// without bloom or a mask.
     pub style: Option<LayerStyle>,
+    /// The layer's perspective map in surface space (`crate::stage`), already composed with
+    /// every parent's: content is laid out by `transform`, then seen through this. `None`
+    /// for a flat layer under flat parents.
+    pub warp: Option<Warp>,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -114,6 +121,7 @@ impl Layer {
             motion_blur: Point::ZERO,
             trail: None,
             style: None,
+            warp: None,
             items: 0..0,
         }
     }

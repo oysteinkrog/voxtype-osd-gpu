@@ -124,6 +124,11 @@ pub(crate) enum Slot {
     WaveAmp = 76,
     WaveLength = 77,
     WavePhase = 78,
+    /// Stage turns in radians and the push toward the viewer in logical units
+    /// (`crate::stage`).
+    RotateX = 100,
+    RotateY = 101,
+    TranslateZ = 102,
     /// Ink outside the box that the app declares (`Element::declare_reach`): left, top,
     /// right and bottom, in logical units. High numbers, clear of the effect slots.
     ReachLeft = 200,
@@ -145,6 +150,7 @@ impl Slot {
     pub(crate) fn prop(slot: u8) -> Prop {
         match slot {
             s if s >= Slot::ReachLeft as u8 => Slot::hud_prop(s),
+            s if (Slot::RotateX as u8..=Slot::TranslateZ as u8).contains(&s) => Prop::Tilt,
             s if s <= Slot::Y as u8 => Prop::Position,
             s if s <= Slot::H as u8 => Prop::Size,
             s if s == Slot::Opacity as u8 => Prop::Opacity,
@@ -191,7 +197,8 @@ impl Slot {
             || slot == Slot::StyleChroma as u8
             || slot == Slot::StyleScanPeriod as u8
             || slot == Slot::WaveAmp as u8
-            || slot == Slot::WaveLength as u8)
+            || slot == Slot::WaveLength as u8
+            || slot == Slot::TranslateZ as u8)
     }
 }
 
@@ -236,6 +243,8 @@ pub enum Prop {
     Style,
     /// A wavy line's amplitude, wavelength and phase (`Element::wavy_line`).
     Wave,
+    /// Stage turns and the push in z (`Element::rotate_x`, `rotate_y`, `translate_z`).
+    Tilt,
 }
 
 /// How a property moves to a new target.
@@ -991,6 +1000,27 @@ impl<M> Element<M> {
     /// Rotation in radians around the box centre, clockwise on screen.
     pub fn rotate(mut self, radians: f32) -> Element<M> {
         self.set(Slot::Rotation as u8, radians);
+        self
+    }
+
+    /// Turns the element about its horizontal centre line in the stage camera
+    /// (`crate::stage`): positive takes the top edge away from the viewer. The element gets a
+    /// layer of its own, seen in perspective. A spring channel (`Prop::Tilt`).
+    pub fn rotate_x(mut self, radians: f32) -> Element<M> {
+        self.set(Slot::RotateX as u8, radians);
+        self
+    }
+
+    /// Turns the element about its vertical centre line: positive takes the right edge away.
+    pub fn rotate_y(mut self, radians: f32) -> Element<M> {
+        self.set(Slot::RotateY as u8, radians);
+        self
+    }
+
+    /// Moves the element toward the viewer by `z` logical pixels (negative pushes it back),
+    /// so it shrinks or grows about the stage origin and moves with parallax.
+    pub fn translate_z(mut self, z: f32) -> Element<M> {
+        self.set(Slot::TranslateZ as u8, z);
         self
     }
 

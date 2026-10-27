@@ -244,7 +244,7 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
     let spread = in.fill_p.w;
     let p = in.p - in.fill_p.xy;
     if (kind == KIND_LINE || kind == KIND_BAND) {
-      let ds = sd_shape (kind, p, in.clip.x + layer.origin.x - in.fill_p.x * layer.t.z, in) - hw - spread;
+      let ds = sd_shape (kind, p, frag_target (in.clip.xy).x - in.fill_p.x * layer.t.z, in) - hw - spread;
       v = 0.5 - 0.5 * erf2 (vec2f (ds * 0.70710678 / sigma)).x;
     } else {
       var rect = in.geom;
@@ -290,8 +290,9 @@ fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
   // Distance and half stroke width in physical pixels. Coverage is the overlap of the pixel's
   // one-pixel box with the filled half-plane or the stroke band, exact for straight edges
   // and for strokes thinner than a pixel.
-  let dp = d * layer.t.z;
-  let hw = 0.5 * in.stroke_width * layer.t.z;
+  let ppu = layer.t.z * warp_scale (frag_target (in.clip.xy));
+  let dp = d * ppu;
+  let hw = 0.5 * in.stroke_width * ppu;
   var fill_cov = clamp (0.5 - dp, 0.0, 1.0);
   if (kind == KIND_LINE) {
     fill_cov = 0.0;
@@ -310,7 +311,7 @@ fn smear_samples () -> i32 {
 }
 
 @fragment fn fs_shape (in: ShapeOut) -> @location(0) vec4f {
-  let frag_x = in.clip.x + layer.origin.x;
+  let frag_x = frag_target (in.clip.xy).x;
   var c: vec4f;
   if (all (layer.smear.xy == vec2f (0.0))) {
     c = shade (in, in.p, frag_x);
