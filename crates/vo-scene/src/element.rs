@@ -143,6 +143,16 @@ pub(crate) enum Slot {
     ReachTop = 201,
     ReachRight = 202,
     ReachBottom = 203,
+    /// A repeater's child: its place on the ring (an angle) or path (a fraction), and its
+    /// distance from it. Set by the repeater (`crate::repeat`).
+    ItemAt = 204,
+    ItemRadius = 205,
+    /// A repeater's ring: radius, start and sweep; or path: offset, from and to.
+    RepeatA = 206,
+    RepeatB = 207,
+    RepeatC = 208,
+    /// A repeater's child moved out from the ring (`Element::radial`).
+    Radial = 209,
 }
 
 impl Slot {
@@ -258,6 +268,9 @@ pub enum Prop {
     Style,
     /// A wavy line's amplitude, wavelength and phase (`Element::wavy_line`).
     Wave,
+    /// A repeater's ring radius, start and sweep, or its path offset and range
+    /// (`Element::polar`, `Element::along_path`).
+    Ring,
     /// Stage turns and the push in z (`Element::rotate_x`, `rotate_y`, `translate_z`).
     Tilt,
 }
@@ -516,6 +529,8 @@ pub(crate) enum Kind {
     Morph(MorphArt),
     /// A sine across the middle of the box, from the wave and trim channels.
     WavyLine(StrokeStyle),
+    /// Children and ticks around a ring or along a path (`crate::repeat`).
+    Repeat(crate::repeat::Repeat),
 }
 
 /// What `Element::stroke_path` draws. Compared by identity of the outline.
@@ -617,7 +632,7 @@ pub struct Element<M = ()> {
 }
 
 impl<M> Element<M> {
-    fn new(key: impl Into<Key>, kind: Kind, style: taffy::Style) -> Element<M> {
+    pub(crate) fn new(key: impl Into<Key>, kind: Kind, style: taffy::Style) -> Element<M> {
         Element {
             key: key.into(),
             kind,
@@ -903,8 +918,9 @@ impl<M> Element<M> {
 
     // Children.
 
-    pub fn child(mut self, child: Element<M>) -> Element<M> {
+    pub fn child(mut self, mut child: Element<M>) -> Element<M> {
         self.adopt(&child);
+        crate::repeat::adopt(&self.kind, &mut child.style);
         self.children.push(child);
         self
     }

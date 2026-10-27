@@ -256,6 +256,7 @@ fn kind_reach(kind: &Kind, size: Option<Size>, t: f64) -> f32 {
         Kind::StrokePath(a) => stroke_glow_reach(a.style.width, a.style.glow),
         Kind::Morph(a) => stroke_glow_reach(a.style.width, a.style.glow),
         Kind::WavyLine(s) => stroke_glow_reach(s.width, s.glow),
+        Kind::Repeat(r) => crate::repeat::reach(r, size),
         _ => 0.0,
     }
 }
@@ -280,7 +281,14 @@ impl<M> Element<M> {
             size,
             t,
         });
-        self.children.iter().fold(own, |acc, c| acc.max(c.effect_reach(t)))
+        self.children.iter().fold(own, |acc, c| {
+            let mut r = c.effect_reach(t);
+            // A repeater's children sit on its ring or path, which may leave its box.
+            if let Kind::Repeat(rep) = &self.kind {
+                r = r.plus(crate::repeat::child_overflow(rep, size, fixed_size(&c.style)));
+            }
+            acc.max(r)
+        })
     }
 
     /// Declares ink outside the box that the framework cannot see, such as a canvas or a
@@ -302,13 +310,19 @@ impl<M> Element<M> {
 
 impl Slot {
     /// The motion group of a slot from `ReachLeft` up.
-    pub(crate) fn hud_prop(_slot: u8) -> crate::element::Prop {
-        crate::element::Prop::Offset
+    pub(crate) fn hud_prop(slot: u8) -> crate::element::Prop {
+        use crate::element::Prop;
+        match slot {
+            s if s == Slot::ItemAt as u8 || s == Slot::ItemRadius as u8 => Prop::Position,
+            s if (Slot::RepeatA as u8..=Slot::RepeatC as u8).contains(&s) => Prop::Ring,
+            _ => Prop::Offset,
+        }
     }
 
     /// Whether a slot from `ReachLeft` up settles at the fine threshold for 0 to 1 values.
-    pub(crate) fn hud_unit(_slot: u8) -> bool {
-        false
+    pub(crate) fn hud_unit(slot: u8) -> bool {
+        // Angles and fractions along a path.
+        slot == Slot::ItemAt as u8 || slot == Slot::RepeatB as u8 || slot == Slot::RepeatC as u8
     }
 }
 
@@ -345,6 +359,9 @@ impl<M> Scene<M> {
     /// The node's box at `t` in its parent's space, offset by `origin`.
     fn node_box(&self, id: NodeId, origin: Point, t: f64) -> Rect {
         let n = &self.nodes[id];
+        if let Some(r) = n.parent.and_then(|p| crate::repeat::placed_box(&self.nodes[p], n, t)) {
+            return Rect::new(origin.x + r.x, origin.y + r.y, r.w, r.h);
+        }
         let v = |s: Slot| n.value(s as u8, t) as f32;
         Rect::new(origin.x + v(Slot::X), origin.y + v(Slot::Y), v(Slot::W).max(0.0), v(Slot::H).max(0.0))
     }

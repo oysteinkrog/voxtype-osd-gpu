@@ -2,24 +2,36 @@
 //!
 //! - **reach**: effect reach and the surface margin. A glowing toast on a surface only as big
 //!   as its box, then on the surface `surface_for` sizes from `effect_reach`.
+//! - **polar**: a gauge of ticks drawing on, and markers on a ring sliding along the arc when
+//!   one goes.
+//! - **along_path**: ticks and chevrons along an S-curve, the chevrons turned along it.
 //!
 //! `cargo run -p vo --example hud_kit -- [--out DIR] [--bench]` writes `contact-sheet.png`
 //! (rows of frames per board) to DIR, or with `--bench` prints the GPU time per frame of
 //! each board at 600 x 300 (scale 1) and at 1920 x 1080 (scale 3.2), from timestamp queries.
 
+use std::f32::consts::{PI, TAU};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use vo::scene::element::Element;
-use vo::scene::geom::{Color, Size};
-use vo::scene::{surface_for, Scene};
+use vo::scene::geom::{Color, Point, Size};
+use vo::scene::path::Contour;
+use vo::scene::{surface_for, Orient, Prop, Scene, Ticks};
+use vo_core::spring::Spring;
 use vo_render::offscreen::write_png;
 use vo_render::{Offscreen, Renderer, Target};
 
-/// One board: a view of a `Size` at a time, the times its sheet row shows, and its name.
+/// A view of a board of `Size`.
+type View = fn(Size) -> Element<()>;
+
+/// One board: a view of a `Size`, an optional second view applied at a time, the times its
+/// sheet row shows, and its name.
 struct Board {
     name: &'static str,
-    view: fn(Size, f64) -> Element<()>,
+    view: View,
+    then: Option<(f64, View)>,
     times: &'static [f64],
 }
 
@@ -27,8 +39,21 @@ const BG: u32 = 0x0b0d12;
 
 fn boards() -> Vec<Board> {
     vec![
-        Board { name: "reach: tight surface", view: reach_tight, times: &[0.0] },
-        Board { name: "reach: computed margin", view: reach_fitted, times: &[0.0] },
+        Board { name: "reach: tight surface", view: reach_tight, then: None, times: &[0.0] },
+        Board { name: "reach: computed margin", view: reach_fitted, then: None, times: &[0.0] },
+        Board {
+            name: "polar: ticks draw on",
+            view: |s| gauge(s, 0.0),
+            then: Some((0.0, |s| gauge(s, 1.0))),
+            times: &[0.05, 0.15, 0.3, 1.0],
+        },
+        Board {
+            name: "polar: a marker goes, the rest slide",
+            view: |s| markers(s, 8),
+            then: Some((0.0, |s| markers(s, 7))),
+            times: &[0.0, 0.1, 0.25, 1.0],
+        },
+        Board { name: "along_path: S-curve", view: snake, then: None, times: &[0.0] },
     ]
 }
 
@@ -45,13 +70,13 @@ fn toast() -> Element<()> {
 }
 
 /// The toast centred on a surface exactly its own size, inside the board.
-fn reach_tight(size: Size, _t: f64) -> Element<()> {
+fn reach_tight(size: Size) -> Element<()> {
     centred(size, Element::layer("cut").clip().size(240.0, 72.0).child(toast()))
 }
 
 /// The toast on the surface `surface_for` sizes from its effect reach; the surface outline
 /// shows where the transparent margin ends.
-fn reach_fitted(size: Size, _t: f64) -> Element<()> {
+fn reach_fitted(size: Size) -> Element<()> {
     let content = Size::new(240.0, 72.0);
     let fit = surface_for(content, toast().effect_reach(0.0));
     let (l, t) = (fit.origin.x, fit.origin.y);
@@ -62,6 +87,71 @@ fn reach_fitted(size: Size, _t: f64) -> Element<()> {
         .pad_edges(t, r, b, l)
         .child(toast());
     centred(size, Element::layer("cut").clip().size(fit.size.w, fit.size.h).child(surface))
+}
+
+// Repeaters.
+
+const CYAN: u32 = 0x35e0ff;
+const STEEL: u32 = 0x5a6a80;
+
+/// 60 ticks inside a ring, every fifth long, the first 35% lit, trimmed to `drawn`.
+fn gauge(size: Size, drawn: f32) -> Element<()> {
+    let ticks = Element::polar("ticks", 220.0, 220.0, 100.0, -0.5 * PI, TAU)
+        .ticks(
+            Ticks::new(60, 8.0, 1.5, Color::hex(STEEL, 1.0))
+                .major(5, 16.0, 3.0, Color::hex(0xc8d4e0, 1.0))
+                .align(-1.0)
+                .lit(0.35, Color::hex(CYAN, 1.0)),
+        )
+        .trim(0.0, drawn)
+        .motion(Prop::Trim, Spring::SOFT);
+    centred(size, ticks)
+}
+
+/// `n` markers on a ring, turned outward, with a hairline ring behind them.
+fn markers(size: Size, n: usize) -> Element<()> {
+    let ring = Element::polar("markers", 220.0, 220.0, 90.0, -0.5 * PI, TAU)
+        .orient(Orient::Outward)
+        .ticks(Ticks::new(120, 2.0, 1.0, Color::hex(STEEL, 1.0)))
+        .children((0..n).map(|i| {
+            let c = if i == 0 { 0xff3d8b } else { CYAN };
+            Element::panel(i.to_string()).size(22.0, 6.0).radius(3.0).fill(Color::hex(c, 1.0)).glow(
+                Color::hex(c, 1.0),
+                4.0,
+                0.8,
+            )
+        }));
+    centred(size, ring)
+}
+
+/// Ticks and chevrons along an S-curve, the chevrons turned along it.
+fn snake(size: Size) -> Element<()> {
+    let pts: Vec<Point> = (0..=64)
+        .map(|i| {
+            let u = i as f32 / 64.0;
+            Point::new(20.0 + 400.0 * u, 110.0 + 70.0 * (u * TAU).sin())
+        })
+        .collect();
+    let contour = Arc::new(Contour::polyline(&pts, false));
+    let rail = Element::along_path("rail", 440.0, 220.0, contour.clone(), 0.0, 1.0)
+        .ticks(Ticks::new(61, 10.0, 1.2, Color::hex(STEEL, 1.0)).major(10, 18.0, 2.0, Color::hex(CYAN, 1.0)))
+        .layout(overlay);
+    let chevrons = Element::along_path("chevrons", 440.0, 220.0, contour, 0.04, 0.96)
+        .orient(Orient::Along)
+        .path_offset(-16.0)
+        .children(
+            (0..12).map(|i| Element::panel(i.to_string()).size(14.0, 5.0).radius(2.5).fill(Color::hex(0xff3d8b, 1.0))),
+        )
+        .layout(overlay);
+    centred(size, Element::layer("snake").size(440.0, 220.0).child(rail).child(chevrons))
+}
+
+/// Takes the element out of flow at its parent's top left, so siblings stack.
+fn overlay(s: &mut vo::scene::taffy::Style) {
+    use vo::scene::taffy::{LengthPercentageAuto, Position};
+    s.position = Position::Absolute;
+    s.inset.left = LengthPercentageAuto::length(0.0);
+    s.inset.top = LengthPercentageAuto::length(0.0);
 }
 
 /// `child` centred on a board of `size`.
@@ -79,8 +169,15 @@ fn centred(size: Size, child: Element<()>) -> Element<()> {
 fn board_list(b: &Board, size: Size, scale: f32, t: f64) -> vo::scene::DisplayList {
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, size, scale);
-    let root = Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child((b.view)(size, t));
-    scene.apply(root, 0.0);
+    let root = |view: View| {
+        Element::panel("bg").size(size.w, size.h).fill(Color::hex(BG, 1.0)).child(view(size))
+    };
+    scene.apply(root(b.view), 0.0);
+    if let Some((at, view)) = b.then {
+        if t >= at {
+            scene.apply(root(view), at);
+        }
+    }
     scene.sample(t)
 }
 

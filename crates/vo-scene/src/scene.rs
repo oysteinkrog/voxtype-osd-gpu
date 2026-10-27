@@ -242,7 +242,7 @@ impl<M> Node<M> {
     }
 
     /// Puts `slot` at `value` at `t`, at rest, for an enter motion to start from.
-    fn start_at(&mut self, slot: u8, value: f64, t: f64, retention: f64) {
+    pub(crate) fn start_at(&mut self, slot: u8, value: f64, t: f64, retention: f64) {
         match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
             Ok(i) => self.chans[i].1.snap(t, value),
             Err(i) => {
@@ -670,6 +670,7 @@ impl<M> Scene<M> {
             self.changed = true;
             self.run_layout(t);
         }
+        self.changed |= crate::repeat::place_children(&mut self.nodes, t, self.retention);
         self.pointer.forget_missing(|id| self.nodes.get(id).is_some_and(|n| n.leaving.is_none()));
         self.changed
     }
@@ -794,6 +795,7 @@ impl<M> Scene<M> {
                 return None;
             }
             let (local, s, o) = local_transform(n, t);
+            let local = crate::repeat::placed(&self.nodes, n, t, s).unwrap_or(local);
             m = local.then(&m);
             opacity *= o;
             size = s;
@@ -951,6 +953,7 @@ impl<M> Scene<M> {
             .iter()
             .map(|(s, _)| *s)
             .filter(|s| *s >= Slot::Opacity as u8 && !targets.iter().any(|(k, _)| k == s))
+            .filter(|s| !crate::repeat::placed_slot(*s))
             .collect();
         for slot in unset {
             changed |= n.set_target(slot, Slot::default_value(slot), t, retention);
@@ -1164,6 +1167,7 @@ impl<M> Scene<M> {
             return;
         }
         let (local, size, opacity) = local_transform(n, t);
+        let local = crate::repeat::placed(&self.nodes, n, t, size).unwrap_or(local);
         if opacity <= 0.0 {
             return;
         }
@@ -1586,6 +1590,10 @@ impl<M> Scene<M> {
                     push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                     out.glyphs.push(crate::path::fill_glyph(*id, pos, k, paint.c0));
                 }
+                None
+            }
+            Kind::Repeat(r) => {
+                crate::repeat::draw(r, n, t, origin, size, alpha, items, out);
                 None
             }
             Kind::Stack => None,

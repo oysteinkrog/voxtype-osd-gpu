@@ -19,6 +19,7 @@
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `curve`: glyphs on curves: text along a path, a glyph flying on an S-curve, curved arrows.
 //! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
+//! - `repeat`: children and ticks around a ring or along a path, sliding on springs.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -59,6 +60,7 @@ pub mod levels;
 pub mod lines;
 pub mod path;
 pub mod reach;
+pub mod repeat;
 pub mod ribbon;
 pub mod roll;
 pub mod scene;
@@ -80,4 +82,5 @@ pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};
 pub use reach::{surface_for, Insets};
+pub use repeat::{Orient, Ticks};
 pub use scene::{NodeId, Presence, Scene};
