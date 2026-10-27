@@ -18,6 +18,7 @@
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `roll`: digit roll, numbers whose changed digits roll like an odometer (FX04).
 //! - `status_icon`: the record, stop, spinner, check and X icon as one continuous shape.
+//! - `swap`: word swap, a label that changes word by word, shared words sliding in place.
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
@@ -38,6 +39,7 @@ pub mod roll;
 pub mod scene;
 pub mod status_icon;
 pub mod story;
+pub mod swap;
 pub mod text;
 pub mod timed;
 

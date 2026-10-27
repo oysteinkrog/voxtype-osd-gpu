@@ -14,6 +14,11 @@
 //!   larger, the ones before dim in 300 ms, and a marker dot glides to the newest paragraph.
 //!   The log is bottom-anchored in a clip that fades at the top, and the rows spring upward.
 //!
+//! - `status` (T22, T25, L02): the status label and the section label change word by word
+//!   (`word_swap`). Old words leave upward, new ones rise in, shared words such as "·" slide to
+//!   their new place, "LIVE TRANSCRIPT" loses "LIVE" and closes the gap, and the keyboard badge
+//!   slides to its new x on a position spring.
+//!
 //!   cargo run --release -p vo --example text_modes -- --mode ticker [--out DIR] [--check]
 //!
 //! Writes `DIR/<mode>.mp4` and `DIR/<mode>-sheet.png` (default DIR
@@ -24,6 +29,7 @@ use std::path::PathBuf;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
 use vo::scene::roll::{digit_roll, digit_roll_with, Roll};
+use vo::scene::swap::{word_swap, Swap};
 use vo::scene::taffy::prelude::{AlignItems, JustifyContent};
 use vo::scene::{Prop, Transition};
 use vo::{App, Cx, Export, FontRegistry, Options, Scenario, ShapedLayout, TextLayout, Video};
@@ -436,6 +442,72 @@ impl App for Log {
     }
 }
 
+// T22, T25 and L02: status and section label swaps.
+
+/// `(t, section label, status label, badge)`.
+const STATES: [(f64, &str, &str, &str); 4] = [
+    (0.0, "LIVE TRANSCRIPT", "Listening", "Right Ctrl"),
+    (1.5, "TRANSCRIPT", "Finishing · 4 s of audio left", "Right Ctrl"),
+    (3.0, "TRANSCRIPT", "Pasted into terminal · Enter sent", "Esc"),
+    (4.5, "TRANSCRIPT", "Done · Esc to dismiss", "Esc"),
+];
+
+struct Status {
+    state: usize,
+}
+
+impl App for Status {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        for (i, (t, ..)) in STATES.iter().enumerate().skip(1) {
+            cx.after(*t, Msg::Tick(i));
+        }
+    }
+
+    fn update(&mut self, msg: Msg, _: &mut Cx<Msg>) {
+        if let Msg::Tick(i) = msg {
+            self.state = i;
+        }
+    }
+
+    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
+        let (_, section, status, key) = STATES[self.state];
+        let section_style = TextStyle::new(0, 13.0, 18.0).tracking(1.5);
+        let status_style = TextStyle::new(0, 22.0, 30.0);
+        let badge_style = TextStyle::new(0, 14.0, 18.0);
+        let slide = Spring::critical_to_98(0.2);
+        let badge = Element::panel("badge")
+            .pad_xy(10.0, 4.0)
+            .radius(6.0)
+            .fill(Color::hex(0x2a3042, 1.0))
+            .stroke(Color::hex(0xffffff, 0.12), 1.0)
+            .motion(Prop::Position, slide)
+            .motion(Prop::Size, slide)
+            .child(word_swap("key", key, badge_style, dim_color(), Swap::new(&badge_style)));
+        let row = Element::row("status")
+            .align_items(AlignItems::CENTER)
+            .gap(14.0)
+            .child(
+                Element::shape("dot", vo::scene::display::ShapeKind::Circle)
+                    .size(10.0, 10.0)
+                    .fill(Color::hex(0x4cc38a, 1.0)),
+            )
+            .child(word_swap("label", status, status_style, text_color(), Swap::new(&status_style)))
+            .child(badge);
+        let card = Element::panel("card")
+            .width(720.0)
+            .pad_xy(26.0, 20.0)
+            .gap(10.0)
+            .radius(16.0)
+            .fill(Color::hex(0x1b1f2b, 1.0))
+            .stroke(Color::hex(0xffffff, 0.07), 1.0)
+            .child(word_swap("section", section, section_style, Color::hex(0x6fb1ff, 1.0), Swap::new(&section_style)))
+            .child(row);
+        bg().child(card)
+    }
+}
+
 // Running a mode.
 
 fn fonts() -> FontRegistry {
@@ -545,6 +617,9 @@ fn main() {
         "log" => {
             run(&mode, LOG_SIZE, &out, check, 8.2, &[1.0, 2.0, 2.15, 2.4, 3.9, 5.0, 5.7, 8.1], || Log::new(&fonts))
         }
-        _ => panic!("unknown mode {mode}; known: ticker, telemetry, log"),
+        "status" => {
+            run(&mode, SIZE, &out, check, 6.0, &[0.5, 1.53, 1.58, 1.7, 3.04, 3.3, 4.55, 5.9], || Status { state: 0 })
+        }
+        _ => panic!("unknown mode {mode}; known: ticker, telemetry, log, status"),
     }
 }
