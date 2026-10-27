@@ -449,6 +449,11 @@ impl GlyphFx {
             && self.chroma == 0.0
             && (self.halo.a <= 0.0 || self.halo_radius <= 0.0)
     }
+
+    /// The effects with the halo faded by `alpha`, as the glyph's colour is.
+    pub fn faded(self, alpha: f32) -> GlyphFx {
+        GlyphFx { halo: self.halo.fade(alpha), ..self }
+    }
 }
 
 /// One round dot, in layer space. Many thousands per frame are fine: the renderer draws them

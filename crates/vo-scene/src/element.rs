@@ -99,6 +99,14 @@ pub(crate) enum Slot {
     TrimEnd = 58,
     /// Morph progress (`Element::morph`), 0 to 1.
     Morph = 59,
+    /// Text effects (TY17) on a label or live text: blur and chromatic offset in logical
+    /// units, dissolve and wipe from 0 to 1, then a halo colour and radius.
+    TextBlur = 60,
+    TextDissolve = 61,
+    TextWipe = 62,
+    TextChroma = 63,
+    TextHalo = 64,
+    TextHaloRadius = 68,
 }
 
 impl Slot {
@@ -131,7 +139,8 @@ impl Slot {
             s if s < Slot::SheenColor as u8 => Prop::Rim,
             s if s < Slot::TrimStart as u8 => Prop::Sheen,
             s if s <= Slot::TrimEnd as u8 => Prop::Trim,
-            _ => Prop::Morph,
+            s if s == Slot::Morph as u8 => Prop::Morph,
+            _ => Prop::TextFx,
         }
     }
 
@@ -146,7 +155,10 @@ impl Slot {
             || slot == Slot::GlowRadius as u8
             || (Slot::ShadowX as u8..=Slot::ShadowBlur as u8).contains(&slot)
             || slot == Slot::BloomRadius as u8
-            || slot == Slot::RimWidth as u8)
+            || slot == Slot::RimWidth as u8
+            || slot == Slot::TextBlur as u8
+            || slot == Slot::TextChroma as u8
+            || slot == Slot::TextHaloRadius as u8)
     }
 }
 
@@ -184,6 +196,8 @@ pub enum Prop {
     Trim,
     /// A morph's progress (`Element::morph`).
     Morph,
+    /// Text blur, dissolve, wipe, chromatic offset and halo.
+    TextFx,
 }
 
 /// How a property moves to a new target.
@@ -214,10 +228,25 @@ pub struct Transition {
     pub trim: Option<(f32, f32)>,
     /// A morph's progress.
     pub morph: Option<f32>,
+    /// Text blur in logical units: `blur(8.0)` on enter blurs text in.
+    pub blur: Option<f32>,
+    /// Text dissolve, 0 to 1: `dissolve(1.0)` on enter forms text out of noise.
+    pub dissolve: Option<f32>,
+    /// Text wipe, 0 to 1: `wipe(1.0)` on enter reveals text from the left.
+    pub wipe: Option<f32>,
 }
 
 impl Transition {
-    pub const NONE: Transition = Transition { opacity: None, offset: None, scale: None, trim: None, morph: None };
+    pub const NONE: Transition = Transition {
+        opacity: None,
+        offset: None,
+        scale: None,
+        trim: None,
+        morph: None,
+        blur: None,
+        dissolve: None,
+        wipe: None,
+    };
 
     pub fn fade() -> Transition {
         Transition { opacity: Some(0.0), ..Transition::NONE }
@@ -250,9 +279,29 @@ impl Transition {
         self
     }
 
-    /// The transition with reduced motion: its opacity only, no travel or scale.
+    /// Enter from (or exit to) text blurred over `v` logical units.
+    pub fn blur(mut self, v: f32) -> Transition {
+        self.blur = Some(v);
+        self
+    }
+
+    /// Enter from (or exit to) text dissolved this far, 0 to 1.
+    pub fn dissolve(mut self, v: f32) -> Transition {
+        self.dissolve = Some(v);
+        self
+    }
+
+    /// Enter from (or exit to) text wiped this far, 0 to 1. Entering from 1 reveals the text
+    /// from the left.
+    pub fn wipe(mut self, v: f32) -> Transition {
+        self.wipe = Some(v);
+        self
+    }
+
+    /// The transition with reduced motion: its opacity, blur and dissolve, with no travel,
+    /// scale or wipe.
     pub(crate) fn reduced(self) -> Transition {
-        Transition { opacity: self.opacity, ..Transition::NONE }
+        Transition { opacity: self.opacity, blur: self.blur, dissolve: self.dissolve, ..Transition::NONE }
     }
 
     /// The slot values this transition sets.
@@ -264,7 +313,10 @@ impl Transition {
         let t0 = self.trim.map(|(a, _)| (Slot::TrimStart as u8, a as f64));
         let t1 = self.trim.map(|(_, b)| (Slot::TrimEnd as u8, b as f64));
         let m = self.morph.map(|v| (Slot::Morph as u8, v as f64));
-        [o, x, y, s, t0, t1, m].into_iter().flatten()
+        let b = self.blur.map(|v| (Slot::TextBlur as u8, v as f64));
+        let d = self.dissolve.map(|v| (Slot::TextDissolve as u8, v as f64));
+        let w = self.wipe.map(|v| (Slot::TextWipe as u8, v as f64));
+        [o, x, y, s, t0, t1, m, b, d, w].into_iter().flatten()
     }
 }
 
@@ -956,10 +1008,47 @@ impl<M> Element<M> {
         self
     }
 
+    /// Text blur (TY17) over `v` logical units, for labels and live text. Animate it with
+    /// `Prop::TextFx`, or blur text in with `Transition::blur`.
+    pub fn text_blur(mut self, v: f32) -> Element<M> {
+        self.set(Slot::TextBlur as u8, v.max(0.0));
+        self
+    }
+
+    /// Text dissolve (TY17), 0 to 1: holes from a noise fixed to each glyph grow until the
+    /// text is gone at 1.
+    pub fn text_dissolve(mut self, v: f32) -> Element<M> {
+        self.set(Slot::TextDissolve as u8, v.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Text wipe (TY17), 0 to 1: the part of each line hidden from the right, with a soft
+    /// front. Going from 1 to 0 reveals the text from the left.
+    pub fn text_wipe(mut self, v: f32) -> Element<M> {
+        self.set(Slot::TextWipe as u8, v.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Chromatic offset (TY17): the red of the text moves `v` logical units left and the
+    /// blue the same right.
+    pub fn text_chroma(mut self, v: f32) -> Element<M> {
+        self.set(Slot::TextChroma as u8, v);
+        self
+    }
+
+    /// A halo (TY17) of `c` under the text, reaching about `radius` logical units past the
+    /// glyphs. Drawn in the glyph shader, with no offscreen pass.
+    pub fn text_halo(mut self, c: Color, radius: f32) -> Element<M> {
+        self.set(Slot::TextHalo as u8, c);
+        self.set(Slot::TextHaloRadius as u8, radius.max(0.0));
+        self
+    }
+
     /// A glow around the element's shape: `c` fading out over about `radius` logical units,
     /// at `strength` (1 is the colour at the shape's edge; above 1 is brighter than the
     /// colour and lights a bloom around it). For elements that draw a shape: panels, layers
-    /// and shapes. Text glows through a [`Element::bloom`] layer around it instead.
+    /// and shapes. Text glows with [`Element::text_halo`], or through a [`Element::bloom`]
+    /// layer around it.
     pub fn glow(mut self, c: Color, radius: f32, strength: f32) -> Element<M> {
         self.set(Slot::GlowColor as u8, c);
         self.set(Slot::GlowRadius as u8, radius);

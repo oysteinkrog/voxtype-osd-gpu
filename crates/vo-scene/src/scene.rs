@@ -17,8 +17,8 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
 use crate::display::{
-    BlendMode, Bloom, DisplayList, DotInstance, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget, Paint,
-    ShapeInstance, ShapeKind, Trail, NO_WORD,
+    BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerTarget,
+    Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
@@ -102,7 +102,8 @@ pub(crate) struct Node<M> {
     pub reduced: bool,
 }
 
-/// One live-text word's motion: opacity and an offset from its laid-out place.
+/// One live-text word's motion: opacity, an offset from its laid-out place, and its text
+/// effects (blur, dissolve and wipe, TY17).
 pub(crate) struct WordAnim {
     pub id: u32,
     pub text: String,
@@ -111,11 +112,14 @@ pub(crate) struct WordAnim {
     pub opacity: Channel,
     pub dx: Channel,
     pub dy: Channel,
+    pub blur: Channel,
+    pub dissolve: Channel,
+    pub wipe: Channel,
 }
 
 impl WordAnim {
-    fn channels(&self) -> [&Channel; 3] {
-        [&self.opacity, &self.dx, &self.dy]
+    fn channels(&self) -> [&Channel; 6] {
+        [&self.opacity, &self.dx, &self.dy, &self.blur, &self.dissolve, &self.wipe]
     }
 }
 
@@ -210,7 +214,7 @@ impl<M> Node<M> {
 
     /// Live text: matches the word motions to `words` at `t`. A new id starts from `enter`, a
     /// kept id with new text jumps to `change`, and both spring to rest (opacity 1, no
-    /// offset). Returns whether any motion started or a word went.
+    /// offset, no text effect). Returns whether any motion started or a word went.
     fn sync_words(&mut self, t: f64, retention: f64) -> bool {
         let Kind::LiveText { words, enter, change, .. } = &self.kind else {
             let had = !self.words.is_empty();
@@ -228,7 +232,8 @@ impl<M> Node<M> {
         let from = |tr: &Transition| {
             let tr = if reduced { tr.reduced() } else { *tr };
             let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
-            (tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64)
+            let fx = [tr.blur, tr.dissolve, tr.wipe].map(|v| v.unwrap_or(0.0) as f64);
+            ([tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64], fx)
         };
         let mut changed = false;
         let mut next = Vec::with_capacity(words.len());
@@ -249,6 +254,9 @@ impl<M> Node<M> {
                         opacity: a.opacity.clone(),
                         dx: a.dx.clone(),
                         dy: a.dy.clone(),
+                        blur: a.blur.clone(),
+                        dissolve: a.dissolve.clone(),
+                        wipe: a.wipe.clone(),
                     }
                 }
                 None => WordAnim {
@@ -258,10 +266,21 @@ impl<M> Node<M> {
                     opacity: chan(1.0, fade, Rest::UNIT),
                     dx: chan(0.0, slide, Rest::PIXELS),
                     dy: chan(0.0, slide, Rest::PIXELS),
+                    blur: chan(0.0, fade, Rest::PIXELS),
+                    dissolve: chan(0.0, fade, Rest::UNIT),
+                    wipe: chan(0.0, fade, Rest::UNIT),
                 },
             };
-            if let Some((o, x, y)) = start {
-                for (ch, v, rest) in [(&mut anim.opacity, o, 1.0), (&mut anim.dx, x, 0.0), (&mut anim.dy, y, 0.0)] {
+            if let Some(([o, x, y], [b, d, w])) = start {
+                let moves = [
+                    (&mut anim.opacity, o, 1.0),
+                    (&mut anim.dx, x, 0.0),
+                    (&mut anim.dy, y, 0.0),
+                    (&mut anim.blur, b, 0.0),
+                    (&mut anim.dissolve, d, 0.0),
+                    (&mut anim.wipe, w, 0.0),
+                ];
+                for (ch, v, rest) in moves {
                     if v != rest {
                         ch.snap(t, v);
                         ch.retarget(t, rest);
@@ -288,6 +307,31 @@ impl<M> Node<M> {
                 (a.opacity.value(t).clamp(0.0, 1.0) as f32, a.dx.value(t) as f32, a.dy.value(t) as f32)
             }
             Err(_) => (1.0, 0.0, 0.0),
+        }
+    }
+
+    /// Live text: a word's text effects `(blur, dissolve, wipe)` at `t`.
+    fn word_fx(&self, id: u32, t: f64) -> (f32, f32, f32) {
+        match self.words.binary_search_by_key(&id, |a| a.id) {
+            Ok(i) => {
+                let a = &self.words[i];
+                let unit = |c: &Channel| c.value(t).clamp(0.0, 1.0) as f32;
+                (a.blur.value(t).max(0.0) as f32, unit(&a.dissolve), unit(&a.wipe))
+            }
+            Err(_) => (0.0, 0.0, 0.0),
+        }
+    }
+
+    /// The text effects (TY17) the node's slots hold at `t`, the wipe for the whole text.
+    fn text_fx(&self, t: f64) -> GlyphFx {
+        let v = |s: Slot| self.value(s as u8, t) as f32;
+        GlyphFx {
+            blur: v(Slot::TextBlur).max(0.0),
+            dissolve: v(Slot::TextDissolve).clamp(0.0, 1.0),
+            wipe: v(Slot::TextWipe).clamp(0.0, 1.0),
+            chroma: v(Slot::TextChroma),
+            halo: self.color(Slot::TextHalo, t),
+            halo_radius: v(Slot::TextHaloRadius).max(0.0),
         }
     }
 
@@ -1096,7 +1140,7 @@ impl<M> Scene<M> {
             }),
             Kind::Label { style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
-                self.glyphs(n, style.font, style.size, origin, color, |_| NO_WORD, items, out);
+                self.glyphs(n, style.font, style.size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
             Kind::LiveText { words, style, particles, .. } => {
@@ -1124,14 +1168,36 @@ impl<M> Scene<M> {
                     }
                 };
                 if n.words.is_empty() || color.a <= 0.0 {
-                    self.glyphs(n, style.font, style.size, origin, color, word_of, items, out);
+                    self.glyphs(n, style.font, style.size, origin, color, alpha, t, word_of, items, out);
                 } else {
-                    for g in &n.shaped.glyphs {
+                    let fx = n.text_fx(t).faded(alpha);
+                    let spans = glyph_spans(&n.shaped, style.size);
+                    // Each word wipes over its own span, from its first glyph to its last.
+                    let mut word_spans: Vec<(u32, f32, f32)> = Vec::new();
+                    for (g, &(x0, x1)) in n.shaped.glyphs.iter().zip(&spans) {
+                        let word = word_of(g.cluster);
+                        match word_spans.iter_mut().find(|w| w.0 == word) {
+                            Some(w) => (w.1, w.2) = (w.1.min(x0), w.2.max(x1)),
+                            None => word_spans.push((word, x0, x1)),
+                        }
+                    }
+                    for (g, &span) in n.shaped.glyphs.iter().zip(&spans) {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
                         if k <= 0.0 {
                             continue;
                         }
+                        let (blur, dissolve, wipe) = n.word_fx(word, t);
+                        let word_span = word_spans.iter().find(|w| w.0 == word).map_or(span, |w| (w.1, w.2));
+                        let e = GlyphFx {
+                            blur: fx.blur + blur,
+                            dissolve: fx.dissolve.max(dissolve),
+                            wipe: wipe_part(fx.wipe, (0.0, n.shaped.size.w), span)
+                                .max(wipe_part(wipe, word_span, span)),
+                            halo: fx.halo.fade(k),
+                            ..fx
+                        };
+                        push_glyph_fx(out, e);
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + g.pos.x + dx, origin.y + g.pos.y + dy),
@@ -1325,6 +1391,7 @@ impl<M> Scene<M> {
         }
     }
 
+    /// A text node's glyphs, with its text effects; `alpha` is the opacity from its parents.
     #[allow(clippy::too_many_arguments)]
     fn glyphs(
         &self,
@@ -1333,6 +1400,8 @@ impl<M> Scene<M> {
         size: f32,
         origin: Point,
         color: Color,
+        alpha: f32,
+        t: f64,
         word_of: impl Fn(u32) -> u32,
         items: &mut Vec<Item>,
         out: &mut DisplayList,
@@ -1340,7 +1409,13 @@ impl<M> Scene<M> {
         if color.a <= 0.0 {
             return;
         }
-        for g in &n.shaped.glyphs {
+        let fx = n.text_fx(t).faded(alpha);
+        let spans = (!fx.is_none() && fx.wipe > 0.0).then(|| glyph_spans(&n.shaped, size));
+        for (i, g) in n.shaped.glyphs.iter().enumerate() {
+            if !fx.is_none() {
+                let wipe = spans.as_ref().map_or(0.0, |s| wipe_part(fx.wipe, (0.0, n.shaped.size.w), s[i]));
+                push_glyph_fx(out, GlyphFx { wipe, ..fx });
+            }
             push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
             out.glyphs.push(GlyphInstance {
                 pos: Point::new(origin.x + g.pos.x, origin.y + g.pos.y),
@@ -1352,6 +1427,39 @@ impl<M> Scene<M> {
             });
         }
     }
+}
+
+/// Records text effects for the glyph about to be pushed, unless there are none.
+fn push_glyph_fx(out: &mut DisplayList, fx: GlyphFx) {
+    if !fx.is_none() {
+        out.glyph_fx.push((out.glyphs.len() as u32, fx));
+    }
+}
+
+/// Each glyph's span along its line: from its pen position to the next glyph's on the same
+/// line, or half an em for the last.
+fn glyph_spans(shaped: &ShapedText, size: f32) -> Vec<(f32, f32)> {
+    let g = &shaped.glyphs;
+    (0..g.len())
+        .map(|i| {
+            let x0 = g[i].pos.x;
+            let next = g.get(i + 1).filter(|n| n.pos.y == g[i].pos.y && n.pos.x > x0);
+            (x0, next.map_or(x0 + 0.5 * size, |n| n.pos.x))
+        })
+        .collect()
+}
+
+/// How much of a glyph spanning `glyph` a wipe hides when it has hidden `w` (0 to 1) of
+/// `span` from the right.
+fn wipe_part(w: f32, span: (f32, f32), glyph: (f32, f32)) -> f32 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    if w >= 1.0 {
+        return 1.0;
+    }
+    let front = span.0 + (1.0 - w) * (span.1 - span.0);
+    ((glyph.1 - front) / (glyph.1 - glyph.0).max(1e-3)).clamp(0.0, 1.0)
 }
 
 fn radius<M>(n: &Node<M>, t: f64) -> f32 {
