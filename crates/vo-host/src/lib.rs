@@ -77,6 +77,11 @@ pub enum Placement {
     /// (0 at the top, 1 at the bottom). Where the host cannot learn the output's height it
     /// takes 1080.
     FromTop { fraction: f32 },
+    /// Centred across the output, with the line `y` logical pixels below the surface's top
+    /// edge `fraction` of the output's height down. For a popup that keeps one line of its
+    /// content, such as the line being read, at a fixed height while the rest moves. Kept
+    /// on the output as `FromTop` is.
+    LineAt { fraction: f32, y: f32 },
     /// The whole output, over panels too (layer shell exclusive zone -1). The spec's size is
     /// only a first guess for the app's layout; the `Configured` event brings the real one.
     /// For a scrim or a screen-edge glow: pair it with `InputMode::None` so every click goes

@@ -944,6 +944,11 @@ impl HostCtl for State {
                         l.set_anchor(Anchor::TOP);
                         l.set_margin(top, 0, 0, 0);
                     }
+                    Placement::LineAt { fraction, y } => {
+                        let top = line_at_margin(fraction, y, self.output_height(), h as i32);
+                        l.set_anchor(Anchor::TOP);
+                        l.set_margin(top, 0, 0, 0);
+                    }
                     Placement::Centered => {}
                 }
                 l.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -1199,9 +1204,26 @@ fn from_top_margin(fraction: f32, output_h: i32, surface_h: i32) -> i32 {
     top.min(output_h - surface_h).max(0)
 }
 
+/// The top margin for `Placement::LineAt`: the line `y` below the surface's top at
+/// `fraction` of the output's height, kept on the output as in `from_top_margin`.
+fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
+    let top = (fraction.clamp(0.0, 1.0) * output_h as f32 - y).round() as i32;
+    top.min(output_h - surface_h).max(0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{from_top_margin, next_present, to_px};
+    use super::{from_top_margin, line_at_margin, next_present, to_px};
+
+    #[test]
+    fn line_at_puts_the_line_at_the_fraction() {
+        // The line 250 px down sits at 600, half of 1200.
+        assert_eq!(line_at_margin(0.5, 250.0, 1200, 320), 350);
+        // Too high up: pinned to the top.
+        assert_eq!(line_at_margin(0.1, 250.0, 1200, 320), 0);
+        // Too far down: moved up to keep the surface on the output.
+        assert_eq!(line_at_margin(1.0, 10.0, 1200, 320), 880);
+    }
 
     #[test]
     fn from_top_keeps_the_surface_on_the_output() {
