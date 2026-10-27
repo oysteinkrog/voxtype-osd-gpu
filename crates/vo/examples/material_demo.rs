@@ -112,9 +112,8 @@ fn levels_at(t: f64) -> f32 {
 
 fn fonts() -> FontRegistry {
     let fonts = FontRegistry::new();
-    for f in ["/usr/share/fonts/noto/NotoSans-Bold.ttf"] {
-        fonts.add_file(f.as_ref()).unwrap_or_else(|e| panic!("cannot load {f}: {e}"));
-    }
+    let f = "/usr/share/fonts/noto/NotoSans-Bold.ttf";
+    fonts.add_file(f.as_ref()).unwrap_or_else(|e| panic!("cannot load {f}: {e}"));
     fonts
 }
 
