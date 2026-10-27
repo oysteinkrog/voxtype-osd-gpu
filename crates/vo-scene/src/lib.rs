@@ -17,6 +17,7 @@
 //! - `segments`: segment meters in a row, a column or an arc, with peak hold and clip.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
+//! - `curve`: glyphs on curves: text along a path, a glyph flying on an S-curve, curved arrows.
 //! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
@@ -40,6 +41,7 @@ pub mod assets;
 pub mod bars;
 pub mod bind;
 pub mod canvas;
+pub mod curve;
 pub mod display;
 pub mod dots;
 pub mod element;
