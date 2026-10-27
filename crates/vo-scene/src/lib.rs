@@ -30,6 +30,8 @@
 //! - `emitter_signals`: emitter inputs driven by the signal bus (level, pitch, onsets).
 //! - `gpu`: elements drawn by app GPU code, such as a 3D scene.
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
+//! - `material`: materials for shapes, glyphs and strokes: neon, hologram, chrome, gradient
+//!   (FX15).
 //! - `roll`: digit roll, numbers whose changed digits roll like an odometer (FX04).
 //! - `status_icon`: the record, stop, spinner, check and X icon as one continuous shape.
 //! - `inline`: inline objects in live text: pause dots, gap waveforms, braces, chips.
@@ -62,6 +64,7 @@ pub mod inspect;
 mod layout;
 pub mod levels;
 pub mod lines;
+pub mod material;
 pub mod path;
 pub mod reach;
 pub mod repeat;

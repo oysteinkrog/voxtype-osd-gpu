@@ -14,6 +14,10 @@
 //   threshold that rises with the amount;
 // - wipe hides the glyph from the right edge of its ink box, with a soft front;
 // - chromatic offset takes the red and blue coverage a few pixels left and right.
+//
+// A material (FX15, `materials.wgsl`, appended) gets the glyph's colour, its coverage and its
+// em coordinates; `fx2.y` holds the material id, `fx2.z` a seed per glyph and `fx2.w` em units
+// per outline unit.
 
 @vertex fn vs_dl_glyph (@builtin(vertex_index) vi: u32, g: GlyphInstance) -> VsOut {
   // The body of `vs_glyph`, which as an entry point cannot be called.
@@ -105,7 +109,7 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   // Plain glyphs take Slug's own path, unchanged. Sharing the derivatives below with Slug's
   // `fwidth` changes rotated text by a few pixels on some drivers. The branch is uniform
   // over a quad in practice: every lane of it belongs to one instance.
-  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && in.fx3.z == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
+  if (all (in.fx == vec4f (0.0)) && in.fx2.x == 0.0 && in.fx3.z == 0.0 && in.fx2.y == 0.0 && all (layer.smear.zw == vec2f (0.0))) {
     return finish (in.color * (hb_gpu_draw (in.tc, in.loc) * clip_coverage (in.clip.xy)));
   }
   let ppe = 1.0 / fwidth (in.tc);
@@ -142,6 +146,22 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
     }
     let rgb = in.color.rgb * vec3f (r, cov, b);
     c = vec4f (rgb, in.color.a * max (cov, max (r, b)));
+  }
+  let mat = u32 (in.fx2.y);
+  if (mat != 0u) {
+    var mi: MatIn;
+    mi.color = in.color;
+    mi.cov = cov;
+    mi.has_dist = false;
+    mi.edge = 0.0;
+    mi.centre = 0.0;
+    mi.half_w = 0.0;
+    mi.px = in.clip.xy + layer.origin.xy;
+    mi.p = mat_px_to_layer (mi.px);
+    mi.em = in.tc * in.fx2.w;
+    mi.ppu = layer.t.z;
+    mi.seed = in.fx2.z;
+    c = material (mat, mi);
   }
   if (in.fx2.x > 0.0 && in.halo.a > 0.0) {
     let at = in.tc - px_em * in.fx3.x - py_em * in.fx3.y;

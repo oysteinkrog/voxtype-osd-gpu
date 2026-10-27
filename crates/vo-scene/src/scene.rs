@@ -17,6 +17,7 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 
 use crate::bind::Bound;
+use crate::display::MATERIAL_SHIFT;
 use crate::display::{
     BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
@@ -30,6 +31,7 @@ use crate::glass::{Glass, GlassInstance};
 use crate::inline::OBJECT_GLYPH;
 use crate::input::PointerState;
 use crate::layout::LayoutView;
+use crate::material::Material;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
 use vo_core::signals::{SignalBlock, SignalsCell};
 
@@ -93,6 +95,8 @@ pub(crate) struct Node<M> {
     pub hairline: bool,
     pub inside: bool,
     pub glass: Option<Glass>,
+    pub material: Option<Material>,
+    pub afterglow: Option<[f32; 3]>,
     pub handlers: Handlers<M>,
     pub born: f64,
     /// `(since, until)`.
@@ -381,6 +385,7 @@ impl<M> Node<M> {
             halo_radius: v(Slot::TextHaloRadius).max(0.0),
             halo_offset: Point::new(v(Slot::TextShadowX), v(Slot::TextShadowY)),
             outline: v(Slot::TextOutline).max(0.0),
+            material: 0,
         }
     }
 
@@ -737,6 +742,13 @@ impl<M> Scene<M> {
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.ambient_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
+            // Materials that flicker or scroll (FX15), at their own capped rate.
+            .chain(
+                self.nodes
+                    .values()
+                    .filter(|n| n.alive(t) && !n.reduced)
+                    .filter_map(|n| n.material.as_ref().and_then(|m| m.next_frame(t - n.since)).map(|d| t + d)),
+            )
             .min_by(f64::total_cmp)
     }
 
@@ -824,6 +836,8 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            material,
+            afterglow,
             motion,
             default_motion,
             binds,
@@ -853,6 +867,8 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            material,
+            afterglow,
             handlers,
             born: t,
             leaving: None,
@@ -903,6 +919,8 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            material,
+            afterglow,
             motion,
             default_motion,
             binds,
@@ -922,6 +940,7 @@ impl<M> Scene<M> {
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;
         changed |= n.binds != binds;
+        changed |= n.material != material || n.afterglow != afterglow;
         changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
@@ -933,6 +952,8 @@ impl<M> Scene<M> {
         n.hairline = hairline;
         n.inside = inside;
         n.glass = glass;
+        n.material = material;
+        n.afterglow = afterglow;
         n.handlers = handlers;
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
@@ -1250,6 +1271,7 @@ impl<M> Scene<M> {
                 key: id.to_bits(),
                 half_life: n.value(Slot::TrailHalfLife as u8, t) as f32,
                 t,
+                decay: n.afterglow.unwrap_or([1.0; 3]),
             }),
             style,
             warp,
@@ -1298,6 +1320,7 @@ impl<M> Scene<M> {
                 surface_alpha: alpha * layer_chain_opacity(&out.layers, layer),
             });
         }
+        let firsts = [out.shapes.len(), out.glyphs.len(), out.vectors.len()];
         if let Kind::Canvas(c) = &n.kind {
             let mut painter = crate::canvas::Painter { list: out, items, alpha, layer };
             (c.draw)(t, Rect::new(m.e, m.f, size.w, size.h), &mut painter);
@@ -1318,6 +1341,11 @@ impl<M> Scene<M> {
         }
         for &c in &n.children {
             self.emit(c, t, m, alpha, layer, leaving, items, out);
+        }
+        if let Some(mat) = &n.material {
+            // Reduced motion (MO09): long after any flicker-on, and still.
+            let age = if n.reduced { 1e3 } else { (t - n.since).max(0.0) as f32 };
+            apply_material(out, firsts, mat.at(age).in_box(Rect::new(m.e, m.f, size.w, size.h)));
         }
     }
 
@@ -1881,6 +1909,39 @@ fn layer_chain_opacity(layers: &[Layer], layer: u32) -> f32 {
         li = l.parent;
     }
     o
+}
+
+/// Points the shapes, glyphs and vectors from `firsts` on that have no material yet at `m`
+/// (FX15). Glows and shadows stay plain.
+fn apply_material(out: &mut DisplayList, firsts: [usize; 3], m: Material) {
+    let [s0, g0, v0] = firsts;
+    if [out.shapes.len(), out.glyphs.len(), out.vectors.len()] == firsts {
+        return;
+    }
+    let id = out.add_material(m);
+    for s in &mut out.shapes[s0..] {
+        if s.material() == 0 && !s.fill.is_halo() {
+            *s = s.with_material(id);
+        }
+    }
+    for v in &mut out.vectors[v0..] {
+        if v.flags >> MATERIAL_SHIFT == 0 {
+            v.flags |= id << MATERIAL_SHIFT;
+        }
+    }
+    let (g0, g1) = (g0 as u32, out.glyphs.len() as u32);
+    if g1 > g0 {
+        // The effects of these glyphs are the sorted tail of `glyph_fx`: merge in an entry
+        // for every glyph.
+        let tail = out.glyph_fx.partition_point(|(i, _)| *i < g0);
+        let old: Vec<(u32, GlyphFx)> = out.glyph_fx.drain(tail..).collect();
+        let mut old = old.into_iter().peekable();
+        for i in g0..g1 {
+            let fx = if old.peek().is_some_and(|(j, _)| *j == i) { old.next().unwrap().1 } else { GlyphFx::default() };
+            let material = if fx.material == 0 { id } else { fx.material };
+            out.glyph_fx.push((i, GlyphFx { material, ..fx }));
+        }
+    }
 }
 
 fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {

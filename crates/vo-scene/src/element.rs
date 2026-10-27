@@ -26,6 +26,7 @@ use crate::emitter::{Emitter, WordParticles};
 use crate::flow::{Caret, CaseChange, LiveMotion, Revise, SettleInk};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
+use crate::material::Material;
 use crate::path::{Morph, Outline, StrokeStyle};
 use crate::timed::{Progress, Wave};
 
@@ -639,6 +640,11 @@ pub struct Element<M = ()> {
     pub(crate) inside: bool,
     /// Drawn as a glass panel under the content (FX06).
     pub(crate) glass: Option<Glass>,
+    /// The material (FX15) of this element's content and of its children's, unless they set
+    /// their own.
+    pub(crate) material: Option<Material>,
+    /// Phosphor persistence (FX15): the trail's half-life multiplier per channel.
+    pub(crate) afterglow: Option<[f32; 3]>,
     pub(crate) motion: Vec<(Prop, Motion)>,
     /// How this node and its descendants move when no `.motion()` names a property
     /// (`Element::default_motion`); `None` takes the parent's.
@@ -665,6 +671,8 @@ impl<M> Element<M> {
             hairline: false,
             inside: false,
             glass: None,
+            material: None,
+            afterglow: None,
             motion: Vec::new(),
             default_motion: None,
             binds: Vec::new(),
@@ -1128,6 +1136,16 @@ impl<M> Element<M> {
         self
     }
 
+    /// Draws this element's shapes, glyphs and strokes with a material (FX15): neon,
+    /// hologram, chrome, a gradient across a word, or an app's own (`vo_scene::material`).
+    /// Children that set no material of their own get it too, so a material on a container
+    /// covers everything in it. Its time starts when the element appears; with reduced motion
+    /// (MO09) it stays still.
+    pub fn material(mut self, m: impl Into<Material>) -> Element<M> {
+        self.material = Some(m.into());
+        self
+    }
+
     pub fn fill(mut self, c: Color) -> Element<M> {
         self.set(Slot::Fill0 as u8, c);
         self.gradient = false;
@@ -1506,6 +1524,19 @@ impl<M> Element<M> {
         self.set(Slot::TrailHalfLife as u8, half_life.max(1e-3));
         self.motion.push((Prop::MotionBlur, Motion::Snap));
         self
+    }
+
+    /// Phosphor persistence (FX15) on a layer: a feedback trail whose channels fade at their
+    /// own rate, the colours `afterglow` lacks first, so a white trace or wave cools to the
+    /// phosphor's colour (green for P1, amber for P3) as it fades over about `half_life`
+    /// seconds. Fading can only take colour away: a trace already in the afterglow's hue keeps
+    /// it. Add `bloom` for the beam's glow. Only on a layer element.
+    pub fn phosphor(mut self, half_life: f32, afterglow: Color) -> Element<M> {
+        let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        let c = [afterglow.r, afterglow.g, afterglow.b].map(lin);
+        let top = c[0].max(c[1]).max(c[2]).max(1e-4);
+        self.afterglow = Some(c.map(|v| 0.2 + 0.8 * v / top));
+        self.trail(half_life)
     }
 
     /// Draw the layer into its own texture, for exact group opacity and effects.

@@ -25,6 +25,10 @@ pub struct GpuShape {
     pub radii: [f32; 4],
     pub fill: GpuPaint,
     pub stroke: GpuPaint,
+    /// Material id (FX15), 0 for none, and how far it draws outside the shape in layer
+    /// units.
+    pub material: u32,
+    pub reach: f32,
 }
 
 /// Paint stops as OKLab plus straight alpha, and the gradient ends `p0.xy, p1.xy`.
@@ -48,10 +52,11 @@ impl GpuPaint {
 
 impl GpuShape {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
             0 => Uint32, 1 => Float32, 2 => Float32x4, 3 => Float32x4,
             4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
             7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
+            10 => Uint32, 11 => Float32,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuShape>() as u64,
@@ -83,6 +88,8 @@ impl GpuShape {
             radii: s.radii,
             fill: GpuPaint::new(&fill, opacity),
             stroke: GpuPaint::new(&stroke, opacity),
+            material: 0,
+            reach: 0.0,
         })
     }
 
@@ -98,7 +105,7 @@ impl GpuShape {
     /// pixels per layer unit.
     pub fn quad(&self, ppu: f32) -> [f32; 4] {
         let g = self.geom;
-        let mut m = 0.5 * self.stroke_width + 1.0 / ppu;
+        let mut m = 0.5 * self.stroke_width + 1.0 / ppu + self.reach;
         let e = self.fill.ends;
         match (self.kinds >> 8) & 0xff {
             k if k == PaintKind::Glow as u32 => m += e[0] * (512.0 * e[1]).max(1.0).ln(),

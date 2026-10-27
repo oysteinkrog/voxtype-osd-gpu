@@ -22,6 +22,7 @@ use serde::Serialize;
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::GlassInstance;
 use crate::gpu::GpuItem;
+use crate::material::Material;
 use crate::path::{VectorInstance, VectorSeg};
 use crate::stage::{Stage, Warp};
 
@@ -63,6 +64,9 @@ pub struct DisplayList {
     /// The signal bus uniform for this frame (`vo_core::signals`), zero without a store.
     #[serde(skip)]
     pub signals: vo_core::signals::SignalBlock,
+    /// Materials (FX15, `crate::material`) that shapes, glyphs and vectors point at by a
+    /// 1-based id; 0 is no material.
+    pub materials: Vec<Material>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -212,6 +216,9 @@ pub struct Trail {
     pub half_life: f32,
     /// The time this frame shows, in seconds: the trail fades by the time between frames.
     pub t: f64,
+    /// Half-life multiplier per channel (red, green, blue), 1 for an even fade. Phosphor
+    /// persistence (FX15) keeps its own colour longest, so a white trace cools to it.
+    pub decay: [f32; 3],
 }
 
 /// A run of content in a layer.
@@ -370,6 +377,10 @@ impl Paint {
 /// `stroke_width` is ignored.
 pub const SHAPE_HAIRLINE: u32 = 1;
 
+/// `ShapeInstance::flags` and `VectorInstance::flags` hold the material id (FX15) from this
+/// bit up.
+pub const MATERIAL_SHIFT: u32 = 8;
+
 /// One SDF shape, in layer space.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[repr(C)]
@@ -459,6 +470,18 @@ impl ShapeInstance {
         self.flags |= SHAPE_HAIRLINE;
         self
     }
+
+    /// Draws the shape with material `id` from `DisplayList::add_material` (0 for none). The
+    /// material reads the stroke's paint where there is a stroke, else the fill's.
+    pub fn with_material(mut self, id: u32) -> ShapeInstance {
+        self.flags = (self.flags & ((1 << MATERIAL_SHIFT) - 1)) | id << MATERIAL_SHIFT;
+        self
+    }
+
+    /// The material id, 0 for none.
+    pub fn material(&self) -> u32 {
+        self.flags >> MATERIAL_SHIFT
+    }
 }
 
 /// One glyph. The renderer looks up the outline by `font` and `glyph` (Slug encoding is
@@ -500,6 +523,8 @@ pub struct GlyphFx {
     /// Outline width (FX-018): the glyph's edge is stroked this wide instead of filled. 0
     /// fills it.
     pub outline: f32,
+    /// Material id (FX15) from `DisplayList::add_material`, 0 for none.
+    pub material: u32,
 }
 
 impl GlyphFx {
@@ -510,6 +535,7 @@ impl GlyphFx {
             && self.chroma == 0.0
             && (self.halo.a <= 0.0 || self.halo_radius <= 0.0)
             && self.outline <= 0.0
+            && self.material == 0
     }
 
     /// The effects with the halo faded by `alpha`, as the glyph's colour is.
@@ -586,7 +612,22 @@ impl DisplayList {
         self.glass.clear();
         self.gpu.clear();
         self.signals = Default::default();
+        self.materials.clear();
         self.hits.clear();
+    }
+
+    /// Adds `m` and returns its id for an instance's material. The same material as the last
+    /// one added reuses its id, so the glyphs of one label share one block.
+    pub fn add_material(&mut self, m: Material) -> u32 {
+        if self.materials.last() != Some(&m) {
+            self.materials.push(m);
+        }
+        self.materials.len() as u32
+    }
+
+    /// The material an instance points at, if any.
+    pub fn material(&self, id: u32) -> Option<&Material> {
+        id.checked_sub(1).and_then(|i| self.materials.get(i as usize))
     }
 
     pub fn root(&self) -> &Layer {

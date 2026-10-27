@@ -2,7 +2,7 @@
 //! GPU instances and their segments into a storage buffer, both in physical pixels.
 
 use bytemuck::{Pod, Zeroable};
-use vo_scene::display::DisplayList;
+use vo_scene::display::{DisplayList, MATERIAL_SHIFT};
 use vo_scene::geom::{Affine, Point};
 use vo_scene::path::{VectorInstance, VectorKind, VectorPaint, VECTOR_HAIRLINE};
 
@@ -13,7 +13,17 @@ const VECTORS_WGSL: &str = include_str!("wgsl/vectors.wgsl");
 
 /// The vector shader: `common.wgsl` and `vectors.wgsl`.
 pub fn vector_shader_source() -> String {
-    [crate::hot::wgsl("common.wgsl", COMMON_WGSL), crate::hot::wgsl("vectors.wgsl", VECTORS_WGSL)].join("\n")
+    vector_shader_source_with(&[])
+}
+
+/// [`vector_shader_source`] with app material functions (FX15).
+pub fn vector_shader_source_with(materials: &[crate::material::MaterialFn]) -> String {
+    [
+        crate::hot::wgsl("common.wgsl", COMMON_WGSL).into_owned(),
+        crate::hot::wgsl("vectors.wgsl", VECTORS_WGSL).into_owned(),
+        crate::material::materials_source(materials),
+    ]
+    .join("\n")
 }
 
 /// Texels per segment in the storage buffer: `p0 p1`, `p2 s0 s1`, `w0 w1`.
@@ -37,13 +47,15 @@ pub struct GpuVector {
     /// in pixels (linear: `p0, p1`; conic: centre, start angle).
     pub a: [f32; 4],
     pub b: [f32; 4],
+    /// Material id (FX15), 0 for none; the rest is unused.
+    pub material: [u32; 4],
 }
 
 impl GpuVector {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
             0 => Uint32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-            4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
+            4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Uint32x4,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVector>() as u64,
@@ -65,10 +77,19 @@ impl GpuVector {
         if v.c0.a * opacity <= 0.0 && v.c1.a * opacity <= 0.0 {
             return None;
         }
-        let glow = v.glow.max(0.0) * ppu;
-        // Room for the glow out to where it is under 1/255, and the AA ramp.
-        let pad_glow = if glow > 0.0 { 2.5 * glow } else { 0.0 };
-        let mut g = GpuVector { c0: oklab_alpha(v.c0, opacity), c1: oklab_alpha(v.c1, opacity), ..Default::default() };
+        let material = v.flags >> MATERIAL_SHIFT;
+        let mat = list.material(material);
+        // A material draws its own light: the plain glow is off under one.
+        let glow = if mat.is_some() { 0.0 } else { v.glow.max(0.0) * ppu };
+        // Room for the glow out to where it is under 1/255 or the material's reach, and the
+        // AA ramp.
+        let pad_glow = if glow > 0.0 { 2.5 * glow } else { 0.0 } + mat.map_or(0.0, |m| m.reach.max(0.0) * ppu);
+        let mut g = GpuVector {
+            c0: oklab_alpha(v.c0, opacity),
+            c1: oklab_alpha(v.c1, opacity),
+            material: [if mat.is_some() { material } else { 0 }, 0, 0, 0],
+            ..Default::default()
+        };
         let px = |p: Point| to_px.apply(p);
         let paint = match v.paint {
             VectorPaint::Along => 0,

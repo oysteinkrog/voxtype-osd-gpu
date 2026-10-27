@@ -19,7 +19,7 @@ use serde::Serialize;
 pub use kurbo;
 use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveArclen, ParamCurveDeriv, PathEl, QuadBez};
 
-use crate::display::{DisplayList, GlyphInstance, Item, ItemKind, NO_WORD};
+use crate::display::{DisplayList, GlyphInstance, Item, ItemKind, MATERIAL_SHIFT, NO_WORD};
 use crate::geom::{Affine, Color, Point};
 
 /// `GlyphInstance::font` for a filled path from `FontRegistry::add_path`. `glyph` is the path
@@ -96,7 +96,7 @@ pub struct VectorInstance {
     pub c1: Color,
     pub ramp: [f32; 2],
     pub paint: VectorPaint,
-    /// `VECTOR_HAIRLINE`.
+    /// `VECTOR_HAIRLINE`, and the material id (FX15) from bit `display::MATERIAL_SHIFT` up.
     pub flags: u32,
     /// Blob circles, `cx, cy, r, k`.
     pub a: [f32; 4],
@@ -113,6 +113,8 @@ pub struct StrokeStyle {
     pub ramp: [f32; 2],
     pub paint: VectorPaint,
     pub hairline: bool,
+    /// Material id (FX15) from `DisplayList::add_material`, 0 for none.
+    pub material: u32,
 }
 
 impl StrokeStyle {
@@ -125,6 +127,7 @@ impl StrokeStyle {
             ramp: [0.0, 0.0],
             paint: VectorPaint::Along,
             hairline: false,
+            material: 0,
         }
     }
 
@@ -153,6 +156,13 @@ impl StrokeStyle {
 
     pub fn glow(mut self, radius: f32) -> StrokeStyle {
         self.glow = radius;
+        self
+    }
+
+    /// Draws with material `id` from `DisplayList::add_material`. The material reads the
+    /// stroke's colour and its distance to the centre line.
+    pub fn material(mut self, id: u32) -> StrokeStyle {
+        self.material = id;
         self
     }
 }
@@ -485,7 +495,7 @@ pub fn push_stroke(list: &mut DisplayList, contour: &Contour, style: &StrokeStyl
         c1: style.c1,
         ramp: style.ramp,
         paint: style.paint,
-        flags: if style.hairline { VECTOR_HAIRLINE } else { 0 },
+        flags: if style.hairline { VECTOR_HAIRLINE } else { 0 } | style.material << MATERIAL_SHIFT,
         a: [0.0; 4],
         b: [0.0; 4],
     });
@@ -522,7 +532,7 @@ pub fn push_fill<'a>(
         c1: style.c1,
         ramp: style.ramp,
         paint: style.paint,
-        flags: 0,
+        flags: style.material << MATERIAL_SHIFT,
         a: [0.0; 4],
         b: [0.0; 4],
     });

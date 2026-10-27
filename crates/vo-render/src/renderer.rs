@@ -52,11 +52,12 @@ use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::gpu::{GpuPainter, PaintCx, StagePx};
 use crate::hot::wgsl;
+use crate::material::{materials_source, GpuMaterial, MaterialFn};
 use crate::particle_layer::ParticleLayer;
 use crate::profile::{BloomReport, FrameReport, FrameTimings, Profiler, Section, SurfaceKind, SurfaceReport};
 use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
-use crate::vector::{vector_shader_source, GpuVector};
+use crate::vector::{vector_shader_source_with, GpuVector};
 
 const COMMON_WGSL: &str = include_str!("wgsl/common.wgsl");
 const SHAPES_WGSL: &str = include_str!("wgsl/shapes.wgsl");
@@ -118,19 +119,30 @@ impl Quality {
     }
 }
 
-/// The shape shader: `common.wgsl` and `shapes.wgsl`.
+/// The shape shader: `common.wgsl`, `shapes.wgsl` and `materials.wgsl`.
 pub fn shape_shader_source() -> String {
-    [wgsl("common.wgsl", COMMON_WGSL), wgsl("shapes.wgsl", SHAPES_WGSL)].join("\n")
+    shape_shader_source_with(&[])
 }
 
-/// The display-list glyph shader: the Slug shader, `common.wgsl`, `noise.wgsl` and
-/// `glyphs.wgsl`.
+/// [`shape_shader_source`] with app material functions (FX15).
+pub fn shape_shader_source_with(materials: &[MaterialFn]) -> String {
+    [wgsl("common.wgsl", COMMON_WGSL), wgsl("shapes.wgsl", SHAPES_WGSL), materials_source(materials).into()].join("\n")
+}
+
+/// The display-list glyph shader: the Slug shader, `common.wgsl`, `noise.wgsl`,
+/// `glyphs.wgsl` and `materials.wgsl`.
 pub fn glyph_shader_source() -> String {
+    glyph_shader_source_with(&[])
+}
+
+/// [`glyph_shader_source`] with app material functions (FX15).
+pub fn glyph_shader_source_with(materials: &[MaterialFn]) -> String {
     [
         slug_gpu::shader_source().into(),
         wgsl("common.wgsl", COMMON_WGSL),
         noise_shader_source(),
         wgsl("glyphs.wgsl", GLYPHS_WGSL),
+        materials_source(materials).into(),
     ]
     .join("\n")
 }
@@ -395,6 +407,8 @@ struct TrailPlan {
     /// What last frame's pixels are multiplied by before this frame draws. `None` clears
     /// instead: the first frame, a seek backward, a gap over `TRAIL_MAX_GAP` or a new size.
     fade: Option<f32>,
+    /// Half-life multiplier per channel (phosphor, FX15): a channel keeps `fade^(1 / d)`.
+    decay: [f32; 3],
 }
 
 /// One layer's bloom for this frame.
@@ -482,6 +496,12 @@ pub struct Renderer {
     vector_buf: Option<wgpu::Buffer>,
     vector_layout: wgpu::BindGroupLayout,
     vector_segs_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// Material blocks (FX15) for this frame, their storage buffer at group 2 of the shape,
+    /// glyph and vector pipelines, and the app's material functions.
+    materials: Vec<GpuMaterial>,
+    material_layout: wgpu::BindGroupLayout,
+    material_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    material_fns: Vec<MaterialFn>,
     uniform_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     fx_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     pool: Vec<PoolTex>,
@@ -615,6 +635,22 @@ impl Renderer {
                 }],
             }),
             vector_segs_buf: None,
+            materials: Vec::new(),
+            material_layout: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("vo-materials"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            }),
+            material_buf: None,
+            material_fns: Vec::new(),
             uniform_buf: None,
             fx_buf: None,
             pool: Vec::new(),
@@ -756,6 +792,26 @@ impl Renderer {
         self.queue.submit([enc.finish()]);
     }
 
+    /// Adds an app material function (FX15): `wgsl` defines `fn name (m: Material, i: MatIn) ->
+    /// vec4f` (see `wgsl/materials.wgsl` for the inputs), drawn for every material whose
+    /// `func` is `func`, which must be at least `vo_scene::material::CUSTOM_FIRST`. A later
+    /// function with the same id replaces it. The shape, glyph and vector shaders are rebuilt
+    /// on their next use, so add materials before the first frame; WGSL that does not compile
+    /// fails there as any shader would.
+    pub fn add_material(&mut self, func: u32, name: &str, wgsl: &str) {
+        assert!(
+            func >= vo_scene::material::CUSTOM_FIRST,
+            "material ids below {} are built in",
+            vo_scene::material::CUSTOM_FIRST
+        );
+        self.material_fns.retain(|f| f.func != func);
+        self.material_fns.push(MaterialFn { func, name: name.into(), source: wgsl.into() });
+        for slot in [0, 1, 5] {
+            self.modules[slot] = None;
+        }
+        self.pipelines.retain(|((_, p, _), _)| !matches!(p, Pipe::Shape | Pipe::Glyph | Pipe::Vector));
+    }
+
     /// Adds a painter for GPU elements (`vo_scene::gpu`). Painters are asked in the order they
     /// were added; an item no painter knows is skipped.
     pub fn add_painter(&mut self, painter: Box<dyn GpuPainter>) {
@@ -799,6 +855,8 @@ impl Renderer {
         self.dots.clear();
         self.glass.clear();
         self.vectors.clear();
+        self.materials.clear();
+        self.materials.extend(list.materials.iter().map(GpuMaterial::new));
         self.vector_segs.clear();
         self.uniforms.clear();
         self.fx_uniforms.clear();
@@ -927,7 +985,8 @@ impl Renderer {
                     s.bloom = Some(bloom_plan(b, ppu));
                 }
                 if let Some(t) = layer.trail.filter(|_| f.effects) {
-                    s.trail = Some(TrailPlan { key: t.key, half_life: t.half_life, t: t.t, fade: None });
+                    s.trail =
+                        Some(TrailPlan { key: t.key, half_life: t.half_life, t: t.t, fade: None, decay: t.decay });
                 }
                 self.surfaces.push(s);
                 let pipe = match (&self.surfaces[child].bloom, layer.style) {
@@ -976,6 +1035,10 @@ impl Renderer {
                             if !f.effects {
                                 g.clamp_glow();
                             }
+                            if let Some(m) = f.list.material(s.material()).filter(|_| !s.fill.is_halo()) {
+                                g.material = s.material();
+                                g.reach = m.reach.max(0.0);
+                            }
                             let q = g.quad(ppu);
                             let b = bounds(
                                 &RRect::new(vo_scene::geom::Rect::new(q[0], q[1], q[2] - q[0], q[3] - q[1]), 0.0),
@@ -1002,6 +1065,13 @@ impl Renderer {
                         if let Some(mut inst) = self.glyph(g, &state) {
                             if let Some(e) = effects {
                                 apply_glyph_fx(&mut inst, &e, &state);
+                                if f.list.material(e.material).is_some() {
+                                    // The id, a seed per glyph and em units per outline unit,
+                                    // as floats: exact below 2^24.
+                                    inst.fx2[1] = e.material as f32;
+                                    inst.fx2[2] = (index % (1 << 20)) as f32;
+                                    inst.fx2[3] = self.em_per_unit(g.font);
+                                }
                             }
                             grow(
                                 &mut self.surfaces[draw_surface].bounds,
@@ -1213,6 +1283,14 @@ impl Renderer {
             }
         }
         cmds.push(Cmd { pipe, range, uniform, blend, scissor });
+    }
+
+    /// Em units per glyph outline unit, for materials keyed to em height (FX15).
+    fn em_per_unit(&self, font: u32) -> f32 {
+        if font == PATH_FONT {
+            return 1.0 / slug_gpu::PATH_UNITS as f32;
+        }
+        self.faces.get(font as usize).map_or(1.0, |f| 1.0 / f.units_per_em() as f32)
     }
 
     fn glyph(&mut self, g: &DlGlyph, st: &LayerState) -> Option<GlyphInstance> {
@@ -1544,6 +1622,24 @@ impl Renderer {
         if !self.vector_segs.is_empty() {
             queue.write_buffer(&self.vector_segs_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.vector_segs));
         }
+        let need = (self.materials.len() * std::mem::size_of::<GpuMaterial>()).max(256) as u64;
+        if self.material_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo-materials"),
+                size: need.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-materials"),
+                layout: &self.material_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+            });
+            self.material_buf = Some((buf, bind));
+        }
+        if !self.materials.is_empty() {
+            queue.write_buffer(&self.material_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.materials));
+        }
         write_uniforms(
             device,
             queue,
@@ -1628,8 +1724,11 @@ impl Renderer {
                     let mut pass = begin_load(enc, view, "vo-trail");
                     if k < 1.0 {
                         pass.set_pipeline(self.cached_pipeline(format, Pipe::Fade, BlendMode::Normal));
-                        let k = k as f64;
-                        pass.set_blend_constant(wgpu::Color { r: k, g: k, b: k, a: k });
+                        // Each channel fades by its own half life; alpha with the slowest.
+                        let d = s.trail.as_ref().map_or([1.0; 3], |t| t.decay).map(|d| d.max(1e-3) as f64);
+                        let c = |d: f64| (k as f64).powf(1.0 / d);
+                        let a = c(d[0].max(d[1]).max(d[2]));
+                        pass.set_blend_constant(wgpu::Color { r: c(d[0]), g: c(d[1]), b: c(d[2]), a });
                         pass.draw(0..3, 0..1);
                     }
                     pass
@@ -1785,6 +1884,9 @@ impl Renderer {
             pass.set_pipeline(self.cached_pipeline(format, c.pipe, c.blend));
             pass.set_bind_group(1, layers, &[c.uniform]);
             pass.set_bind_group(3, &self.signals_bind, &[]);
+            if matches!(c.pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) {
+                pass.set_bind_group(2, &self.material_buf.as_ref().expect("uploaded").1, &[]);
+            }
             match c.pipe {
                 Pipe::Shape => {
                     pass.set_vertex_buffer(0, self.shape_buf.as_ref().unwrap().slice(..));
@@ -1852,11 +1954,11 @@ impl Renderer {
     /// The shader module for a module slot, from the current sources (see `hot`).
     fn shader_module(&self, slot: usize) -> wgpu::ShaderModule {
         let (label, source) = match slot {
-            0 => ("vo-shapes", shape_shader_source()),
-            1 => ("vo-glyphs", glyph_shader_source()),
+            0 => ("vo-shapes", shape_shader_source_with(&self.material_fns)),
+            1 => ("vo-glyphs", glyph_shader_source_with(&self.material_fns)),
             2 => ("vo-composite", composite_shader_source()),
             4 => ("vo-dots", dot_shader_source()),
-            5 => ("vo-vectors", vector_shader_source()),
+            5 => ("vo-vectors", vector_shader_source_with(&self.material_fns)),
             7 => ("vo-glass", glass_layer_shader_source()),
             _ => ("vo-bloom", bloom_shader_source()),
         };
@@ -1925,10 +2027,16 @@ impl Renderer {
         };
         // The signal block is group 3 of every pipeline that draws into a layer.
         let signals = groups[1].filter(|l| std::ptr::eq(*l, &self.layer_layout)).map(|_| &self.signals_layout);
+        // Materials (FX15) are group 2 of the content pipelines.
+        let with_materials = [groups[0], groups[1], Some(&self.material_layout), signals];
         let groups = [groups[0], groups[1], None, signals];
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &groups,
+            bind_group_layouts: if matches!(pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) {
+                &with_materials
+            } else {
+                &groups
+            },
             immediate_size: 0,
         });
         let (vs, fs, buffers) = match pipe {

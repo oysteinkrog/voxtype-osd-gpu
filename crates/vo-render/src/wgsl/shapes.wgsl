@@ -7,6 +7,9 @@
 // distance, or a Gaussian drop shadow of it in closed form (Evan Wallace's rounded box
 // shadow). No blur pass, no texture reads.
 //
+// An instance with a material (FX15) hands its paint, coverage and distances to `material`
+// (`materials.wgsl`, appended) instead: the stroke's where it has one, else the fill's.
+//
 // The CPU side (`shapes.rs`) has already resolved hairlines to a stroke width of one physical
 // pixel, snapped their geometry to the pixel grid, and folded layer opacity into the alpha
 // of every paint.
@@ -37,6 +40,9 @@ struct ShapeIn {
   @location(7) stroke_c0: vec4f,
   @location(8) stroke_c1: vec4f,
   @location(9) stroke_p: vec4f,
+  // Material id, 0 for none, and how far it draws outside the shape (layer units).
+  @location(10) material: u32,
+  @location(11) reach: f32,
 };
 
 struct ShapeOut {
@@ -54,12 +60,15 @@ struct ShapeOut {
   @location(10) @interpolate(flat) stroke_p: vec4f,
   // A band's ends in physical pixels along x, compared with the exact pixel centre.
   @location(11) @interpolate(flat) band_px: vec2f,
+  // Material id and a seed that differs per instance.
+  @location(12) @interpolate(flat) mat: vec2u,
 };
 
-@vertex fn vs_shape (@builtin(vertex_index) vi: u32, s: ShapeIn) -> ShapeOut {
+@vertex fn vs_shape (@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, s: ShapeIn) -> ShapeOut {
   let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
-  // Grow the quad by half the stroke plus one physical pixel for the antialiasing ramp.
-  var m = 0.5 * s.stroke_width + 1.0 / layer.t.z;
+  // Grow the quad by half the stroke plus one physical pixel for the antialiasing ramp, and
+  // by the material's reach.
+  var m = 0.5 * s.stroke_width + 1.0 / layer.t.z + s.reach;
   let kind = s.kinds & 0xffu;
   // A halo reaches further: a glow until it falls under 1/512, a shadow by its offset, three
   // standard deviations and its spread.
@@ -105,6 +114,7 @@ struct ShapeOut {
   o.stroke_c1 = s.stroke_c1;
   o.stroke_p = s.stroke_p;
   o.band_px = vec2f (layer_to_px (s.geom.xy).x, layer_to_px (s.geom.zy).x);
+  o.mat = vec2u (s.material, ii);
   return o;
 }
 
@@ -298,6 +308,32 @@ fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
     fill_cov = 0.0;
   }
   let stroke_cov = clamp (min (dp + 0.5, hw) - max (dp - 0.5, -hw), 0.0, 1.0);
+
+  if (in.mat.x != 0u) {
+    let stroke_kind = (in.kinds >> 16u) & 0xffu;
+    let stroked = hw > 0.0 && stroke_kind != PAINT_NONE;
+    var mi: MatIn;
+    mi.has_dist = true;
+    mi.p = p;
+    mi.px = layer_to_px (p);
+    mi.ppu = layer.t.z;
+    mi.seed = f32 (in.mat.y);
+    mi.em = vec2f (0.0);
+    if (stroked) {
+      mi.color = paint (stroke_kind, in.stroke_c0, in.stroke_c1, in.stroke_p, p);
+      mi.cov = stroke_cov;
+      mi.edge = abs (dp) - hw;
+      mi.centre = abs (dp);
+      mi.half_w = hw;
+    } else {
+      mi.color = paint (fill_kind, in.fill_c0, in.fill_c1, in.fill_p, p);
+      mi.cov = fill_cov;
+      mi.edge = dp;
+      mi.centre = 0.0;
+      mi.half_w = 0.0;
+    }
+    return material (in.mat.x, mi);
+  }
 
   let fill = paint ((in.kinds >> 8u) & 0xffu, in.fill_c0, in.fill_c1, in.fill_p, p) * fill_cov;
   let stroke = paint ((in.kinds >> 16u) & 0xffu, in.stroke_c0, in.stroke_c1, in.stroke_p, p) * stroke_cov;

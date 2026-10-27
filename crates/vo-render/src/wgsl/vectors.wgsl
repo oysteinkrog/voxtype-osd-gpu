@@ -1,4 +1,5 @@
-// Vector strokes, fills and blobs (`vector.rs`, `vo_scene::path`). `common.wgsl` is prepended.
+// Vector strokes, fills and blobs (`vector.rs`, `vo_scene::path`). `common.wgsl` is prepended
+// and `materials.wgsl` appended.
 //
 // One instance is one contour (a stroke) or one set of contours (a fill): a quad over the
 // bounding box in target pixels, and a fragment loop over the segments in the storage buffer.
@@ -34,6 +35,8 @@ struct VecIn {
   // Blob circles in px (cx, cy, r, k), or the paint geometry in `a`.
   @location(5) a: vec4f,
   @location(6) b: vec4f,
+  // x: material id (FX15), 0 for none.
+  @location(7) mat: vec4u,
 };
 
 struct VecOut {
@@ -44,9 +47,11 @@ struct VecOut {
   @location(3) @interpolate(flat) c1: vec4f,
   @location(4) @interpolate(flat) a: vec4f,
   @location(5) @interpolate(flat) b: vec4f,
+  // Material id and a seed that differs per instance.
+  @location(6) @interpolate(flat) mat: vec2u,
 };
 
-@vertex fn vs_vector (@builtin(vertex_index) vi: u32, v: VecIn) -> VecOut {
+@vertex fn vs_vector (@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, v: VecIn) -> VecOut {
   let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
   var o: VecOut;
   o.clip = px_to_ndc (mix (v.bbox.xy, v.bbox.zw, c));
@@ -56,6 +61,7 @@ struct VecOut {
   o.c1 = v.c1;
   o.a = v.a;
   o.b = v.b;
+  o.mat = vec2u (v.mat.x, ii);
   return o;
 }
 
@@ -238,6 +244,12 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
   // Distance outside the shape's edge, for the glow.
   var outside: f32;
   var k: f32;
+  // For a material: the signed distance to the edge, to the centre line, the half width
+  // there, and the arc length.
+  var edge: f32;
+  var centre = 0.0;
+  var half_w = 0.0;
+  var along = 0.0;
   if (in.head.x == KIND_BLOB) {
     let d1 = length (p - in.a.xy) - in.a.z;
     let d2 = length (p - in.b.xy) - in.b.z;
@@ -247,11 +259,13 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
     cov = clamp (0.5 - dist * seen, 0.0, 1.0);
     outside = max (dist, 0.0);
     k = 1.0 - h;
+    edge = dist;
   } else {
     let hw = in.params.x;
     let fill = in.head.x == KIND_FILL;
-    // Best covering margin (half width minus distance) and the arc length there.
-    var best = vec2f (-1e30, 0.0);
+    // Best covering margin (half width minus distance), the arc length, the distance and the
+    // half width there.
+    var best = vec4f (-1e30, 0.0, 0.0, 0.0);
     var winding = 0;
     let end = in.head.y + in.head.z;
     for (var i = in.head.y; i < end; i++) {
@@ -265,7 +279,7 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
       }
       let margin = w - n.x;
       if (margin > best.x) {
-        best = vec2f (margin, mix (t1.z, t1.w, n.y));
+        best = vec4f (margin, mix (t1.z, t1.w, n.y), n.x, w);
       }
       if (fill) {
         winding += quad_winding (p, t0.xy, t0.zw, t1.xy);
@@ -278,8 +292,29 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f) -> f32 {
     cov = clamp (0.5 - signed * seen, 0.0, 1.0);
     outside = max (signed, 0.0);
     k = ramp (paint_pos (in.head.w, p, best.y, in.a), in.params.zw);
+    edge = signed;
+    along = best.y;
+    if (!fill) {
+      centre = best.z;
+      half_w = best.w;
+    }
   }
   let col = mix_color (in.c0, in.c1, k);
+  if (in.mat.x != 0u) {
+    var mi: MatIn;
+    mi.color = col;
+    mi.cov = cov;
+    mi.has_dist = true;
+    mi.edge = edge;
+    mi.centre = centre;
+    mi.half_w = half_w;
+    mi.px = p;
+    mi.p = mat_px_to_layer (p);
+    mi.em = vec2f (along, 0.0);
+    mi.ppu = layer.t.z;
+    mi.seed = f32 (in.mat.y);
+    return finish (material (in.mat.x, mi) * clip_coverage (in.clip.xy));
+  }
   var out = col * cov;
   if (in.params.y > 0.0) {
     let g = outside / in.params.y;
