@@ -931,7 +931,7 @@ impl HostCtl for State {
                         l.set_margin(margin[0], margin[1], margin[2], margin[3]);
                     }
                     Placement::FromTop { fraction } => {
-                        let top = (fraction.clamp(0.0, 1.0) * self.output_height() as f32).round() as i32;
+                        let top = from_top_margin(fraction, self.output_height(), h as i32);
                         l.set_anchor(Anchor::TOP);
                         l.set_margin(top, 0, 0, 0);
                     }
@@ -1176,9 +1176,27 @@ impl Host for WaylandHost {
     }
 }
 
+/// The top margin for `Placement::FromTop`: `fraction` of the output's height, moved up
+/// as far as needed to keep a surface `surface_h` tall on the output, but never above
+/// its top edge.
+fn from_top_margin(fraction: f32, output_h: i32, surface_h: i32) -> i32 {
+    let top = (fraction.clamp(0.0, 1.0) * output_h as f32).round() as i32;
+    top.min(output_h - surface_h).max(0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{next_present, to_px};
+    use super::{from_top_margin, next_present, to_px};
+
+    #[test]
+    fn from_top_keeps_the_surface_on_the_output() {
+        // Fits: the fraction as given.
+        assert_eq!(from_top_margin(0.45, 1200, 470), 540);
+        // Would run off the bottom: moved up just enough.
+        assert_eq!(from_top_margin(0.85, 1200, 470), 730);
+        // Taller than the output: pinned to the top.
+        assert_eq!(from_top_margin(0.85, 400, 470), 0);
+    }
 
     #[test]
     fn buffer_sizes_at_fractional_scales() {
