@@ -310,3 +310,23 @@ fn with_a_stable_list_a_word_holds_until_it_is_stable() {
     assert!(mid > ink0 && mid < 1.0);
     assert_eq!(ink(&s.sample(3.0), 1), 1.0);
 }
+
+#[test]
+fn a_new_word_moves_with_the_words_its_line_moved() {
+    let mut s = scene();
+    s.apply(view(&words(&[(1, "so"), (2, "the")]), None, false), 0.0);
+    let before = s.sample(1.0);
+    // "so" grows, which pushes "the" right, and "fox" arrives after it at the same time.
+    s.apply(view(&words(&[(1, "sooooo"), (2, "the"), (3, "fox")]), None, false), 1.0);
+    let settled = s.sample(5.0);
+    let the = (first(&before, 2).0, first(&settled, 2).0);
+    assert!(the.1 > the.0 + 10.0, "the moves right: {the:?}");
+    let gap = first(&settled, 3).0 - first(&settled, 2).0;
+    // From the change on, "fox" keeps its settled distance from "the", so they never overlap
+    // while "the" slides.
+    for t in [1.0, 1.05, 1.1, 1.2] {
+        let f = s.sample(t);
+        let d = first(&f, 3).0 - first(&f, 2).0;
+        assert!((d - gap).abs() < 0.5, "at {t} the gap is {d}, settled {gap}");
+    }
+}

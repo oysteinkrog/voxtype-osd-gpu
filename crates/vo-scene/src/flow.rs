@@ -452,6 +452,11 @@ impl Flow {
         let mut next = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
         let (mut stagger, mut arrived) = (0u32, false);
+        // How far the last kept word's line moved, `(line, from old x to new x)`. A new word
+        // on that line starts as far back and moves with it, so a line that shifts (a centred
+        // line that grows, words after a revised one) slides as one piece instead of the old
+        // words sliding over the new one.
+        let mut line_shift: Option<(u32, f32)> = None;
         for (w, p) in words.iter().zip(placed) {
             let prev = old.iter().position(|o| o.id == w.id).map(|i| old.remove(i));
             let Some(p) = p else {
@@ -467,11 +472,15 @@ impl Flow {
             let graphemes = graphemes_of(&w.text, &p.glyphs);
             let Some(mut o) = prev else {
                 arrived = true;
+                let back = match line_shift {
+                    Some((line, dx)) if line == p.line && !reduced => dx,
+                    _ => 0.0,
+                };
                 let glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                 next.push(FlowWord {
                     id: w.id,
                     text: w.text.clone(),
-                    x: make.ch(p.x, FLIP, Rest::PIXELS),
+                    x: make.to(p.x - back, p.x, FLIP, Rest::PIXELS),
                     y: make.ch(p.y, FLIP, Rest::PIXELS),
                     width: make.ch(p.width, FLIP, Rest::PIXELS),
                     spread: false,
@@ -509,6 +518,7 @@ impl Flow {
                 o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                 o.spread = false;
             }
+            line_shift = (o.line == p.line).then(|| (p.line, p.x - o.x.target() as f32));
             if o.line != p.line {
                 let at = t + REWRAP_STAGGER * stagger as f64;
                 stagger += 1;
