@@ -25,7 +25,9 @@
 mod chrome;
 mod composite;
 pub mod control;
+pub mod effects;
 mod player;
+pub mod reference;
 pub mod reload;
 pub mod sheet;
 mod source;
@@ -57,6 +59,8 @@ pub struct State {
     pub one_to_one: bool,
     /// Window size, logical units.
     pub size: (f32, f32),
+    /// A reference image to match, when one is loaded.
+    pub reference: Option<reference::RefState>,
 }
 
 impl Default for State {
@@ -70,6 +74,7 @@ impl Default for State {
             overlays: Vec::new(),
             one_to_one: false,
             size: (1280.0, 820.0),
+            reference: None,
         }
     }
 }
@@ -144,9 +149,12 @@ impl Preview {
     }
 }
 
-/// The first argument asks for a preview mode: `--preview`, `--sheet` or `--bench-seek`.
+/// The first argument asks for a preview mode: `--preview`, `--sheet`, `--compare` or
+/// `--bench-seek`.
 pub fn wanted() -> bool {
-    std::env::args().nth(1).is_some_and(|a| matches!(a.as_str(), "--preview" | "--sheet" | "--bench-seek"))
+    std::env::args()
+        .nth(1)
+        .is_some_and(|a| matches!(a.as_str(), "--preview" | "--sheet" | "--compare" | "--bench-seek"))
 }
 
 const HELP: &str = "\
@@ -156,7 +164,13 @@ Preview modes (the first argument picks one):
       --at T              start at T seconds (VO_PREVIEW_AT)
       --play              start playing
       --speed S           0.25 to 2
-      --overlay NAME      bounds, springs, graph or stats; repeat for more
+      --overlay NAME      bounds, springs, graph, stats or effects; repeat for more
+      --reference PNG     a mock-up to match, drawn with the stage (VO_PREVIEW_REFERENCE)
+      --ref-crop X,Y,W[,H]  the part of the PNG that shows the scene, in its pixels;
+                          without H the height follows the stage's aspect
+      --ref-mode M        over, under, diff, split or off (default over)
+      --ref-opacity O     0 to 1 (default 0.5)
+      --ref-backdrop B    what the stage is put over for diff: ref (default) or #rrggbb
       --tokens PATH       TOML token file, reloaded on change (VO_PREVIEW_TOKENS)
       --shaders DIR       WGSL directory, reloaded on change (VO_SHADER_DIR)
       --control SOCK      control socket for `vo-preview ctl` (VO_PREVIEW_CONTROL)
@@ -169,6 +183,14 @@ Preview modes (the first argument picks one):
       --thumb W           thumbnail width in pixels (default 400)
       --tokens PATH       render with these tokens
       --check GOLDEN.png  compare with a golden sheet; exit 1 on a mismatch
+  --compare REF.png [options]  how far frame T is from a mock-up, headless
+      --at T              the frame (default 0)
+      --crop X,Y,W[,H]    the part of REF.png that shows the scene
+      --scale S           pixels per logical unit (default 1)
+      --backdrop B        ref (default) or #rrggbb, under the stage's transparent parts
+      --tokens PATH       render with these tokens
+      --out OUT.png       frame, reference and difference side by side
+      --max-error PCT     exit 1 when the mean difference is above PCT percent
   --bench-seek [N]        time N random seeks and a backwards scrub (default 500)
 ";
 
@@ -188,6 +210,7 @@ pub fn main(preview: Preview) -> i32 {
     let result = match mode.as_str() {
         "--preview" => run_window(preview, &rest),
         "--sheet" => run_sheet(preview, &rest),
+        "--compare" => run_compare(preview, &rest),
         "--bench-seek" => bench_seek(preview, &rest),
         _ => Err(format!("unknown preview mode '{mode}'\n{HELP}")),
     };
@@ -265,6 +288,24 @@ fn run_window(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
         }
     }
     state.t = state.t.clamp(0.0, preview.source.duration());
+    if let Some(path) = path("--reference", "VO_PREVIEW_REFERENCE") {
+        let size = preview.source.size();
+        let mut r = state.reference.take().unwrap_or_default();
+        r.path = path;
+        if let Some(c) = a.value("--ref-crop") {
+            r.crop = Some(reference::parse_crop(c, size.w / size.h.max(1e-6))?);
+        }
+        if let Some(m) = a.value("--ref-mode") {
+            r.mode = reference::RefMode::parse(m).ok_or_else(|| format!("no reference mode '{m}'"))?;
+        }
+        if let Some(o) = a.num("--ref-opacity")? {
+            r.opacity = o.clamp(0.0, 1.0) as f32;
+        }
+        if let Some(b) = a.value("--ref-backdrop") {
+            r.backdrop = reference::Backdrop::parse(b).ok_or_else(|| format!("backdrop '{b}': give ref or #rrggbb"))?;
+        }
+        state.reference = Some(r);
+    }
     let shaders = path("--shaders", "VO_SHADER_DIR");
     if let Some(dir) = &shaders {
         // vo-render reads shader files from here (`vo_render::hot`). Set before any thread starts.
@@ -332,6 +373,44 @@ fn run_sheet(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
         return Ok(if report.passed() { 0 } else { 1 });
     }
     Ok(0)
+}
+
+fn run_compare(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
+    let a = Args { rest };
+    let path = PathBuf::from(rest.first().filter(|s| !s.starts_with("--")).ok_or("--compare needs a reference PNG")?);
+    load_tokens(preview.source.as_mut(), a.value("--tokens").map(PathBuf::from).as_ref())?;
+    let size = preview.source.size();
+    let crop = a.value("--crop").map(|c| reference::parse_crop(c, size.w / size.h.max(1e-6))).transpose()?;
+    let backdrop = match a.value("--backdrop") {
+        Some(b) => reference::Backdrop::parse(b).ok_or_else(|| format!("backdrop '{b}': give ref or #rrggbb"))?,
+        None => reference::Backdrop::Reference,
+    };
+    let t = a.num("--at")?.unwrap_or(0.0).clamp(0.0, preview.source.duration());
+    let scale = a.num("--scale")?.unwrap_or(1.0) as f32;
+    let img = reference::Image::load(&path)?;
+    let (w, h) = sheet::frame_size(preview.source.as_ref(), scale);
+    let fitted = img.resample(crop, w, h);
+    let px = sheet::render_frame(preview.source.as_mut(), t, scale).map_err(|e| e.to_string())?;
+    let flat = reference::flatten(&px, &fitted, backdrop);
+    let (d, heat) = reference::diff(&flat, &fitted.rgba);
+    let opaque_ref: Vec<u8> = reference::flatten(&fitted.premultiplied(), &fitted, reference::Backdrop::Color([0; 3]));
+    println!(
+        "vo-preview: {} at {t:.3} s, {w}x{h} px: mean difference {:.2}%, p95 {:.2}%, {:.1}% of pixels off by more than 10%",
+        path.display(),
+        d.mean * 100.0,
+        d.p95 * 100.0,
+        d.over_10 * 100.0
+    );
+    if let Some(out) = a.value("--out") {
+        let tri = reference::triptych([&flat, &opaque_ref, &heat], w, h);
+        vo_render::offscreen::write_png(out.as_ref(), tri.width, tri.height, &tri.rgba)
+            .map_err(|e| format!("{out}: {e}"))?;
+        println!("vo-preview: frame, reference and difference in {out}");
+    }
+    match a.num("--max-error")? {
+        Some(max) if d.mean * 100.0 > max => Ok(1),
+        _ => Ok(0),
+    }
 }
 
 fn bench_seek(mut preview: Preview, rest: &[String]) -> Result<i32, String> {

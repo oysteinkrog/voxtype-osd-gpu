@@ -28,10 +28,7 @@ pub struct DisplayFacts {
 impl DisplayFacts {
     /// The facts for this process. Reads the systemd environment only for a dev tool.
     pub fn current() -> DisplayFacts {
-        let dev_tool = std::env::current_exe().is_ok_and(|p| is_dev_tool(&p))
-            // `cargo run` and `cargo test` set it, wherever CARGO_TARGET_DIR points.
-            || std::env::var_os("CARGO_MANIFEST_DIR").is_some()
-            || std::env::args().nth(1).is_some_and(|a| a == "--preview");
+        let dev_tool = dev_process();
         DisplayFacts {
             wayland_display: std::env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.is_empty()),
             session_display: if dev_tool { session_display() } else { None },
@@ -40,6 +37,14 @@ impl DisplayFacts {
                 || std::env::args().any(|a| a == "--real-display"),
         }
     }
+}
+
+/// This process is a dev build or the preview tool (see the module notes).
+pub fn dev_process() -> bool {
+    std::env::current_exe().is_ok_and(|p| is_dev_tool(&p))
+        // `cargo run` and `cargo test` set it, wherever CARGO_TARGET_DIR points.
+        || std::env::var_os("CARGO_MANIFEST_DIR").is_some()
+        || std::env::args().nth(1).is_some_and(|a| a == "--preview")
 }
 
 fn is_dev_tool(exe: &Path) -> bool {

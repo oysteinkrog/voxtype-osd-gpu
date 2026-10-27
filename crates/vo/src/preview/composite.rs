@@ -4,7 +4,8 @@
 //! The renderer clears its target, and display lists from other lanes grow new arenas often, so
 //! the preview never merges lists. It draws each into a texture of its own and composites:
 //! background and checkerboard, then the stage at whole pixels with `textureLoad` (so the stage
-//! shows exactly the pixels an export writes at that scale), then the chrome.
+//! shows exactly the pixels an export writes at that scale), then the chrome. A reference image
+//! (`super::reference`) at the stage's pixel size goes under or over the stage.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +21,12 @@ struct Blit {
     bg: vec4<f32>,
     c0: vec4<f32>,
     c1: vec4<f32>,
-    // 0: background and checkerboard, 1: the texture at `px`, 1:1.
+    // Reference draws: opacity, the split's x in target pixels, the reference mode
+    // (1 over or under, 3 diff, 4 split), and 1 when the reference is the diff's backdrop.
+    refs: vec4<f32>,
+    // The diff's backdrop colour when it is not the reference, linear.
+    backdrop: vec4<f32>,
+    // 0: background and checkerboard, 1: the texture at `px`, 1:1, 2: the reference.
     mode: u32,
     cell: f32,
     pad0: u32,
@@ -29,6 +35,8 @@ struct Blit {
 
 @group(0) @binding(0) var<uniform> u: Blit;
 @group(0) @binding(1) var src: texture_2d<f32>;
+// The stage, for the diff.
+@group(0) @binding(2) var other: texture_2d<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -55,7 +63,41 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let size = vec2<i32>(textureDimensions(src, 0));
     let p = clamp(vec2<i32>(floor(pos.xy - u.px.xy)), vec2<i32>(0), size - 1);
-    return textureLoad(src, p, 0);
+    let c = textureLoad(src, p, 0);
+    if u.mode == 1u {
+        return c;
+    }
+    let kind = u32(u.refs.z);
+    if kind == 4u {
+        // Split: the reference right of the line, nothing left of it.
+        if pos.x < u.refs.y {
+            return vec4<f32>(0.0);
+        }
+        return c;
+    }
+    if kind == 3u {
+        let s = textureLoad(other, clamp(p, vec2<i32>(0), vec2<i32>(textureDimensions(other, 0)) - 1), 0);
+        var bg = u.backdrop.rgb;
+        if u.refs.w > 0.5 {
+            bg = c.rgb;
+        }
+        let flat = s.rgb + (1.0 - s.a) * bg;
+        // The largest channel difference in sRGB terms, 4x, as a heat ramp.
+        let d = abs(srgb(flat) - srgb(c.rgb));
+        let g = clamp(max(d.r, max(d.g, d.b)) * 4.0, 0.0, 1.0);
+        let heat = clamp((vec3<f32>(g) - vec3<f32>(0.0, 1.0 / 3.0, 2.0 / 3.0)) * 3.0, vec3<f32>(0.0), vec3<f32>(1.0));
+        return vec4<f32>(linear(heat), 1.0);
+    }
+    return c * u.refs.x;
+}
+
+fn srgb(l: vec3<f32>) -> vec3<f32> {
+    let c = clamp(l, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3<f32>(0.0031308));
+}
+
+fn linear(e: vec3<f32>) -> vec3<f32> {
+    return select(pow((e + 0.055) / 1.055, vec3<f32>(2.4)), e / 12.92, e <= vec3<f32>(0.04045));
 }
 "#;
 
@@ -69,9 +111,23 @@ struct Blit {
     bg: [f32; 4],
     c0: [f32; 4],
     c1: [f32; 4],
+    refs: [f32; 4],
+    backdrop: [f32; 4],
     mode: u32,
     cell: f32,
     pad: [u32; 2],
+}
+
+/// How the reference is drawn this frame. The texture is at the stage's pixel size.
+#[derive(Clone, Copy, Debug)]
+pub struct RefDraw<'a> {
+    pub texture: &'a wgpu::Texture,
+    pub mode: super::reference::RefMode,
+    pub opacity: f32,
+    /// 0 to 1 across the stage.
+    pub split: f32,
+    /// The diff's backdrop: `None` for the reference itself, else a linear colour.
+    pub backdrop: Option<[f32; 3]>,
 }
 
 /// A rectangle in target pixels.
@@ -89,7 +145,7 @@ pub struct Compositor {
     layout: wgpu::BindGroupLayout,
     pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     module: wgpu::ShaderModule,
-    uniforms: [wgpu::Buffer; 3],
+    uniforms: [wgpu::Buffer; 5],
 }
 
 /// Linear premultiplied colours of the window.
@@ -116,16 +172,8 @@ impl Compositor {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                texture_entry(1),
+                texture_entry(2),
             ],
         });
         let uniform = || {
@@ -142,7 +190,7 @@ impl Compositor {
             layout,
             pipelines: Vec::new(),
             module,
-            uniforms: [uniform(), uniform(), uniform()],
+            uniforms: [uniform(), uniform(), uniform(), uniform(), uniform()],
         }
     }
 
@@ -185,8 +233,9 @@ impl Compositor {
     }
 
     /// Records the window into `target`: background, checkerboard under `stage`, the stage
-    /// texture at `stage`, then `chrome` over the whole target. Both textures must be
-    /// `TEXTURE_BINDING`; `stage` is drawn 1:1 from its top-left pixel.
+    /// texture at `stage`, then `chrome` over the whole target. All textures must be
+    /// `TEXTURE_BINDING`; `stage` is drawn 1:1 from its top-left pixel. A reference goes
+    /// under the stage in `Under` mode and over it otherwise.
     pub fn encode(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
@@ -194,7 +243,9 @@ impl Compositor {
         stage_tex: &wgpu::Texture,
         stage: PxRect,
         chrome: &wgpu::Texture,
+        reference: Option<RefDraw<'_>>,
     ) {
+        use super::reference::RefMode;
         let (tw, th) = (target.width() as f32, target.height() as f32);
         let full = PxRect { x: 0.0, y: 0.0, w: tw, h: th };
         let blit = |r: PxRect, mode: u32| Blit {
@@ -205,14 +256,39 @@ impl Compositor {
             bg: BG,
             c0: CHECK0,
             c1: CHECK1,
+            refs: [0.0; 4],
+            backdrop: [0.0; 4],
             mode,
             cell: 12.0,
             pad: [0; 2],
         };
-        let draws: [(Blit, &wgpu::Texture); 3] =
-            [(blit(full, 0), chrome), (blit(stage, 1), stage_tex), (blit(full, 1), chrome)];
+        let reference = reference.filter(|r| r.mode != RefMode::Off);
+        let ref_blit = |r: &RefDraw| {
+            let kind = match r.mode {
+                RefMode::Diff => 3.0,
+                RefMode::Split => 4.0,
+                _ => 1.0,
+            };
+            let mut b = blit(stage, 2);
+            b.refs = [r.opacity.clamp(0.0, 1.0), stage.x + r.split.clamp(0.0, 1.0) * stage.w, kind, 0.0];
+            match r.backdrop {
+                Some(c) => b.backdrop = [c[0], c[1], c[2], 1.0],
+                None => b.refs[3] = 1.0,
+            }
+            b
+        };
+        let mut draws: Vec<(Blit, &wgpu::Texture)> = vec![(blit(full, 0), chrome)];
+        if let Some(r) = reference.filter(|r| r.mode == RefMode::Under) {
+            draws.push((ref_blit(&r), r.texture));
+        }
+        draws.push((blit(stage, 1), stage_tex));
+        if let Some(r) = reference.filter(|r| r.mode != RefMode::Under) {
+            draws.push((ref_blit(&r), r.texture));
+        }
+        draws.push((blit(full, 1), chrome));
         let pipeline = self.pipeline(target.format());
-        let mut groups = Vec::with_capacity(3);
+        let mut groups = Vec::with_capacity(draws.len());
+        let stage_view = stage_tex.create_view(&Default::default());
         for (i, (b, tex)) in draws.iter().enumerate() {
             self.queue.write_buffer(&self.uniforms[i], 0, bytemuck::bytes_of(b));
             let view = tex.create_view(&Default::default());
@@ -222,6 +298,7 @@ impl Compositor {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.uniforms[i].as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&stage_view) },
                 ],
             }));
         }
@@ -245,6 +322,40 @@ impl Compositor {
             pass.draw(0..6, 0..1);
         }
     }
+}
+
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// An sRGB texture holding `rgba` (premultiplied, sRGB encoded), for the reference.
+pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, rgba: &[u8]) -> wgpu::Texture {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vo-preview-reference"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        tex.as_image_copy(),
+        rgba,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    tex
 }
 
 /// Copies `tex` (RGBA8, sRGB encoded, premultiplied) back to the CPU. Blocks.

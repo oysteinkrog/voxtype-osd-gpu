@@ -173,6 +173,9 @@ frame `t` into a texture; it gets the window, scrubbing and contact sheets, not 
 | Golden check of a sheet | add `--check golden.png` (exit 1 when more than 0.05 % of pixels differ by more than 2 levels) |
 | Seek timings | `just preview-bench title_card` |
 | Drive a running window | `target/debug/vo-preview ctl seek 2.5`, `play`, `step -1`, `marker out`, `loop 1 3`, `overlay bounds on`, `shot out.png`, `state`, `quit` |
+| Match a mock-up | add `--reference mock.png --ref-crop 430,560,690 --ref-mode diff` |
+| Score a frame against a mock-up, headless | `cargo run -p vo --example title_card -- --compare mock.png --at 2 --crop 430,560,690 --out cmp.png` |
+| Effect extents and GPU time per pass | add `--overlay effects` |
 
 Run the window only inside a nested `kwin_wayland --virtual` when an agent starts it.
 
@@ -192,6 +195,28 @@ new build at the same time, play state, loop, overlays and window size. It watch
 the example can depend on. Measured: the window is up 0.25 s after start; edit to window
 1.5 s when cargo needs 1.0 s. In this shared checkout heavy-build often queues the build
 behind other lanes, which added 5 to 35 s.
+
+**Reference images.** `--reference PNG` (or `ctl ref PNG`) puts a mock-up with the stage, to
+match a theme to it. `--ref-crop X,Y,W[,H]` picks the part of the PNG that shows the scene, in
+the PNG's pixels; without H the height follows the stage's aspect. The crop is resampled to
+the stage's pixels in linear light, so one reference pixel lies under one stage pixel at any
+fit. Modes: `over` and `under` at an opacity (the `-` and `+` buttons, `ctl ref opacity 0.3`),
+`split` (the stage left of a line, the mock-up right of it, `ctl ref split 0.4`), and `diff`, a
+heat map of the largest channel difference, 4x, black where they match. For the difference the
+stage goes over a backdrop where it is transparent: the mock-up itself by default (only what
+the stage draws counts), or a flat colour (`--ref-backdrop #101418`), which also counts what
+the stage does not draw. `ctl ref score` and the headless `--compare` print the mean
+difference, its 95th percentile and the share of pixels off by more than 10%; `--compare
+--out` writes the frame, the mock-up and the heat map side by side, and `--max-error PCT`
+makes it a gate. The reference is kept in the state file, so it survives a rebuild.
+
+**Effects overlay.** `--overlay effects` (the Effects button) draws every effect's extent over
+the stage: offscreen layers with their content box, their bloom's reach and their texture size,
+and the glows, drop shadows and glyph halos and blurs that the shape and glyph shaders draw
+without a surface. An extent that leaves the surface is red: that glow is cut off at the edge.
+Its panel lists the GPU time of each section of the frame, slowest first (`Renderer::
+last_timings`, when the device has timestamp queries; the host asks for them in dev builds), and
+the stats overlay shows the four slowest.
 
 **Drawing.** The window draws the stage and its own chrome into two textures with the normal
 renderer and composites them, so it never merges display lists. The stage is drawn at its

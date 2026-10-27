@@ -45,6 +45,10 @@ pub(crate) trait Source {
     fn stats(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Glows, shadows and glyph effects at the last drawn `t`, in scene units.
+    fn shader_effects(&self) -> Vec<super::effects::FxBox> {
+        Vec::new()
+    }
 }
 
 /// An app and its scenario.
@@ -147,6 +151,10 @@ impl<A: App> Source for AppSource<A> {
             lines.push(format!("and {more} more moving channels"));
         }
         (boxes, lines)
+    }
+
+    fn shader_effects(&self) -> Vec<super::effects::FxBox> {
+        super::effects::shader_effects(&self.list)
     }
 
     fn stats(&self) -> Vec<String> {

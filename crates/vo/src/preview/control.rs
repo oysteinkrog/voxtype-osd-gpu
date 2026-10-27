@@ -12,7 +12,13 @@
 //! | `speed S` | playback speed, 0.25 to 2 |
 //! | `marker NAME` | go to a named marker |
 //! | `loop A B`, `loop off` | loop a range |
-//! | `overlay bounds\|springs\|graph\|stats on\|off` | debug overlays |
+//! | `overlay bounds\|springs\|graph\|stats\|effects on\|off` | debug overlays |
+//! | `ref PATH` | load a reference image (`ref off` unloads it) |
+//! | `ref mode over\|under\|diff\|split\|off` | how the reference shows |
+//! | `ref opacity O`, `ref split S` | 0 to 1 |
+//! | `ref crop X Y W [H]` | the part of the image to use, in its pixels; `ref crop full` |
+//! | `ref backdrop ref\|#rrggbb` | what the stage is compared over in diff mode |
+//! | `ref score` | reply with how far the frame is from the reference |
 //! | `fit` / `1:1` | stage scale |
 //! | `size W H` | resize the window (logical units) |
 //! | `shot PATH` | write the window as a PNG |
@@ -45,6 +51,20 @@ pub enum Cmd {
     Shot(PathBuf),
     State,
     Quit,
+    Ref(RefCmd),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RefCmd {
+    Load(PathBuf),
+    Unload,
+    Mode(super::reference::RefMode),
+    Opacity(f32),
+    Split(f32),
+    /// x, y, w and h or x, y, w (the height follows the stage), or `None` for the whole image.
+    Crop(Option<Vec<f32>>),
+    Backdrop(super::reference::Backdrop),
+    Score,
 }
 
 pub fn overlay_name(o: Overlay) -> &'static str {
@@ -53,11 +73,14 @@ pub fn overlay_name(o: Overlay) -> &'static str {
         Overlay::Springs => "springs",
         Overlay::Graph => "graph",
         Overlay::Stats => "stats",
+        Overlay::Effects => "effects",
     }
 }
 
 pub fn parse_overlay(s: &str) -> Option<Overlay> {
-    [Overlay::Bounds, Overlay::Springs, Overlay::Graph, Overlay::Stats].into_iter().find(|o| overlay_name(*o) == s)
+    [Overlay::Bounds, Overlay::Springs, Overlay::Graph, Overlay::Stats, Overlay::Effects]
+        .into_iter()
+        .find(|o| overlay_name(*o) == s)
 }
 
 pub fn parse(line: &str) -> Result<Cmd, String> {
@@ -85,6 +108,21 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
         ["shot", path] => Cmd::Shot(PathBuf::from(path)),
         ["state"] => Cmd::State,
         ["quit"] => Cmd::Quit,
+        ["ref", "off"] => Cmd::Ref(RefCmd::Unload),
+        ["ref", "score"] => Cmd::Ref(RefCmd::Score),
+        ["ref", "mode", m] => Cmd::Ref(RefCmd::Mode(
+            super::reference::RefMode::parse(m).ok_or_else(|| format!("no reference mode '{m}'"))?,
+        )),
+        ["ref", "opacity", _] => Cmd::Ref(RefCmd::Opacity(num(2)? as f32)),
+        ["ref", "split", _] => Cmd::Ref(RefCmd::Split(num(2)? as f32)),
+        ["ref", "crop", "full"] => Cmd::Ref(RefCmd::Crop(None)),
+        ["ref", "crop", rest @ ..] if (3..=4).contains(&rest.len()) => Cmd::Ref(RefCmd::Crop(Some(
+            (2..2 + rest.len()).map(num).collect::<Result<Vec<f64>, _>>()?.into_iter().map(|v| v as f32).collect(),
+        ))),
+        ["ref", "backdrop", b] => Cmd::Ref(RefCmd::Backdrop(
+            super::reference::Backdrop::parse(b).ok_or_else(|| format!("backdrop '{b}': give ref or #rrggbb"))?,
+        )),
+        ["ref", path] => Cmd::Ref(RefCmd::Load(PathBuf::from(path))),
         _ => return Err(format!("unknown command '{line}'; see `vo-preview ctl help`")),
     })
 }
@@ -148,5 +186,14 @@ mod tests {
         assert!(parse("overlay nope on").is_err());
         assert!(parse("seek x").is_err());
         assert!(parse("dance").is_err());
+        assert_eq!(parse("overlay effects on"), Ok(Cmd::Overlay(Overlay::Effects, true)));
+        assert_eq!(parse("ref /x/mock.png"), Ok(Cmd::Ref(RefCmd::Load("/x/mock.png".into()))));
+        assert_eq!(parse("ref mode diff"), Ok(Cmd::Ref(RefCmd::Mode(super::super::reference::RefMode::Diff))));
+        assert_eq!(parse("ref opacity 0.3"), Ok(Cmd::Ref(RefCmd::Opacity(0.3))));
+        assert_eq!(parse("ref crop 10 20 300"), Ok(Cmd::Ref(RefCmd::Crop(Some(vec![10.0, 20.0, 300.0])))));
+        assert_eq!(parse("ref crop full"), Ok(Cmd::Ref(RefCmd::Crop(None))));
+        assert_eq!(parse("ref score"), Ok(Cmd::Ref(RefCmd::Score)));
+        assert!(parse("ref mode sideways").is_err());
+        assert!(parse("ref backdrop blue").is_err());
     }
 }

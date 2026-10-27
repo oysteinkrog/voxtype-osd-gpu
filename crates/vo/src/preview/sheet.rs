@@ -98,6 +98,23 @@ pub(crate) fn render_sheet(source: &mut dyn Source, spec: &SheetSpec) -> Result<
     Ok(Sheet { width: w, height: h, rgba })
 }
 
+/// A frame's size in pixels at `scale`.
+pub(crate) fn frame_size(source: &dyn Source, scale: f32) -> (u32, u32) {
+    let size = source.size();
+    ((size.w * scale).round().max(1.0) as u32, (size.h * scale).round().max(1.0) as u32)
+}
+
+/// Frame `t` at `scale`, as premultiplied sRGB bytes.
+pub(crate) fn render_frame(source: &mut dyn Source, t: f64, scale: f32) -> Result<Vec<u8>, OfflineError> {
+    let (device, queue) = headless_gpu()?;
+    let mut off = Offscreen::with_fonts(&device, &queue, source.fonts());
+    source.configure(&mut off.renderer);
+    let (w, h) = frame_size(source, scale);
+    let mut target = Target::new(&device, w, h, FORMAT);
+    source.draw(t, scale, &mut off.renderer, &mut target);
+    Ok(read_back(&device, &queue, target.texture()))
+}
+
 /// Premultiplied over in sRGB-encoded values: close enough for opaque thumbnails and text on
 /// the flat background.
 fn over(dst: &mut [u8], dst_w: u32, src: &[u8], w: u32, h: u32, ox: u32, oy: u32) {

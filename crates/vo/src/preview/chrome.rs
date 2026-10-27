@@ -22,6 +22,8 @@ pub enum Overlay {
     Springs,
     Graph,
     Stats,
+    /// Effect extents: offscreen layers, bloom reach, glows, shadows and glyph halos.
+    Effects,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +40,19 @@ pub enum UiMsg {
     Marker(usize),
     Toggle(Overlay),
     OneToOne,
+    /// The reference's next mode.
+    RefMode,
+    /// Changes the reference's opacity by this much.
+    RefOpacity(f32),
+}
+
+/// The reference, as the chrome shows it.
+#[derive(Clone, Debug)]
+pub struct RefChrome {
+    pub mode: super::reference::RefMode,
+    pub opacity: f32,
+    /// The split line's x in window units, in split mode.
+    pub split_x: Option<f32>,
 }
 
 /// One node box over the stage, in window units.
@@ -74,6 +89,12 @@ pub struct ChromeIn<'a> {
     pub stats: &'a [String],
     /// One line under the readout: seek time, reload results, errors.
     pub status: &'a str,
+    /// Effect boxes in window units, and lines for the effects panel.
+    pub fx: &'a [super::effects::FxBox],
+    pub fx_lines: &'a [String],
+    pub reference: Option<RefChrome>,
+    /// The stage in window units.
+    pub stage: Rect,
 }
 
 /// The timeline track in window units.
@@ -109,6 +130,8 @@ const DIM: u32 = 0x8a909a;
 const ACCENT: u32 = 0xff5a36;
 const BOUNDS: u32 = 0x3fc1ff;
 const TARGET: u32 = 0xffb02e;
+const FX: u32 = 0xc77dff;
+const CLIPPED: u32 = 0xff3b5c;
 
 fn button(key: &str, label: &str, font: u32, on: bool, msg: UiMsg) -> Element<UiMsg> {
     let fill = if on { Color::hex(0x4a2a22, 1.0) } else { Color::hex(0x272a31, 1.0) };
@@ -119,6 +142,7 @@ fn button(key: &str, label: &str, font: u32, on: bool, msg: UiMsg) -> Element<Ui
         .radius(5.0)
         .fill(fill)
         .on_click(msg)
+        .shrink(0.0)
         .child(text("l", label, font, 13.0, ink))
 }
 
@@ -144,20 +168,34 @@ pub fn view(c: &ChromeIn) -> Element<UiMsg> {
     controls.push(button("loop", "Loop", f, c.looping, UiMsg::Loop));
     controls.push(button("in", "In", f, false, UiMsg::LoopIn));
     controls.push(button("out", "Out", f, false, UiMsg::LoopOut));
-    controls.push(Element::panel("sp2").width(8.0));
-    for (i, (name, _)) in c.markers.iter().enumerate() {
-        controls.push(button(&format!("m{i}"), name, f, false, UiMsg::Marker(i)));
-    }
     controls.push(Element::panel("sp3").width(8.0));
     for (key, label, o) in [
         ("ob", "Bounds", Overlay::Bounds),
         ("os", "Springs", Overlay::Springs),
         ("og", "Graph", Overlay::Graph),
         ("ot", "Stats", Overlay::Stats),
+        ("of", "Effects", Overlay::Effects),
     ] {
         controls.push(button(key, label, f, c.overlays.contains(&o), UiMsg::Toggle(o)));
     }
     controls.push(button("one", "1:1", f, c.one_to_one, UiMsg::OneToOne));
+    if let Some(r) = &c.reference {
+        use super::reference::RefMode;
+        controls.push(Element::panel("sp4").width(8.0));
+        let on = r.mode != RefMode::Off;
+        controls.push(button("ref", &format!("Ref {}", r.mode.name()), f, on, UiMsg::RefMode));
+        if matches!(r.mode, RefMode::Over | RefMode::Under) {
+            controls.push(button("rminus", "-", f, false, UiMsg::RefOpacity(-0.1)));
+            controls.push(text("rop", format!("{:.0}%", r.opacity * 100.0), c.mono, 12.0, Color::hex(INK, 1.0)));
+            controls.push(button("rplus", "+", f, false, UiMsg::RefOpacity(0.1)));
+        }
+    }
+    // Markers last: with many of them the row runs off the right edge, and the track shows
+    // them too.
+    controls.push(Element::panel("sp2").width(8.0));
+    for (i, (name, _)) in c.markers.iter().enumerate() {
+        controls.push(button(&format!("m{i}"), name, f, false, UiMsg::Marker(i)));
+    }
 
     let readout = format!(
         "{:7.3} s  f {frame:>4}/{total}  {:.0}%  {}",
@@ -260,6 +298,39 @@ fn overlays(c: &ChromeIn) -> Vec<Element<UiMsg>> {
             }
         }
     }
+    if c.overlays.contains(&Overlay::Effects) {
+        for (i, b) in c.fx.iter().enumerate() {
+            let ink = if b.clipped { CLIPPED } else { FX };
+            let (r, reach) = (b.content, b.reach);
+            out.push(
+                at(Element::panel(format!("fc{i}")), r.x, r.y, r.w.max(1.0), r.h.max(1.0))
+                    .stroke(Color::hex(ink, if b.surface { 0.9 } else { 0.6 }), 1.0),
+            );
+            if reach != r {
+                // Drawn inside the stage; red says it goes further.
+                let s = c.stage;
+                let (x0, y0) = (reach.x.max(s.x), reach.y.max(s.y));
+                let (x1, y1) = (reach.right().min(s.right()), reach.bottom().min(s.bottom()));
+                out.push(
+                    at(Element::panel(format!("fr{i}")), x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0))
+                        .stroke(Color::hex(ink, 0.45), 1.0),
+                );
+            }
+            // Under the content box, stacked a little so neighbours do not cover each other.
+            let ly = (r.bottom() + 2.0 + 13.0 * (i % 3) as f32).min(c.stage.bottom() - 14.0);
+            out.push(at(
+                text(format!("fl{i}"), b.label.clone(), c.mono, 10.5, Color::hex(ink, 1.0)),
+                r.x.max(c.stage.x) + 2.0,
+                ly,
+                360.0,
+                14.0,
+            ));
+        }
+    }
+    if let Some(x) = c.reference.as_ref().and_then(|r| r.split_x) {
+        let s = c.stage;
+        out.push(at(Element::panel("split"), x - 0.5, s.y, 1.0, s.h).fill(Color::hex(ACCENT, 0.9)));
+    }
     let mut panel_y = 12.0;
     let panel = |key: &str, lines: &[String], y: f32| {
         let h = 10.0 + 15.0 * lines.len() as f32;
@@ -279,6 +350,10 @@ fn overlays(c: &ChromeIn) -> Vec<Element<UiMsg>> {
     }
     if c.overlays.contains(&Overlay::Stats) {
         out.push(panel("stats", c.stats, panel_y));
+        panel_y += 14.0 + 15.0 * c.stats.len() as f32;
+    }
+    if c.overlays.contains(&Overlay::Effects) && !c.fx_lines.is_empty() {
+        out.push(panel("fxp", c.fx_lines, panel_y));
     }
     if c.overlays.contains(&Overlay::Graph) {
         out.push(graph(c));

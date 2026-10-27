@@ -331,10 +331,8 @@ fn make_gpu(display: DisplayHandle, origin: f64, target: mpsc::Receiver<BgTarget
         apply_limit_buckets: false,
     }))
     .map_err(|e| e.to_string())?;
-    let (device, queue) = pollster::block_on(
-        adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-host-wayland"), ..Default::default() }),
-    )
-    .map_err(|e| e.to_string())?;
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).map_err(|e| e.to_string())?;
     let t_device = monotonic() - origin;
     let surface = surface.map(|(s, w, h)| {
         let (config, offered) = swapchain_config(&s, &adapter, w, h);
@@ -387,6 +385,19 @@ pub struct State {
 pub struct WaylandHost {
     state: State,
     event_loop: EventLoop<'static, State>,
+}
+
+/// The device the host asks for. Dev builds and the preview get GPU timestamps when the
+/// adapter has them, for the preview's per-pass timings (`vo_render::profile`); an installed
+/// binary asks for no features.
+fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let timestamps = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let want = guard::dev_process() && adapter.features().contains(timestamps);
+    wgpu::DeviceDescriptor {
+        label: Some("vo-host-wayland"),
+        required_features: if want { timestamps } else { wgpu::Features::empty() },
+        ..Default::default()
+    }
 }
 
 impl WaylandHost {
@@ -881,10 +892,8 @@ impl HostCtl for State {
             apply_limit_buckets: false,
         }))
         .map_err(|e| HostError::Gpu(e.to_string()))?;
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor { label: Some("vo-host-wayland"), ..Default::default() }),
-        )
-        .map_err(|e| HostError::Gpu(e.to_string()))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
+            .map_err(|e| HostError::Gpu(e.to_string()))?;
         let name = adapter.get_info().name;
         self.diag.notes.push(format!("adapter: {name}"));
         self.gpu = Some(GpuState { adapter, gpu: Gpu { device, queue, adapter: name } });

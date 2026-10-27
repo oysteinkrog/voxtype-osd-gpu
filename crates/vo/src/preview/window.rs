@@ -19,9 +19,11 @@ use vo_scene::geom::Rect;
 use vo_scene::input::Button;
 use vo_scene::{FontRegistry, Motion, Scene};
 
-use super::chrome::{self, ChromeIn, Overlay, UiMsg, BAR_H, STAGE_MARGIN};
-use super::composite::{read_back, Compositor, PxRect};
-use super::control::{self, Cmd, Request};
+use super::chrome::{self, ChromeIn, Overlay, RefChrome, UiMsg, BAR_H, STAGE_MARGIN};
+use super::composite::{read_back, upload, Compositor, PxRect, RefDraw};
+use super::control::{self, Cmd, RefCmd, Request};
+use super::effects::{self, FxBox};
+use super::reference::{self, Backdrop, Image, RefMode, RefState};
 use super::reload::{parse_tokens, Watch};
 use super::source::{OverlayAsk, Source};
 use super::State;
@@ -71,8 +73,18 @@ pub(crate) struct Window {
     tokens_watch: Watch,
     shader_watch: Watch,
     shots: Vec<(PathBuf, mpsc::Sender<String>)>,
+    /// The reference image as loaded, and as resampled for the stage with its key.
+    ref_image: Option<Image>,
+    ref_stage: Option<(RefKey, Image, wgpu::Texture)>,
+    /// `ref score` requests, answered after the next draw.
+    scores: Vec<mpsc::Sender<String>>,
+    /// GPU timestamps are on in the renderer.
+    profiling: bool,
     pub(crate) error: Option<HostError>,
 }
+
+/// What the resampled reference depends on.
+type RefKey = (PathBuf, Option<[f32; 4]>, [u32; 2]);
 
 impl Window {
     pub(crate) fn new(p: Box<dyn Source>, setup: Setup) -> Window {
@@ -122,8 +134,82 @@ impl Window {
             tokens_watch,
             shader_watch,
             shots: Vec::new(),
+            ref_image: None,
+            ref_stage: None,
+            scores: Vec::new(),
+            profiling: false,
             error: None,
         }
+        .with_reference()
+    }
+
+    /// Loads the reference the state names, if any.
+    fn with_reference(mut self) -> Window {
+        if let Some(path) = self.st.reference.as_ref().map(|r| r.path.clone()) {
+            if let Err(e) = self.load_reference(&path) {
+                self.status = e;
+            }
+        }
+        self
+    }
+
+    fn load_reference(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let img = Image::load(path)?;
+        self.status = format!("reference {} ({}x{})", path.display(), img.width, img.height);
+        self.ref_image = Some(img);
+        self.ref_stage = None;
+        let r = self.st.reference.get_or_insert_with(RefState::default);
+        r.path = path.to_path_buf();
+        Ok(())
+    }
+
+    fn reference_command(&mut self, cmd: RefCmd, reply: mpsc::Sender<String>) {
+        let aspect = {
+            let s = self.p.size();
+            s.w / s.h.max(1e-6)
+        };
+        let result = match cmd {
+            RefCmd::Load(path) => self.load_reference(&path),
+            RefCmd::Unload => {
+                self.st.reference = None;
+                self.ref_image = None;
+                self.ref_stage = None;
+                Ok(())
+            }
+            RefCmd::Score => {
+                if self.ref_image.is_none() {
+                    Err("no reference loaded".into())
+                } else {
+                    self.scores.push(reply);
+                    return;
+                }
+            }
+            cmd => match self.st.reference.as_mut() {
+                None => Err("no reference loaded; `ref PATH` first".into()),
+                Some(r) => {
+                    match cmd {
+                        RefCmd::Mode(m) => r.mode = m,
+                        RefCmd::Opacity(o) => r.opacity = o.clamp(0.0, 1.0),
+                        RefCmd::Split(x) => r.split = x.clamp(0.0, 1.0),
+                        RefCmd::Backdrop(b) => r.backdrop = b,
+                        RefCmd::Crop(None) => r.crop = None,
+                        RefCmd::Crop(Some(v)) => {
+                            let text: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+                            match reference::parse_crop(&text.join(","), aspect) {
+                                Ok(c) => r.crop = Some(c),
+                                Err(e) => {
+                                    let _ = reply.send(format!("error: {e}"));
+                                    return;
+                                }
+                            }
+                        }
+                        _ => unreachable!("handled above"),
+                    }
+                    Ok(())
+                }
+            },
+        };
+        let _ = reply.send(result.map_or_else(|e| format!("error: {e}"), |_| "ok".into()));
     }
 
     fn frame_step(&self) -> f64 {
@@ -175,6 +261,16 @@ impl Window {
                 self.set_overlay(o, on);
             }
             UiMsg::OneToOne => self.st.one_to_one = !self.st.one_to_one,
+            UiMsg::RefMode => {
+                if let Some(r) = self.st.reference.as_mut() {
+                    r.mode = r.mode.next();
+                }
+            }
+            UiMsg::RefOpacity(d) => {
+                if let Some(r) = self.st.reference.as_mut() {
+                    r.opacity = ((r.opacity + d) * 10.0).round().clamp(0.0, 10.0) / 10.0;
+                }
+            }
         }
     }
 
@@ -268,6 +364,7 @@ impl Window {
                 ok(&reply);
                 host.exit();
             }
+            Cmd::Ref(cmd) => self.reference_command(cmd, reply),
         }
         host.request_frame(self.surface);
     }
@@ -352,6 +449,63 @@ impl Window {
         out
     }
 
+    /// The reference resampled to the stage's pixels, made again when the image, the crop or
+    /// the stage size changes.
+    fn prepare_reference(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, px: [u32; 2]) {
+        let (Some(r), Some(img)) = (self.st.reference.as_ref(), self.ref_image.as_ref()) else { return };
+        let key: RefKey = (r.path.clone(), r.crop, px);
+        if self.ref_stage.as_ref().is_none_or(|(k, _, _)| *k != key) {
+            let fitted = img.resample(r.crop, px[0], px[1]);
+            let tex = upload(device, queue, px[0], px[1], &fitted.premultiplied());
+            self.ref_stage = Some((key, fitted, tex));
+        }
+    }
+
+    fn ref_draw(&self) -> Option<RefDraw<'_>> {
+        let r = self.st.reference.as_ref()?;
+        self.ref_image.as_ref()?;
+        let lin = |c: u8| ((c as f32 / 255.0 + 0.055) / 1.055).powf(2.4);
+        Some(RefDraw {
+            texture: &self.ref_stage.as_ref()?.2,
+            mode: r.mode,
+            opacity: r.opacity,
+            split: r.split,
+            backdrop: match r.backdrop {
+                Backdrop::Reference => None,
+                Backdrop::Color(c) => Some(c.map(lin)),
+            },
+        })
+    }
+
+    /// Effect boxes from the frame just drawn, in window units, and the panel's lines.
+    fn effect_boxes(&mut self, fit: f32, stage: Rect, px_per_unit: f32) -> (Vec<FxBox>, Vec<String>) {
+        let Some(r) = self.renderer.as_mut() else { return (Vec::new(), Vec::new()) };
+        let timings = if self.profiling { r.last_timings() } else { None };
+        let report = r.frame_report();
+        let size = self.p.size();
+        let mut boxes = effects::surface_effects(&report, px_per_unit, size, timings.as_ref());
+        let surfaces = boxes.len();
+        boxes.extend(self.p.shader_effects());
+        let clipped = boxes.iter().filter(|b| b.clipped).count();
+        let mut lines = vec![format!(
+            "{} offscreen layers, {} shader effects, {clipped} cut off at the edge  {} path  pool {:.1} MB",
+            surfaces,
+            boxes.len() - surfaces,
+            if report.effects { "effect" } else { "direct" },
+            report.pool_bytes as f64 / 1e6
+        )];
+        match &timings {
+            Some(t) => lines.extend(effects::timing_lines(t, 8)),
+            None if !self.profiling => lines.push("no GPU timestamps on this device".into()),
+            None => {}
+        }
+        let to_window = |r: Rect| Rect::new(stage.x + r.x * fit, stage.y + r.y * fit, r.w * fit, r.h * fit);
+        for b in &mut boxes {
+            (b.content, b.reach) = (to_window(b.content), to_window(b.reach));
+        }
+        (boxes, lines)
+    }
+
     fn draw(&mut self, frame: &Frame<'_>) -> Result<(), String> {
         let started = Instant::now();
         let interval = self.last_frame_t.map_or(0.0, |p| (frame.t - p) * 1e3) as f32;
@@ -384,8 +538,47 @@ impl Window {
         } else {
             (Vec::new(), Vec::new())
         };
-        let stats = if self.st.overlays.contains(&Overlay::Stats) { self.stats(stage_px, fit) } else { Vec::new() };
+        let mut stats = if self.st.overlays.contains(&Overlay::Stats) { self.stats(stage_px, fit) } else { Vec::new() };
         let graph: Vec<(f32, f32)> = self.graph.iter().copied().collect();
+
+        // The stage first: the effect overlay reads the renderer's report of it.
+        let want_fx = self.st.overlays.contains(&Overlay::Effects);
+        let (device, queue) = {
+            let r = self.renderer.as_mut().ok_or("no renderer")?;
+            if (want_fx || self.st.overlays.contains(&Overlay::Stats)) && !self.profiling {
+                self.profiling = r.set_profiling(true);
+            }
+            (r.device().clone(), r.queue().clone())
+        };
+        let fresh = |t: &Option<Target>, size: [u32; 2]| {
+            t.as_ref().is_none_or(|t| t.width() != size[0] || t.height() != size[1])
+        };
+        if fresh(&self.stage_tex, stage_px) {
+            self.stage_tex = Some(Target::new(&device, stage_px[0], stage_px[1], FORMAT));
+        }
+        if fresh(&self.chrome_tex, frame.size) {
+            self.chrome_tex = Some(Target::new(&device, frame.size[0], frame.size[1], FORMAT));
+        }
+        {
+            let r = self.renderer.as_mut().ok_or("no renderer")?;
+            self.p.draw(t, fit * s, r, self.stage_tex.as_mut().unwrap());
+        }
+        let (fx, fx_lines) = if want_fx { self.effect_boxes(fit, stage, fit * s) } else { (Vec::new(), Vec::new()) };
+        if self.st.overlays.contains(&Overlay::Stats) && !want_fx && self.profiling {
+            if let Some(tm) = self.renderer.as_mut().and_then(|r| r.last_timings()) {
+                stats.extend(effects::timing_lines(&tm, 4));
+            }
+        }
+        for reply in std::mem::take(&mut self.scores) {
+            let msg = self.score().unwrap_or_else(|e| format!("error: {e}"));
+            self.status = msg.clone();
+            let _ = reply.send(msg);
+        }
+        let reference = self.st.reference.as_ref().map(|r| RefChrome {
+            mode: r.mode,
+            opacity: r.opacity,
+            split_x: (r.mode == RefMode::Split).then_some(stage.x + r.split * stage.w),
+        });
         let view = chrome::view(&ChromeIn {
             size: (self.size.w, self.size.h),
             font: self.font,
@@ -407,37 +600,34 @@ impl Window {
             graph: &graph,
             stats: &stats,
             status: &self.status,
+            fx: &fx,
+            fx_lines: &fx_lines,
+            reference,
+            stage,
         });
         self.ui_t = self.ui_t.max(frame.t);
         self.ui.apply(view, self.ui_t);
         self.ui.sample_into(self.ui_t, &mut self.ui_list);
 
-        let r = self.renderer.as_mut().ok_or("no renderer")?;
-        let device = r.device().clone();
-        let queue = r.queue().clone();
-        let fresh = |t: &Option<Target>, size: [u32; 2]| {
-            t.as_ref().is_none_or(|t| t.width() != size[0] || t.height() != size[1])
-        };
-        if fresh(&self.stage_tex, stage_px) {
-            self.stage_tex = Some(Target::new(&device, stage_px[0], stage_px[1], FORMAT));
+        {
+            let r = self.renderer.as_mut().ok_or("no renderer")?;
+            r.render_at(&self.ui_list, s, self.chrome_tex.as_mut().unwrap());
         }
-        if fresh(&self.chrome_tex, frame.size) {
-            self.chrome_tex = Some(Target::new(&device, frame.size[0], frame.size[1], FORMAT));
-        }
-        let stage_tex = self.stage_tex.as_mut().unwrap();
-        let chrome_tex = self.chrome_tex.as_mut().unwrap();
-        self.p.draw(t, fit * s, r, stage_tex);
-        r.render_at(&self.ui_list, s, chrome_tex);
         let rect = PxRect { x: stage.x * s, y: stage.y * s, w: stage_px[0] as f32, h: stage_px[1] as f32 };
-        let comp = self.comp.as_mut().ok_or("no compositor")?;
+        let mut comp = self.comp.take().ok_or("no compositor")?;
+        self.prepare_reference(&device, &queue, stage_px);
+        let shots = std::mem::take(&mut self.shots);
+        let reference = self.ref_draw();
+        let stage_tex = self.stage_tex.as_ref().unwrap();
+        let chrome_tex = self.chrome_tex.as_ref().unwrap();
         let mut enc = device.create_command_encoder(&Default::default());
-        comp.encode(&mut enc, frame.texture, stage_tex.texture(), rect, chrome_tex.texture());
+        comp.encode(&mut enc, frame.texture, stage_tex.texture(), rect, chrome_tex.texture(), reference);
         queue.submit([enc.finish()]);
 
-        for (path, reply) in std::mem::take(&mut self.shots) {
+        for (path, reply) in shots {
             let shot = Target::new(&device, frame.size[0], frame.size[1], FORMAT);
             let mut enc = device.create_command_encoder(&Default::default());
-            comp.encode(&mut enc, shot.texture(), stage_tex.texture(), rect, chrome_tex.texture());
+            comp.encode(&mut enc, shot.texture(), stage_tex.texture(), rect, chrome_tex.texture(), reference);
             queue.submit([enc.finish()]);
             let rgba = read_back(&device, &queue, shot.texture());
             let msg = match write_png(&path, frame.size[0], frame.size[1], &rgba) {
@@ -446,12 +636,38 @@ impl Window {
             };
             let _ = reply.send(msg);
         }
+        self.comp = Some(comp);
 
         self.graph.push_back((interval, ms(started) as f32));
         while self.graph.len() > GRAPH_FRAMES {
             self.graph.pop_front();
         }
         Ok(())
+    }
+}
+
+impl Window {
+    /// How far the stage just drawn is from the reference: reads the stage back, puts it over
+    /// the backdrop and compares.
+    fn score(&mut self) -> Result<String, String> {
+        let (r, stage) = (self.renderer.as_ref().ok_or("no renderer")?, self.stage_tex.as_ref().ok_or("no stage yet")?);
+        let state = self.st.reference.as_ref().ok_or("no reference loaded")?;
+        let img = self.ref_image.as_ref().ok_or("no reference loaded")?;
+        let (w, h) = (stage.width(), stage.height());
+        let fitted = match &self.ref_stage {
+            Some((k, fitted, _)) if k.2 == [w, h] && k.1 == state.crop => fitted.clone(),
+            _ => img.resample(state.crop, w, h),
+        };
+        let px = read_back(r.device(), r.queue(), stage.texture());
+        let flat = reference::flatten(&px, &fitted, state.backdrop);
+        let (d, _) = reference::diff(&flat, &fitted.rgba);
+        Ok(format!(
+            "ref score at {:.3} s: mean {:.2}%, p95 {:.2}%, {:.1}% of pixels off by more than 10%",
+            self.st.t,
+            d.mean * 100.0,
+            d.p95 * 100.0,
+            d.over_10 * 100.0
+        ))
     }
 }
 
