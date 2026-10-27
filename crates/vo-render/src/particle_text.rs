@@ -70,6 +70,9 @@ pub struct ParticleText {
     pub style: SpriteStyle,
     /// Pixels² of ink per particle (`Particles::set_word_dots`).
     pub dot_area: f32,
+    /// Where the next new word's particles start, relative to its first glyph, and how far
+    /// round that point in text sizes; taken by the next [`ParticleText::set_held`].
+    pub from: Option<(Point, f32)>,
 }
 
 /// A freed slot is reused only after its scatter has faded.
@@ -85,6 +88,7 @@ impl ParticleText {
             size: 0.0,
             style: SpriteStyle::Soft,
             dot_area: crate::particles::DOT_AREA,
+            from: None,
         }
     }
 
@@ -130,6 +134,9 @@ impl ParticleText {
         if h.word == Some(run.word) && h.glyphs == run.glyphs && h.held_from == held_from {
             h.origin = run.origin;
             return true;
+        }
+        if let Some((from, spread)) = self.from.take() {
+            p.set_word_from(Some(from), spread);
         }
         p.set_word_held(slot, t, &run.glyphs, self.px_per_unit, self.dot_area, held_from);
         *h = Held {

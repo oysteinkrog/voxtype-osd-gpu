@@ -373,6 +373,9 @@ pub struct WordParticles {
     /// rate once another word arrives, or once this goes to 0 (set it to 0 with the final
     /// text; the release then counts from the latest word change). 0 holds nothing.
     pub hold: f32,
+    /// Where a new word's particles come from: a point on an orbit at the time the word was
+    /// said, instead of a cloud round the word. `None` forms the word from a cloud round it.
+    pub from: Option<WordSource>,
 }
 
 impl Default for WordParticles {
@@ -384,7 +387,49 @@ impl Default for WordParticles {
             density: 1.0,
             dot_area: 1.25,
             hold: 0.0,
+            from: None,
         }
+    }
+}
+
+/// A light that runs along an arc of an ellipse, and the point a word's particles come
+/// from: where the light was when the word was said (MO-69). The app draws the light with
+/// [`WordSource::at`] so the two agree.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct WordSource {
+    /// Centre of the ellipse, in the space the live text's glyphs are drawn in.
+    pub centre: Point,
+    /// Half width and half height.
+    pub radius: [f32; 2],
+    /// The arc the light runs along, in radians (y down: -pi/2 is the top), from `from`
+    /// to `to`, then again from `from`.
+    pub from: f32,
+    pub to: f32,
+    /// Seconds per run.
+    pub period: f32,
+    /// Seconds from a word being said to its text on screen: the light's place
+    /// `lag` before the word came.
+    pub lag: f32,
+    /// Particles start this far round the point, as a share of the text size.
+    pub spread: f32,
+}
+
+impl WordSource {
+    /// The angle of the light at scene time `t`.
+    pub fn angle(&self, t: f64) -> f32 {
+        let k = (t / self.period.max(1e-3) as f64).rem_euclid(1.0) as f32;
+        self.from + (self.to - self.from) * k
+    }
+
+    /// The light's place at scene time `t`.
+    pub fn at(&self, t: f64) -> Point {
+        let a = self.angle(t);
+        Point::new(self.centre.x + self.radius[0] * a.cos(), self.centre.y + self.radius[1] * a.sin())
+    }
+
+    /// Where the particles of a word that came at `since` start.
+    pub fn start(&self, since: f64) -> Point {
+        self.at(since - self.lag as f64)
     }
 }
 
@@ -550,5 +595,26 @@ mod tests {
         assert!(r.sim(0.5).shock.is_none());
         assert_eq!(r.sim(1.5).epoch, 1);
         assert_eq!(r.sim(2.25).shock.unwrap().age, 0.25);
+    }
+
+    #[test]
+    fn a_word_source_runs_its_arc_and_starts_words_where_they_were_said() {
+        use std::f32::consts::PI;
+        let s = WordSource {
+            centre: Point::new(100.0, 50.0),
+            radius: [80.0, 20.0],
+            from: -PI,
+            to: 0.0,
+            period: 2.0,
+            lag: 0.25,
+            spread: 0.3,
+        };
+        let close = |a: Point, x: f32, y: f32| (a.x - x).abs() < 1e-3 && (a.y - y).abs() < 1e-3;
+        // Left end at the start of a run, the top in the middle, then again from the left.
+        assert!(close(s.at(0.0), 20.0, 50.0));
+        assert!(close(s.at(1.0), 100.0, 30.0));
+        assert!(close(s.at(2.0), 20.0, 50.0));
+        // A word that came at 1.25 was said at 1.0.
+        assert!(close(s.start(1.25), 100.0, 30.0));
     }
 }

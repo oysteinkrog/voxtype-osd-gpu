@@ -37,7 +37,8 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
       p.start = tg.start;
       p.v0 = vec2f (0.0);
       p.delay = tg.reveal_delay;
-      p.flags = W_ACTIVE | persist;
+      // A word from a source fades in like a fresh word; a shape's dots are already lit.
+      p.flags = W_ACTIVE | persist | select (0u, W_FRESH, (tg.flags & T_FROM) != 0u);
     } else if (!was_active) {
       // Fresh: start in a loose cloud around the target, a little low and to the left.
       let a = h1 * 2.0 * PI;

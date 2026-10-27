@@ -461,6 +461,8 @@ const T_CHANGED: u32 = 2;
 const T_PERSIST: u32 = 4;
 const T_START: u32 = 8;
 const T_HELD: u32 = 16;
+/// The particle starts at `start` and fades in like a fresh word's (a word from a source).
+const T_FROM: u32 = 32;
 const E_3D: u32 = 1;
 
 #[repr(C)]
@@ -640,6 +642,9 @@ pub struct Particles {
     step_data: Vec<u8>,
     emit_data: Vec<GpuEmitStep>,
     target_data: Vec<GpuTarget>,
+    /// Where the next fresh word's particles start, relative to the word, instead of a cloud
+    /// round it; taken by the next [`Particles::set_word_held`].
+    word_from: Option<(Point, f32)>,
 }
 
 fn storage(binding: u32, read_only: bool, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -916,6 +921,7 @@ impl Particles {
             step_data: Vec::new(),
             emit_data: Vec::new(),
             target_data: Vec::new(),
+            word_from: None,
         }
     }
 
@@ -1230,6 +1236,13 @@ impl Particles {
     /// but do not hand over to solid text. Setting the word again with a larger `held_from`
     /// (the same glyphs, or a revision) releases them from `t` at the normal rate. A glyph that
     /// is already solid is not held again.
+    /// The next fresh word's particles start within `spread` text sizes of `from` (relative
+    /// to the word's first glyph) rather than in a cloud round the word
+    /// (`WordParticles::from`).
+    pub fn set_word_from(&mut self, from: Option<Point>, spread: f32) {
+        self.word_from = from.map(|f| (f, spread));
+    }
+
     pub fn set_word_held(
         &mut self,
         slot: u32,
@@ -1254,6 +1267,7 @@ impl Particles {
             .take_while(|(a, b)| same(&a.glyph, b))
             .count();
         let fresh = old.glyphs.is_empty();
+        let source = self.word_from.take();
 
         // Points and budget per glyph: about one particle per 1.25 px² of ink.
         let pts: Vec<Arc<GlyphPoints>> = glyphs
@@ -1331,8 +1345,11 @@ impl Particles {
             let pick = |list: &[[f32; 2]], j: usize, n: usize| {
                 list[((j as f32 + 0.5) * list.len() as f32 / n as f32) as usize]
             };
-            let flags =
-                T_ACTIVE | if state == GlyphState::Changed { T_CHANGED } else { 0 } | if held { T_HELD } else { 0 };
+            let from = source.filter(|_| state == GlyphState::Fresh);
+            let flags = T_ACTIVE
+                | if state == GlyphState::Changed { T_CHANGED } else { 0 }
+                | if held { T_HELD } else { 0 }
+                | if from.is_some() { T_START | T_FROM } else { 0 };
             for j in 0..n_c + n_in {
                 let q = if j < n_c { pick(&p.contour, j, n_c) } else { pick(&p.interior, j - n_c, n_in) };
                 let pos = [g.pos.x + q[0], g.pos.y + q[1]];
@@ -1343,7 +1360,13 @@ impl Particles {
                     glyph: gi as u32,
                     reveal_t0: reveal_t0 as f32,
                     reveal_delay,
-                    start: [0.0; 2],
+                    start: from.map_or([0.0; 2], |(f, from_spread)| {
+                        // A small disc round the source, the same for each particle every run.
+                        let h = |k: u32| ((j as u32).wrapping_mul(2_654_435_761) ^ k).wrapping_mul(0x9e37_79b9) >> 8;
+                        let a = h(0x51ed) as f32 / (1 << 24) as f32 * std::f32::consts::TAU;
+                        let r = (h(0x7f4a) as f32 / (1 << 24) as f32).sqrt() * from_spread * size;
+                        [f.x + r * a.cos(), f.y + r * a.sin()]
+                    }),
                 };
             }
         }

@@ -54,6 +54,8 @@ const T_PERSIST: u32 = 4u;
 const T_START: u32 = 8u;
 // Held as particles: the glyph forms but does not hand over until it is set again.
 const T_HELD: u32 = 16u;
+// Starts at `start` and fades in like a fresh word (a word from a source).
+const T_FROM: u32 = 32u;
 // A reveal delay that never runs out.
 const HELD_DELAY: f32 = 1.0e9;
 

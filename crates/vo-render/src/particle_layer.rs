@@ -223,6 +223,10 @@ impl ParticleLayer {
             let Some(run) = runs.iter().find(|r| r.word == w.word) else { continue };
             self.text.px_per_unit = w.look.density * self.scale;
             self.text.dot_area = w.look.dot_area;
+            self.text.from = w.look.from.map(|s| {
+                let q = s.start(w.since);
+                (Point::new(q.x - run.origin.x, q.y - run.origin.y), s.spread)
+            });
             let n = run.glyphs.len();
             let is_newest = newest.is_some_and(|x| x.word == w.word);
             let held_from = if is_newest { n - ((w.look.hold.min(1.0) * n as f32).round() as usize).min(n) } else { n };
