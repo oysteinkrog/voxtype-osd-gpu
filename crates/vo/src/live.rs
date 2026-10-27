@@ -3,7 +3,8 @@
 //! only while something changed or moves.
 
 use vo_host::{
-    CpuFrame, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, SurfaceChange, SurfaceId,
+    CpuFrame, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, Placement, SurfaceChange,
+    SurfaceId,
 };
 use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
@@ -213,6 +214,7 @@ impl<A: App> Live<A> {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
             self.spec.size = fit.size;
+            self.spec.placement = inset_placement(self.spec.placement, fit.origin.y);
             driver.scene.set_viewport(t, fit.size, 1.0);
             let (right, bottom) = (fit.size.w - content.w - fit.origin.x, fit.size.h - content.h - fit.origin.y);
             driver.set_margin(vo_scene::Insets::new(fit.origin.x, fit.origin.y, right, bottom), t);
@@ -458,5 +460,26 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
     match live.error.take() {
         Some(e) => Err(e),
         None => result,
+    }
+}
+
+/// The placement once the effect margin has moved the content `top` pixels down the surface:
+/// `LineAt` names a line of the content, so it moves with it.
+fn inset_placement(placement: Placement, top: f32) -> Placement {
+    match placement {
+        Placement::LineAt { fraction, y } => Placement::LineAt { fraction, y: y + top },
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod inset_tests {
+    use super::*;
+
+    #[test]
+    fn line_at_follows_the_top_inset() {
+        let p = inset_placement(Placement::LineAt { fraction: 0.5, y: 120.0 }, 9.0);
+        assert_eq!(p, Placement::LineAt { fraction: 0.5, y: 129.0 });
+        assert_eq!(inset_placement(Placement::Centered, 9.0), Placement::Centered);
     }
 }
