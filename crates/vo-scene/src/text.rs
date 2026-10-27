@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use harfrust::{Direction, ShaperFont};
+use harfrust::{Direction, Feature, ShaperFont, Tag};
 use skrifa::instance::{LocationRef, Size as FontSize};
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
@@ -254,16 +254,27 @@ impl ShapedLayout {
     /// so does whitespace the run's face has, so a space between two Japanese words does not
     /// split the run.
     fn shape_runs(&self, text: &str, style: &TextStyle, primary: &ShaperFont<'_, '_>, k: f32) -> Vec<Shaped> {
+        self.shape_runs_with(text, style, primary, k, &[])
+    }
+
+    fn shape_runs_with(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        primary: &ShaperFont<'_, '_>,
+        k: f32,
+        features: &[Feature],
+    ) -> Vec<Shaped> {
         let runs = self.runs(text, style.font);
         let mut out = Vec::with_capacity(text.len());
         for (range, font) in runs {
             let face = if font == style.font { None } else { self.fonts.get(font) };
             let (buf, k) = match &face {
-                None => (shape(primary, &text[range.clone()]), k),
+                None => (shape_with(primary, &text[range.clone()], features), k),
                 Some(face) => {
                     let upem = face.units_per_em();
                     let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
-                    (shape(&shaper, &text[range.clone()]), style.size / upem as f32)
+                    (shape_with(&shaper, &text[range.clone()], features), style.size / upem as f32)
                 }
             };
             for (info, p) in buf.glyph_infos().iter().zip(buf.glyph_positions()) {
@@ -306,6 +317,64 @@ impl ShapedLayout {
     }
 }
 
+impl ShapedLayout {
+    /// Vertical text (FX-005): one character per line, top to bottom, every character
+    /// upright and centred across a column one em wide (wider when a glyph is). Lines are
+    /// `style.line_height` apart, plus `style.tracking`; a space is half a line. Japanese
+    /// faces use their vertical forms (`vert`), so the long vowel mark and the brackets turn
+    /// and the small kana and punctuation sit in the corner they do in vertical type.
+    /// `style.max_lines` caps the number of characters. Fallback runs work as in `layout`.
+    pub fn vertical(&self, text: &str, style: &TextStyle) -> ShapedText {
+        let Some(face) = self.fonts.get(style.font) else {
+            return ShapedText::default();
+        };
+        let upem = face.units_per_em();
+        let k = style.size / upem as f32;
+        let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
+        let vert = [Feature::new(Tag::new(b"vert"), 1, ..), Feature::new(Tag::new(b"vrt2"), 1, ..)];
+        let glyphs = self.shape_runs_with(text, style, &shaper, k, &vert);
+
+        // Characters as (cluster, glyphs, advance); joiners and marks stay with the one
+        // before them, because they share its cluster after shaping.
+        let mut cells: Vec<(u32, Range<usize>, f32)> = Vec::new();
+        for (i, g) in glyphs.iter().enumerate() {
+            match cells.last_mut() {
+                Some((cluster, range, advance)) if *cluster == g.cluster => {
+                    range.end = i + 1;
+                    *advance += g.advance;
+                }
+                _ => cells.push((g.cluster, i..i + 1, g.advance)),
+            }
+        }
+        let max = style.max_lines as usize;
+        let column = cells.iter().fold(style.size, |w, c| w.max(c.2));
+        let m = face.skrifa().metrics(FontSize::new(style.size), LocationRef::default());
+        let pitch = style.line_height + style.tracking;
+        let drop = 0.5 * (style.line_height - (m.ascent - m.descent)) + m.ascent;
+        let (mut y, mut lines) = (0.0f32, 0usize);
+        let mut out = ShapedText::default();
+        for (cluster, range, advance) in cells {
+            if is_space(text, cluster) {
+                y += 0.5 * pitch;
+                continue;
+            }
+            if max > 0 && lines == max {
+                break;
+            }
+            let mut x = 0.5 * (column - advance);
+            for g in &glyphs[range] {
+                let pos = Point::new(x + g.dx, y + drop - g.dy);
+                out.glyphs.push(PlacedGlyph { glyph: g.id, font: g.font, pos, cluster, advance: g.advance });
+                x += g.advance;
+            }
+            y += pitch;
+            lines += 1;
+        }
+        out.size = Size::new(column, (y - style.tracking).max(0.0));
+        out
+    }
+}
+
 /// Characters that belong to the one before them and stay in its run: combining marks,
 /// the kana voicing marks, joiners and variation selectors.
 fn joins(c: char) -> bool {
@@ -315,11 +384,16 @@ fn joins(c: char) -> bool {
 }
 
 fn shape(shaper: &ShaperFont<'_, '_>, text: &str) -> harfrust::Buffer {
+    shape_with(shaper, text, &[])
+}
+
+fn shape_with(shaper: &ShaperFont<'_, '_>, text: &str, features: &[Feature]) -> harfrust::Buffer {
     let mut buf = harfrust::Buffer::new();
     buf.push_str(text);
     buf.guess_segment_properties();
     buf.set_direction(Direction::LeftToRight);
-    harfrust::shape(shaper, &mut buf, harfrust::ShapeOptions::new()).expect("shaping a text buffer");
+    let options = harfrust::ShapeOptions::new().features(features);
+    harfrust::shape(shaper, &mut buf, options).expect("shaping a text buffer");
     buf
 }
 
@@ -642,6 +716,40 @@ mod tests {
         let runs = t.runs(text, latin);
         let split = text.find("ab").unwrap();
         assert_eq!(runs, vec![(0..split, jp), (split..text.len(), latin)]);
+    }
+
+    #[test]
+    fn vertical_stacks_one_upright_character_per_line() {
+        let (t, latin, jp) = with_japanese();
+        let text = "音声 AI";
+        let s = t.vertical(text, &STYLE);
+        assert_eq!(s.glyphs.len(), 4);
+        // One em wide; four lines and half a line for the space.
+        assert_eq!(s.size.w, 20.0);
+        assert!((s.size.h - 4.5 * 26.0).abs() < 1e-3, "{}", s.size.h);
+        let ys: Vec<f32> = s.glyphs.iter().map(|g| g.pos.y).collect();
+        assert!((ys[1] - ys[0] - 26.0).abs() < 1e-3);
+        assert!((ys[2] - ys[1] - 1.5 * 26.0).abs() < 1e-3);
+        // Each glyph is centred across the column: a narrow I sits further right than A.
+        let (a, i) = (&s.glyphs[2], &s.glyphs[3]);
+        assert!((a.pos.x + 0.5 * a.advance - 10.0).abs() < 1e-3);
+        assert!((i.pos.x + 0.5 * i.advance - 10.0).abs() < 1e-3);
+        assert!(i.pos.x > a.pos.x);
+        assert_eq!([s.glyphs[0].font, s.glyphs[3].font], [jp, latin]);
+        // max_lines caps the characters.
+        assert_eq!(t.vertical(text, &STYLE.clamp_lines(3)).glyphs.len(), 3);
+    }
+
+    #[test]
+    fn vertical_uses_the_vertical_forms() {
+        let fonts = FontRegistry::new();
+        let jp = fonts.asset("jp-labels").unwrap();
+        let t = ShapedLayout::new(fonts);
+        let style = TextStyle { font: jp, ..STYLE };
+        // The long vowel mark turns to a vertical bar in vertical text.
+        let across = t.layout("ー", &style, None).glyphs[0].glyph;
+        let down = t.vertical("ー", &style).glyphs[0].glyph;
+        assert_ne!(across, down);
     }
 
     #[test]
