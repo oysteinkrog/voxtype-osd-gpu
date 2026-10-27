@@ -17,6 +17,7 @@ use taffy::prelude::{
 use vo_core::spring::Spring;
 use vo_core::words::Word;
 
+use crate::ambient::{Loop, LoopProp, Ripples};
 use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
@@ -428,6 +429,8 @@ pub(crate) enum Kind {
     Bars(Bars),
     /// A progress bar filling the box.
     Progress(Progress),
+    /// Rings growing from the centre of the box (`crate::ambient`).
+    Ripples(Ripples),
     /// A dot grid filling the box.
     Dots(Dots),
     /// A particle emitter at the centre of the box, simulated by the renderer.
@@ -541,6 +544,8 @@ pub struct Element<M = ()> {
     pub(crate) presence: Option<(Transition, Transition)>,
     pub(crate) handlers: Handlers<M>,
     pub(crate) children: Vec<Element<M>>,
+    /// Ambient loops by slot (`Element::ambient`).
+    pub(crate) loops: Vec<(u8, Loop)>,
 }
 
 impl<M> Element<M> {
@@ -560,6 +565,7 @@ impl<M> Element<M> {
             presence: None,
             handlers: Handlers::default(),
             children: Vec::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -1348,6 +1354,25 @@ impl<M> Element<M> {
             None => self.motion.push((prop, motion)),
         }
         self
+    }
+
+    /// The node enters from `enter` and, once removed from the view, exits to `exit` and
+    /// stays until that motion settles.
+    /// Runs an ambient loop on `prop` while the view declares it (FX-203): its offset is
+    /// added to the property's value. When a later view leaves it out, or the node leaves,
+    /// the loop settles to its rest, so the scene can go idle. One loop per property; a
+    /// second call for the same property replaces the first.
+    pub fn ambient(mut self, prop: LoopProp, l: Loop) -> Element<M> {
+        let slot = prop.slot();
+        self.loops.retain(|(s, _)| *s != slot);
+        self.loops.push((slot, l));
+        self
+    }
+
+    /// Rings that grow from the centre of the box and fade, a new one every `every` seconds
+    /// while `active` is set (FX-101). Turning `active` off lets the rings on screen finish.
+    pub fn ripples(key: impl Into<Key>, ripples: Ripples) -> Element<M> {
+        Element::new(key, Kind::Ripples(ripples), taffy::Style::default())
     }
 
     /// The node enters from `enter` and, once removed from the view, exits to `exit` and

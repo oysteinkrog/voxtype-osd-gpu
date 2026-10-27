@@ -32,6 +32,7 @@
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod assets;
+pub mod ambient;
 pub mod bars;
 pub mod bind;
 pub mod canvas;
@@ -65,6 +66,7 @@ pub mod trace;
 pub use taffy;
 
 pub use bind::Param;
+pub use ambient::{Loop, LoopProp, Ripples};
 pub use display::DisplayList;
 pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};

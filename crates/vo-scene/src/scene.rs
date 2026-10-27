@@ -112,6 +112,8 @@ pub(crate) struct Node<M> {
     pub default_motion: Motion,
     /// Reduced motion (MO09): travel and scale jump, effects change slowly.
     pub reduced: bool,
+    /// Ambient loops and ripples (FX-203, FX-101).
+    pub ambient: crate::ambient::NodeAmbient,
 }
 
 /// One live-text word's motion: opacity, an offset from its laid-out place, and its text
@@ -137,6 +139,28 @@ impl WordAnim {
 
 impl<M> Node<M> {
     pub fn value(&self, slot: u8, t: f64) -> f64 {
+        self.base_value(slot, t) + self.ambient.offset(slot, t, self.reduced)
+    }
+
+    fn ripples(&self) -> Option<&crate::ambient::Ripples> {
+        match &self.kind {
+            Kind::Ripples(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// When the node's ambient loops or ripples next change after `t`.
+    fn ambient_wake(&self, t: f64) -> Option<f64> {
+        self.ambient.wake(t, self.reduced, self.ripples())
+    }
+
+    /// When the node's ambient loops and ripples are at rest for good.
+    fn ambient_rest_at(&self) -> f64 {
+        self.ambient.rest_at(self.reduced, self.ripples())
+    }
+
+    /// The value from the slot's channel alone, without ambient loops.
+    fn base_value(&self, slot: u8, t: f64) -> f64 {
         let v = match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
             Ok(i) => self.chans[i].1.value(t),
             Err(_) => Slot::default_value(slot),
@@ -150,10 +174,11 @@ impl<M> Node<M> {
 
     /// The rate of change of `slot` at `t`, per second.
     fn velocity(&self, slot: u8, t: f64) -> f64 {
-        match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
+        let base = match self.chans.binary_search_by_key(&slot, |(s, _)| *s) {
             Ok(i) => self.chans[i].1.sample(t).1,
             Err(_) => 0.0,
-        }
+        };
+        base + self.ambient.velocity(slot, t, self.reduced)
     }
 
     pub fn has(&self, slot: u8) -> bool {
@@ -692,6 +717,7 @@ impl<M> Scene<M> {
             .filter(|n| n.alive(t) && !n.reduced && matches!(n.kind, Kind::Panel))
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
+            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.ambient_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
             .min_by(f64::total_cmp)
@@ -772,6 +798,7 @@ impl<M> Scene<M> {
             presence,
             handlers,
             children,
+            loops,
         } = el;
         self.changed = true;
         let mut node = Node {
@@ -805,6 +832,7 @@ impl<M> Scene<M> {
             live: Flow::default(),
             default_motion: self.default_motion,
             reduced: self.reduced_motion,
+            ambient: Default::default(),
         };
         node.sync_words(t, self.retention);
         let enter = presence.map_or(Transition::NONE, |(enter, _)| enter);
@@ -819,6 +847,8 @@ impl<M> Scene<M> {
                 node.start_at(slot, v, t, self.retention);
             }
         }
+        let ripples_on = node.ripples().map(|r| r.active);
+        node.ambient.sync(&loops, ripples_on, t, true, self.retention);
         node.entered = node.settled_at().max(t);
         let id = self.nodes.insert(node);
         check_keys(&children, || self.path(id));
@@ -845,6 +875,7 @@ impl<M> Scene<M> {
             presence,
             handlers,
             children,
+            loops,
         } = el;
         let retention = self.retention;
         let n = &mut self.nodes[id];
@@ -868,6 +899,8 @@ impl<M> Scene<M> {
             changed |= n.set_target(slot, v, t, retention);
         }
         changed |= n.sync_words(t, retention);
+        let ripples_on = n.ripples().map(|r| r.active);
+        changed |= n.ambient.sync(&loops, ripples_on, t, false, retention);
         // Visual slots the view no longer sets go back to their defaults.
         let unset: Vec<u8> = n
             .chans
@@ -959,6 +992,7 @@ impl<M> Scene<M> {
             n.set_target(slot, v, t, retention);
         }
         self.changed = true;
+        self.stop_ambient(id, t);
         let until = self.subtree_settled_at(id);
         if until <= t {
             return false;
@@ -967,9 +1001,17 @@ impl<M> Scene<M> {
         true
     }
 
+    /// Lets the ambient loops of `id` and everything under it settle from `t`.
+    fn stop_ambient(&mut self, id: NodeId, t: f64) {
+        self.nodes[id].ambient.stop(t);
+        for c in self.nodes[id].children.clone() {
+            self.stop_ambient(c, t);
+        }
+    }
+
     fn subtree_settled_at(&self, id: NodeId) -> f64 {
         let n = &self.nodes[id];
-        n.children.iter().map(|&c| self.subtree_settled_at(c)).fold(n.settled_at(), f64::max)
+        n.children.iter().map(|&c| self.subtree_settled_at(c)).fold(n.settled_at().max(n.ambient_rest_at()), f64::max)
     }
 
     /// Removes leaving nodes whose exit has settled by `t`.
@@ -1390,6 +1432,13 @@ impl<M> Scene<M> {
             }
             Kind::Progress(p) => {
                 self.timed_shapes(items, out, |v| p.shapes(rect, t, alpha, v));
+                None
+            }
+            Kind::Ripples(r) => {
+                if !n.reduced {
+                    let runs = n.ambient.ripple_runs();
+                    self.timed_shapes(items, out, |v| r.shapes(runs, rect, t, alpha, v));
+                }
                 None
             }
             Kind::Dots(d) => {
