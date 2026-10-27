@@ -84,8 +84,8 @@ fn ambient_golden() {
     let rows = (TIMES.len() as u32).div_ceil(cols);
     let (sw, sh) = (cols * cw + (cols + 1) * gap, rows * ch + (rows + 1) * gap);
     let mut px = vec![0u8; (sw * sh * 4) as usize];
-    for p in px.chunks_exact_mut(4) {
-        p.copy_from_slice(&[40, 42, 48, 255]);
+    for p in px.as_chunks_mut::<4>().0 {
+        *p = [40, 42, 48, 255];
     }
     for (i, &t) in TIMES.iter().enumerate() {
         let frame = off.render_to_rgba(&scene.sample(t), [cw, ch], 1.0);
