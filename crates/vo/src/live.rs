@@ -214,10 +214,11 @@ impl<A: App> Live<A> {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
             self.spec.size = fit.size;
-            self.spec.placement = inset_placement(self.spec.placement, fit.origin.y);
             driver.scene.set_viewport(t, fit.size, 1.0);
             let (right, bottom) = (fit.size.w - content.w - fit.origin.x, fit.size.h - content.h - fit.origin.y);
-            driver.set_margin(vo_scene::Insets::new(fit.origin.x, fit.origin.y, right, bottom), t);
+            let insets = vo_scene::Insets::new(fit.origin.x, fit.origin.y, right, bottom);
+            self.spec.placement = inset_placement(self.spec.placement, insets);
+            driver.set_margin(insets, t);
         }
         if options.cpu_first_frame && host.gpu_in_background() {
             self.cpu = Some(CpuRenderer::new(options.fonts.clone()));
@@ -463,11 +464,26 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
     }
 }
 
-/// The placement once the effect margin has moved the content `top` pixels down the surface:
-/// `LineAt` names a line of the content, so it moves with it.
-fn inset_placement(placement: Placement, top: f32) -> Placement {
+/// The placement once the effect margin has grown the surface by `insets` around the content:
+/// the content stays where it was without the margin. `Centered` is left as it is.
+fn inset_placement(placement: Placement, insets: vo_scene::Insets) -> Placement {
     match placement {
-        Placement::LineAt { fraction, y } => Placement::LineAt { fraction, y: y + top },
+        Placement::LineAt { fraction, y } => Placement::LineAt { fraction, y: y + insets.top },
+        // The content's top edge at the fraction, not the surface's.
+        Placement::FromTop { fraction } => Placement::LineAt { fraction, y: insets.top },
+        Placement::Anchored { edges, margin } => {
+            let [top, right, bottom, left] = margin;
+            let pull = |m: i32, on: bool, inset: f32| if on { m - inset.round() as i32 } else { m };
+            Placement::Anchored {
+                edges,
+                margin: [
+                    pull(top, edges.top, insets.top),
+                    pull(right, edges.right, insets.right),
+                    pull(bottom, edges.bottom, insets.bottom),
+                    pull(left, edges.left, insets.left),
+                ],
+            }
+        }
         other => other,
     }
 }
@@ -476,10 +492,31 @@ fn inset_placement(placement: Placement, top: f32) -> Placement {
 mod inset_tests {
     use super::*;
 
+    use vo_host::Edges;
+    use vo_scene::Insets;
+
+    const INSETS: Insets = Insets::new(6.0, 9.0, 7.0, 11.0);
+
     #[test]
     fn line_at_follows_the_top_inset() {
-        let p = inset_placement(Placement::LineAt { fraction: 0.5, y: 120.0 }, 9.0);
+        let p = inset_placement(Placement::LineAt { fraction: 0.5, y: 120.0 }, INSETS);
         assert_eq!(p, Placement::LineAt { fraction: 0.5, y: 129.0 });
-        assert_eq!(inset_placement(Placement::Centered, 9.0), Placement::Centered);
+        assert_eq!(inset_placement(Placement::Centered, INSETS), Placement::Centered);
+    }
+
+    #[test]
+    fn from_top_puts_the_content_top_at_the_fraction() {
+        let p = inset_placement(Placement::FromTop { fraction: 0.85 }, INSETS);
+        assert_eq!(p, Placement::LineAt { fraction: 0.85, y: 9.0 });
+        assert_eq!(
+            inset_placement(Placement::FromTop { fraction: 0.85 }, Insets::ZERO),
+            Placement::LineAt { fraction: 0.85, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn anchored_margins_shrink_by_the_insets_on_anchored_edges() {
+        let p = inset_placement(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [24, 24, 24, 24] }, INSETS);
+        assert_eq!(p, Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [24, 17, 13, 24] });
     }
 }
