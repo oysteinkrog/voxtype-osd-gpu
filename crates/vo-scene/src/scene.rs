@@ -1284,6 +1284,24 @@ impl<M> Scene<M> {
                 self.stroke_path(art, n, t, origin, size, alpha, items, out);
                 None
             }
+            Kind::WavyLine(style) => {
+                let v = |s: Slot| n.value(s as u8, t) as f32;
+                let (amp, wavelength) = (v(Slot::WaveAmp), v(Slot::WaveLength).max(1.0));
+                // A growing phase moves the crests to the right.
+                let phase = -std::f32::consts::TAU * v(Slot::WavePhase);
+                let y = origin.y + 0.5 * size.h;
+                let line = crate::path::make::wave(origin.x, origin.x + size.w, y, amp, wavelength, phase);
+                let len = line.length();
+                let start = v(Slot::TrimStart).clamp(0.0, 1.0);
+                let end = v(Slot::TrimEnd).clamp(0.0, 1.0);
+                if end > start {
+                    let line = line.trim(start * len, end * len);
+                    if let Some(item) = crate::path::push_stroke(out, &line, &faded(style, alpha)) {
+                        push_item(items, ItemKind::Vectors, item.start);
+                    }
+                }
+                None
+            }
             Kind::Morph(art) => {
                 let fit = fit_view(art.view, origin, size);
                 let v = n.value(Slot::Morph as u8, t) as f32;

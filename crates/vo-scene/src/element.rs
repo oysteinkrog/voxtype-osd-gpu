@@ -116,6 +116,11 @@ pub(crate) enum Slot {
     StyleCurvature = 73,
     StyleVignette = 74,
     StyleFlicker = 75,
+    /// A wavy line (`Element::wavy_line`, T06): amplitude and wavelength in logical units,
+    /// and the phase in waves.
+    WaveAmp = 76,
+    WaveLength = 77,
+    WavePhase = 78,
 }
 
 impl Slot {
@@ -150,7 +155,8 @@ impl Slot {
             s if s <= Slot::TrimEnd as u8 => Prop::Trim,
             s if s == Slot::Morph as u8 => Prop::Morph,
             s if s <= Slot::TextHaloRadius as u8 => Prop::TextFx,
-            _ => Prop::Style,
+            s if s <= Slot::StyleFlicker as u8 => Prop::Style,
+            _ => Prop::Wave,
         }
     }
 
@@ -170,7 +176,9 @@ impl Slot {
             || slot == Slot::TextChroma as u8
             || slot == Slot::TextHaloRadius as u8
             || slot == Slot::StyleChroma as u8
-            || slot == Slot::StyleScanPeriod as u8)
+            || slot == Slot::StyleScanPeriod as u8
+            || slot == Slot::WaveAmp as u8
+            || slot == Slot::WaveLength as u8)
     }
 }
 
@@ -213,6 +221,8 @@ pub enum Prop {
     /// A layer's style: chromatic aberration, glitch, scanlines, curvature, vignette and
     /// flicker.
     Style,
+    /// A wavy line's amplitude, wavelength and phase (`Element::wavy_line`).
+    Wave,
 }
 
 /// How a property moves to a new target.
@@ -430,6 +440,8 @@ pub(crate) enum Kind {
     StrokePath(StrokeArt),
     /// A stroked morph fitted to the box at the morph channel's progress.
     Morph(MorphArt),
+    /// A sine across the middle of the box, from the wave and trim channels.
+    WavyLine(StrokeStyle),
 }
 
 /// What `Element::stroke_path` draws. Compared by identity of the outline.
@@ -645,6 +657,29 @@ impl<M> Element<M> {
         let mut e = Element::new(key, Kind::StrokePath(art), taffy::Style::default());
         e.set(Slot::TrimEnd as u8, 1.0);
         e
+    }
+
+    /// A wavy line across the middle of the box (T06): a sine with amplitude `amp` and
+    /// `wavelength` in logical units, starting at the left edge. Trim draws it on and off
+    /// (`.trim`, `Prop::Trim`, `Transition::trim`). `Prop::Wave` springs the amplitude,
+    /// wavelength and phase, so `.wave_shape(0.0, wavelength)` straightens it.
+    pub fn wavy_line(key: impl Into<Key>, style: StrokeStyle, amp: f32, wavelength: f32) -> Element<M> {
+        let mut e = Element::new(key, Kind::WavyLine(style), taffy::Style::default());
+        e.set(Slot::TrimEnd as u8, 1.0);
+        e.wave_shape(amp, wavelength)
+    }
+
+    /// A wavy line's amplitude and wavelength in logical units. The wavelength is at least
+    /// one unit.
+    pub fn wave_shape(mut self, amp: f32, wavelength: f32) -> Element<M> {
+        self.set(Slot::WaveAmp as u8, [amp, wavelength.max(1.0)]);
+        self
+    }
+
+    /// A wavy line's phase in waves: 1 moves the crests one wavelength to the right.
+    pub fn wave_phase(mut self, waves: f32) -> Element<M> {
+        self.set(Slot::WavePhase as u8, waves);
+        self
     }
 
     /// A stroked (or with `.morph_filled()`, filled) morph fitted to the box. Its progress is
