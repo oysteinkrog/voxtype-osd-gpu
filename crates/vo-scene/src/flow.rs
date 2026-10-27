@@ -223,6 +223,13 @@ impl Reading {
     }
 }
 
+/// Whether a glyph on the newest line breaks the reading-line envelope of the motion plan
+/// (MO-08): ink under 70 % of rest, more than 3 px off its baseline, scaled or blurred.
+/// `ink` and `scale` are relative to rest, `dy` and `blur` in layout units.
+pub(crate) fn breaks_envelope(ink: f32, dy: f32, scale: f32, blur: f32) -> bool {
+    ink < 0.7 || dy.abs() > 3.0 || (scale - 1.0).abs() > 0.01 || blur > 0.1
+}
+
 /// How live text moves, set on the element.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveMotion {
@@ -242,6 +249,9 @@ pub struct LiveMotion {
     pub magnet: Option<magnet::Magnet>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
+    /// Draws glyphs on the newest line that break the reading-line envelope in this colour
+    /// (`Element::envelope_tint`, MO-08).
+    pub envelope_tint: Option<crate::geom::Color>,
     /// A mark beside the newest line that splits when the text wraps (MO-32).
     pub margin: Option<margin::MarginMark>,
     /// A record in the top margin of each line that left from the front (MO-34).

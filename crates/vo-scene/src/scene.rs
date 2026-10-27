@@ -1511,6 +1511,13 @@ impl<M> Scene<M> {
                         }
                     }
                     let mut letter = (NO_WORD, 0usize);
+                    // The newest line's baseline, when breaches of the envelope are tinted.
+                    let envelope_tint = match &n.kind {
+                        Kind::LiveText { live, .. } => live.envelope_tint,
+                        _ => None,
+                    };
+                    let newest_y =
+                        envelope_tint.map(|_| n.shaped.glyphs.iter().map(|g| g.pos.y).fold(f32::MIN, f32::max));
                     for (i, (g, &span)) in n.shaped.glyphs.iter().zip(&spans).enumerate() {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
@@ -1551,7 +1558,13 @@ impl<M> Scene<M> {
                             font: g.font,
                             glyph: g.glyph,
                             word,
-                            color: m.tint(color).fade(k),
+                            color: envelope_tint
+                                .filter(|_| {
+                                    newest_y.is_some_and(|y| g.pos.y >= y - 0.5)
+                                        && crate::flow::breaks_envelope(k, dy, m.scale, blur)
+                                })
+                                .unwrap_or_else(|| m.tint(color))
+                                .fade(k),
                         });
                     }
                     for gh in n.live.ghosts(t) {

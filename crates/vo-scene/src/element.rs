@@ -1304,6 +1304,17 @@ impl<M> Element<M> {
 
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
+    /// Live text: draws glyphs on the newest line in `tint` while they break the
+    /// reading-line envelope (MO-08: ink under 70 %, more than 3 px off the baseline, scaled
+    /// or blurred), so the check is visible live. For the station and tests, not for looks.
+    pub fn envelope_tint(mut self, tint: Color) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.envelope_tint = Some(tint),
+            _ => debug_assert!(false, "envelope_tint on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.revise = r,
