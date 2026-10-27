@@ -236,11 +236,21 @@ after M3, the macOS host, which has since been dropped.
   window over a column of the ten digits on a spring. The column is keyed by the text to its left, so
   a carry rolls a new column in from below while the old one leaves upward, with no history in the
   view. R8 mask textures for arbitrary shapes are not done.
-- **Demos.** `glow_demo` (glow, bloom, shadow), `comet_demo` (trail, motion blur, rim, sheen) and
-  `ticker_demo` (edge fades, digit roll) each write an mp4 and a contact sheet, and `--check` renders
-  twice and compares all 360 frame hashes.
-- **Not done.** The CPU first frame skips glows, shadows and bloom; it draws conic, sheen and edge-fade
-  paints. Glyph-level effects (TY17), the noise library (FX10) and the style pack (FX13) are next.
+- **Text effects (TY17).** Blur, dissolve, wipe, chromatic offset and halo come from the glyph's own
+  Slug coverage in the glyph shader, with no offscreen pass. Blur and halo average 12 to 24 coverage
+  taps on a disc, each with a wider antialiasing window; taps outside the ink box are dropped, since
+  Slug coverage is not valid there. Dissolve thresholds a value noise fixed to the glyph's em space;
+  wipe hides the glyph from its right edge; chroma moves the red and blue coverage apart. The display
+  list carries the effects sparsely (`glyph_fx`, by glyph index), so text without effects costs nothing
+  and keeps Slug's own path. Labels and live text take `text_blur`, `text_dissolve`, `text_wipe`,
+  `text_chroma` and `text_halo` on `Prop::TextFx`; a label's wipe is one front along each line.
+  `Transition` gains `blur`, `dissolve` and `wipe`, so live-text words blur in, form out of noise or
+  wipe in as they arrive. The CPU first frame draws text without these effects.
+- **Demos.** `glow_demo` (glow, bloom, shadow), `comet_demo` (trail, motion blur, rim, sheen),
+  `ticker_demo` (edge fades, digit roll) and `textfx_demo` (text effects) each write an mp4 and a
+  contact sheet, and `--check` renders twice and compares all 360 frame hashes.
+- **Not done.** The CPU first frame skips glows, shadows, bloom and text effects; it draws conic, sheen
+  and edge-fade paints. The noise library (FX10), R8 masks and the style pack (FX13) are next.
 ## Crates
 
 | Crate | Contents |
