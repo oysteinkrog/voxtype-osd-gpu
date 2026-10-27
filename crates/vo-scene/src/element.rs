@@ -496,8 +496,9 @@ pub(crate) enum Kind {
         change: Transition,
         /// Words form from particles (`Element::word_particles`).
         particles: Option<WordParticles>,
-        /// Caret and other live text motion (`crate::flow`).
-        live: LiveMotion,
+        /// Caret and other live text motion (`crate::flow`). Boxed: it is the largest part of
+        /// the largest `Kind`.
+        live: Box<LiveMotion>,
         /// Inline objects by word id (`Element::inline_objects`, `crate::inline`).
         inline: Vec<(u32, crate::inline::Inline)>,
     },
@@ -689,7 +690,7 @@ impl<M> Element<M> {
             enter: Transition::NONE,
             change: Transition::NONE,
             particles: None,
-            live: LiveMotion::default(),
+            live: Box::default(),
             inline: Vec::new(),
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
