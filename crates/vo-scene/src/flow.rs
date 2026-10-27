@@ -38,6 +38,7 @@ use vo_core::channel::{Channel, Rest};
 use vo_core::spring::Spring;
 use vo_core::words::{Word, WordId};
 
+use crate::font::FontId;
 use crate::geom::{Color, Point, Rect};
 use crate::lines::LineLook;
 use crate::text::ShapedText;
@@ -222,6 +223,8 @@ struct FlowWord {
 /// A glyph's own motion: where it sits in its word, and its enter or change.
 struct FlowGlyph {
     glyph: u32,
+    /// The face it is in (a fallback face for characters the style's font lacks).
+    font: FontId,
     /// Index of its grapheme in the word's text.
     grapheme: u32,
     advance: f32,
@@ -239,6 +242,8 @@ struct FlowGlyph {
 /// A glyph on its way out: an old glyph of a revised word, or a glyph of a removed word.
 struct Ghost {
     glyph: u32,
+    /// The face it is in (a fallback face for characters the style's font lacks).
+    font: FontId,
     word: WordId,
     advance: f32,
     /// `None` while the word is on screen, so the ghost moves with it; the word's last place
@@ -261,6 +266,8 @@ struct Placed {
     /// Index in the shaped glyphs.
     index: usize,
     glyph: u32,
+    /// The face it is in (a fallback face for characters the style's font lacks).
+    font: FontId,
     /// Pen position from the word's, and offset from its baseline.
     x: f32,
     y: f32,
@@ -296,6 +303,7 @@ impl GlyphMotion {
 pub(crate) struct GhostGlyph {
     pub word: WordId,
     pub glyph: u32,
+    pub font: FontId,
     pub pos: Point,
     pub opacity: f32,
     pub scale: f32,
@@ -425,6 +433,7 @@ fn place(shaped: &ShapedText, words: &[Word]) -> Vec<Option<PlacedWord>> {
         p.glyphs.push(Placed {
             index: i,
             glyph: g.glyph,
+            font: g.font,
             x: g.pos.x - p.x,
             y: g.pos.y - p.y,
             advance: g.advance,
@@ -461,6 +470,7 @@ impl Make {
     fn rest(&self, p: &Placed, grapheme: u32) -> FlowGlyph {
         FlowGlyph {
             glyph: p.glyph,
+            font: p.font,
             grapheme,
             advance: p.advance,
             x: self.ch(p.x, FLIP, Rest::PIXELS),
@@ -561,7 +571,7 @@ impl Flow {
             } else if o.glyphs.len() == p.glyphs.len() {
                 for ((g, n), &gr) in o.glyphs.iter_mut().zip(&p.glyphs).zip(&graphemes) {
                     move_to(&mut g.x, n.x, t, FLIP, reduced);
-                    (g.glyph, g.y, g.advance, g.grapheme) = (n.glyph, n.y, n.advance, gr);
+                    (g.glyph, g.font, g.y, g.advance, g.grapheme) = (n.glyph, n.font, n.y, n.advance, gr);
                 }
             } else {
                 o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
@@ -612,6 +622,7 @@ impl Flow {
             if k > 0.0 {
                 self.ghosts.push(Ghost {
                     glyph: g.glyph,
+                    font: g.font,
                     word: o.id,
                     advance: g.advance,
                     fixed: None,
@@ -663,6 +674,7 @@ impl Flow {
             }
             ghosts.push(Ghost {
                 glyph: g.glyph,
+                font: g.font,
                 word,
                 advance: g.advance,
                 fixed: None,
@@ -686,7 +698,7 @@ impl Flow {
                         // Slides from where it is drawn now to its new place.
                         let x = g.x.value(t) as f32 * s;
                         g.x = make.to(x, n.x, FLIP, Rest::PIXELS);
-                        FlowGlyph { glyph: n.glyph, grapheme: gr, advance: n.advance, y: n.y, ..g }
+                        FlowGlyph { glyph: n.glyph, font: n.font, grapheme: gr, advance: n.advance, y: n.y, ..g }
                     }
                     None => make.enter(n, gr, (0.0, 0.0, 1.0), CROSSFADE),
                 },
@@ -740,6 +752,7 @@ impl Flow {
                 opacity.retarget(t, 0.0);
                 self.ghosts.push(Ghost {
                     glyph: g.glyph,
+                    font: g.font,
                     word: o.id,
                     advance: g.advance,
                     fixed: Some(at),
@@ -848,7 +861,7 @@ impl Flow {
             };
             let scale = g.scale.value(t).max(0.0) as f32;
             let pos = Point::new(x + gx + 0.5 * g.advance * (1.0 - scale), y + g.y + g.rise.value(t) as f32);
-            Some(GhostGlyph { word: g.word, glyph: g.glyph, pos, opacity, scale })
+            Some(GhostGlyph { word: g.word, glyph: g.glyph, font: g.font, pos, opacity, scale })
         })
     }
 

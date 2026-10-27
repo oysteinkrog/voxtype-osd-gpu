@@ -1465,7 +1465,7 @@ impl<M> Scene<M> {
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + gh.pos.x + dx, origin.y + gh.pos.y + dy),
                             size: style.size * gh.scale,
-                            font: style.font,
+                            font: gh.font,
                             glyph: gh.glyph,
                             word: gh.word,
                             color: color.fade(k),
