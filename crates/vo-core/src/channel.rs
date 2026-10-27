@@ -109,6 +109,18 @@ impl Channel {
         self.start_segment(t, value, 0.0, value);
     }
 
+    /// Moves the value by `by` at `t`, keeping its velocity and target, so the motion carries
+    /// on from the new place. For a layout change that the eye should see as a glide: shift
+    /// an offset by the old place minus the new one, and it springs back to its target.
+    pub fn shift(&mut self, t: f64, by: f64) {
+        if by == 0.0 {
+            return;
+        }
+        let (x, v) = self.sample(t);
+        let target = self.target();
+        self.start_segment(t, x + by, v, target);
+    }
+
     fn start_segment(&mut self, t: f64, x0: f64, v0: f64, target: f64) {
         let i = self.index(t);
         let keep = if t < self.segments[0].t0 || self.segments[i].t0 == t { i } else { i + 1 };
@@ -350,5 +362,21 @@ mod tests {
         assert_eq!(ch.sample(0.1), (7.0, 0.0));
         assert_eq!(ch.sample(5.0), (7.0, 0.0));
         assert_eq!(ch.settled_at(), 0.1);
+    }
+
+    #[test]
+    fn shift_keeps_velocity_and_target() {
+        let mut ch = Channel::new(0.0, 0.0, Spring::SOFT);
+        ch.retarget(0.0, 10.0);
+        let (x, v) = ch.sample(0.05);
+        ch.shift(0.05, 30.0);
+        let (x2, v2) = ch.sample(0.05);
+        assert_eq!((x2, v2), (x + 30.0, v));
+        assert_eq!(ch.target(), 10.0);
+        assert_eq!(ch.value(5.0), 10.0);
+        // A shift of zero adds no segment.
+        let n = ch.segments().len();
+        ch.shift(0.1, 0.0);
+        assert_eq!(ch.segments().len(), n);
     }
 }
