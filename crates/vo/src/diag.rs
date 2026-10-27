@@ -33,6 +33,21 @@ pub trait Diagnostics {
     fn exit(&mut self, host: &HostDiag) {
         let _ = host;
     }
+
+    /// An extra surface (`App::surfaces`) opened at `t`.
+    fn surface_opened(&mut self, key: &str, t: f64) {
+        let _ = (key, t);
+    }
+
+    /// Extra surface `key` drew its frame `n` (from 0), sampled at `t`.
+    fn surface_frame(&mut self, key: &str, n: u64, t: f64) {
+        let _ = (key, n, t);
+    }
+
+    /// Extra surface `key` closed at `t` after `frames` frames.
+    fn surface_closed(&mut self, key: &str, t: f64, frames: u64) {
+        let _ = (key, t, frames);
+    }
 }
 
 /// Bytes on the heap, from an app's counting global allocator.
@@ -51,6 +66,32 @@ pub struct LogDiagnostics {
     settles: Vec<(f64, usize, u64)>,
     /// Frames drawn while idle. Should stay 0.
     idle_frames: u64,
+    /// Frame times per extra surface, by key, in the order the surfaces opened.
+    surfaces: Vec<(String, Vec<f64>)>,
+}
+
+impl LogDiagnostics {
+    fn surface_times(&mut self, key: &str) -> &mut Vec<f64> {
+        let i = match self.surfaces.iter().position(|(k, _)| k == key) {
+            Some(i) => i,
+            None => {
+                self.surfaces.push((key.to_string(), Vec::new()));
+                self.surfaces.len() - 1
+            }
+        };
+        &mut self.surfaces[i].1
+    }
+
+    /// One line per extra surface: frames, and the longest stretch without one.
+    fn surface_summary(&self, key: &str, times: &[f64]) -> String {
+        let gap = times.windows(2).map(|w| (w[1] - w[0], w[0])).max_by(|a, b| a.0.total_cmp(&b.0));
+        match gap {
+            Some((g, from)) => {
+                format!("vo: surface {key}: frames={} longest gap {g:.2}s from t={from:.3}", times.len())
+            }
+            None => format!("vo: surface {key}: frames={}", times.len()),
+        }
+    }
 }
 
 impl LogDiagnostics {
@@ -97,6 +138,22 @@ impl Diagnostics for LogDiagnostics {
         eprintln!("vo: frame {n} at t={t:.4} was drawn while idle: same display list as before the settle");
     }
 
+    fn surface_opened(&mut self, key: &str, t: f64) {
+        eprintln!("vo: surface {key} opened t={t:.3} {}", self.memory());
+        self.surface_times(key);
+    }
+
+    fn surface_frame(&mut self, key: &str, n: u64, t: f64) {
+        self.surface_times(key).push(t);
+        if self.every_frame {
+            eprintln!("vo: surface {key} frame {n} t={t:.4}");
+        }
+    }
+
+    fn surface_closed(&mut self, key: &str, t: f64, frames: u64) {
+        eprintln!("vo: surface {key} closed t={t:.3} after {frames} frames");
+    }
+
     fn exit(&mut self, host: &HostDiag) {
         for &(t, before, woke) in &self.settles {
             let in_5s = self.frames[before..].iter().filter(|f| f.0 > t && f.0 <= t + 5.0).count();
@@ -109,6 +166,9 @@ impl Diagnostics for LogDiagnostics {
             );
         }
         eprintln!("vo: idle frames: {} (drawn after a settle and the same as before it)", self.idle_frames);
+        for (key, times) in &self.surfaces {
+            eprintln!("{}", self.surface_summary(key, times));
+        }
         eprintln!("vo: exit: frames={} loop_wakeups={} {}", self.frames.len(), host.loop_wakeups, self.memory());
     }
 }

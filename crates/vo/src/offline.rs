@@ -94,12 +94,30 @@ pub fn render_offline_with<A: App>(
 ) -> Result<u64, OfflineError> {
     std::fs::create_dir_all(out_dir)?;
     let mut written = 0u64;
+    let mut extra_written: std::collections::HashMap<String, u64> = Default::default();
     let frames = Frames::UntilDone(scenario.duration);
-    drive(app, scenario, fps, frames, options, &mut |frame: Frame| -> Result<(), OfflineError> {
-        write_png(&out_dir.join(format!("frame_{written:05}.png")), frame.width, frame.height, &frame.rgba)?;
-        written += 1;
-        Ok(())
-    })?;
+    drive_surfaces(
+        app,
+        scenario,
+        fps,
+        frames,
+        options,
+        &mut |frame: Frame| -> Result<(), OfflineError> {
+            write_png(&out_dir.join(format!("frame_{written:05}.png")), frame.width, frame.height, &frame.rgba)?;
+            written += 1;
+            Ok(())
+        },
+        &mut |key: &str, frame: Frame| -> Result<(), OfflineError> {
+            let dir = out_dir.join(key);
+            let n = extra_written.entry(key.to_string()).or_default();
+            if *n == 0 {
+                std::fs::create_dir_all(&dir)?;
+            }
+            write_png(&dir.join(format!("frame_{n:05}.png")), frame.width, frame.height, &frame.rgba)?;
+            *n += 1;
+            Ok(())
+        },
+    )?;
     Ok(written)
 }
 
@@ -108,7 +126,7 @@ pub fn render_offline_with<A: App>(
 pub(crate) fn start<A: App>(app: A, scenario: &Scenario<A::Msg>, options: &mut Options<A::Msg>) -> Driver<A> {
     let mut scene = options.scene();
     scene.set_viewport(0.0, scenario.size, scenario.scale);
-    Driver::new(app, scene, options.tokens.clone(), 0.0)
+    Driver::with_surfaces(app, scene, options.tokens.clone(), 0.0, options.scene_maker())
 }
 
 /// Applies the scenario inputs from `inputs[*next..]` and the app's timers up to and including
@@ -161,19 +179,38 @@ pub(crate) enum Frames {
 }
 
 /// Runs `app` through `scenario` and hands each frame to `sink`, in order. Returns the number
-/// of frames rendered.
+/// of frames rendered. Extra surfaces (`App::surfaces`) are not drawn.
+#[cfg_attr(not(feature = "export"), allow(dead_code))]
 pub(crate) fn drive<A: App, E: From<OfflineError>>(
+    app: A,
+    scenario: &Scenario<A::Msg>,
+    fps: f64,
+    frames: Frames,
+    options: Options<A::Msg>,
+    sink: &mut dyn FnMut(Frame) -> Result<(), E>,
+) -> Result<u64, E> {
+    drive_surfaces(app, scenario, fps, frames, options, sink, &mut |_, _| Ok(()))
+}
+
+/// [`drive`], and each extra surface's frames to `extra` with the surface's key, drawn at the
+/// size its spec asks for at the scenario's scale.
+pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     app: A,
     scenario: &Scenario<A::Msg>,
     fps: f64,
     frames: Frames,
     mut options: Options<A::Msg>,
     sink: &mut dyn FnMut(Frame) -> Result<(), E>,
+    extra: &mut dyn FnMut(&str, Frame) -> Result<(), E>,
 ) -> Result<u64, E> {
     let (device, queue) = headless_gpu()?;
     let mut off = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
     options.configure(&mut off.renderer);
     let mut driver = start(app, scenario, &mut options);
+    // One offscreen renderer per extra surface, by key: renderer state such as particles
+    // belongs to one surface.
+    let mut extra_off: Vec<(String, Offscreen)> = Vec::new();
+    let mut extra_list = Default::default();
     let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
 
     let mut rendered = 0u64;
@@ -192,12 +229,42 @@ pub(crate) fn drive<A: App, E: From<OfflineError>>(
         if let Some(frame) = off.submit(&list, px, scenario.scale) {
             sink(frame)?;
         }
+        for e in &driver.extras.list {
+            let i = match extra_off.iter().position(|(k, _)| *k == e.key) {
+                Some(i) => i,
+                None => {
+                    let mut o = Offscreen::with_fonts(&device, &queue, options.fonts.clone());
+                    options.configure(&mut o.renderer);
+                    extra_off.push((e.key.clone(), o));
+                    extra_off.len() - 1
+                }
+            };
+            e.scene.sample_into(ft.t, &mut extra_list);
+            let size =
+                [(e.spec.size.w * scenario.scale).round() as u32, (e.spec.size.h * scenario.scale).round() as u32];
+            if let Some(frame) = extra_off[i].1.submit(&extra_list, size, scenario.scale) {
+                extra(&e.key, frame)?;
+            }
+        }
+        for key in driver.extras.take_closed(ft.t) {
+            if let Some(i) = extra_off.iter().position(|(k, _)| *k == key) {
+                let (key, mut o) = extra_off.remove(i);
+                for frame in o.finish() {
+                    extra(&key, frame)?;
+                }
+            }
+        }
         if matches!(frames, Frames::UntilDone(_)) && driver.done(ft.t) {
             break;
         }
     }
     for frame in off.finish() {
         sink(frame)?;
+    }
+    for (key, mut o) in extra_off {
+        for frame in o.finish() {
+            extra(&key, frame)?;
+        }
     }
     Ok(rendered)
 }

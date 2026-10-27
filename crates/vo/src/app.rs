@@ -10,6 +10,8 @@ use vo_scene::element::Element;
 use vo_scene::geom::Color;
 use vo_scene::Scene;
 
+use crate::surfaces::{Extras, MakeScene, SurfaceView};
+
 /// Design tokens handed to `view`. A plain name to value map until `#[derive(Tokens)]` and
 /// TOML loading land (plan decision 4).
 #[derive(Clone, Debug, Default)]
@@ -41,6 +43,14 @@ pub trait App {
     fn update(&mut self, msg: Self::Msg, cx: &mut Cx<Self::Msg>);
 
     fn view(&self, tokens: &Tokens) -> Element<Self::Msg>;
+
+    /// Extra surfaces next to the main one, such as a ticker bar or a fullscreen scrim
+    /// (`vo::SurfaceView`). Runs after every update, with `view`. A key that appears opens a
+    /// surface; a key that goes away closes it once its view has left.
+    fn surfaces(&self, tokens: &Tokens) -> Vec<SurfaceView<Self::Msg>> {
+        let _ = tokens;
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -168,16 +178,33 @@ pub(crate) struct Driver<A: App> {
     pub(crate) dirty: bool,
     /// Transparent room around the app's view for ink outside its box (`Options::margin`).
     margin: Option<vo_scene::Insets>,
+    /// The app's extra surfaces, each with its own scene (`App::surfaces`).
+    pub(crate) extras: Extras<A::Msg>,
 }
 
 impl<A: App> Driver<A> {
-    pub(crate) fn new(mut app: A, scene: Scene<A::Msg>, tokens: Tokens, t: f64) -> Driver<A> {
+    /// A driver whose extra surfaces get plain scenes (estimated text).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(app: A, scene: Scene<A::Msg>, tokens: Tokens, t: f64) -> Driver<A> {
+        Driver::with_surfaces(app, scene, tokens, t, Box::new(Scene::new))
+    }
+
+    /// A driver whose extra surfaces get their scenes from `make`.
+    pub(crate) fn with_surfaces(
+        mut app: A,
+        scene: Scene<A::Msg>,
+        tokens: Tokens,
+        t: f64,
+        make: MakeScene<A::Msg>,
+    ) -> Driver<A> {
         let mut timers = Timers::default();
         let mut exit = false;
         app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit });
-        let mut d = Driver { app, scene, tokens, timers, exit, last_t: t, dirty: true, margin: None };
+        let extras = Extras::new(make);
+        let mut d = Driver { app, scene, tokens, timers, exit, last_t: t, dirty: true, margin: None, extras };
         let view = d.view();
         d.scene.apply(view, t);
+        d.extras.apply(d.app.surfaces(&d.tokens), t);
         d
     }
 
@@ -207,6 +234,7 @@ impl<A: App> Driver<A> {
         // A message that changes nothing drawn, such as a hover that only stops a timer,
         // costs no frame.
         self.dirty |= self.scene.apply(view, t);
+        self.extras.apply(self.app.surfaces(&self.tokens), t);
     }
 
     /// Fires the earliest timer if it is due at or before `t`. Returns whether one fired.
@@ -228,22 +256,36 @@ impl<A: App> Driver<A> {
     }
 
     pub(crate) fn pointer(&mut self, ev: &PointerEvent) {
+        self.pointer_on(None, ev);
+    }
+
+    /// A pointer event on the main surface (`None`) or on extra surface `extra`.
+    pub(crate) fn pointer_on(&mut self, extra: Option<usize>, ev: &PointerEvent) {
         self.fire_timers(ev.t);
         let mut ev = *ev;
         ev.t = ev.t.max(self.last_t);
         self.last_t = ev.t;
-        for msg in self.scene.pointer(&ev) {
+        let msgs = match extra {
+            None => self.scene.pointer(&ev),
+            // A timer above may have closed it.
+            Some(i) => match self.extras.list.get_mut(i) {
+                Some(e) => e.scene.pointer(&ev),
+                None => Vec::new(),
+            },
+        };
+        for msg in msgs {
             self.dispatch(msg, ev.t);
         }
     }
 
+    /// The main surface's scene moves at `t`.
     pub(crate) fn moving(&self, t: f64) -> bool {
         self.scene.next_wake(t).is_some()
     }
 
-    /// The app asked to exit and nothing moves any more at `t`.
+    /// The app asked to exit and nothing moves any more at `t`, on any surface.
     pub(crate) fn done(&self, t: f64) -> bool {
-        self.exit && !self.moving(t)
+        self.exit && !self.moving(t) && !self.extras.moving(t)
     }
 }
 

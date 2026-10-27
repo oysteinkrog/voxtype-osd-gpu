@@ -21,6 +21,7 @@ mod live;
 mod offline;
 #[cfg(feature = "preview")]
 pub mod preview;
+mod surfaces;
 
 pub use app::{channel, App, Cx, Inbox, Proxy, TimerId, Tokens};
 pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};
@@ -29,6 +30,7 @@ pub use export::{export, export_with, frame_hash, Export, ExportError, ExportRep
 #[cfg(feature = "wayland")]
 pub use live::run_overlay_with;
 pub use offline::{render_offline, render_offline_with, Input, OfflineError, Scenario};
+pub use surfaces::SurfaceView;
 
 pub use vo_host::{Edges, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind};
 pub use vo_scene as scene;
@@ -127,6 +129,24 @@ impl<M> Options<M> {
         if let Some(setup) = &self.renderer_setup {
             setup(r);
         }
+    }
+
+    /// Makes the scenes of extra surfaces (`App::surfaces`): shaped text over `fonts` and the
+    /// same motion settings as the main scene. A custom `text` layout is the main scene's
+    /// only, since it cannot be shared.
+    pub(crate) fn scene_maker(&self) -> surfaces::MakeScene<M>
+    where
+        M: 'static,
+    {
+        let (fonts, motion, reduced) = (self.fonts.clone(), self.default_motion, self.reduced_motion);
+        Box::new(move || {
+            let scene = vo_scene::Scene::new().with_default_motion(motion).with_reduced_motion(reduced);
+            if fonts.is_empty() {
+                scene
+            } else {
+                scene.with_text(Box::new(ShapedLayout::new(fonts.clone())))
+            }
+        })
     }
 
     /// The scene with the text layout these options ask for.

@@ -15,6 +15,20 @@ use crate::{Options, Tokens};
 /// Channel history kept by a live overlay, in seconds. Seeking is an offline need.
 const LIVE_RETENTION: f64 = 10.0;
 
+/// The host side of an extra surface (`App::surfaces`); its scene is in the driver.
+struct LiveExtra {
+    key: String,
+    id: SurfaceId,
+    /// Its own renderer: renderer state such as particles and pooled textures belongs to one
+    /// surface.
+    renderer: Renderer,
+    list: DisplayList,
+    region: Option<InputRegion>,
+    /// When a capped-rate animation on it wants its next frame.
+    paced: Option<f64>,
+    frames: u64,
+}
+
 struct Live<A: App> {
     pending: Option<(A, Options<A::Msg>)>,
     spec: OverlaySpec,
@@ -40,6 +54,7 @@ struct Live<A: App> {
     /// When a capped-rate animation (glass at 30 fps, FX08) wants its next frame.
     paced: Option<f64>,
     frames: u64,
+    extras: Vec<LiveExtra>,
     startup_logged: bool,
     finished: bool,
     error: Option<HostError>,
@@ -64,13 +79,116 @@ impl<A: App> Live<A> {
         }
         let next = d.timers.next_at();
         let paced = paced.filter(|&w| w > now);
-        host.wake_at(match (next, paced) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        });
-        if self.driver().done(now) && !self.driver().dirty {
+        let extra_paced = self.sync_extras(host, now);
+        let wake = [next, paced, extra_paced].into_iter().flatten().min_by(f64::total_cmp);
+        host.wake_at(wake);
+        if self.driver().done(now) && !self.driver().dirty && !self.driver().extras.list.iter().any(|e| e.dirty) {
             self.finish(host);
         }
+    }
+
+    /// Opens, closes and asks frames for the extra surfaces at `now`. Returns the earliest
+    /// capped-rate wake time among them that is still to come.
+    fn sync_extras(&mut self, host: &mut dyn HostCtl, now: f64) -> Option<f64> {
+        // Extra surfaces draw on the GPU only; they open once it is ready.
+        self.renderer.as_ref()?;
+        for key in self.driver().extras.take_closed(now) {
+            if let Some(i) = self.extras.iter().position(|x| x.key == key) {
+                let x = self.extras.remove(i);
+                host.close(x.id);
+                if let Some(d) = self.diag() {
+                    d.surface_closed(&x.key, now, x.frames);
+                }
+            }
+        }
+        let mut wake: Option<f64> = None;
+        let n = self.driver().extras.list.len();
+        for di in 0..n {
+            let (key, spec, dirty, next) = {
+                let e = &self.driver().extras.list[di];
+                (e.key.clone(), e.spec.clone(), e.dirty, e.scene.next_wake(now))
+            };
+            let li = match self.extras.iter().position(|x| x.key == key) {
+                Some(li) => li,
+                None => match self.open_extra(host, &key, &spec) {
+                    Ok(li) => li,
+                    Err(e) => {
+                        eprintln!("vo: cannot open surface {key}: {e}");
+                        continue;
+                    }
+                },
+            };
+            let x = &mut self.extras[li];
+            let paced_due = x.paced.is_some_and(|w| w <= now);
+            if dirty || paced_due || next.is_some_and(|w| w <= now) {
+                host.request_frame(x.id);
+            }
+            if let Some(w) = x.paced.filter(|&w| w > now) {
+                wake = Some(wake.map_or(w, |v: f64| v.min(w)));
+            }
+        }
+        wake
+    }
+
+    fn open_extra(&mut self, host: &mut dyn HostCtl, key: &str, spec: &OverlaySpec) -> Result<usize, HostError> {
+        let id = host.open(spec)?;
+        let gpu = host.gpu()?;
+        let options = self.options_rest.as_ref().expect("started");
+        let mut renderer = Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone());
+        options.configure(&mut renderer);
+        self.extras.push(LiveExtra {
+            key: key.to_string(),
+            id,
+            renderer,
+            list: DisplayList::default(),
+            region: None,
+            paced: None,
+            frames: 0,
+        });
+        let t = host.now();
+        if let Some(d) = self.diag() {
+            d.surface_opened(key, t);
+        }
+        Ok(self.extras.len() - 1)
+    }
+
+    /// The driver's index of the extra surface with host id `id`.
+    fn extra_index(&mut self, id: SurfaceId) -> Option<usize> {
+        let key = &self.extras.iter().find(|x| x.id == id)?.key;
+        let key = key.clone();
+        self.driver().extras.find(&key)
+    }
+
+    /// Draws a frame of an extra surface.
+    fn extra_frame(&mut self, host: &mut dyn HostCtl, frame: &Frame<'_>) {
+        let Some(li) = self.extras.iter().position(|x| x.id == frame.id) else { return };
+        let Some(di) = self.extra_index(frame.id) else { return };
+        let driver = self.driver.as_mut().expect("started");
+        let e = &mut driver.extras.list[di];
+        let x = &mut self.extras[li];
+        e.scene.sample_into(frame.t, &mut x.list);
+        if matches!(e.spec.input, InputMode::Regions(_)) {
+            let region = x.list.input_region();
+            if x.region.as_ref() != Some(&region) {
+                let _ = host.update(frame.id, SurfaceChange::Input(InputMode::Regions(region.clone())));
+                x.region = Some(region);
+            }
+        }
+        let mut target = Target::from_texture(frame.texture.clone());
+        x.renderer.render_at(&x.list, frame.scale, &mut target);
+        e.dirty = false;
+        x.frames += 1;
+        x.paced = None;
+        match e.scene.next_wake(frame.t) {
+            Some(w) if w > frame.t => x.paced = Some((w - 1.0 / 120.0).max(frame.t)),
+            Some(_) => host.request_frame(frame.id),
+            None => {}
+        }
+        let (key, n) = (x.key.clone(), x.frames - 1);
+        if let Some(d) = self.diag() {
+            d.surface_frame(&key, n, frame.t);
+        }
+        self.after_change(host);
     }
 
     fn finish(&mut self, host: &mut dyn HostCtl) {
@@ -90,7 +208,7 @@ impl<A: App> Live<A> {
         let mut scene = options.scene().with_retention(LIVE_RETENTION);
         let t = host.now();
         scene.set_viewport(t, self.spec.size, 1.0);
-        let mut driver = Driver::new(app, scene, self.tokens.clone(), t);
+        let mut driver = Driver::with_surfaces(app, scene, self.tokens.clone(), t, options.scene_maker());
         if let Some(m) = options.margin.reach(&driver.scene, t) {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
@@ -217,6 +335,22 @@ impl<A: App> HostApp for Live<A> {
                 self.host_asked = true;
             }
             HostEvent::Pointer(ev) if ev.surface == self.surface => self.driver().pointer(&ev),
+            HostEvent::Configured { id, t, size, scale } => {
+                if let Some(di) = self.extra_index(id) {
+                    let e = &mut self.driver().extras.list[di];
+                    e.scene.set_viewport(t, size, scale);
+                    e.dirty = true;
+                }
+            }
+            HostEvent::Pointer(ev) => {
+                if let Some(di) = self.extra_index(ev.surface) {
+                    self.driver().pointer_on(Some(di), &ev);
+                }
+            }
+            HostEvent::Closed { id, .. } if id != self.surface => {
+                // The compositor closed it; it opens again if the app still returns its key.
+                self.extras.retain(|x| x.id != id);
+            }
             HostEvent::Timer { t } => self.driver().fire_timers(t),
             HostEvent::External { t } => {
                 self.driver().fire_timers(t);
@@ -260,6 +394,10 @@ impl<A: App> HostApp for Live<A> {
     }
 
     fn frame(&mut self, host: &mut dyn HostCtl, frame: &Frame<'_>) {
+        if frame.id != self.surface {
+            self.extra_frame(host, frame);
+            return;
+        }
         self.cpu = None;
         self.first_gpu_frame.get_or_insert(frame.frame);
         self.sample(host, frame.id, frame.t);
@@ -311,6 +449,7 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
         blur: None,
         paced: None,
         frames: 0,
+        extras: Vec::new(),
         startup_logged: false,
         finished: false,
         error: None,
