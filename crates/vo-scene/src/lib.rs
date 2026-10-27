@@ -41,6 +41,8 @@
 //! - `roll`: digit roll, numbers whose changed digits roll like an odometer (FX04).
 //! - `status_icon`: the record, stop, spinner, check and X icon as one continuous shape.
 //! - `inline`: inline objects in live text: pause dots, gap waveforms, braces, chips.
+//! - `hearing`: the popup hears before it reads: pre-echo blobs per onset, pause ticks that
+//!   gather into a hollow comma, and the exhale in long quiet (MO-11, MO-12, MO-30).
 //! - `lines`: live text broken into lines whose look follows their age (teleprompter).
 //! - `swap`: word swap, a label that changes word by word, shared words sliding in place.
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
@@ -68,6 +70,7 @@ pub mod geom;
 pub mod glass;
 pub mod gpu;
 pub mod graticule;
+pub mod hearing;
 pub mod inline;
 pub mod input;
 pub mod inspect;
