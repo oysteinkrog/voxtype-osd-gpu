@@ -185,9 +185,10 @@ Preview modes (the first argument picks one):
       --check GOLDEN.png  compare with a golden sheet; exit 1 on a mismatch
   --compare REF.png [options]  how far frame T is from a mock-up, headless
       --at T              the frame (default 0)
-      --crop X,Y,W[,H]    the part of REF.png that shows the scene
+      --crop X,Y,W[,H]    the part of REF.png that shows the scene (or --ref-crop)
       --scale S           pixels per logical unit (default 1)
       --backdrop B        ref (default) or #rrggbb, under the stage's transparent parts
+                          (or --ref-backdrop)
       --tokens PATH       render with these tokens
       --out OUT.png       frame, reference and difference side by side
       --max-error PCT     exit 1 when the mean difference is above PCT percent
@@ -380,8 +381,9 @@ fn run_compare(mut preview: Preview, rest: &[String]) -> Result<i32, String> {
     let path = PathBuf::from(rest.first().filter(|s| !s.starts_with("--")).ok_or("--compare needs a reference PNG")?);
     load_tokens(preview.source.as_mut(), a.value("--tokens").map(PathBuf::from).as_ref())?;
     let size = preview.source.size();
-    let crop = a.value("--crop").map(|c| reference::parse_crop(c, size.w / size.h.max(1e-6))).transpose()?;
-    let backdrop = match a.value("--backdrop") {
+    // The window's spellings work too, so a command line can move from one mode to the other.
+    let crop = a.value("--crop").or(a.value("--ref-crop")).map(|c| reference::parse_crop(c, size.w / size.h.max(1e-6))).transpose()?;
+    let backdrop = match a.value("--backdrop").or(a.value("--ref-backdrop")) {
         Some(b) => reference::Backdrop::parse(b).ok_or_else(|| format!("backdrop '{b}': give ref or #rrggbb"))?,
         None => reference::Backdrop::Reference,
     };
