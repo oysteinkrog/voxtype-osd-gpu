@@ -81,9 +81,9 @@ impl Default for LatticeLook {
     fn default() -> LatticeLook {
         LatticeLook {
             strands: 4,
-            bow_per_sec: 18.0,
-            bow: (1.5, 9.0),
-            width: (0.5, 1.6),
+            bow_per_sec: 30.0,
+            bow: (2.0, 14.0),
+            width: (0.6, 2.2),
             color: Color::rgba(0.82, 0.86, 0.9, 0.55),
             accent: Color::hex(0x2de2c8, 1.0),
             drop: 7.0,
@@ -181,7 +181,8 @@ impl LatticeLook {
                 // Spread from -1 to 1; outer strands are thinner and fainter.
                 let f = if s == 1 { 0.0 } else { 2.0 * k as f32 / (s - 1) as f32 - 1.0 };
                 let edge = 1.0 - 0.45 * f.abs();
-                let c = lens(node(a), node(b), bow * f, 16).trim(0.0, grow);
+                let c = lens(node(a), node(b), bow * f, 16);
+                let c = c.trim(0.0, grow * c.length());
                 p.stroke(&c, &StrokeStyle::solid(width * edge, color.fade(edge)));
             }
         }
@@ -193,8 +194,9 @@ impl LatticeLook {
             }
             let grow = if reduced { 1.0 } else { ease(((t - words[c].at) / (2.0 * self.draw_on)).clamp(0.0, 1.0)) };
             let bow = -(self.rest_bow(words[c].pause) + self.rest_bow(words[w[1]].pause)) * tension;
-            let arc = lens(node(a), node(c), bow, 20).trim(0.0, grow);
-            p.stroke(&arc, &StrokeStyle::solid(0.5, self.color.fade(0.35)));
+            let arc = lens(node(a), node(c), bow, 20);
+            let arc = arc.trim(0.0, grow * arc.length());
+            p.stroke(&arc, &StrokeStyle::solid(0.6, self.color.fade(0.5)));
         }
         // Nodes and their dashed drop lines.
         for &i in &shown {
@@ -269,10 +271,7 @@ fn lens(a: Point, b: Point, bow: f32, n: usize) -> Contour {
             let u = i as f32 / n as f32;
             let v = 1.0 - u;
             let (k0, k1, k2, k3) = (v * v * v, 3.0 * v * v * u, 3.0 * v * u * u, u * u * u);
-            Point::new(
-                k0 * a.x + k1 * c1.x + k2 * c2.x + k3 * b.x,
-                k0 * a.y + k1 * c1.y + k2 * c2.y + k3 * b.y,
-            )
+            Point::new(k0 * a.x + k1 * c1.x + k2 * c2.x + k3 * b.x, k0 * a.y + k1 * c1.y + k2 * c2.y + k3 * b.y)
         })
         .collect();
     Contour::polyline(&pts, false)
@@ -326,8 +325,7 @@ mod tests {
     #[test]
     fn drawing_is_pure_in_time_and_hides_words_not_yet_arrived() {
         let l = LatticeLook::default();
-        let words: Vec<LatticeWord> =
-            (0..3).map(|i| LatticeWord { pause: 0.3, loud: 0.5, at: i as f64 }).collect();
+        let words: Vec<LatticeWord> = (0..3).map(|i| LatticeWord { pause: 0.3, loud: 0.5, at: i as f64 }).collect();
         let nodes: Vec<Anchor> =
             (0..3).map(|i| Anchor { x: 60.0 * i as f32, width: 40.0, baseline: 20.0, line: 0 }).collect();
         let count = |t: f64| {

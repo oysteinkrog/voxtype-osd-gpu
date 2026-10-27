@@ -68,10 +68,10 @@ impl Default for DepthStack {
         DepthStack {
             depth: 3,
             parallax: vec![1.0, 0.72, 0.48, 0.28],
-            step_z: 70.0,
-            step_rise: 26.0,
-            step_x: 10.0,
-            turn: -0.42,
+            step_z: 110.0,
+            step_rise: 46.0,
+            step_x: 16.0,
+            turn: -0.7,
             ink: vec![0.62, 0.42, 0.26],
             blur: 0.5,
             spring_secs: 0.22,
@@ -191,12 +191,8 @@ impl DepthStack {
             .size(sheet.w, sheet.h)
             .layout(|s| {
                 s.position = taffy::Position::Absolute;
-                s.inset = taffy::Rect {
-                    left: length(0.0),
-                    top: length(size.h - sheet.h),
-                    right: auto(),
-                    bottom: auto(),
-                };
+                s.inset =
+                    taffy::Rect { left: length(0.0), top: length(size.h - sheet.h), right: auto(), bottom: auto() };
             })
             .translate_z(p.z)
             .rotate_y(p.turn)

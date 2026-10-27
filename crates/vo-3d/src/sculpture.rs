@@ -59,9 +59,9 @@ pub struct SculptLook {
 impl Default for SculptLook {
     fn default() -> SculptLook {
         SculptLook {
-            color: Color::hex(0xc9ced8, 1.0),
-            emissive: 0.05,
-            shear: (0.35, 0.55),
+            color: Color::hex(0x7d8696, 1.0),
+            emissive: 0.0,
+            shear: (0.3, 0.45),
             light: Light {
                 dir: Vec3::new(0.35, -0.9, -0.45),
                 color: Color::WHITE,
@@ -152,7 +152,8 @@ impl Sculpture {
         let mut s = self.state.lock().unwrap();
         let mut old: HashMap<u64, Body> = s.bodies.drain(..).map(|b| (b.letter.key, b)).collect();
         let spring = Spring::critical_to_98(self.look.grow_secs);
-        let channel = |v: f32, spring: Spring| Channel::new(t, v as f64, spring).with_rest(Rest::PIXELS).with_retention(4.0);
+        let channel =
+            |v: f32, spring: Spring| Channel::new(t, v as f64, spring).with_rest(Rest::PIXELS).with_retention(4.0);
         let mut until = s.until;
         for l in letters {
             let mut body = old.remove(&l.key).unwrap_or_else(|| Body {
@@ -185,9 +186,10 @@ impl Sculpture {
     /// Lays every letter flat from `t`, left to right across `flatten_spread` seconds.
     pub fn flatten(&self, t: f64) {
         let mut s = self.state.lock().unwrap();
-        let (lo, hi) = s.bodies.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| {
-            (lo.min(b.letter.pos.x), hi.max(b.letter.pos.x))
-        });
+        let (lo, hi) = s
+            .bodies
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| (lo.min(b.letter.pos.x), hi.max(b.letter.pos.x)));
         let span = (hi - lo).max(1.0);
         let mut until = s.until;
         for b in &mut s.bodies {
@@ -209,7 +211,8 @@ impl Sculpture {
     fn frame_at(&self, t: f64, size: Size) -> Frame3d {
         let s = self.state.lock().unwrap();
         let (sx, sy) = self.look.shear;
-        let material = Material { color: self.look.color, emissive: self.look.emissive, specular: 0.5, shininess: 40.0 };
+        let material =
+            Material { color: self.look.color, emissive: self.look.emissive, specular: 0.5, shininess: 40.0 };
         let meshes = s
             .bodies
             .iter()
@@ -223,8 +226,11 @@ impl Sculpture {
                 }
                 // Unit glyph (em, y up, z from -0.5 to 0.5) to a body `d` deep behind z = 0,
                 // its back face moved across and up by the shear, at the glyph's pen.
-                let body = Mat4::translation(Vec3::new(0.0, 0.0, -0.5)).then(&Mat4::scale(Vec3::new(l.size, l.size, d)));
-                let shear = Mat4 { cols: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [-sx, -sy, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]] };
+                let body =
+                    Mat4::translation(Vec3::new(0.0, 0.0, -0.5)).then(&Mat4::scale(Vec3::new(l.size, l.size, d)));
+                let shear = Mat4 {
+                    cols: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [-sx, -sy, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                };
                 let at = Mat4::translation(Vec3::new(px - 0.5 * size.w, 0.5 * size.h - py, 0.0));
                 Some(MeshDraw { mesh: MeshId(mesh), model: body.then(&shear).then(&at), material })
             })
