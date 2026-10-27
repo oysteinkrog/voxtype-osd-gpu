@@ -88,6 +88,22 @@ pub fn extrude_text(face: &Face, text: &str, size: f32, depth: f32) -> Vec<Glyph
     glyphs
 }
 
+/// One glyph of `face` extruded to `depth` (along z from `-depth / 2` to `depth / 2`), at
+/// one world unit per em, with its pen origin at the origin and y up. `None` for a glyph
+/// without ink.
+pub fn extrude_glyph(face: &Face, glyph: u32, depth: f32) -> Option<Mesh> {
+    let k = 1.0 / face.units_per_em() as f32;
+    let font = face.skrifa();
+    let outline = font.outline_glyphs().get(GlyphId::new(glyph))?;
+    let mut pen = LyonPen { builder: Path::builder(), open: false, k, ox: 0.0, oy: 0.0 };
+    outline.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
+    if pen.open {
+        pen.builder.end(true);
+    }
+    let mesh = Mesh::extrude(&pen.builder.build(), depth, 0.003);
+    (!mesh.vertices.is_empty()).then_some(mesh)
+}
+
 /// An extruded word whose letters turn in and out on springs, one channel per letter. The
 /// channel runs from 0 (edge-on, lowered, small) to 1 (facing the camera, in place). Turns are
 /// events at a time, so sampling any `t` gives the same draws.

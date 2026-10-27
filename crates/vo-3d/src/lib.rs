@@ -14,6 +14,8 @@
 //!   on the stage camera.
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
+//! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
+//!   loudness (MO-88).
 //! - `timer`: GPU time per stage from timestamp queries.
 //!
 //! Everything is a pure function of `t` and seeds: point clouds are evaluated in closed form
@@ -28,6 +30,7 @@ pub mod mesh;
 pub mod painter;
 pub mod readback;
 pub mod render;
+pub mod sculpture;
 pub mod sdf;
 pub mod stack;
 pub mod text3d;
@@ -44,7 +47,8 @@ pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use painter::{install, item, Item3d, Painter3d};
 pub use render::{ExtraDraw, FieldBinding, Output, PassInfo, Renderer3d};
+pub use sculpture::{Letter, SculptLook, Sculpture};
 pub use sdf::{hero, HeroFrame, HeroItem, HeroLook, HeroPainter, HeroShape, HeroSource};
 pub use stack::{Layers, Stack, TextPlane};
-pub use text3d::{extrude_text, GlyphMesh, TurningWord};
+pub use text3d::{extrude_glyph, extrude_text, GlyphMesh, TurningWord};
 pub use timer::GpuTimer;
