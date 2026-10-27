@@ -149,9 +149,7 @@ impl FontRegistry {
         if let Some(&id) = fb.assets.get(asset.name) {
             return Ok(id);
         }
-        let id = self
-            .add_face(Arc::new(asset.bytes), 0)
-            .map_err(|e| FontError::Parse(PathBuf::from(asset.name), e))?;
+        let id = self.add_face(Arc::new(asset.bytes), 0).map_err(|e| FontError::Parse(PathBuf::from(asset.name), e))?;
         fb.assets.insert(asset.name, id);
         Ok(id)
     }

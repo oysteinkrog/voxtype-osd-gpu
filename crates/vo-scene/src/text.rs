@@ -375,6 +375,33 @@ impl ShapedLayout {
     }
 }
 
+/// Autofit (FX-049): the largest of the sizes `style.size`, `style.size - step`, and so on
+/// down to `min_size`, at which `text` fits in `room` (no taller, and no line wider), with
+/// the line height and tracking scaled with it. Steps keep the size from creeping by tiny
+/// amounts as text grows. When nothing fits, the style at `min_size`, which then overflows
+/// (or ellipsises, with `style.max_lines` and `style.ellipsis`).
+pub fn fit_size(
+    layout: &dyn TextLayout,
+    text: &str,
+    style: &TextStyle,
+    room: Size,
+    min_size: f32,
+    step: f32,
+) -> TextStyle {
+    let min_size = min_size.min(style.size);
+    let step = step.max(0.25);
+    let at = |size: f32| {
+        let k = size / style.size;
+        TextStyle { size, line_height: style.line_height * k, tracking: style.tracking * k, ..*style }
+    };
+    let fits = |st: &TextStyle| {
+        let s = layout.layout(text, st, Some(room.w));
+        s.size.h <= room.h + FIT_TOLERANCE && s.size.w <= room.w + FIT_TOLERANCE
+    };
+    let n = ((style.size - min_size) / step).floor() as i32;
+    (0..=n).map(|i| at(style.size - i as f32 * step)).find(fits).unwrap_or_else(|| at(min_size))
+}
+
 /// Characters that belong to the one before them and stay in its run: combining marks,
 /// the kana voicing marks, joiners and variation selectors.
 fn joins(c: char) -> bool {
@@ -750,6 +777,26 @@ mod tests {
         let across = t.layout("ー", &style, None).glyphs[0].glyph;
         let down = t.vertical("ー", &style).glyphs[0].glyph;
         assert_ne!(across, down);
+    }
+
+    #[test]
+    fn fit_size_steps_down_until_the_text_fits() {
+        // Estimate: 0.55 em per character, 0.3 em per space.
+        let t = EstimateText::default();
+        let style = TextStyle::new(0, 40.0, 48.0);
+        let room = Size::new(300.0, 60.0);
+        // Short text fits at full size.
+        assert_eq!(fit_size(&t, "short", &style, room, 20.0, 2.0).size, 40.0);
+        // Four words of four letters take 9.7 em on one line, and two lines take 2.4 em of
+        // height, so only one line fits: at most 300 / 9.7 = 30.9, the step 30.
+        let fitted = fit_size(&t, "aaaa bbbb cccc dddd", &style, room, 20.0, 2.0);
+        assert_eq!(fitted.size, 30.0);
+        assert!((fitted.line_height - 36.0).abs() < 1e-3);
+        let s = t.layout("aaaa bbbb cccc dddd", &fitted, Some(room.w));
+        assert!(s.size.h <= room.h && s.size.w <= room.w);
+        // Too much text: the minimum size.
+        let long = "aaaa ".repeat(40);
+        assert_eq!(fit_size(&t, &long, &style, room, 20.0, 2.0).size, 20.0);
     }
 
     #[test]

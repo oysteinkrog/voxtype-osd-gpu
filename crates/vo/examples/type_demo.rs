@@ -51,7 +51,9 @@ fn view(fonts: &FontRegistry) -> Element<()> {
     let mut col = Element::column("col")
         .pad(14.0)
         .gap(3.0)
-        .child(Element::label("head", "音声入力 VOICE DICTATION").text_style(style("condensed-bold", 32.0)).color(orange))
+        .child(
+            Element::label("head", "音声入力 VOICE DICTATION").text_style(style("condensed-bold", 32.0)).color(orange),
+        )
         .child(
             Element::label("body", "録音中 LISTENING · Blåbærsyltetøy på Ærø")
                 .text_style(style("condensed", 20.0))
