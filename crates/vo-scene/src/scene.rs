@@ -614,6 +614,7 @@ impl<M> Scene<M> {
                 || (n.alive(t)
                     && match &n.kind {
                         Kind::Wave(w) => w.moving(t),
+                        Kind::Bars(b) => b.moving(t),
                         Kind::Progress(p) => p.moving(),
                         Kind::Dots(d) => d.source.moving(t),
                         Kind::Emitter(_) => true,
@@ -1324,6 +1325,10 @@ impl<M> Scene<M> {
                         out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * bar.w), Paint::solid(c)));
                     }
                 }
+                None
+            }
+            Kind::Bars(b) => {
+                self.timed_shapes(items, out, |v| b.shapes(rect, t, alpha, v));
                 None
             }
             Kind::Wave(w) => {

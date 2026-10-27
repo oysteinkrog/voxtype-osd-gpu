@@ -9,6 +9,7 @@
 //! - `flow`: live text motion: words spring to each new layout, revisions, caret.
 //! - `input`: hit testing at the event's time and pointer messages.
 //! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
+//! - `bars`: a bar-strip waveform over the level history, with settle and a playhead.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
@@ -23,6 +24,7 @@
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
+pub mod bars;
 pub mod canvas;
 pub mod display;
 pub mod dots;

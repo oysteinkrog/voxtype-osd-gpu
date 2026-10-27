@@ -82,3 +82,52 @@ fn status_icon_story_golden() {
     let img = sheet("story-icon", 64.0, 64.0, rows);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+/// Speech-like levels at 100 a second: syllables in bursts with short pauses.
+fn speech(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / 100.0;
+            let syllable = (t * 21.0).sin().abs();
+            let phrase = (0.5 + 0.5 * (t * 2.3).sin()).powf(0.7);
+            let pause = if (t * 0.9).fract() > 0.82 { 0.05 } else { 1.0 };
+            (syllable * phrase * pause * 0.95).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+fn bar_frames(bars: Arc<vo_scene::bars::Bars>, times: &[f64]) -> Vec<Frame> {
+    times
+        .iter()
+        .map(|&t| {
+            let bars = bars.clone();
+            Arc::new(move |r: Rect, p: &mut Painter| {
+                let mut v = Vec::new();
+                bars.shapes(Rect::new(r.x + 8.0, r.y + 4.0, r.w - 16.0, r.h - 8.0), t, 1.0, &mut v);
+                for s in v {
+                    p.shape(s);
+                }
+            }) as Frame
+        })
+        .collect()
+}
+
+#[test]
+fn bars_golden() {
+    use vo_scene::bars::Bars;
+    let levels: Arc<[f32]> = Arc::from(speech(600).as_slice());
+    let accent = Color::hex(0x7dd3fc, 1.0);
+    let live = Bars { levels: levels.clone(), newest_at: 6.0, accent, ..Bars::default() };
+    let settle = Bars { settle: Some(6.0), ..live.clone() };
+    let played = |p: f32| Arc::new(Bars { playhead: Some(p), ..live.clone() });
+    let rows = vec![
+        // Live: the strip scrolls left, bars rise fast and fall slowly.
+        bar_frames(Arc::new(live.clone()), &[4.0, 4.5, 5.0, 5.5, 6.0]),
+        // Finishing: heights fall to a dotted line over 400 ms.
+        bar_frames(Arc::new(settle), &[6.0, 6.1, 6.2, 6.3, 6.4]),
+        // A playhead: accent on the left, grey on the right, split inside a bar.
+        [0.1, 0.33, 0.5, 0.71, 0.95].iter().flat_map(|&p| bar_frames(played(p), &[6.0])).collect(),
+    ];
+    let img = sheet("story-bars", 200.0, 48.0, rows);
+    support::check(&img, Tolerance::default()).unwrap();
+}

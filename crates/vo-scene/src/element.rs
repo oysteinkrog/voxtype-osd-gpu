@@ -17,6 +17,7 @@ use taffy::prelude::{
 use vo_core::spring::Spring;
 use vo_core::words::Word;
 
+use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
@@ -423,6 +424,8 @@ pub(crate) enum Kind {
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
+    /// A bar-strip waveform over the level history, filling the box (`crate::bars`).
+    Bars(Bars),
     /// A progress bar filling the box.
     Progress(Progress),
     /// A dot grid filling the box.
@@ -606,6 +609,12 @@ impl<M> Element<M> {
     /// A filled waveform that fills the element's box and scrolls by the frame time.
     pub fn wave(key: impl Into<Key>, wave: Wave) -> Element<M> {
         Element::new(key, Kind::Wave(wave), taffy::Style::default())
+    }
+
+    /// A bar-strip waveform filling the box (`crate::bars`). Give it a size: it has no
+    /// content size.
+    pub fn bars(key: impl Into<Key>, bars: Bars) -> Element<M> {
+        Element::new(key, Kind::Bars(bars), taffy::Style::default())
     }
 
     /// A progress bar that fills the element's box, with an indeterminate sweep when the
