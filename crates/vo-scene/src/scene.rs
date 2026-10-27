@@ -723,6 +723,9 @@ impl<M> Scene<M> {
                         Kind::StrokePath(a) => a.head.is_some(),
                         Kind::Frame(f) => f.moving(),
                         Kind::Spectrum(s) => s.moving(self.signals.as_ref(), t),
+                        Kind::LiveText { .. } => {
+                            n.live.magnet_moving(self.signals.as_ref().map(|c| c.get()).as_deref(), t)
+                        }
                         _ => false,
                     })
         });
@@ -1565,6 +1568,14 @@ impl<M> Scene<M> {
                             word: gh.word,
                             color: color.fade(k),
                         });
+                    }
+                }
+                // Magnetic caret (MO-89): the field around the caret.
+                let signals = self.signals.as_ref().map(|c| c.get());
+                if let Some((m, bar, f)) = n.live.magnet_field(signals.as_deref(), t) {
+                    for shape in m.shapes(bar, style.size, f, alpha, origin, z) {
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        out.shapes.push(shape);
                     }
                 }
                 // Letter physics (MO-83): a faint motion vector on each letter in flight.

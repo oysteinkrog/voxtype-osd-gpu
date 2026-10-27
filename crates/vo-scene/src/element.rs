@@ -1258,6 +1258,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the magnetic caret (MO-89). New words snap to the caret along their line,
+    /// and the caret draws a field whose strength follows the voice level and which relaxes
+    /// into concentric rings in silence. Needs a `caret`. See [`crate::flow::magnet`].
+    pub fn magnetic_caret(mut self, m: crate::flow::magnet::Magnet) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.magnet = Some(m),
+            _ => debug_assert!(false, "magnetic_caret on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: letter physics (MO-83). New letters drop into the line as small rigid
     /// bodies, bounce, nudge their neighbours and lock into place, within the reading-line
     /// envelope on the newest line. See [`crate::flow::letter_physics`].
