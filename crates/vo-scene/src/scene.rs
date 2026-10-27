@@ -23,9 +23,8 @@ use crate::display::{
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::dots::Dots;
-use crate::element::{Element, Handlers, Key, Kind, MarkShape, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
+use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
 use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
-use crate::final_pass::{self, FinalPass};
 use crate::flow::{Flow, FlowInput};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::{Glass, GlassInstance};
@@ -115,8 +114,6 @@ pub(crate) struct Node<M> {
     pub words: Vec<WordAnim>,
     /// Live text: when a word last came or went.
     pub words_at: f64,
-    /// Live text: the current-word mark's motion.
-    pub mark: Option<MarkAnim>,
     /// Live text: where each word is on screen, sprung toward its laid-out place.
     pub live: Flow,
     /// The motion of a property no `.motion()` call names: the scene's default.
@@ -142,187 +139,12 @@ pub(crate) struct WordAnim {
     pub blur: Channel,
     pub dissolve: Channel,
     pub wipe: Channel,
-    /// 1 while the word holds the current-word role and its mark has an accent colour.
-    pub accent: Channel,
-    /// When the final pass reached the word, for its brighten pulse. Can be ahead of the
-    /// time it was set, for words the pass reached together.
-    pub passed: Option<f64>,
 }
 
 impl WordAnim {
-    fn channels(&self) -> [&Channel; 7] {
-        [&self.opacity, &self.dx, &self.dy, &self.blur, &self.dissolve, &self.wipe, &self.accent]
+    fn channels(&self) -> [&Channel; 6] {
+        [&self.opacity, &self.dx, &self.dy, &self.blur, &self.dissolve, &self.wipe]
     }
-}
-
-/// How fast the accent colour leaves a word and reaches the next.
-const ACCENT: Spring = Spring::critical_to_98(0.150);
-/// Both edges of a box or underline mark.
-const MARK_MOVE: Spring = Spring::critical_to_98(0.180);
-/// Karaoke: the leading edge reaches the next word first, the trailing edge follows.
-const MARK_LEAD: Spring = Spring::critical_to_98(0.070);
-const MARK_TRAIL: Spring = Spring::critical_to_98(0.220);
-
-/// Live text: the current-word mark. The live piece follows the current word's sprung box
-/// (`Flow::word_bounds`), so it moves with the word when the text reflows. On a hop each
-/// edge blends from where the mark was drawn to the new word's box, by `p0` and `p1` (0 to
-/// 1). Pieces still running off lines the mark left are kept in `gone`.
-pub(crate) struct MarkAnim {
-    word: Option<u32>,
-    /// The current word's baseline in the last layout, to tell a line jump.
-    line: f32,
-    /// Where the edges start a hop from.
-    from: (f32, f32),
-    /// The live piece is clipped to this range: the new line's start while it enters there.
-    clip: (f32, f32),
-    p0: Channel,
-    p1: Channel,
-    opacity: Channel,
-    gone: Vec<MarkPiece>,
-}
-
-/// `Flow::word_bounds` puts a word's top this many ems above its baseline.
-const BOUNDS_ASCENT: f32 = 0.78;
-const NO_CLIP: (f32, f32) = (f32::NEG_INFINITY, f32::INFINITY);
-
-impl MarkAnim {
-    fn channels(&self) -> impl Iterator<Item = &Channel> {
-        let gone = self.gone.iter().flat_map(|p| [&p.x0, &p.x1, &p.opacity]);
-        gone.chain([&self.p0, &self.p1, &self.opacity])
-    }
-
-    /// The live piece at `t` as `(baseline, x0, x1)`, or `None` when no word holds the role.
-    fn live_span(&self, flow: &Flow, t: f64, size: f32) -> Option<(f32, f32, f32)> {
-        let b = flow.word_bounds(self.word?, t, size)?;
-        let (p0, p1) = (self.p0.value(t) as f32, self.p1.value(t) as f32);
-        let x0 = self.from.0 + (b.x - self.from.0) * p0;
-        let x1 = self.from.1 + (b.x + b.w - self.from.1) * p1;
-        Some((b.y + BOUNDS_ASCENT * size, x0.max(self.clip.0), x1.min(self.clip.1)))
-    }
-
-    /// The pieces to draw at `t`: `(baseline, x0, x1, opacity)`.
-    fn pieces(&self, flow: &Flow, t: f64, size: f32) -> Vec<(f32, f32, f32, f32)> {
-        let mut v: Vec<_> = self.gone.iter().filter_map(|p| p.drawn(t)).collect();
-        let k = self.opacity.value(t).clamp(0.0, 1.0) as f32;
-        if let Some((baseline, x0, x1)) = self.live_span(flow, t, size) {
-            if k > 0.0 && x1 - x0 > 0.25 {
-                v.push((baseline, x0, x1, k));
-            }
-        }
-        v
-    }
-}
-
-/// A piece of the mark left behind on a line, drawn from `x0` to `x1` clipped to `lo..hi`.
-struct MarkPiece {
-    baseline: f32,
-    lo: f32,
-    hi: f32,
-    x0: Channel,
-    x1: Channel,
-    opacity: Channel,
-}
-
-impl MarkPiece {
-    fn drawn(&self, t: f64) -> Option<(f32, f32, f32, f32)> {
-        let k = self.opacity.value(t).clamp(0.0, 1.0) as f32;
-        let (x0, x1) = ((self.x0.value(t) as f32).max(self.lo), (self.x1.value(t) as f32).min(self.hi));
-        (k > 0.0 && x1 - x0 > 0.25).then_some((self.baseline, x0, x1, k))
-    }
-
-    fn settled(&self, t: f64) -> bool {
-        [&self.x0, &self.x1, &self.opacity].iter().all(|c| c.is_settled(t))
-    }
-}
-
-/// The springs for the left and right edges of a mark moving right or left. With `lead` the
-/// edge in front gets there first and the other follows; otherwise both move together.
-fn edge_springs(right: bool, lead: bool) -> (Spring, Spring) {
-    let (front, back) = if lead { (MARK_LEAD, MARK_TRAIL) } else { (MARK_MOVE, MARK_MOVE) };
-    if right {
-        (back, front)
-    } else {
-        (front, back)
-    }
-}
-
-/// A live text's final pass, its word boxes `(id, x0, x1, baseline)` and its lines.
-type PassLines = (FinalPass, Vec<(u32, f32, f32, f32)>, Vec<final_pass::ReadLine>);
-
-/// Byte offset where each word starts in the joined text, with its id.
-fn word_starts(words: &[vo_core::words::Word]) -> Vec<(u32, u32)> {
-    let mut starts = Vec::with_capacity(words.len());
-    let mut at = 0u32;
-    for w in words {
-        starts.push((at, w.id));
-        at += w.text.len() as u32 + 1;
-    }
-    starts
-}
-
-/// The id of the word a glyph of `cluster` belongs to, or `NO_WORD`.
-fn word_at(starts: &[(u32, u32)], cluster: u32) -> u32 {
-    if cluster == ELLIPSIS_CLUSTER {
-        return NO_WORD;
-    }
-    let i = starts.partition_point(|(s, _)| *s <= cluster);
-    if i == 0 {
-        NO_WORD
-    } else {
-        starts[i - 1].1
-    }
-}
-
-/// Each word's ink extent on its first line, `(id, x0, x1, baseline)`, in layout order.
-fn word_boxes(shaped: &ShapedText, starts: &[(u32, u32)]) -> Vec<(u32, f32, f32, f32)> {
-    let mut out: Vec<(u32, f32, f32, f32)> = Vec::new();
-    for g in &shaped.glyphs {
-        let id = word_at(starts, g.cluster);
-        if id == NO_WORD {
-            continue;
-        }
-        let (x0, x1) = (g.pos.x, g.pos.x + g.advance);
-        match out.iter_mut().find(|b| b.0 == id) {
-            Some(b) if b.3 == g.pos.y => (b.1, b.2) = (b.1.min(x0), b.2.max(x1)),
-            Some(_) => {}
-            None => out.push((id, x0, x1, g.pos.y)),
-        }
-    }
-    out
-}
-
-/// The extent of the words on the line at `baseline`.
-fn line_extent(boxes: &[(u32, f32, f32, f32)], baseline: f32) -> (f32, f32) {
-    boxes
-        .iter()
-        .filter(|b| b.3 == baseline)
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| (lo.min(b.1), hi.max(b.2)))
-}
-
-/// Live text with a final pass and final words: each word the pass has reached, by the
-/// node's last layout, takes its final text.
-fn release_finals<M>(n: &Node<M>, kind: &mut Kind) {
-    let Kind::LiveText { words, pass: Some(pass), finals, .. } = kind else { return };
-    let Kind::LiveText { words: old, .. } = &n.kind else { return };
-    if finals.is_empty() {
-        return;
-    }
-    let boxes = word_boxes(&n.shaped, &word_starts(old));
-    let lines = final_pass::read_lines(&boxes);
-    let pos = pass.at * final_pass::total(&lines);
-    for w in words.iter_mut() {
-        let reached =
-            boxes.iter().find(|b| b.0 == w.id).is_some_and(|b| final_pass::reading_at(&lines, b.3, b.1) < pos);
-        if let Some(f) = finals.iter().find(|f| f.id == w.id).filter(|_| reached) {
-            w.text.clone_from(&f.text);
-        }
-    }
-}
-
-/// `a` mixed toward `b` by `k`, straight alpha.
-fn mix(a: Color, b: Color, k: f32) -> Color {
-    let l = |x: f32, y: f32| x + (y - x) * k;
-    Color::rgba(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b), l(a.a, b.a))
 }
 
 impl<M> Node<M> {
@@ -441,8 +263,7 @@ impl<M> Node<M> {
 
     fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| w.channels());
-        let mark = self.mark.iter().flat_map(|m| m.channels());
-        let chans = self.chans.iter().map(|(_, c)| c).chain(words).chain(mark).map(|c| c.settled_at());
+        let chans = self.chans.iter().map(|(_, c)| c).chain(words).map(|c| c.settled_at());
         chans.fold(self.typo.settled_at(), f64::max)
     }
 
@@ -493,8 +314,6 @@ impl<M> Node<M> {
                         blur: a.blur.clone(),
                         dissolve: a.dissolve.clone(),
                         wipe: a.wipe.clone(),
-                        accent: a.accent.clone(),
-                        passed: a.passed,
                     }
                 }
                 None => WordAnim {
@@ -507,8 +326,6 @@ impl<M> Node<M> {
                     blur: chan(0.0, fade, Rest::PIXELS),
                     dissolve: chan(0.0, fade, Rest::UNIT),
                     wipe: chan(0.0, fade, Rest::UNIT),
-                    accent: chan(0.0, ACCENT, Rest::UNIT),
-                    passed: None,
                 },
             };
             if let Some(([o, x, y], [b, d, w])) = start {
@@ -537,181 +354,6 @@ impl<M> Node<M> {
         }
         self.words = next;
         changed || typo_changed
-    }
-
-    /// Live text: moves the current-word accent and mark to the word that holds the role now,
-    /// using the last layout. Returns whether anything started to move.
-    fn sync_mark(&mut self, t: f64, retention: f64) -> bool {
-        let Kind::LiveText { words, style, current, mark, .. } = &self.kind else {
-            return self.mark.take().is_some();
-        };
-        let current = current.filter(|id| words.iter().any(|w| w.id == *id));
-        let mark = mark.as_deref();
-        let tint = mark.is_some_and(|m| m.tints());
-        let mut changed = false;
-        for w in &mut self.words {
-            let on = if tint && Some(w.id) == current { 1.0 } else { 0.0 };
-            if w.accent.target() != on {
-                w.accent.retarget(t, on);
-                changed = true;
-            }
-        }
-        let Some(mark) = mark else {
-            return changed | self.mark.take().is_some();
-        };
-        let lead = mark.shape == MarkShape::Karaoke && !self.reduced;
-        let reduced = self.reduced;
-        let size = style.size;
-        let boxes = word_boxes(&self.shaped, &word_starts(words));
-        let target = current.and_then(|id| boxes.iter().find(|b| b.0 == id)).copied();
-        let chan =
-            |v: f32, s: Spring, rest: Rest| Channel::new(t, v as f64, s).with_rest(rest).with_retention(retention);
-        let m = self.mark.get_or_insert_with(|| MarkAnim {
-            word: None,
-            line: 0.0,
-            from: (0.0, 0.0),
-            clip: NO_CLIP,
-            p0: chan(1.0, MARK_MOVE, Rest::UNIT),
-            p1: chan(1.0, MARK_MOVE, Rest::UNIT),
-            opacity: chan(0.0, ACCENT, Rest::UNIT),
-            gone: Vec::new(),
-        });
-        m.gone.retain(|p| !p.settled(t));
-        if target.map(|b| b.0) == m.word {
-            // The same word: the live piece follows its box; only the line may change.
-            if let Some(b) = target {
-                m.line = b.3;
-            }
-            if m.p0.is_settled(t) && m.p1.is_settled(t) {
-                m.clip = NO_CLIP;
-            }
-            return changed;
-        }
-        let drawn = m.live_span(&self.live, t, size);
-        let k = m.opacity.value(t).clamp(0.0, 1.0) as f32;
-        let piece = |baseline: f32, (lo, hi): (f32, f32), (x0, x1): (f32, f32)| MarkPiece {
-            baseline,
-            lo,
-            hi,
-            x0: chan(x0, MARK_MOVE, Rest::PIXELS),
-            x1: chan(x1, MARK_MOVE, Rest::PIXELS),
-            opacity: chan(k, MARK_TRAIL, Rest::UNIT),
-        };
-        match (drawn, target) {
-            (None, None) => m.word = None,
-            (Some((baseline, x0, x1)), None) => {
-                // No word holds the role: the mark fades where it is.
-                let mut p = piece(baseline, NO_CLIP, (x0, x1));
-                p.opacity.set_spring(ACCENT);
-                p.opacity.retarget(t, 0.0);
-                m.gone.push(p);
-                m.word = None;
-                m.opacity.snap(t, 0.0);
-            }
-            (None, Some((id, x0, x1, line))) => {
-                // Nothing was showing: fade in on the word.
-                (m.word, m.line, m.from, m.clip) = (Some(id), line, (x0, x1), NO_CLIP);
-                m.p0.snap(t, 1.0);
-                m.p1.snap(t, 1.0);
-                m.opacity.retarget(t, 1.0);
-            }
-            (Some((baseline, x0, x1)), Some((id, tx0, tx1, line))) => {
-                let right = if reduced {
-                    true
-                } else if line != m.line {
-                    // A line jump: the old piece runs off its line's end (its start when the
-                    // word is on an earlier line) and the live piece enters from the other side
-                    // of the new line.
-                    let down = line > m.line;
-                    let old_line = line_extent(&boxes, m.line);
-                    let (lo, hi) = if old_line.0 <= old_line.1 { old_line } else { (x0, x1) };
-                    let w = x1 - x0;
-                    let mut p = piece(baseline, (lo, hi), (x0, x1));
-                    let (s0, s1) = edge_springs(down, lead);
-                    p.x0.set_spring(s0);
-                    p.x1.set_spring(s1);
-                    let (e0, e1) = if down { (hi, hi + w) } else { (lo - w, lo) };
-                    p.x0.retarget(t, e0 as f64);
-                    p.x1.retarget(t, e1 as f64);
-                    p.opacity.retarget(t, 0.0);
-                    m.gone.push(p);
-                    let (nlo, nhi) = line_extent(&boxes, line);
-                    m.from = if down { (nlo - w, nlo) } else { (nhi, nhi + w) };
-                    m.clip = if down { (nlo, f32::INFINITY) } else { (f32::NEG_INFINITY, nhi) };
-                    down
-                } else {
-                    m.from = (x0, x1);
-                    m.clip = NO_CLIP;
-                    tx0 + tx1 >= x0 + x1
-                };
-                let (s0, s1) = edge_springs(right, lead);
-                m.p0.set_spring(s0);
-                m.p1.set_spring(s1);
-                if reduced {
-                    m.p0.snap(t, 1.0);
-                    m.p1.snap(t, 1.0);
-                } else {
-                    m.p0.snap(t, 0.0);
-                    m.p1.snap(t, 0.0);
-                    m.p0.retarget(t, 1.0);
-                    m.p1.retarget(t, 1.0);
-                }
-                (m.word, m.line) = (Some(id), line);
-                m.opacity.retarget(t, 1.0);
-            }
-        }
-        true
-    }
-
-    /// Live text: the final pass and its lines, when the node has one.
-    fn pass_lines(&self) -> Option<PassLines> {
-        let Kind::LiveText { words, pass: Some(pass), .. } = &self.kind else { return None };
-        let boxes = word_boxes(&self.shaped, &word_starts(words));
-        let lines = final_pass::read_lines(&boxes);
-        Some((*pass, boxes, lines))
-    }
-
-    /// Live text: starts the brighten pulse of each word the final pass reached since the
-    /// last call, in reading order and `final_pass::STAGGER` apart. Words a pass that moved
-    /// back has not reached lose their pulse. Returns whether a pulse started.
-    fn sync_pass(&mut self, t: f64) -> bool {
-        let Some((pass, boxes, lines)) = self.pass_lines() else {
-            self.words.iter_mut().for_each(|w| w.passed = None);
-            return false;
-        };
-        let pos = pass.at * final_pass::total(&lines);
-        let mut order: Vec<(f32, u32)> =
-            boxes.iter().map(|b| (final_pass::reading_at(&lines, b.3, b.1), b.0)).collect();
-        order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut next = self.words.iter().filter_map(|w| w.passed).fold(t, |a, p| a.max(p + final_pass::STAGGER));
-        let mut started = false;
-        for (start, id) in order {
-            let Ok(i) = self.words.binary_search_by_key(&id, |a| a.id) else { continue };
-            let w = &mut self.words[i];
-            if start < pos {
-                if w.passed.is_none() {
-                    w.passed = Some(next);
-                    next += final_pass::STAGGER;
-                    started = true;
-                }
-            } else {
-                w.passed = None;
-            }
-        }
-        started
-    }
-
-    /// Live text: how far a word's text has turned to the mark's accent colour at `t`.
-    fn word_accent(&self, id: u32, t: f64) -> f32 {
-        match self.words.binary_search_by_key(&id, |a| a.id) {
-            Ok(i) => self.words[i].accent.value(t).clamp(0.0, 1.0) as f32,
-            Err(_) => 0.0,
-        }
-    }
-
-    /// Live text: when the final pass reached a word.
-    fn word_passed(&self, id: u32) -> Option<f64> {
-        self.words.binary_search_by_key(&id, |a| a.id).ok().and_then(|i| self.words[i].passed)
     }
 
     /// Live text: a word's `(opacity, dx, dy)` at `t`.
@@ -1063,8 +705,6 @@ impl<M> Scene<M> {
             n.chans.iter().any(|(_, c)| c.settled_at() > t)
                 || (n.alive(t) && self.bound_moving(n, t))
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
-                || n.mark.iter().flat_map(|m| m.channels()).any(|c| c.settled_at() > t)
-                || n.words.iter().any(|w| w.passed.is_some_and(|p| t < p + final_pass::PULSE))
                 || n.live.settled_at() > t
                 || n.typo.settled_at() > t
                 || (n.alive(t) && n.sheen_progress(t).is_some())
@@ -1136,8 +776,8 @@ impl<M> Scene<M> {
         out.clear();
         out.size = self.viewport;
         out.scale = self.scale;
-        out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
         out.stage = self.stage;
+        out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
         out.layers.push(Layer::root());
         let mut items = Vec::new();
         if let Some(root) = self.root {
@@ -1164,20 +804,6 @@ impl<M> Scene<M> {
     /// Live text: the caret bar at `t` in the node's space, and its blink opacity.
     pub fn caret(&self, id: NodeId, t: f64) -> Option<(Rect, f32)> {
         self.nodes.get(id)?.live.caret(t).map(|(r, _, a)| (r, a))
-    }
-
-    /// Live text: where the final pass is, `(baseline, x)` in the node's space.
-    pub fn final_pass_at(&self, id: NodeId) -> Option<(f32, f32)> {
-        let (pass, _, lines) = self.nodes.get(id)?.pass_lines()?;
-        final_pass::locate(&lines, pass.at)
-    }
-
-    /// Live text: whether the final pass has reached the start of `word`. Hold back a word's
-    /// final text until this is true, so its revision plays as the line crosses it.
-    pub fn final_pass_reached(&self, id: NodeId, word: u32) -> bool {
-        let Some((pass, boxes, lines)) = self.nodes.get(id).and_then(|n| n.pass_lines()) else { return false };
-        let Some(b) = boxes.iter().find(|b| b.0 == word) else { return false };
-        final_pass::reading_at(&lines, b.3, b.1) < pass.at * final_pass::total(&lines)
     }
 
     /// Box, transform and opacity of a node at `t`, composed with its ancestors. `None` if
@@ -1266,7 +892,6 @@ impl<M> Scene<M> {
             words: Vec::new(),
             words_at: t,
             live: Flow::default(),
-            mark: None,
             default_motion: self.inherited_motion(default_motion, parent),
             reduced: self.reduced_motion,
             ambient: Default::default(),
@@ -1323,9 +948,7 @@ impl<M> Scene<M> {
         let effective = self.inherited_motion(default_motion, self.nodes[id].parent);
         let n = &mut self.nodes[id];
         n.default_motion = effective;
-        let mut kind = kind;
-        release_finals(n, &mut kind);
-        let relayout = n.style != style || n.kind.layout_differs(&kind);
+        let relayout = n.style != style || (kind.is_text() && n.kind != kind);
         let old_size = text_size(&n.kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;
@@ -1362,11 +985,6 @@ impl<M> Scene<M> {
         changed |= n.sync_words(t, retention);
         let ripples_on = n.ripples().map(|r| r.active);
         changed |= n.ambient.sync(&loops, ripples_on, t, false, retention);
-        // After a relayout `run_layout` moves the mark, with the new glyph positions.
-        if !relayout {
-            changed |= n.sync_mark(t, retention);
-            changed |= n.sync_pass(t);
-        }
         // Visual slots the view no longer sets go back to their defaults.
         let unset: Vec<u8> = n
             .chans
@@ -1562,8 +1180,6 @@ impl<M> Scene<M> {
                 };
                 n.live.update(t, input);
             }
-            n.sync_mark(t, retention);
-            n.sync_pass(t);
             stack.extend(n.flow.iter().copied());
         }
     }
@@ -1835,45 +1451,12 @@ impl<M> Scene<M> {
                 self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style, particles, mark, inline, pass, .. } => {
+            Kind::LiveText { words, style, particles, inline, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 let z = n.value(Slot::TextZoom as u8, t) as f32;
                 if let Some(look) = particles {
                     let pw = out.particle_words.get_or_insert_with(|| ParticleWords { t, words: Vec::new() });
                     pw.words.extend(n.words.iter().map(|w| ParticleWord { word: w.id, since: w.since, look: *look }));
-                }
-                if let (Some(look), Some(m)) = (mark, &n.mark) {
-                    let s = style.size;
-                    for (baseline, x0, x1, k) in m.pieces(&n.live, t, s) {
-                        let (l, r) = (Point::new(origin.x + x0, 0.0), Point::new(origin.x + x1, 0.0));
-                        let c0 = look.color.fade(k * alpha);
-                        let c = match look.gradient {
-                            Some(c1) => Paint::linear(l, c0, r, c1.fade(k * alpha)),
-                            None => Paint::solid(c0),
-                        };
-                        let shape = match look.shape {
-                            MarkShape::Box => {
-                                // The padding shrinks with a piece that is running off its line.
-                                let pad = (0.18 * s).min(0.5 * (x1 - x0));
-                                let r = Rect::new(
-                                    origin.x + x0 - pad,
-                                    origin.y + baseline - 0.92 * s,
-                                    x1 - x0 + 2.0 * pad,
-                                    1.22 * s,
-                                );
-                                ShapeInstance::rrect(RRect::new(r, 0.22 * s), c)
-                            }
-                            MarkShape::Underline | MarkShape::Karaoke => {
-                                let h = (0.075 * s).max(1.5);
-                                ShapeInstance::capsule(
-                                    Rect::new(origin.x + x0, origin.y + baseline + 0.14 * s, x1 - x0, h),
-                                    c,
-                                )
-                            }
-                        };
-                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
-                        out.shapes.push(shape);
-                    }
                 }
                 if !inline.is_empty() {
                     let mut shapes = Vec::new();
@@ -1888,9 +1471,24 @@ impl<M> Scene<M> {
                         out.shapes.push(shape);
                     }
                 }
-                let starts = word_starts(words);
-                let word_of = |cluster: u32| word_at(&starts, cluster);
-                let accent = mark.as_deref().filter(|m| m.tints());
+                // Byte offset where each word starts in the joined text.
+                let mut starts = Vec::with_capacity(words.len());
+                let mut at = 0u32;
+                for w in words {
+                    starts.push((at, w.id));
+                    at += w.text.len() as u32 + 1;
+                }
+                let word_of = |cluster: u32| {
+                    if cluster == ELLIPSIS_CLUSTER {
+                        return NO_WORD;
+                    }
+                    let i = starts.partition_point(|(s, _)| *s <= cluster);
+                    if i == 0 {
+                        NO_WORD
+                    } else {
+                        starts[i - 1].1
+                    }
+                };
                 if n.words.is_empty() || color.a <= 0.0 {
                     self.glyphs(n, style.size, origin, color, alpha, t, word_of, items, out);
                 } else {
@@ -1945,24 +1543,6 @@ impl<M> Scene<M> {
                             ..fx
                         };
                         push_glyph_fx(out, e);
-                        let amount = accent.map_or(0.0, |_| n.word_accent(word, t));
-                        let color = match accent.filter(|_| amount > 0.0) {
-                            Some(m) => {
-                                // Where the glyph's centre sits across its word, for a gradient.
-                                let centre = 0.5 * (span.0 + span.1);
-                                let share = (centre - word_span.0) / (word_span.1 - word_span.0).max(1e-3);
-                                let c = m.accent_at(share).unwrap_or(color);
-                                mix(color, c.fade(alpha), amount)
-                            }
-                            None => color,
-                        };
-                        // The final pass's brighten pulse, toward white.
-                        let lift = match (pass, n.word_passed(word)) {
-                            (Some(p), Some(at)) => p.lift * final_pass::pulse(t - at),
-                            _ => 0.0,
-                        };
-                        let color =
-                            if lift > 0.0 { mix(color, Color { a: color.a, ..Color::WHITE }, lift) } else { color };
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + (g.pos.x + dx) * z, origin.y + (g.pos.y + dy) * z),
@@ -2006,19 +1586,6 @@ impl<M> Scene<M> {
                     push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                     out.shapes.push(ShapeInstance::line(tail, tip, z, Paint::solid(c.fade(alpha))));
                 }
-                if let (Some(p), Some((baseline, x))) =
-                    (pass, n.pass_lines().and_then(|(p, _, l)| final_pass::locate(&l, p.at)))
-                {
-                    if p.line.a > 0.0 {
-                        let s = style.size;
-                        let top = Point::new(origin.x + x, origin.y + baseline - 0.95 * s);
-                        let bottom = Point::new(origin.x + x, origin.y + baseline + 0.3 * s);
-                        let line = ShapeInstance::line(top, bottom, 0.0, Paint::NONE)
-                            .with_hairline(Paint::solid(p.line.fade(alpha)));
-                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
-                        out.shapes.push(line);
-                    }
-                }
                 if let Some((bar, tint, blink)) = n.live.caret(t) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {
@@ -2061,6 +1628,7 @@ impl<M> Scene<M> {
                 self.dots(d, rect, t, alpha, items, out);
                 None
             }
+            // Drawn by `emit_body`, which knows the layer.
             Kind::StrokePath(art) => {
                 self.stroke_path(art, n, t, origin, size, alpha, items, out);
                 None
@@ -2105,7 +1673,6 @@ impl<M> Scene<M> {
                 }
                 None
             }
-            // Drawn by `emit_body`, which knows the layer.
             Kind::Canvas(_) | Kind::Emitter(_) | Kind::Gpu(_) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
@@ -2189,6 +1756,7 @@ impl<M> Scene<M> {
         }
     }
 
+    /// Shapes from a timed element, appended in order.
     /// A stroked outline: optional fill, the trimmed stroke, and the light head.
     #[allow(clippy::too_many_arguments)]
     fn stroke_path(
@@ -2232,7 +1800,6 @@ impl<M> Scene<M> {
         }
     }
 
-    /// Shapes from a timed element, appended in order.
     fn timed_shapes(&self, items: &mut Vec<Item>, out: &mut DisplayList, f: impl FnOnce(&mut Vec<ShapeInstance>)) {
         let start = out.shapes.len();
         f(&mut out.shapes);
@@ -2359,6 +1926,21 @@ fn local_transform<M>(n: &Node<M>, t: f64) -> (Affine, Size, f32) {
 
 /// Appends one instance at `index` to the item list, extending the last run when it is the
 /// same kind and adjacent.
+/// The box `(0, 0, size)` through `m`, as `x0, y0, x1, y1`.
+fn affine_bounds(m: &Affine, size: Size) -> [f32; 4] {
+    let pts =
+        [Point::ZERO, Point::new(size.w, 0.0), Point::new(0.0, size.h), Point::new(size.w, size.h)].map(|p| m.apply(p));
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in pts {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    [x0, y0, x1, y1]
+}
+
+/// The product of the opacities of `layer` and every layer above it.
 /// The transform that fits `view` into the box at `origin`, centred, keeping its aspect.
 fn fit_view(view: Rect, origin: Point, size: Size) -> Affine {
     if view.w <= 0.0 || view.h <= 0.0 {
@@ -2384,21 +1966,6 @@ fn faded(style: &crate::path::StrokeStyle, alpha: f32) -> crate::path::StrokeSty
     crate::path::StrokeStyle { c0: style.c0.fade(alpha), c1: style.c1.fade(alpha), ..*style }
 }
 
-/// The box `(0, 0, size)` through `m`, as `x0, y0, x1, y1`.
-fn affine_bounds(m: &Affine, size: Size) -> [f32; 4] {
-    let pts =
-        [Point::ZERO, Point::new(size.w, 0.0), Point::new(0.0, size.h), Point::new(size.w, size.h)].map(|p| m.apply(p));
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for p in pts {
-        x0 = x0.min(p.x);
-        y0 = y0.min(p.y);
-        x1 = x1.max(p.x);
-        y1 = y1.max(p.y);
-    }
-    [x0, y0, x1, y1]
-}
-
-/// The product of the opacities of `layer` and every layer above it.
 fn layer_chain_opacity(layers: &[Layer], layer: u32) -> f32 {
     let mut o = 1.0;
     let mut li = Some(layer);

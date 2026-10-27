@@ -23,7 +23,6 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
-use crate::final_pass::FinalPass;
 use crate::flow::{Caret, CaseChange, LiveMotion, Revise, Rewrap, SettleInk};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
@@ -521,15 +520,6 @@ pub(crate) enum Kind {
         /// Caret and other live text motion (`crate::flow`). Boxed: it is the largest part of
         /// the largest `Kind`.
         live: Box<LiveMotion>,
-        /// The word that holds the "current word" role (`Element::current_word`).
-        current: Option<u32>,
-        /// The decoration that follows the current word (`Element::word_mark`). Boxed to keep
-        /// `Kind` small.
-        mark: Option<Box<WordMark>>,
-        /// The final-pass sweep (`Element::final_pass`).
-        pass: Option<FinalPass>,
-        /// Final text that each word takes once the pass reaches it (`Element::final_words`).
-        finals: Vec<Word>,
         /// Inline objects by word id (`Element::inline_objects`, `crate::inline`).
         inline: Vec<(u32, crate::inline::Inline)>,
     },
@@ -621,102 +611,6 @@ impl Kind {
     pub(crate) fn is_text(&self) -> bool {
         matches!(self, Kind::Label { .. } | Kind::LiveText { .. })
     }
-
-    /// Whether `other` lays out differently from `self`. A live text's current-word mark and
-    /// final pass do not change its layout; its live motion does, since the layout feeds it to
-    /// the flow.
-    pub(crate) fn layout_differs(&self, other: &Kind) -> bool {
-        match (self, other) {
-            (
-                Kind::LiveText {
-                    words: a, style: sa, inline: ia, live: la, enter: ea, change: ca, particles: pa, ..
-                },
-                Kind::LiveText {
-                    words: b, style: sb, inline: ib, live: lb, enter: eb, change: cb, particles: pb, ..
-                },
-            ) => {
-                a != b
-                    || sa != sb
-                    || la != lb
-                    || ea != eb
-                    || ca != cb
-                    || pa != pb
-                    || ia.len() != ib.len()
-                    || ia.iter().zip(ib).any(|(x, y)| x.0 != y.0 || x.1.width != y.1.width)
-            }
-            _ => other.is_text() && self != other,
-        }
-    }
-}
-
-/// A decoration that belongs to the "current word" role of a live text, not to a fixed word
-/// id: when the role moves to another word, the mark moves with it (T04, T05).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WordMark {
-    pub shape: MarkShape,
-    pub color: Color,
-    /// With a second colour the mark runs from `color` on the left to this on the right.
-    pub gradient: Option<Color>,
-    /// The colour the current word's text takes, or `None` to keep the text colour. It
-    /// leaves the old word and reaches the new one in about 150 ms.
-    pub accent: Option<Color>,
-    /// A gradient for the current word's text instead of one accent colour: left, middle
-    /// and right (`WordMark::accent_gradient`).
-    pub accent_ramp: Option<[Color; 3]>,
-}
-
-impl WordMark {
-    pub fn new(shape: MarkShape, color: Color) -> WordMark {
-        WordMark { shape, color, gradient: None, accent: None, accent_ramp: None }
-    }
-
-    /// Runs the mark from its colour on the left to `c` on the right.
-    pub fn gradient(self, c: Color) -> WordMark {
-        WordMark { gradient: Some(c), ..self }
-    }
-
-    /// Also tints the current word's text with `c`.
-    pub fn accent(self, c: Color) -> WordMark {
-        WordMark { accent: Some(c), ..self }
-    }
-
-    /// Fills the current word's text with a gradient instead: `c0` at the word's left, `mid`
-    /// in its middle and `c1` at its right, by each glyph's centre. It moves from word to
-    /// word like `accent`.
-    pub fn accent_gradient(self, c0: Color, mid: Color, c1: Color) -> WordMark {
-        WordMark { accent_ramp: Some([c0, mid, c1]), ..self }
-    }
-
-    pub(crate) fn tints(&self) -> bool {
-        self.accent.is_some() || self.accent_ramp.is_some()
-    }
-
-    /// The accent colour at `share` (0 at the word's left, 1 at its right), or `None`.
-    pub(crate) fn accent_at(&self, share: f32) -> Option<Color> {
-        match self.accent_ramp {
-            Some([c0, mid, c1]) => {
-                let mix = |a: Color, b: Color, k: f32| {
-                    let l = |x: f32, y: f32| x + (y - x) * k;
-                    Color::rgba(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b), l(a.a, b.a))
-                };
-                let s = share.clamp(0.0, 1.0);
-                Some(if s < 0.5 { mix(c0, mid, 2.0 * s) } else { mix(mid, c1, 2.0 * s - 1.0) })
-            }
-            None => self.accent,
-        }
-    }
-}
-
-/// How a [`WordMark`] looks and moves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MarkShape {
-    /// A rounded box behind the word. Both edges spring to the next word together.
-    Box,
-    /// A line under the word. Both edges spring to the next word together.
-    Underline,
-    /// A line under the word whose leading edge springs to the next word first and whose
-    /// trailing edge follows, so it stretches over both words and then contracts.
-    Karaoke,
 }
 
 /// Pointer handlers. Message values, not closures, so elements stay cheap to rebuild.
@@ -829,10 +723,6 @@ impl<M> Element<M> {
             change: Transition::NONE,
             particles: None,
             live: Box::default(),
-            current: None,
-            mark: None,
-            pass: None,
-            finals: Vec::new(),
             inline: Vec::new(),
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
@@ -1065,15 +955,6 @@ impl<M> Element<M> {
         self.adopt(&child);
         crate::repeat::adopt(&self.kind, &mut child.style);
         self.children.push(child);
-        self
-    }
-
-    /// `child` painted behind the children so far, as the first child. For absolutely
-    /// placed marks under text; an in-flow child would also move to the front of the flow.
-    pub fn child_behind(mut self, mut child: Element<M>) -> Element<M> {
-        self.adopt(&child);
-        crate::repeat::adopt(&self.kind, &mut child.style);
-        self.children.insert(0, child);
         self
     }
 
@@ -1480,51 +1361,6 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { particles, .. } => *particles = Some(look),
             _ => debug_assert!(false, "word_particles on a node that is not live text: {}", self.key),
-        }
-        self
-    }
-
-    /// Live text: gives the "current word" role to word `id`, or to no word. A
-    /// [`Element::word_mark`] follows the role from word to word. An id that is not among the
-    /// words counts as no word.
-    pub fn current_word(mut self, id: Option<u32>) -> Element<M> {
-        match &mut self.kind {
-            Kind::LiveText { current, .. } => *current = id,
-            _ => debug_assert!(false, "current_word on a node that is not live text: {}", self.key),
-        }
-        self
-    }
-
-    /// Live text: a decoration on the current word. Its edges spring from word to word, and
-    /// when the next word is on another line it runs off the end of the old line and enters
-    /// at the start of the new one (off the start and in from the end when it goes back).
-    pub fn word_mark(mut self, m: WordMark) -> Element<M> {
-        match &mut self.kind {
-            Kind::LiveText { mark, .. } => *mark = Some(Box::new(m)),
-            _ => debug_assert!(false, "word_mark on a node that is not live text: {}", self.key),
-        }
-        self
-    }
-
-    /// Live text: a reading pass at `p.at` (0 to 1) of the text, in reading order (T10). A
-    /// hairline marks it, and each word brightens briefly as the pass reaches it. Feed it the
-    /// finishing fraction; see `crate::final_pass`.
-    pub fn final_pass(mut self, p: FinalPass) -> Element<M> {
-        match &mut self.kind {
-            Kind::LiveText { pass, .. } => *pass = Some(p),
-            _ => debug_assert!(false, "final_pass on a node that is not live text: {}", self.key),
-        }
-        self
-    }
-
-    /// Live text: the final text of each word, by id. A word shows its final text from the
-    /// moment the final pass reaches its start, so the revision (with `Revise::Glyphs`, the
-    /// casing roll and the punctuation pop) plays as the line crosses the word. Words not
-    /// listed keep their text.
-    pub fn final_words(mut self, words: &[Word]) -> Element<M> {
-        match &mut self.kind {
-            Kind::LiveText { finals, .. } => *finals = words.to_vec(),
-            _ => debug_assert!(false, "final_words on a node that is not live text: {}", self.key),
         }
         self
     }

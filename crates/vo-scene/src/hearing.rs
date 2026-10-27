@@ -425,19 +425,13 @@ impl HearingLook {
             blob_max: font_px * 3.0,
             blob_height: (font_px * 0.22).max(3.0),
             blob_gap: (font_px * 0.25).max(3.0),
-            tick_height: (font_px * 0.3).max(3.0),
+            tick_height: (font_px * 0.25).max(3.0),
             tick_gap: (font_px * 0.2).max(3.0),
-            tick_ink: 0.75,
-            mark_height: font_px * 0.62,
-            mark_stroke: 0.9,
+            tick_ink: 0.55,
+            mark_height: font_px * 0.42,
+            mark_stroke: 1.0,
         }
     }
-}
-
-/// The alpha that draws `a` of the way from a dark background to the ink as the eye sees
-/// it. The renderer blends in linear light, where 15 % alpha already reads as about 40 %.
-pub fn perceived(a: f32) -> f32 {
-    a.clamp(0.0, 1.0).powf(2.2)
 }
 
 fn place<M>(e: Element<M>, x: f32, y: f32, w: f32, h: f32) -> Element<M> {
@@ -484,33 +478,21 @@ pub fn pre_echo<M>(
         x += w + look.blob_gap * squeeze;
     }
     for b in hearing.blobs() {
-        // Several blobs read into one word all go to its box, but only the first stays to
-        // fade there, so they never stack into a bright box over the letters.
-        let leader = b.read_at.is_none()
-            || !hearing.blobs().iter().any(|o| o.id < b.id && o.read_at == b.read_at && o.word == b.word);
         let key = format!("pre-echo-{}", b.id);
-        // The fade is computed from the audio clock, not left to a spring, so the box is
-        // gone when the blob leaves the list.
-        let age = b.read_at.map_or(0.0, |r| hearing.clock().unwrap_or(r) - r) as f32;
-        let ink = if leader { look.blob_ink * (1.0 - age / HANDOFF_SECS as f32).clamp(0.0, 1.0) } else { 0.0 };
-        // Ink goes in the fill's alpha, so the colour carries it wherever the shape is drawn.
-        let paint = |a: f32| look.ink.fade(perceived(a));
         let shape = Element::shape(key, crate::display::ShapeKind::Capsule)
+            .fill(look.ink)
             .motion(Prop::Position, morph)
             .motion(Prop::Size, morph)
             .motion(Prop::Radius, morph)
-            .motion(Prop::Fill, Motion::Spring(Spring::critical_to_98(0.05)));
-        let gone = Transition::fade().opacity(0.0);
+            .motion(Prop::Opacity, Motion::Spring(Spring::critical_to_98(HANDOFF_SECS)));
         let e = match (b.read_at, slots.get(&b.id)) {
-            // A new blob fades in at the caret.
-            (None, Some(&(bx, w))) => {
-                place(shape.fill(paint(look.blob_ink)), bx, y, w.max(1.0), h).presence(gone, gone)
-            }
+            (None, Some(&(bx, w))) => place(shape.opacity(look.blob_ink), bx, y, w.max(1.0), h)
+                // A new blob grows from nothing at the caret.
+                .presence(Transition::fade().opacity(0.0), Transition::fade()),
             _ => match word_box(b) {
-                Some(r) => place(shape.fill(paint(ink)).radius(r.h * 0.2), r.x, r.y, r.w.max(1.0), r.h.max(1.0))
-                    .presence(gone, gone),
+                Some(r) => place(shape.opacity(0.0).radius(r.h * 0.2), r.x, r.y, r.w.max(1.0), r.h.max(1.0)),
                 // Read with no word to go to: fade in place.
-                None => place(shape.fill(paint(0.0)), caret.0, y, look.blob_min, h).presence(gone, gone),
+                None => place(shape.opacity(0.0), caret.0, y, look.blob_min, h),
             },
         };
         out.push(e);
@@ -556,7 +538,7 @@ pub fn pause_marks<M>(n: u64, pause: &Pause, look: &HearingLook, caret: (f32, f3
         let x = if gathered { x0 + look.mark_height * 0.25 } else { x0 + 2.0 + i as f32 * look.tick_gap };
         let tick = Element::shape(format!("pause-{n}-tick-{i}"), crate::display::ShapeKind::RRect)
             .fill(look.ink)
-            .opacity(if gathered { 0.0 } else { perceived(look.tick_ink) })
+            .opacity(if gathered { 0.0 } else { look.tick_ink })
             .motion(Prop::Position, tick_motion)
             .motion(Prop::Opacity, tick_motion)
             .motion(Prop::Size, tick_motion)
@@ -574,7 +556,7 @@ pub fn pause_marks<M>(n: u64, pause: &Pause, look: &HearingLook, caret: (f32, f3
             view,
             StrokeStyle::solid(look.mark_stroke, look.ink),
         )
-        .opacity(perceived(look.tick_ink.max(0.7)))
+        .opacity(look.tick_ink.max(0.7))
         .motion(Prop::Trim, Motion::Spring(Spring::critical_to_98(0.2)))
         .motion(Prop::Opacity, Motion::Spring(Spring::critical_to_98(0.2)))
         .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade().opacity(0.0));

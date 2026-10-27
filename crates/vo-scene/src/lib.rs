@@ -34,7 +34,6 @@
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `emitter`: particle emitters and particle words, simulated by the renderer.
 //! - `emitter_signals`: emitter inputs driven by the signal bus (level, pitch, onsets).
-//! - `final_pass`: a reading pass across live text, placed by the finishing fraction.
 //! - `gpu`: elements drawn by app GPU code, such as a 3D scene.
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `material`: materials for shapes, glyphs and strokes: neon, hologram, chrome, gradient
@@ -47,6 +46,8 @@
 //! - `lines`: live text broken into lines whose look follows their age (teleprompter).
 //! - `typo`: per-word typographic channels on live text: ink, weight, tracking, baseline and
 //!   fill on springs, clamped on the reading line (MO-03).
+//! - `word_voice`: what the voice did while each word was said, from the signal bus, and
+//!   how it maps to the typographic channels (MO-04).
 //! - `swap`: word swap, a label that changes word by word, shared words sliding in place.
 //! - `story`: labelled sequences whose phases hand on their state and velocities.
 //! - `stage`: 2D layers as planes in one perspective camera: rotate_x, rotate_y,
@@ -67,7 +68,6 @@ pub mod element;
 pub mod emitter;
 pub mod emitter_signals;
 pub mod erase;
-pub mod final_pass;
 pub mod flow;
 pub mod font;
 pub mod frame;
@@ -105,6 +105,7 @@ pub mod text;
 pub mod timed;
 pub mod trace;
 pub mod typo;
+pub mod word_voice;
 
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
 pub use taffy;
@@ -112,7 +113,7 @@ pub use taffy;
 pub use ambient::{Loop, LoopProp, Ripples};
 pub use bind::Param;
 pub use display::DisplayList;
-pub use element::{Element, Key, MarkShape, Motion, Prop, TextStyle, Transition, WordMark};
+pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
 pub use font::{FontId, FontRegistry};
 pub use frame::{Corner, Edge, Frame, Grid, Notch, Stripes};
 pub use graticule::{Axis, Graticule};
