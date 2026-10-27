@@ -146,6 +146,8 @@ pub fn particle_reach(sim: &crate::emitter::EmitterSim, look: &crate::emitter::E
         Shape::Line { half_length, .. } => half_length,
         Shape::Box { half } => half[0].abs().max(half[1].abs()),
         Shape::Torus { major, minor } => major + minor,
+        // The path's own extent is added by `EmitterSource::reach`.
+        Shape::Path { sway, width, .. } => sway.abs() + width.abs(),
     };
     let life = sim.life.max(0.0) * (1.0 + sim.life_jitter.abs());
     // With drag `k` a speed `v` carries a particle at most `v / k`; without drag, `v life`.

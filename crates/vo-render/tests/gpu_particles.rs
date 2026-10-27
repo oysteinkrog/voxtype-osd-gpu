@@ -682,3 +682,150 @@ fn dots_at_rest_sit_on_pixels_by_their_diameter() {
     assert!((ox - 10.5).abs() < 0.02 && (oy - 10.5).abs() < 0.02, "odd dot at ({ox}, {oy})");
     assert!((ex - 34.0).abs() < 0.02 && (ey - 10.0).abs() < 0.02, "even dot at ({ex}, {ey})");
 }
+
+/// Total light of a frame over black, linear.
+fn total_light(px: &[u8]) -> f32 {
+    px.chunks(4).map(light).sum()
+}
+
+#[test]
+fn a_word_of_sparks_keeps_its_light_through_the_hand_over() {
+    let fonts = FontRegistry::new();
+    fonts.add_file(&test_font_path()).unwrap();
+    let mut rig = Rig::new(&fonts, 320, 80);
+    // Dim, so no pixel clips and the sums are exact.
+    let color = Color::hex(0x384050, 1.0);
+    let word = shape(&fonts, "polished", 30.0, Point::new(20.0, 22.0));
+    let (w, h) = (rig.w, rig.h);
+    let list = |parts: &Particles, t: f64, solid: bool| {
+        let mut l = empty_list(w, h);
+        for (i, g) in word.glyphs.iter().enumerate() {
+            let a = if solid { 1.0 } else { parts.glyph_alpha(0, i, t) };
+            l.glyphs.push(GlyphInstance {
+                pos: Point::new(word.origin.x + g.pos.x, word.origin.y + g.pos.y),
+                size: g.size,
+                font: 0,
+                glyph: g.glyph,
+                word: 0,
+                color: color.fade(a),
+            });
+        }
+        l.items.push(Item { kind: ItemKind::Glyphs, start: 0, len: l.glyphs.len() as u32 });
+        l.layers[0].items = 0..1;
+        l
+    };
+    let cfg = ParticleConfig { free_capacity: 64, word_slots: 1, ..Default::default() };
+    let empty = rig.particles(&fonts, cfg);
+    let solid = total_light(&rig.frame(&list(&empty, 0.0, true), &empty));
+    let mut sheet = Vec::new();
+    for dot_area in [1.25, 5.0] {
+        let mut p = rig.particles(&fonts, cfg);
+        p.set_word_dots(0, 0.0, &word.glyphs, 1.0, dot_area);
+        let mut worst = 0.0f32;
+        let mut row = Vec::new();
+        for i in 0..=30 {
+            let t = i as f64 * 0.01;
+            let look = SlotLook { style: SpriteStyle::SPARK, ..SlotLook::new(word.origin, color) };
+            p.prepare(&rig.params(t), &|_| EmitterLook::default(), &[look]);
+            let px = rig.frame(&list(&p, t, false), &p);
+            // After the 50 ms fade in, the light stays the solid word's.
+            if t >= 0.06 {
+                worst = worst.max((total_light(&px) / solid - 1.0).abs());
+            }
+            if i % 3 == 0 && i <= 21 {
+                row.push(px);
+            }
+        }
+        println!("dot area {dot_area} px²: light differs from the solid word's by at most {:.1} %", worst * 100.0);
+        assert!(worst < 0.03, "dot area {dot_area}: the light changes by {worst} during the hand-over");
+        sheet.extend(row);
+    }
+    // Brightened for the eye: the test colour is dim on purpose.
+    let px: Vec<u8> = sheet.concat().iter().map(|&c| c.saturating_mul(3)).collect();
+    let img = Image { name: "particles-spark-word".into(), w: rig.w, h: rig.h * sheet.len() as u32, channels: 4, px };
+    support::check(&img, Tolerance { per_pixel: 6, max_fraction: 0.004 }).unwrap();
+}
+
+fn river_sim(_: u32, t: f64) -> EmitterSim {
+    let l = level(t);
+    EmitterSim {
+        shape: Shape::Path { strands: 5, sway: 30.0 + 20.0 * l, wavelength: 160.0, wave_speed: 0.4, width: 2.0 },
+        spawn_speed: 150.0,
+        emit: 1.0,
+        level: l,
+        ..Default::default()
+    }
+}
+
+fn river_look(t: f64) -> EmitterLook {
+    EmitterLook {
+        origin: Point::new(160.0, 60.0),
+        size: 0.8,
+        brightness: 0.8 + 0.4 * level(t),
+        ramp: [Color::hex(0x36d6ff, 1.0), Color::hex(0x3a6bff, 1.0), Color::hex(0xa24bff, 0.3)],
+        style: SpriteStyle::SPARK,
+        // Ribbons span the whole path at once; they come on late so the flow's front shows.
+        ribbons: if t >= 1.5 { 3 } else { 0 },
+        ribbon_width: 1.4,
+        ribbon_alpha: 0.6,
+        ..Default::default()
+    }
+}
+
+/// A path emitter with sparks and ribbons: the same at 60 fps and 144 Hz, particles stay
+/// on their strands, and the stream is a steady flow from the start, not one packet.
+#[test]
+fn a_river_is_the_same_at_any_frame_rate_and_flows_along_its_path() {
+    let fonts = FontRegistry::new();
+    let mut rig = Rig::new(&fonts, 320, 120);
+    let path = [Point::new(-140.0, 0.0), Point::new(0.0, 10.0), Point::new(140.0, 0.0)];
+    let run = |rig: &mut Rig, fps: f64, keep: &[f64]| {
+        let mut p = rig.particles(&fonts, ParticleConfig { free_capacity: 2048, word_slots: 1, ..Default::default() });
+        let id = p.add_emitter(EmitterSpec { warmup: 0.2, ..EmitterSpec::new(2048, 9) });
+        p.set_path(id, &path);
+        let mut kept = Vec::new();
+        let end = keep.iter().copied().fold(0.0, f64::max);
+        for i in 0..=(end * fps).round() as u64 {
+            let t = i as f64 / fps;
+            p.advance(t, &river_sim);
+            if keep.iter().any(|k| (k * fps).round() as u64 == i) {
+                p.prepare(&rig.params(t), &|_| river_look(t), &[]);
+                kept.push(rig.frame(&empty_list(rig.w, rig.h), &p));
+            }
+        }
+        kept
+    };
+    let times = [0.5, 1.0, 2.0];
+    let a = run(&mut rig, 60.0, &times);
+    let b = run(&mut rig, 144.0, &times);
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(x == y, "frame at {} s differs between 60 fps and 144 Hz", times[i]);
+    }
+    // Light by column: at 0.5 s the stream has grown about 75 units out of the start (it
+    // flows at 150 units per second after a 0.2 s warmup) and nothing is past its front;
+    // at 2 s it fills the path with no gap.
+    let columns = |px: &[u8]| -> Vec<f32> {
+        (0..rig.w as usize)
+            .map(|x| (0..rig.h as usize).map(|y| light(&px[(y * rig.w as usize + x) * 4..][..4])).sum())
+            .collect()
+    };
+    let early = columns(&a[0]);
+    let front = early.iter().rposition(|&c| c > 0.05).expect("the stream has started");
+    assert!((40..=120).contains(&front), "the stream's front is at x = {front} at 0.5 s");
+    let late = columns(&a[2]);
+    let lit = late[30..290].iter().filter(|&&c| c > 0.05).count();
+    assert!(lit >= 255, "only {lit} of 260 columns are lit at 2 s");
+    // On the strands: nothing far from the path (sway 50 at most, plus the width).
+    let far = a[2]
+        .chunks(4)
+        .enumerate()
+        .filter(|(i, p)| {
+            let y = (*i / rig.w as usize) as f32;
+            p[3] > 8 && (y - 65.0).abs() > 58.0
+        })
+        .count();
+    assert_eq!(far, 0, "{far} pixels are lit far from the path");
+    let img =
+        Image { name: "particles-river".into(), w: rig.w, h: rig.h * times.len() as u32, channels: 4, px: a.concat() };
+    support::check(&img, Tolerance { per_pixel: 6, max_fraction: 0.004 }).unwrap();
+}

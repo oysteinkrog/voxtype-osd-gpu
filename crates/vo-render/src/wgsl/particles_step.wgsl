@@ -9,6 +9,88 @@
 @group(0) @binding(4) var mask_a: texture_2d<f32>;
 @group(0) @binding(5) var mask_b: texture_2d<f32>;
 @group(0) @binding(6) var mask_sampler: sampler;
+@group(0) @binding(7) var<storage, read> paths: array<vec4f>;
+
+// Emitter `em`'s path at arc length `s`: position and normal.
+fn path_at (em: u32, s: f32) -> vec4f {
+  let base = em * PATH_N;
+  let len = paths[base + PATH_N - 1u].z;
+  let f = clamp (s / max (len, 1e-6), 0.0, 1.0) * f32 (PATH_N - 1u);
+  let i = min (u32 (f), PATH_N - 2u);
+  return path_point (paths[base + i], paths[base + i + 1u], f - f32 (i));
+}
+
+// One tick of a particle on a path (`Shape::Path`). Its place is a function of its age, its
+// strand and the time, so it never drifts: vel holds (arc length, strand, offset, random).
+fn step_path (i: u32, p_in: Free, e: EmitStep, em: u32, local: u32) {
+  var p = p_in;
+  let dt = step.dt;
+  let len = paths[em * PATH_N + PATH_N - 1u].z;
+  var age = p.pos.w + dt;
+  var life = p.prev.w;
+  var flags = p.info.w;
+  var spawn = p.info.x;
+  var strand = p.vel.y;
+  var off = p.vel.z;
+  var r = p.vel.w;
+  var pos = p.pos.xyz;
+  let burst = p.info.z != e.spawn.z;
+  if (burst || (age >= life && age >= 0.0)) {
+    spawn += 1u;
+    let k = spawn * 8u;
+    let h0 = to_unit (rand (e.spawn.y, em, local, k));
+    let h2 = to_unit (rand (e.spawn.y, em, local, k + 2u));
+    let h3 = to_unit (rand (e.spawn.y, em, local, k + 3u));
+    let h4 = to_unit (rand (e.spawn.y, em, local, k + 4u));
+    if ((burst || h4 < e.life.z) && len > 0.0) {
+      strand = floor (h0 * max (e.path.x, 1.0));
+      off = (h2 - 0.5) * e.shape.x;
+      r = h3;
+      let speed = max (e.life.w * (0.85 + 0.3 * r), 1e-3);
+      age = select (age - max (life, 0.0), 0.0, burst || life <= 0.0);
+      // The first lives start spread over one trip, so the stream grows out of the start
+      // as a steady flow instead of leaving in one packet.
+      if (spawn == 1u && !burst) {
+        age = -to_unit (rand (e.spawn.y, em, local, k + 5u)) * len / speed;
+      }
+      life = len / speed;
+      flags |= F_ALIVE;
+    } else {
+      flags &= ~F_ALIVE;
+      age = -e.life.x * 0.25 * to_unit (rand (e.spawn.y, em, local, k + 1u));
+      life = 0.0;
+    }
+    p.info.z = e.spawn.z;
+    if (local < e.pool.w) {
+      let base = (e.pool.z + local) * TRAIL;
+      for (var k2 = 0u; k2 < TRAIL; k2++) {
+        trail_rw[base + k2] = vec4f (pos, 1e9);
+      }
+    }
+  }
+  var prev = pos;
+  if ((flags & F_ALIVE) != 0u && age >= 0.0) {
+    let speed = max (e.life.w * (0.85 + 0.3 * r), 1e-3);
+    let s = speed * age;
+    let at = path_at (em, s);
+    let side = strand_offset (strand, s, len, step.t + dt, e.path) + off;
+    let next = vec3f (at.xy + at.zw * side, 0.0);
+    // A new life starts where it is, not with a streak from where the last one ended.
+    if (age < dt * 1.5) {
+      prev = next;
+    }
+    pos = next;
+    p.vel.x = s;
+    if (local < e.pool.w) {
+      trail_rw[(e.pool.z + local) * TRAIL + (step.tick + 1u) % TRAIL] = vec4f (pos, age);
+    }
+  }
+  p.pos = vec4f (pos, age);
+  p.prev = vec4f (prev, life);
+  p.vel = vec4f (p.vel.x, strand, off, r);
+  p.info = vec4u (spawn, em, p.info.z, flags);
+  free_rw[i] = p;
+}
 
 struct Spawned {
   pos: vec3f,
@@ -101,6 +183,10 @@ fn cs_step (@builtin(global_invocation_id) gid: vec3u) {
     return;
   }
   let local = i - e.pool.x;
+  if (e.spawn.x == S_PATH) {
+    step_path (i, p, e, em, local);
+    return;
+  }
   let dt = step.dt;
   var pos = p.pos.xyz;
   var vel = p.vel.xyz;

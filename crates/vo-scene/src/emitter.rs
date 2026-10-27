@@ -44,6 +44,18 @@ pub enum Shape {
         major: f32,
         minor: f32,
     },
+    /// Along the source's path ([`EmitterSource::path`]): particles flow from its start to its
+    /// end at `EmitterSim::spawn_speed`, in `strands` strands. Each strand sways across the
+    /// path by up to `sway` units in a wave of `wavelength` units that travels at
+    /// `wave_speed` cycles per second, tapering to nothing at both ends; `width` scatters
+    /// particles across their strand. Forces do not apply: the path holds them.
+    Path {
+        strands: u32,
+        sway: f32,
+        wavelength: f32,
+        wave_speed: f32,
+        width: f32,
+    },
 }
 
 /// A shockwave: a front leaving the emitter's origin (PA05).
@@ -144,6 +156,27 @@ pub enum SpriteStyle {
     /// Out of focus by depth (FX16): sprites at clip depth `focus` are sharp, others grow by
     /// `aperture` pixels per unit of depth into flat discs with the same light. 3D only.
     Bokeh { focus: f32, aperture: f32 },
+    /// Points of light: a crisp core that keeps its energy, so a point smaller than a pixel
+    /// gets dimmer, not blurrier, and dense spots saturate towards white. A share `accents`
+    /// (0 to 1) of the particles are four times brighter and whiter; `gain` scales all the
+    /// light; `twinkle` (0 to 1) makes each point flicker a little.
+    Spark { accents: f32, gain: f32, twinkle: f32 },
+}
+
+impl SpriteStyle {
+    /// Points of light with a few accents.
+    pub const SPARK: SpriteStyle = SpriteStyle::Spark { accents: 0.03, gain: 1.0, twinkle: 0.15 };
+}
+
+/// What picks a free particle's colour from an emitter's ramp.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub enum ColorBy {
+    /// Birth, mid-life and death.
+    #[default]
+    Age,
+    /// The angle about the emitter's z axis, once round the ramp and back, so it closes.
+    /// The alpha still fades by age.
+    Angle,
 }
 
 /// An emitter's look at the frame time.
@@ -164,6 +197,13 @@ pub struct EmitterLook {
     /// Ribbon width as a share of the sprite, and its opacity (PA07; hero particles only).
     pub trail_width: f32,
     pub trail_alpha: f32,
+    pub color_by: ColorBy,
+    /// Path emitters: continuous glowing ribbons along the first `ribbons` strands,
+    /// `ribbon_width` units wide at their core, at `ribbon_alpha`, coloured along the path by
+    /// the ramp.
+    pub ribbons: u32,
+    pub ribbon_width: f32,
+    pub ribbon_alpha: f32,
 }
 
 impl Default for EmitterLook {
@@ -178,6 +218,10 @@ impl Default for EmitterLook {
             style: SpriteStyle::Soft,
             trail_width: 0.8,
             trail_alpha: 0.6,
+            color_by: ColorBy::Age,
+            ribbons: 0,
+            ribbon_width: 1.2,
+            ribbon_alpha: 0.8,
         }
     }
 }
@@ -199,7 +243,14 @@ pub trait EmitterSource: Debug + Send + Sync {
     /// How far a particle can get from the box centre at `t`, in logical units, for the
     /// surface margin (`crate::reach`). The default estimates it from `sim` and `look`.
     fn reach(&self, t: f64) -> f32 {
-        crate::reach::particle_reach(&self.sim(t), &self.look(t))
+        let path = self.path().map_or(0.0, |p| p.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max));
+        path + crate::reach::particle_reach(&self.sim(t), &self.look(t))
+    }
+
+    /// For `Shape::Path`: the path's points in emitter space, start to end. Return the same
+    /// `Arc` while the path does not change; a changed path takes effect at the next frame.
+    fn path(&self) -> Option<Arc<[Point]>> {
+        None
     }
 }
 
@@ -309,14 +360,22 @@ pub struct WordParticles {
     /// Sprite radius in logical units; 0 sizes it from the stroke.
     pub size: f32,
     pub style: SpriteStyle,
-    /// Particle density: particles per logical unit of stroke at 1 means one per pixel at
-    /// scale 1.
+    /// Sampling density of the glyph outlines: 1 samples them at one point per pixel.
     pub density: f32,
+    /// Pixels² of ink each particle stands for: 1.25 makes a dense swarm, 4 to 6 makes
+    /// distinct dots. The particles together carry the solid word's light whatever this is.
+    pub dot_area: f32,
 }
 
 impl Default for WordParticles {
     fn default() -> WordParticles {
-        WordParticles { color: Color::hex(0xbfe4ff, 1.0), size: 0.0, style: SpriteStyle::Soft, density: 1.0 }
+        WordParticles {
+            color: Color::hex(0xbfe4ff, 1.0),
+            size: 0.0,
+            style: SpriteStyle::Soft,
+            density: 1.0,
+            dot_area: 1.25,
+        }
     }
 }
 

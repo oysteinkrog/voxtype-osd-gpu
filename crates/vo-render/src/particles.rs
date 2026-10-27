@@ -40,7 +40,7 @@ use vo_core::hash::rand_f32;
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
 
-pub use vo_scene::emitter::{tilt_x, EmitterLook, EmitterSim, Shape, Shock, SpriteStyle};
+pub use vo_scene::emitter::{tilt_x, ColorBy, EmitterLook, EmitterSim, Shape, Shock, SpriteStyle};
 
 use crate::color::srgb_to_linear;
 use crate::glyph_points::{GlyphPointCache, GlyphPoints};
@@ -77,6 +77,10 @@ pub const TRAIL: u32 = 16;
 const STEP_STRIDE: u64 = 256;
 /// Frames a [`Particles`] can draw into at once: the target plus offscreen layers.
 pub const VIEWS: u32 = 8;
+/// Points of a path emitter's path after resampling.
+pub const PATH_POINTS: u32 = 128;
+/// Segments of each ribbon along a path.
+pub const RIBBON_SEGMENTS: u32 = 96;
 const VIEW_STRIDE: u64 = 256;
 
 /// What [`Particles::draw_part`] draws.
@@ -100,6 +104,8 @@ pub const CHANGED_DELAY: f32 = 0.04;
 /// Scatter speed of a changed glyph, in font sizes per second. The peak excursion of a
 /// critically damped spring kicked from rest is `v0 / (w e)`, about a quarter of the size.
 pub const SCATTER: f32 = 22.0;
+/// Pixels² of glyph ink per word particle by default.
+pub const DOT_AREA: f32 = 1.25;
 
 /// The solid glyph's opacity `tau` seconds into its reveal. The sprite shader uses the same
 /// formula (`reveal` in `particles_draw.wgsl`), so particle light and glyph opacity add up.
@@ -148,6 +154,7 @@ fn style_code(s: SpriteStyle) -> [f32; 4] {
         SpriteStyle::Soft => [0.0; 4],
         SpriteStyle::Dot { pitch } => [1.0, pitch, 0.0, 0.0],
         SpriteStyle::Bokeh { focus, aperture } => [2.0, 0.0, focus, aperture],
+        SpriteStyle::Spark { accents, gain, twinkle } => [3.0, accents, gain, twinkle],
     }
 }
 
@@ -403,6 +410,7 @@ struct GpuEmitStep {
     gravity: [f32; 4],
     shock: [f32; 4],
     pool: [u32; 4],
+    path: [f32; 4],
 }
 
 #[repr(C)]
@@ -498,6 +506,8 @@ struct GpuEmitDraw {
     look: [f32; 4],
     trail: [f32; 4],
     pool: [u32; 4],
+    path: [f32; 4],
+    ribbon: [f32; 4],
 }
 
 #[repr(C)]
@@ -520,6 +530,8 @@ struct Emitter {
     trail_base: u32,
     /// The first tick that steps this pool; earlier ticks leave it as added.
     start: u64,
+    /// The path's strand wave at the last tick, for ribbons drawn at the frame time.
+    path: [f32; 4],
 }
 
 /// How a glyph came into the current text of its slot.
@@ -550,6 +562,8 @@ struct Slot {
     glyphs: Vec<SlotGlyph>,
     /// The current targets, relative to the slot's origin.
     points: Vec<[f32; 2]>,
+    /// Pixels² of ink per particle: the light each carries when formed.
+    ink: f32,
 }
 
 /// A pipeline set for one target format, blend and depth format.
@@ -558,6 +572,7 @@ struct DrawPipes {
     free: wgpu::RenderPipeline,
     trail: wgpu::RenderPipeline,
     word: wgpu::RenderPipeline,
+    ribbon: wgpu::RenderPipeline,
 }
 
 struct MaskTex {
@@ -597,6 +612,7 @@ pub struct Particles {
     targets: wgpu::Buffer,
     anchor: wgpu::Buffer,
     frame: wgpu::Buffer,
+    paths: wgpu::Buffer,
     emit_draw: wgpu::Buffer,
     slot_draw: wgpu::Buffer,
     sampler: wgpu::Sampler,
@@ -614,6 +630,8 @@ pub struct Particles {
     /// The frame as `prepare` wrote it, for further views.
     frame_data: GpuFrame,
     view_keys: [Option<DrawKey>; VIEWS as usize],
+    /// Ribbons each emitter draws this frame.
+    ribbons: Vec<u32>,
     // Scratch, reused.
     step_data: Vec<u8>,
     emit_data: Vec<GpuEmitStep>,
@@ -715,6 +733,7 @@ impl Particles {
         let targets = buffer(device, "vo-particles-targets", word_count * size_of::<GpuTarget>() as u64, U::STORAGE);
         let anchor = buffer(device, "vo-particles-anchor", size_of::<GpuAnchor>() as u64, U::UNIFORM);
         let frame = buffer(device, "vo-particles-frame", VIEWS as u64 * VIEW_STRIDE, U::UNIFORM);
+        let paths = buffer(device, "vo-particles-paths", (MAX_EMITTERS * PATH_POINTS) as u64 * 16, U::STORAGE);
         let emit_draw =
             buffer(device, "vo-particles-emit-draw", MAX_EMITTERS as u64 * size_of::<GpuEmitDraw>() as u64, U::STORAGE);
         let slot_draw = buffer(
@@ -753,6 +772,7 @@ impl Particles {
                 storage(3, false, S::COMPUTE),
                 tex_entry(4),
                 tex_entry(5),
+                storage(7, true, S::COMPUTE),
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: S::COMPUTE,
@@ -780,6 +800,7 @@ impl Particles {
                 storage(4, true, S::VERTEX),
                 storage(5, true, S::VERTEX),
                 storage(6, true, S::VERTEX),
+                storage(7, true, S::VERTEX),
             ],
         });
         let anchor_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -803,6 +824,7 @@ impl Particles {
                 entry(4, &slot_draw, Some(cfg.word_slots as u64 * size_of::<GpuSlotDraw>() as u64)),
                 entry(5, &trail, Some(trail_bytes)),
                 entry(6, &trail_owner, None),
+                entry(7, &paths, None),
             ],
         });
 
@@ -841,7 +863,8 @@ impl Particles {
         enc.clear_buffer(&words, 0, None);
         enc.clear_buffer(&free, 0, None);
         queue.submit([enc.finish()]);
-        let step_bind = Self::make_step_bind(device, &step_layout, &steps, &free, &emits, &trail, &masks, 1, &sampler);
+        let step_bind =
+            Self::make_step_bind(device, &step_layout, &steps, &free, &emits, &trail, &masks, 1, &sampler, &paths);
 
         Particles {
             device: device.clone(),
@@ -869,6 +892,7 @@ impl Particles {
             targets,
             anchor,
             frame,
+            paths,
             emit_draw,
             slot_draw,
             sampler,
@@ -884,6 +908,7 @@ impl Particles {
             draw_key: None,
             frame_data: GpuFrame::default(),
             view_keys: [None; VIEWS as usize],
+            ribbons: Vec::new(),
             step_data: Vec::new(),
             emit_data: Vec::new(),
             target_data: Vec::new(),
@@ -901,6 +926,7 @@ impl Particles {
         masks: &[MaskTex; 2],
         b: usize,
         sampler: &wgpu::Sampler,
+        paths: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vo-particles-step"),
@@ -913,6 +939,7 @@ impl Particles {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&masks[1 - b].view) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&masks[b].view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(sampler) },
+                entry(7, paths, None),
             ],
         })
     }
@@ -974,7 +1001,7 @@ impl Particles {
         let trail_base = self.trails_used;
         assert!(trail_base + trails <= self.cfg.trail_capacity, "trail pool is full");
         let id = self.emitters.len() as u32;
-        self.emitters.push(Emitter { spec, base, capacity, trail_base, start });
+        self.emitters.push(Emitter { spec, base, capacity, trail_base, start, path: [0.0; 4] });
         self.free_used += capacity;
         self.trails_used += trails;
         // Not yet born: negative age, staggered by a hash of the slot. Ages sit on the tick
@@ -1083,8 +1110,10 @@ impl Particles {
             };
             self.step_data.extend_from_slice(bytemuck::bytes_of(&step));
             self.step_data.resize(((k + 1) as u64 * STEP_STRIDE) as usize, 0);
-            for (id, e) in self.emitters.iter().enumerate() {
-                self.emit_data.push(encode_sim(&sim(id as u32, t), e));
+            for (id, e) in self.emitters.iter_mut().enumerate() {
+                let s = sim(id as u32, t);
+                e.path = path_wave(&s);
+                self.emit_data.push(encode_sim(&s, e));
             }
             if self.emitters.is_empty() {
                 self.emit_data.push(GpuEmitStep::default());
@@ -1164,6 +1193,7 @@ impl Particles {
             &self.masks,
             self.mask_b,
             &self.sampler,
+            &self.paths,
         );
     }
 
@@ -1182,7 +1212,15 @@ impl Particles {
     ///
     /// Records and submits the re-anchor pass at once, so calls must come in time order.
     pub fn set_word(&mut self, slot: u32, t: f64, glyphs: &[WordGlyph], px_per_unit: f32) {
+        self.set_word_dots(slot, t, glyphs, px_per_unit, DOT_AREA);
+    }
+
+    /// [`Particles::set_word`] with one particle per `dot_area` px² of ink: 1.25 makes a
+    /// dense swarm, 4 to 6 distinct dots. The particles carry the solid word's light
+    /// together whatever the area, so the hand-over neither dims nor flashes.
+    pub fn set_word_dots(&mut self, slot: u32, t: f64, glyphs: &[WordGlyph], px_per_unit: f32, dot_area: f32) {
         let cap = self.cfg.slot_capacity;
+        let dot_area = dot_area.max(0.25);
         let old = std::mem::take(&mut self.slots[slot as usize]);
         let same = |a: &WordGlyph, b: &WordGlyph| a.font == b.font && a.glyph == b.glyph && a.size == b.size;
         let prefix = old.glyphs.iter().zip(glyphs).take_while(|(a, b)| same(&a.glyph, b)).count();
@@ -1206,7 +1244,7 @@ impl Particles {
             })
             .collect();
         let px2 = px_per_unit * px_per_unit;
-        let want: Vec<f32> = pts.iter().map(|p| p.area * px2 / 1.25).collect();
+        let want: Vec<f32> = pts.iter().map(|p| p.area * px2 / dot_area).collect();
         let total: f32 = want.iter().sum();
         let k = if total > cap as f32 { cap as f32 / total } else { 1.0 };
         let (x0, x1) = glyphs.iter().zip(&pts).fold((f32::MAX, f32::MIN), |(a, b), (g, p)| {
@@ -1296,7 +1334,9 @@ impl Particles {
             ..Default::default()
         };
         self.form(anchor);
-        self.slots[slot as usize] = Slot { gen: anchor.gen, glyphs: slot_glyphs, points };
+        let ink_px: f32 = pts.iter().map(|p| p.area * px2).sum();
+        let ink = if points.is_empty() { dot_area } else { ink_px / points.len() as f32 };
+        self.slots[slot as usize] = Slot { gen: anchor.gen, glyphs: slot_glyphs, points, ink };
     }
 
     /// Forms `form.points` in slot `slot` from time `t` (PA09 and any shape): dots that
@@ -1357,6 +1397,7 @@ impl Particles {
             gen: anchor.gen,
             glyphs: if n > 0 { vec![glyph] } else { Vec::new() },
             points: form.points[..n].iter().map(|p| [p.x, p.y]).collect(),
+            ink: DOT_AREA,
         };
     }
 
@@ -1427,7 +1468,7 @@ impl Particles {
         let frame = GpuFrame {
             m: [m.a, m.b, m.c, m.d],
             t: [m.e, m.f, p.px_per_unit, 0.0],
-            viewport: [p.width as f32, p.height as f32, srgb as u32 as f32, 0.0],
+            viewport: [p.width as f32, p.height as f32, srgb as u32 as f32, self.cfg.tick_hz as f32],
             time: p.t as f32,
             alpha,
             stretch: p.stretch,
@@ -1442,6 +1483,7 @@ impl Particles {
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         self.frame_data = frame;
         self.view_keys = [None; VIEWS as usize];
+        self.ribbons.clear();
         let draws: Vec<GpuEmitDraw> = self
             .emitters
             .iter()
@@ -1449,6 +1491,9 @@ impl Particles {
             .map(|(id, e)| {
                 let l = look(id as u32);
                 let r = l.rotation;
+                // Ribbons follow the path's strands, so only path emitters draw them.
+                let ribbons = if e.path[0] > 0.0 { l.ribbons.min(e.path[0] as u32) } else { 0 };
+                self.ribbons.push(if l.brightness > 0.0 { ribbons } else { 0 });
                 GpuEmitDraw {
                     origin: [l.origin.x, l.origin.y, l.z, l.size],
                     rot: [
@@ -1458,8 +1503,10 @@ impl Particles {
                     ],
                     c: l.ramp.map(linear),
                     look: style_code(l.style),
-                    trail: [l.trail_width, l.trail_alpha, 0.0, 0.0],
+                    trail: [l.trail_width, l.trail_alpha, (l.color_by == ColorBy::Angle) as u32 as f32, 0.0],
                     pool: [e.base, e.capacity, e.trail_base, if e.spec.three_d { E_3D } else { 0 }],
+                    path: e.path,
+                    ribbon: [ribbons as f32, l.ribbon_width, l.ribbon_alpha, 0.0],
                 }
             })
             .collect();
@@ -1468,13 +1515,17 @@ impl Particles {
         }
         let sd: Vec<GpuSlotDraw> = (0..self.cfg.word_slots as usize)
             .map(|i| match slots.get(i) {
-                Some(s) => GpuSlotDraw {
-                    origin: [s.origin.x, s.origin.y],
-                    visible: s.visible as u32 as f32,
-                    size: s.size,
-                    color: linear(s.color),
-                    look: style_code(s.style),
-                },
+                Some(s) => {
+                    let mut look = style_code(s.style);
+                    look[2] = self.slots[i].ink;
+                    GpuSlotDraw {
+                        origin: [s.origin.x, s.origin.y],
+                        visible: s.visible as u32 as f32,
+                        size: s.size,
+                        color: linear(s.color),
+                        look,
+                    }
+                }
                 None => GpuSlotDraw::default(),
             })
             .collect();
@@ -1506,7 +1557,7 @@ impl Particles {
         let frame = GpuFrame {
             m: [m.a, m.b, m.c, m.d],
             t: [m.e, m.f, px_per_unit, 0.0],
-            viewport: [width as f32, height as f32, srgb as u32 as f32, 0.0],
+            viewport: [width as f32, height as f32, srgb as u32 as f32, self.cfg.tick_hz as f32],
             ..self.frame_data
         };
         let frame = match camera {
@@ -1528,6 +1579,11 @@ impl Particles {
         match part {
             Part::Emitter(id) => {
                 let Some(e) = self.emitters.get(id as usize) else { return };
+                let ribbons = self.ribbons.get(id as usize).copied().unwrap_or(0);
+                if ribbons > 0 {
+                    pass.set_pipeline(&pipes.ribbon);
+                    pass.draw(0..ribbons * RIBBON_SEGMENTS * 6, id..id + 1);
+                }
                 pass.set_pipeline(&pipes.free);
                 pass.draw(e.base * 6..(e.base + e.capacity) * 6, 0..1);
                 let trails = e.spec.trails.min(e.capacity);
@@ -1545,6 +1601,16 @@ impl Particles {
                 }
             }
         }
+    }
+
+    /// Gives emitter `id` the path its `Shape::Path` particles follow, in emitter space, start
+    /// to end. Takes effect from the next tick.
+    pub fn set_path(&mut self, id: EmitterId, points: &[Point]) {
+        if id >= MAX_EMITTERS {
+            return;
+        }
+        let data = resample_path(points);
+        self.queue.write_buffer(&self.paths, (id * PATH_POINTS) as u64 * 16, bytemuck::cast_slice(&data));
     }
 
     /// Clears every slot's formed particles, as before the first [`Particles::set_word`].
@@ -1613,7 +1679,13 @@ impl Particles {
                 cache: None,
             })
         };
-        let pipes = DrawPipes { key, free: make("vs_free"), trail: make("vs_trail"), word: make("vs_word") };
+        let pipes = DrawPipes {
+            key,
+            free: make("vs_free"),
+            trail: make("vs_trail"),
+            word: make("vs_word"),
+            ribbon: make("vs_ribbon"),
+        };
         self.draw_pipes.push(pipes);
     }
 
@@ -1623,6 +1695,10 @@ impl Particles {
         let Some(key) = self.draw_key else { return };
         let Some(pipes) = self.draw_pipes.iter().find(|d| d.key == key) else { return };
         pass.set_bind_group(0, &self.draw_bind, &[0]);
+        for (id, &ribbons) in self.ribbons.iter().enumerate().filter(|r| *r.1 > 0) {
+            pass.set_pipeline(&pipes.ribbon);
+            pass.draw(0..ribbons * RIBBON_SEGMENTS * 6, id as u32..id as u32 + 1);
+        }
         if self.free_used > 0 {
             pass.set_pipeline(&pipes.free);
             pass.draw(0..self.free_used * 6, 0..1);
@@ -1666,6 +1742,7 @@ fn encode_sim(s: &EmitterSim, e: &Emitter) -> GpuEmitStep {
         Shape::Line { half_length, angle } => (3, [half_length, angle, 0.0, 0.0]),
         Shape::Box { half } => (4, [half[0], half[1], half[2], 0.0]),
         Shape::Torus { major, minor } => (5, [major, minor, 0.0, 0.0]),
+        Shape::Path { width, .. } => (6, [width, 0.0, 0.0, 0.0]),
     };
     let shock = s.shock.map_or([-1.0, 0.0, 1.0, 0.0], |k| [k.age, k.speed, k.width, k.strength]);
     let a = s.attract;
@@ -1680,7 +1757,49 @@ fn encode_sim(s: &EmitterSim, e: &Emitter) -> GpuEmitStep {
         gravity: [g[0], g[1], g[2], s.mask],
         shock,
         pool: [e.base, e.capacity, e.trail_base, e.spec.trails.min(e.capacity)],
+        path: path_wave(s),
     }
+}
+
+/// A path emitter's strand wave: strands, sway, wavelength, wave speed.
+fn path_wave(s: &EmitterSim) -> [f32; 4] {
+    match s.shape {
+        Shape::Path { strands, sway, wavelength, wave_speed, .. } => {
+            [strands.max(1) as f32, sway, wavelength, wave_speed]
+        }
+        _ => [0.0; 4],
+    }
+}
+
+/// `points` resampled to [`PATH_POINTS`] points at equal arc length, with the length so far
+/// in `z` (so the last point's `z` is the whole length).
+fn resample_path(points: &[Point]) -> Vec<[f32; 4]> {
+    let n = PATH_POINTS as usize;
+    let mut cum = vec![0.0f32; points.len()];
+    for i in 1..points.len() {
+        let (a, b) = (points[i - 1], points[i]);
+        cum[i] = cum[i - 1] + (b.x - a.x).hypot(b.y - a.y);
+    }
+    let len = cum.last().copied().unwrap_or(0.0);
+    let mut out = Vec::with_capacity(n);
+    let mut j = 0;
+    for i in 0..n {
+        let s = len * i as f32 / (n - 1) as f32;
+        while j + 2 < points.len() && cum[j + 1] < s {
+            j += 1;
+        }
+        let p = match points.len() {
+            0 => Point::ZERO,
+            1 => points[0],
+            _ => {
+                let f = ((s - cum[j]) / (cum[j + 1] - cum[j]).max(1e-6)).clamp(0.0, 1.0);
+                let (a, b) = (points[j], points[j + 1]);
+                Point::new(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f)
+            }
+        };
+        out.push([p.x, p.y, s, 0.0]);
+    }
+    out
 }
 
 /// Places each glyph's particles in a slot of `cap`: glyph `i` keeps the range `keep(i)`
@@ -1780,13 +1899,13 @@ mod tests {
     #[test]
     fn struct_sizes_match_wgsl() {
         assert_eq!(size_of::<GpuFree>(), 64);
-        assert_eq!(size_of::<GpuEmitStep>(), 144);
+        assert_eq!(size_of::<GpuEmitStep>(), 160);
         assert_eq!(size_of::<GpuStep>(), 64);
         assert_eq!(size_of::<GpuWord>(), 64);
         assert_eq!(size_of::<GpuTarget>(), 32);
         assert_eq!(size_of::<GpuAnchor>(), 48);
         assert_eq!(size_of::<GpuFrame>(), 160);
-        assert_eq!(size_of::<GpuEmitDraw>(), 160);
+        assert_eq!(size_of::<GpuEmitDraw>(), 192);
         assert_eq!(size_of::<GpuSlotDraw>(), 48);
     }
 
@@ -1899,5 +2018,29 @@ mod tests {
     fn frame_params_take_the_scale_from_the_transform() {
         let p = FrameParams::new(0.0, Affine::scale(2.0), 10, 10, wgpu::TextureFormat::Rgba8UnormSrgb);
         assert!((p.px_per_unit - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_path_is_resampled_at_equal_arc_length() {
+        // An L: 30 units right, then 10 down.
+        let l = [Point::new(0.0, 0.0), Point::new(30.0, 0.0), Point::new(30.0, 10.0)];
+        let r = resample_path(&l);
+        assert_eq!(r.len(), PATH_POINTS as usize);
+        assert_eq!(r[0], [0.0, 0.0, 0.0, 0.0]);
+        let last = r[r.len() - 1];
+        assert!((last[0] - 30.0).abs() < 1e-4 && (last[1] - 10.0).abs() < 1e-4 && (last[2] - 40.0).abs() < 1e-4);
+        let step = 40.0 / (PATH_POINTS - 1) as f32;
+        for (i, p) in r.iter().enumerate() {
+            assert!((p[2] - step * i as f32).abs() < 1e-3, "point {i} at length {}", p[2]);
+            // On the L: on the first leg while the length is under 30, then on the second.
+            if p[2] <= 30.0 {
+                assert!((p[0] - p[2]).abs() < 1e-3 && p[1].abs() < 1e-3);
+            } else {
+                assert!((p[0] - 30.0).abs() < 1e-3 && (p[1] - (p[2] - 30.0)).abs() < 1e-3);
+            }
+        }
+        // Degenerate paths do not panic.
+        assert!(resample_path(&[]).iter().all(|p| *p == [0.0; 4]));
+        assert!(resample_path(&[Point::new(2.0, 3.0)]).iter().all(|p| p[0] == 2.0 && p[1] == 3.0 && p[2] == 0.0));
     }
 }

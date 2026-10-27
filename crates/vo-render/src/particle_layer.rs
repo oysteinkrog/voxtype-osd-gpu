@@ -51,6 +51,8 @@ struct Pool {
     source: Arc<dyn EmitterSource>,
     /// Not in the last frame: spawns nothing more.
     gone: bool,
+    /// The path last uploaded for a path emitter.
+    path: Option<Arc<[Point]>>,
 }
 
 struct Placement {
@@ -166,7 +168,15 @@ impl ParticleLayer {
             let start = parts.ticks_for(e.since) - 1;
             let id = parts.add_emitter_at(spec, start);
             let source = list.emitter_sources[e.source as usize].0.clone();
-            self.pools.push(Pool { node: e.node, generation: e.generation, id, source, gone: false });
+            self.pools.push(Pool { node: e.node, generation: e.generation, id, source, gone: false, path: None });
+        }
+        for p in &mut self.pools {
+            if let Some(path) = p.source.path() {
+                if !p.path.as_ref().is_some_and(|old| Arc::ptr_eq(old, &path)) {
+                    parts.set_path(p.id, &path);
+                    p.path = Some(path);
+                }
+            }
         }
         let pools = &self.pools;
         let sim = |id: EmitterId, tt: f64| match pools.iter().find(|p| p.id == id) {
@@ -194,6 +204,7 @@ impl ParticleLayer {
         for w in changes {
             let Some(run) = runs.iter().find(|r| r.word == w.word) else { continue };
             self.text.px_per_unit = w.look.density * self.scale;
+            self.text.dot_area = w.look.dot_area;
             if self.text.set(parts, w.since.min(t), run) {
                 self.words.retain(|x| x.0 != w.word);
                 self.words.push((w.word, w.since, w.look));
@@ -249,7 +260,8 @@ impl ParticleLayer {
         look.brightness *= opacity * e.opacity;
         let k = ((to_px.a * to_px.d - to_px.b * to_px.c).abs().sqrt() / s).max(1e-6);
         look.size *= k;
-        let reach = (extent(&pool.source.sim(self.t)) * k + 4.0 * look.size) * s;
+        let path = pool.path.as_ref().map_or(0.0, |p| p.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max));
+        let reach = ((extent(&pool.source.sim(self.t)) + path) * k + 4.0 * look.size) * s;
         let start = self.placements.len() as u32;
         self.placements.push(Placement {
             part: Part::Emitter(pool.id),
@@ -411,6 +423,7 @@ fn extent(s: &EmitterSim) -> f32 {
         Shape::Line { half_length, .. } => half_length,
         Shape::Box { half } => half[0].max(half[1]).max(half[2]),
         Shape::Torus { major, minor } => major + minor,
+        Shape::Path { sway, width, .. } => sway + width,
     };
     let flight = (s.spawn_speed + s.noise * 0.2) * s.life.max(0.1) + s.gravity[0].abs().max(s.gravity[1].abs()) * 0.5;
     let shock = s.shock.map_or(0.0, |k| (k.speed * 0.3).min(4.0 * shape.max(10.0)));

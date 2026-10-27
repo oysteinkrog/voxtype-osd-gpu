@@ -66,6 +66,8 @@ pub struct ParticleText {
     pub color: Color,
     pub size: f32,
     pub style: SpriteStyle,
+    /// Pixels² of ink per particle (`Particles::set_word_dots`).
+    pub dot_area: f32,
 }
 
 /// A freed slot is reused only after its scatter has faded.
@@ -80,6 +82,7 @@ impl ParticleText {
             color,
             size: 0.0,
             style: SpriteStyle::Soft,
+            dot_area: crate::particles::DOT_AREA,
         }
     }
 
@@ -118,7 +121,7 @@ impl ParticleText {
             h.origin = run.origin;
             return true;
         }
-        p.set_word(slot, t, &run.glyphs, self.px_per_unit);
+        p.set_word_dots(slot, t, &run.glyphs, self.px_per_unit, self.dot_area);
         *h = Held { word: Some(run.word), glyphs: run.glyphs.clone(), origin: run.origin, freed_at: f64::NEG_INFINITY };
         true
     }

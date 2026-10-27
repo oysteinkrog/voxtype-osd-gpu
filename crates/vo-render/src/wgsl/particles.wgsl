@@ -29,6 +29,11 @@ const S_DISC: u32 = 2u;
 const S_LINE: u32 = 3u;
 const S_BOX: u32 = 4u;
 const S_TORUS: u32 = 5u;
+// Along a path, in strands (`Shape::Path`).
+const S_PATH: u32 = 6u;
+// Points per resampled path, and segments per ribbon.
+const PATH_N: u32 = 128u;
+const RIBBON_SEGS: u32 = 96u;
 
 // Emitter flags (`EmitStep::spawn.w`, `EmitDraw::pool.w` high bits).
 const E_3D: u32 = 1u;
@@ -52,6 +57,11 @@ const T_START: u32 = 8u;
 const ST_SOFT: u32 = 0u;
 const ST_DOT: u32 = 1u;
 const ST_BOKEH: u32 = 2u;
+// Points of light: a crisp Gaussian core whose energy is kept, so a point smaller than a pixel
+// gets dimmer, not blurrier.
+const ST_SPARK: u32 = 3u;
+// A glowing ribbon: a sharp core with a faint wide halo, across the ribbon only.
+const ST_RIBBON: u32 = 4u;
 
 // --- hashing (vo_core::hash, the same functions bit for bit) ---
 
@@ -114,6 +124,32 @@ fn curl3 (p: vec3f, t: f32) -> vec3f {
   return vec3f (p3y - p2z, p1z - p3x, p2x - p1y) / (2.0 * e);
 }
 
+// --- paths ---
+
+// Strand `k`'s sideways offset at arc length `s` of a path `len` long at time `t`: a wave
+// with its own amplitude, wavelength and phase, tapering to 0 at both ends. `w` is
+// `EmitStep::path`.
+fn strand_offset (k: f32, s: f32, len: f32, t: f32, w: vec4f) -> f32 {
+  let kk = u32 (k);
+  let h1 = to_unit (rand (0x51ab7u, kk, 1u, 0u));
+  let h2 = to_unit (rand (0x51ab7u, kk, 2u, 0u));
+  let h3 = to_unit (rand (0x51ab7u, kk, 3u, 0u));
+  let u = clamp (s / max (len, 1e-3), 0.0, 1.0);
+  let env = pow (sin (PI * u), 0.8);
+  let amp = w.y * (0.45 + 0.55 * h1) * select (-1.0, 1.0, h2 < 0.5);
+  let lambda = max (w.z * (0.75 + 0.5 * h2), 1.0);
+  return env * amp * sin (2.0 * PI * (s / lambda - w.w * t + h3));
+}
+
+// A point on a resampled path (`a`, `b` the samples around it, `f` between them), with its
+// unit normal: x, y and the normal's x, y.
+fn path_point (a: vec4f, b: vec4f, f: f32) -> vec4f {
+  let d = b.xy - a.xy;
+  let l = length (d);
+  let tangent = select (vec2f (1.0, 0.0), d / l, l > 1e-6);
+  return vec4f (mix (a.xy, b.xy, f), -tangent.y, tangent.x);
+}
+
 // --- free particles ---
 
 struct Free {
@@ -148,6 +184,8 @@ struct EmitStep {
   shock: vec4f,
   // x pool base, y pool capacity, z trail base, w trail count.
   pool: vec4u,
+  // Path emitters: x strands, y sway, z wavelength, w wave speed in cycles per second.
+  path: vec4f,
 };
 
 struct Step {
@@ -275,13 +313,17 @@ struct EmitDraw {
   c0: vec4f,
   c1: vec4f,
   c2: vec4f,
-  // x style, y dot pitch in pixels, z focus depth (clip w), w aperture (blur pixels per unit
-  // of depth away from focus).
+  // x style; dots: y pitch in pixels; bokeh: z focus depth (clip w), w aperture (blur pixels
+  // per unit of depth away from focus); sparks: y accent share, z gain, w twinkle.
   look: vec4f,
-  // x ribbon width as a share of the sprite, y ribbon opacity.
+  // x ribbon width as a share of the sprite, y ribbon opacity, z colour by: 0 age, 1 angle.
   trail: vec4f,
   // x pool base, y capacity, z trail base, w flags.
   pool: vec4u,
+  // As `EmitStep::path`, from the last tick.
+  path: vec4f,
+  // x ribbons, y ribbon core width in units, z ribbon opacity.
+  ribbon: vec4f,
 };
 
 struct SlotDraw {
@@ -291,6 +333,7 @@ struct SlotDraw {
   // Sprite radius in logical units; 0 for one from the stroke.
   size: f32,
   color: vec4f,
-  // x style, y dot pitch in pixels.
+  // x style, y dot pitch in pixels, z ink per particle in px² (the light a particle carries
+  // at full strength, set by the CPU so the formed word matches the solid word's light).
   look: vec4f,
 };
