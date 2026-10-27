@@ -761,6 +761,13 @@ impl<M> Scene<M> {
         n.live.word_bounds(word, t, style.size)
     }
 
+    /// Live text with a reading stage (`Element::reading`): the newest line's box at `t` in
+    /// the node's space. Map it with `sampled(id, t).transform` to place a surface so the
+    /// line being read sits where the eye is.
+    pub fn reading_line(&self, id: NodeId, t: f64) -> Option<Rect> {
+        self.nodes.get(id)?.live.reading_line(t)
+    }
+
     /// Live text: the caret bar at `t` in the node's space, and its blink opacity.
     pub fn caret(&self, id: NodeId, t: f64) -> Option<(Rect, f32)> {
         self.nodes.get(id)?.live.caret(t).map(|(r, _, a)| (r, a))

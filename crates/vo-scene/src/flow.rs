@@ -22,6 +22,10 @@
 //!   little looser and settle to full ink in 300 to 600 ms, slower for words revised often.
 //!   A revision starts the settle again; a stable list from the recogniser holds a word
 //!   until it is stable.
+//! - **Reading stage (T14).** With `Element::reading` the newest line holds a fixed
+//!   height in the text box and older lines recede upward, each taking the look of its age
+//!   (scale about a point on the line, and opacity), 260 ms by default. A word that rewraps
+//!   onto the new line glides along the stage: its rewrap travel and the roll cancel.
 //! - **Caret (T17).** A bar after the last word. Its position springs in 120 ms, it stays
 //!   solid while words arrive and for 400 ms after, then blinks at about 1 Hz.
 //!
@@ -35,6 +39,7 @@ use vo_core::spring::Spring;
 use vo_core::words::{Word, WordId};
 
 use crate::geom::{Color, Point, Rect};
+use crate::lines::LineLook;
 use crate::text::ShapedText;
 
 /// Words that stay on their line move to their new place in about 200 ms.
@@ -129,6 +134,37 @@ impl Default for SettleInk {
     }
 }
 
+/// The active-line reading stage: where the newest line sits and how older lines look.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    /// The centre of the newest line, from the top of the text box, in logical units.
+    pub line_y: f32,
+    /// The look of each line age, newest first. Lines older than the last look keep it.
+    pub looks: Vec<LineLook>,
+    /// Where on a line its scale is centred, from 0 (left end) to 1 (right end).
+    pub origin: f32,
+    /// Moves lines up and eases their looks.
+    pub travel: Spring,
+}
+
+impl Reading {
+    /// The teleprompter: the newest line at `line_y` at full size; the line before at 0.88
+    /// and 0.45 opacity; older lines faded out; 260 ms; scaled about the left end.
+    pub fn teleprompter(line_y: f32) -> Reading {
+        Reading {
+            line_y,
+            looks: vec![LineLook::new(1.0, 1.0), LineLook::new(0.88, 0.45), LineLook::new(0.88, 0.0)],
+            origin: 0.0,
+            travel: Spring::critical_to_98(0.26),
+        }
+    }
+
+    fn look(&self, age: u32) -> LineLook {
+        let last = self.looks.len().saturating_sub(1);
+        self.looks.get((age as usize).min(last)).copied().unwrap_or(LineLook::new(1.0, 1.0))
+    }
+}
+
 /// How live text moves, set on the element.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveMotion {
@@ -139,6 +175,8 @@ pub struct LiveMotion {
     /// The words the recogniser marks stable, when it says. With a list, a word not on it
     /// holds its arrival ink until it is; without one, every word settles by its age.
     pub stable: Option<Vec<WordId>>,
+    /// The active-line reading stage (T14).
+    pub reading: Option<Reading>,
 }
 
 /// What `Flow::update` needs from the node.
@@ -175,6 +213,10 @@ struct FlowWord {
     track: Channel,
     /// How many times the text changed.
     revisions: u32,
+    /// Reading stage: vertical roll of the word's line, and its line's look.
+    roll: Channel,
+    look_scale: Channel,
+    look_opacity: Channel,
 }
 
 /// A glyph's own motion: where it sits in its word, and its enter or change.
@@ -448,6 +490,10 @@ impl Flow {
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
         let placed = place(shaped, words);
+        let stage = StageTargets::new(&placed, motion.reading.as_ref(), size);
+        self.spans = stage.spans.clone();
+        (self.origin, self.staged) = (motion.reading.as_ref().map_or(0.0, |r| r.origin), motion.reading.is_some());
+        self.line_height = line_height;
         let mut old = std::mem::take(&mut self.words);
         let mut next = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
@@ -489,6 +535,9 @@ impl Flow {
                     ink: make.ch(1.0, CROSSFADE, Rest::UNIT),
                     track: make.ch(0.0, CROSSFADE, Rest::UNIT),
                     revisions: 0,
+                    roll: make.ch(stage.roll, FLIP, Rest::PIXELS),
+                    look_scale: make.ch(stage.look(p.line).scale, FLIP, Rest::UNIT),
+                    look_opacity: make.ch(stage.look(p.line).opacity, FLIP, Rest::UNIT),
                 });
                 if let Some(o) = next.last_mut() {
                     settle(o, true, motion, &make, reduced);
@@ -519,15 +568,22 @@ impl Flow {
                 o.spread = false;
             }
             line_shift = (o.line == p.line).then(|| (p.line, p.x - o.x.target() as f32));
+            let look = stage.look(p.line);
             if o.line != p.line {
                 let at = t + REWRAP_STAGGER * stagger as f64;
                 stagger += 1;
                 move_to(&mut o.x, p.x, at, REWRAP, reduced);
                 move_to(&mut o.y, p.y, at, REWRAP, reduced);
+                // The roll moves with the rewrap, so a word that drops onto the new line
+                // slides along the stage instead of jumping a line.
+                move_to(&mut o.roll, stage.roll, at, REWRAP, reduced);
             } else {
                 move_to(&mut o.x, p.x, t, FLIP, reduced);
                 move_to(&mut o.y, p.y, t, FLIP, reduced);
+                move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
             }
+            move_to(&mut o.look_scale, look.scale, t, stage.travel, reduced);
+            move_to(&mut o.look_opacity, look.opacity, t, stage.travel, reduced);
             move_to(&mut o.width, p.width, t, FLIP, reduced);
             o.line = p.line;
             settle(&mut o, revised, motion, &make, reduced);
@@ -669,7 +725,7 @@ impl Flow {
 
     /// Fades out every glyph of a word that left the screen, where it is at `t`.
     fn ghost_word(&mut self, o: FlowWord, t: f64, retention: f64) {
-        let at = (o.x.value(t) as f32, o.y.value(t) as f32);
+        let at = (o.x.value(t) as f32, o.y.value(t) as f32 + o.roll.value(t) as f32);
         for g in self.ghosts.iter_mut().filter(|g| g.word == o.id && g.fixed.is_none()) {
             let k = if g.width > 0.0 { o.width.value(t) as f32 / g.width } else { 1.0 };
             g.x *= k;
@@ -677,7 +733,7 @@ impl Flow {
         }
         let s = stretch(&o, t);
         for g in &o.glyphs {
-            let k = g.opacity.value(t);
+            let k = g.opacity.value(t) * o.look_opacity.value(t);
             if k > 0.0 {
                 let ch = |v: f64, spring: Spring, rest: Rest| chan(t, v, spring, rest, retention);
                 let mut opacity = ch(k, CROSSFADE, Rest::UNIT);
@@ -741,12 +797,38 @@ impl Flow {
         let middle = 0.5 * (w.glyphs.len() as f32 - 1.0);
         let track = w.track.value(t) as f32 * self.size * (*gi as f32 - middle);
         let centre = 0.5 * g.advance * (1.0 - scale);
+        let dx = off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + centre + track;
+        let dy = off(&w.y) + g.rise.value(t) as f32;
+        let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
+        let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
-            dx: off(&w.x) + g.x.value(t) as f32 * stretch(w, t) - g.x.target() as f32 + centre + track,
-            dy: off(&w.y) + g.rise.value(t) as f32,
-            opacity: (g.opacity.value(t) * w.ink.value(t)).clamp(0.0, 1.0) as f32,
-            scale,
+            dx: pos.x - pen.x + dx,
+            dy: pos.y - pen.y + dy,
+            opacity: (g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)).clamp(0.0, 1.0) as f32,
+            scale: scale * look,
         }
+    }
+
+    /// Where the reading stage puts a pen position of word `w` at `t`: scaled about its
+    /// line's origin by the line's look, and rolled. Returns the place and the scale.
+    fn on_stage(&self, w: &FlowWord, pen: Point, t: f64) -> (Point, f32) {
+        let s = w.look_scale.value(t) as f32;
+        let roll = w.roll.value(t) as f32;
+        let ox = self.spans.get(w.line as usize).map_or(0.0, |sp| sp.0 + self.origin * (sp.1 - sp.0));
+        let oy = w.y.value(t) as f32 - 0.28 * self.size;
+        (Point::new(ox + (pen.x - ox) * s, oy + (pen.y - oy) * s + roll), s)
+    }
+
+    /// The newest line's box at `t` in the text box's space, when the text has a reading
+    /// stage: where a host can centre the line being read.
+    pub fn reading_line(&self, t: f64) -> Option<Rect> {
+        let w = self.words.last()?;
+        if self.spans.is_empty() || !self.staged {
+            return None;
+        }
+        let (x0, x1, _) = self.spans[w.line as usize];
+        let centre = w.y.value(t) as f32 - 0.28 * self.size + w.roll.value(t) as f32;
+        Some(Rect::new(x0, centre - 0.5 * self.line_height, x1 - x0, self.line_height))
     }
 
     /// Glyphs on their way out at `t`.
@@ -761,7 +843,7 @@ impl Flow {
                 None => {
                     let w = self.words.iter().find(|w| w.id == g.word)?;
                     let k = if g.width > 0.0 { w.width.value(t) as f32 / g.width } else { 1.0 };
-                    (w.x.value(t) as f32, w.y.value(t) as f32, g.x * k)
+                    (w.x.value(t) as f32, w.y.value(t) as f32 + w.roll.value(t) as f32, g.x * k)
                 }
             };
             let scale = g.scale.value(t).max(0.0) as f32;
@@ -774,7 +856,7 @@ impl Flow {
     /// what decorations and the caret follow.
     pub fn word_bounds(&self, id: WordId, t: f64, size: f32) -> Option<Rect> {
         let w = self.words.iter().find(|w| w.id == id)?;
-        let (x, y) = (w.x.value(t) as f32, w.y.value(t) as f32);
+        let (x, y) = (w.x.value(t) as f32, w.y.value(t) as f32 + w.roll.value(t) as f32);
         Some(Rect::new(x, y - 0.78 * size, w.width.value(t).max(0.0) as f32, size))
     }
 
@@ -782,14 +864,15 @@ impl Flow {
     pub fn caret(&self, t: f64) -> Option<(Rect, Option<Color>, f32)> {
         let (x, y, style, [w, up, down]) = self.caret.as_ref()?;
         let alpha = caret_alpha(t - self.arrived);
-        let (x, y) = (x.value(t) as f32, y.value(t) as f32);
+        let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32);
+        let (x, y) = (x.value(t) as f32, y.value(t) as f32 + roll);
         Some((Rect::new(x, y - up, *w, up + down), style.color, alpha))
     }
 
     /// When every word, glyph, ghost and the caret's glide come to rest.
     pub fn settled_at(&self) -> f64 {
         let words = self.words.iter().flat_map(|w| {
-            [&w.x, &w.y, &w.width, &w.ink, &w.track]
+            [&w.x, &w.y, &w.width, &w.ink, &w.track, &w.roll, &w.look_scale, &w.look_opacity]
                 .into_iter()
                 .chain(w.glyphs.iter().flat_map(|g| [&g.x, &g.opacity, &g.rise, &g.scale]))
         });
@@ -836,6 +919,51 @@ pub(crate) struct Flow {
     arrived: f64,
     /// Em size of the text, for tracking.
     size: f32,
+    line_height: f32,
+    /// Each line's `(x0, x1, baseline)` in the current layout, by line number.
+    spans: Vec<(f32, f32, f32)>,
+    /// The reading stage's scale origin along a line, and whether there is a stage.
+    origin: f32,
+    staged: bool,
+}
+
+/// What the reading stage asks of every word for one layout.
+struct StageTargets {
+    spans: Vec<(f32, f32, f32)>,
+    /// The roll every line takes: the newest line's centre to `line_y`. 0 without a stage.
+    roll: f32,
+    newest: u32,
+    reading: Option<Reading>,
+    travel: Spring,
+}
+
+impl StageTargets {
+    fn new(placed: &[Option<PlacedWord>], reading: Option<&Reading>, size: f32) -> StageTargets {
+        let mut spans: Vec<(f32, f32, f32)> = Vec::new();
+        for p in placed.iter().flatten() {
+            let i = p.line as usize;
+            if spans.len() <= i {
+                spans.resize(i + 1, (f32::INFINITY, f32::NEG_INFINITY, p.y));
+            }
+            let sp = &mut spans[i];
+            (sp.0, sp.1, sp.2) = (sp.0.min(p.x), sp.1.max(p.x + p.width), p.y);
+        }
+        let newest = spans.len().saturating_sub(1) as u32;
+        let roll = match (reading, spans.last()) {
+            (Some(r), Some(sp)) => r.line_y - (sp.2 - 0.28 * size),
+            _ => 0.0,
+        };
+        let travel = reading.map_or(FLIP, |r| r.travel);
+        StageTargets { spans, roll, newest, reading: reading.cloned(), travel }
+    }
+
+    /// The look of a word on `line`: its age's look on a stage, plain without one.
+    fn look(&self, line: u32) -> LineLook {
+        match &self.reading {
+            Some(r) => r.look(self.newest.saturating_sub(line)),
+            None => LineLook::new(1.0, 1.0),
+        }
+    }
 }
 
 /// Settling ink for a word at `make.t`: a `fresh` word (new, or its text changed) starts at

@@ -1124,6 +1124,19 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the active-line reading stage (T14). The newest line holds its centre at
+    /// `reading.line_y` from the top of the box, older lines recede upward and take the look
+    /// of their age, and a word that rewraps onto the new line glides along the stage. Give
+    /// the element a fixed height and clip it, since older lines move above the box.
+    /// `Scene::reading_line` gives the newest line's box for placing the surface.
+    pub fn reading(mut self, reading: crate::flow::Reading) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.reading = Some(reading),
+            _ => debug_assert!(false, "reading on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Swap` by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
