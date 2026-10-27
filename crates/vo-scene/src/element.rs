@@ -417,6 +417,14 @@ pub struct TextStyle {
     /// Wrap to near-equal line lengths, as CSS `text-wrap: balance` (TY25): the narrowest
     /// width that keeps the greedy line count.
     pub balance: bool,
+    /// One character per line, top to bottom, every character upright (FX-005); see
+    /// [`ShapedLayout::vertical`](crate::text::ShapedLayout::vertical). Wrapping, alignment
+    /// and balance do not apply.
+    pub vertical: bool,
+    /// Autofit (FX-049) as `(min size, step)`: a label is drawn at the largest of its size,
+    /// size minus step, and so on down to the min size, that fits its box. See
+    /// [`fit_size`](crate::text::fit_size). Labels only.
+    pub fit: Option<(f32, f32)>,
 }
 
 impl TextStyle {
@@ -430,6 +438,8 @@ impl TextStyle {
             tracking: 0.0,
             align: crate::text::Align::Start,
             balance: false,
+            vertical: false,
+            fit: None,
         }
     }
 
@@ -446,6 +456,16 @@ impl TextStyle {
     /// Lines of near-equal length.
     pub fn balanced(self) -> TextStyle {
         TextStyle { balance: true, ..self }
+    }
+
+    /// Set top to bottom, one upright character per line (FX-005).
+    pub fn vertical(self) -> TextStyle {
+        TextStyle { vertical: true, ..self }
+    }
+
+    /// Shrunk in `step`s, down to `min_size`, until the text fits its box (FX-049).
+    pub fn fit(self, min_size: f32, step: f32) -> TextStyle {
+        TextStyle { fit: Some((min_size, step)), ..self }
     }
 
     /// With `tracking` logical units of extra space after every character.

@@ -13,8 +13,9 @@ use taffy::{
 };
 
 use crate::element::{Kind, TextStyle};
+use crate::geom::Size;
 use crate::scene::{Node, NodeId};
-use crate::text::{ShapedText, TextLayout};
+use crate::text::{fit_size, ShapedText, TextLayout};
 
 pub(crate) struct LayoutView<'a, M> {
     pub nodes: &'a mut SlotMap<NodeId, Node<M>>,
@@ -81,7 +82,8 @@ impl<M> LayoutView<'_, M> {
                     AvailableSpace::MinContent => Some(0.0),
                     AvailableSpace::MaxContent => None,
                 });
-                let s = text_layout.layout_objects(text, style, max, objects);
+                let st = fitted(text_layout, text, style, max, known.height);
+                let s = text_layout.layout_objects(text, &st, max, objects);
                 let size =
                     taffy::Size { width: known.width.unwrap_or(s.size.w), height: known.height.unwrap_or(s.size.h) };
                 shaped = Some(s);
@@ -91,15 +93,38 @@ impl<M> LayoutView<'_, M> {
         if inputs.run_mode == RunMode::PerformLayout {
             if let Some((text, style, objects)) = &content {
                 // The measure function did not run when the style fixes both sides.
+                // A label that fits itself is laid out again in its final box.
+                let st = fitted(text_layout, text, style, Some(out.size.width), Some(out.size.height));
+                let shaped = if style.fit.is_some() { None } else { shaped };
                 let mut s =
-                    shaped.unwrap_or_else(|| text_layout.layout_objects(text, style, Some(out.size.width), objects));
+                    shaped.unwrap_or_else(|| text_layout.layout_objects(text, &st, Some(out.size.width), objects));
                 // A box wider than its text (a fixed or stretched width) holds the lines by
                 // their alignment.
                 s.align_in(style.align, out.size.width);
-                self.node_mut(node_id).shaped = s;
+                let n = self.node_mut(node_id);
+                n.shaped = s;
+                n.fitted = st.size;
             }
         }
         out
+    }
+}
+
+/// The style text is laid out in: its own, or with `fit`, the largest step that fits in
+/// `width` by `height` (FX-049). A missing side does not limit.
+fn fitted(
+    layout: &dyn TextLayout,
+    text: &str,
+    style: &TextStyle,
+    width: Option<f32>,
+    height: Option<f32>,
+) -> TextStyle {
+    match style.fit {
+        Some((min, step)) => {
+            let room = Size::new(width.unwrap_or(f32::INFINITY), height.unwrap_or(f32::INFINITY));
+            fit_size(layout, text, style, room, min, step)
+        }
+        None => *style,
     }
 }
 

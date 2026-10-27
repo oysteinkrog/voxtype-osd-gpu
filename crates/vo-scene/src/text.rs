@@ -268,6 +268,9 @@ impl TextLayout for ShapedLayout {
         let Some(face) = self.fonts.get(style.font) else {
             return EstimateText::default().layout_objects(text, style, max_width, objects);
         };
+        if style.vertical {
+            return self.vertical(text, style);
+        }
         if text.is_empty() {
             return ShapedText::default();
         }

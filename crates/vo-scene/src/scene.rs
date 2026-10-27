@@ -102,6 +102,8 @@ pub(crate) struct Node<M> {
     /// When the enter motion settles.
     pub entered: f64,
     pub shaped: ShapedText,
+    /// The font size `shaped` was laid out at: the style's, or smaller with autofit.
+    pub fitted: f32,
     pub has_layout: bool,
     /// Live text: each word's own motion, sorted by word id.
     pub words: Vec<WordAnim>,
@@ -856,6 +858,7 @@ impl<M> Scene<M> {
             since: t,
             entered: t,
             shaped: ShapedText::default(),
+            fitted: 0.0,
             has_layout: false,
             words: Vec::new(),
             words_at: t,
@@ -1389,7 +1392,8 @@ impl<M> Scene<M> {
             }),
             Kind::Label { style, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
-                self.glyphs(n, style.size, origin, color, alpha, t, |_| NO_WORD, items, out);
+                let size = if n.fitted > 0.0 { n.fitted } else { style.size };
+                self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
             Kind::LiveText { words, style, particles, inline, .. } => {
