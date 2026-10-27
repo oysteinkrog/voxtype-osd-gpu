@@ -29,6 +29,8 @@ pub struct PlacedGlyph {
     pub pos: Point,
     /// Byte offset of the glyph's cluster in the source text, or `ELLIPSIS_CLUSTER`.
     pub cluster: u32,
+    /// How far the pen moves after this glyph, in logical units.
+    pub advance: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -90,7 +92,12 @@ impl TextLayout for EstimateText {
             }
             let baseline = line as f32 * style.line_height + self.ascent * em;
             for (i, c) in word.char_indices() {
-                glyphs.push(PlacedGlyph { glyph: c as u32, pos: Point::new(x, baseline), cluster: (start + i) as u32 });
+                glyphs.push(PlacedGlyph {
+                    glyph: c as u32,
+                    pos: Point::new(x, baseline),
+                    cluster: (start + i) as u32,
+                    advance: self.advance * em,
+                });
                 x += self.advance * em;
             }
             any = true;
@@ -183,7 +190,7 @@ impl TextLayout for ShapedLayout {
                 let advance = p.x_advance as f32 * k + style.tracking;
                 if !is_space(text, info.cluster) {
                     let at = Point::new(x + p.x_offset as f32 * k, baseline - p.y_offset as f32 * k);
-                    out.glyphs.push(PlacedGlyph { glyph: info.glyph_id, pos: at, cluster: info.cluster });
+                    out.glyphs.push(PlacedGlyph { glyph: info.glyph_id, pos: at, cluster: info.cluster, advance });
                     ends.push(x + advance);
                     width = x + advance;
                 }
@@ -203,9 +210,11 @@ impl TextLayout for ShapedLayout {
                     out.glyphs.truncate(start + ends.len());
                 }
                 let x = ends.last().copied().unwrap_or(0.0);
-                for &(glyph, dx, dy) in dots.iter() {
+                for (i, &(glyph, dx, dy)) in dots.iter().enumerate() {
                     let at = Point::new(x + dx, baseline - dy);
-                    out.glyphs.push(PlacedGlyph { glyph, pos: at, cluster: ELLIPSIS_CLUSTER });
+                    let next = dots.get(i + 1).map_or(*dots_width, |d| d.1);
+                    let advance = next - dx;
+                    out.glyphs.push(PlacedGlyph { glyph, pos: at, cluster: ELLIPSIS_CLUSTER, advance });
                 }
                 width = x + *dots_width;
             }

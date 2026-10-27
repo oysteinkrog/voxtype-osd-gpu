@@ -23,6 +23,7 @@ use crate::display::{
 use crate::dots::Dots;
 use crate::element::{Element, Handlers, Key, Kind, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
 use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
+use crate::flow::{Flow, FlowInput};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::{Glass, GlassInstance};
 use crate::input::PointerState;
@@ -100,6 +101,8 @@ pub(crate) struct Node<M> {
     pub words: Vec<WordAnim>,
     /// Live text: when a word last came or went.
     pub words_at: f64,
+    /// Live text: where each word is on screen, sprung toward its laid-out place.
+    pub live: Flow,
     /// The motion of a property no `.motion()` call names: the scene's default.
     pub default_motion: Motion,
     /// Reduced motion (MO09): travel and scale jump, effects change slowly.
@@ -606,6 +609,7 @@ impl<M> Scene<M> {
         let moving = self.nodes.values().any(|n| {
             n.chans.iter().any(|(_, c)| c.settled_at() > t)
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
+                || n.live.settled_at() > t
                 || (n.alive(t) && n.sheen_progress(t).is_some())
                 || (n.alive(t)
                     && match &n.kind {
@@ -645,6 +649,7 @@ impl<M> Scene<M> {
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
+            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
             .min_by(f64::total_cmp)
     }
 
@@ -666,6 +671,19 @@ impl<M> Scene<M> {
             self.emit(root, t, Affine::IDENTITY, 1.0, 0, false, &mut items, out);
         }
         out.layers[0].items = close_items(&mut items, out);
+    }
+
+    /// Live text: a word's box at `t` in the node's space, from its sprung position and
+    /// width. Decorations, highlights and particle targets follow this, not the layout.
+    pub fn word_bounds(&self, id: NodeId, word: u32, t: f64) -> Option<Rect> {
+        let n = self.nodes.get(id)?;
+        let Kind::LiveText { style, .. } = &n.kind else { return None };
+        n.live.word_bounds(word, t, style.size)
+    }
+
+    /// Live text: the caret bar at `t` in the node's space, and its blink opacity.
+    pub fn caret(&self, id: NodeId, t: f64) -> Option<(Rect, f32)> {
+        self.nodes.get(id)?.live.caret(t).map(|(r, _, a)| (r, a))
     }
 
     /// Box, transform and opacity of a node at `t`, composed with its ancestors. `None` if
@@ -735,6 +753,7 @@ impl<M> Scene<M> {
             has_layout: false,
             words: Vec::new(),
             words_at: t,
+            live: Flow::default(),
             default_motion: self.default_motion,
             reduced: self.reduced_motion,
         };
@@ -967,6 +986,19 @@ impl<M> Scene<M> {
                 }
             }
             n.has_layout = true;
+            if let Kind::LiveText { words, style, live, particles, .. } = &n.kind {
+                let input = FlowInput {
+                    shaped: &n.shaped,
+                    words,
+                    motion: live,
+                    size: style.size,
+                    line_height: style.line_height,
+                    retention,
+                    reduced: n.reduced,
+                    crossfade: particles.is_none(),
+                };
+                n.live.update(t, input);
+            }
             stack.extend(n.flow.iter().copied());
         }
     }
@@ -1237,9 +1269,12 @@ impl<M> Scene<M> {
                             None => word_spans.push((word, x0, x1)),
                         }
                     }
-                    for (g, &span) in n.shaped.glyphs.iter().zip(&spans) {
+                    for (i, (g, &span)) in n.shaped.glyphs.iter().zip(&spans).enumerate() {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
+                        // Where the word and glyph are on their way to the laid-out place.
+                        let m = n.live.glyph(i, t);
+                        let (k, dx, dy) = (k * m.opacity, dx + m.dx, dy + m.dy);
                         if k <= 0.0 {
                             continue;
                         }
@@ -1263,6 +1298,30 @@ impl<M> Scene<M> {
                             word,
                             color: color.fade(k),
                         });
+                    }
+                    for gh in n.live.ghosts(t) {
+                        let (k, dx, dy) = n.word_motion(gh.word, t);
+                        let k = k * gh.opacity;
+                        if k <= 0.0 {
+                            continue;
+                        }
+                        push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
+                        out.glyphs.push(GlyphInstance {
+                            pos: Point::new(origin.x + gh.pos.x + dx, origin.y + gh.pos.y + dy),
+                            size: style.size,
+                            font: style.font,
+                            glyph: gh.glyph,
+                            word: gh.word,
+                            color: color.fade(k),
+                        });
+                    }
+                }
+                if let Some((bar, tint, blink)) = n.live.caret(t) {
+                    let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
+                    if c.a > 0.0 {
+                        let r = Rect::new(origin.x + bar.x, origin.y + bar.y, bar.w, bar.h);
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * bar.w), Paint::solid(c)));
                     }
                 }
                 None

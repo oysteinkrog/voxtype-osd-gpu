@@ -21,6 +21,7 @@ use crate::canvas::{CanvasDraw, Painter};
 use crate::display::{BlendMode, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
+use crate::flow::{Caret, LiveMotion, Revise};
 use crate::geom::{Color, Rect};
 use crate::glass::Glass;
 use crate::path::{Morph, Outline, StrokeStyle};
@@ -417,6 +418,8 @@ pub(crate) enum Kind {
         change: Transition,
         /// Words form from particles (`Element::word_particles`).
         particles: Option<WordParticles>,
+        /// Caret and other live text motion (`crate::flow`).
+        live: LiveMotion,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -587,6 +590,7 @@ impl<M> Element<M> {
             enter: Transition::NONE,
             change: Transition::NONE,
             particles: None,
+            live: LiveMotion::default(),
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
@@ -1044,6 +1048,27 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { change, .. } => *change = t,
             _ => debug_assert!(false, "word_change on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: a caret after the last word (TY14). It glides to the new end in about
+    /// 120 ms, stays solid while words arrive and for 400 ms after, then blinks at about
+    /// 1 Hz.
+    pub fn caret(mut self, c: Caret) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.caret = Some(c),
+            _ => debug_assert!(false, "caret on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: what a word whose text changes does with its glyphs. `Revise::Swap` by
+    /// default.
+    pub fn word_revise(mut self, r: Revise) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.revise = r,
+            _ => debug_assert!(false, "word_revise on a node that is not live text: {}", self.key),
         }
         self
     }

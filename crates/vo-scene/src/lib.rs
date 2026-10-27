@@ -6,6 +6,7 @@
 //! - `layout`: taffy (flexbox and block) on the node arena through its low-level traits.
 //! - `font`: the font table that text layout and the renderer share.
 //! - `text`: text measurement behind a trait, with a width estimate for now.
+//! - `flow`: live text motion: words spring to each new layout, revisions, caret.
 //! - `input`: hit testing at the event's time and pointer messages.
 //! - `inspect`: read-only node and channel views for tools (preview overlays, state dumps).
 //! - `canvas`: elements drawn by app code from the frame time.
@@ -27,6 +28,7 @@ pub mod display;
 pub mod dots;
 pub mod element;
 pub mod emitter;
+pub mod flow;
 pub mod font;
 pub mod geom;
 pub mod glass;
