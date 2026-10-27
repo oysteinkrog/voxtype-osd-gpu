@@ -2,7 +2,8 @@
 //! different enter transitions, run through a scenario on the CPU. The GPU budget test runs
 //! the same scenario offline and is skipped on an adapter without timestamps.
 
-use vo::envelope::{check_scenario, measure_budget, Envelope};
+use vo::envelope::{check_scenario, measure_budget, sample_scenario, Envelope};
+use vo::scene::display::NO_WORD;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::font::{test_font_path, FontRegistry};
 use vo::scene::geom::{Color, Size};
@@ -13,6 +14,7 @@ use vo_core::words::Word;
 struct Live {
     words: Vec<Word>,
     enter: Transition,
+    tint: Option<Color>,
 }
 
 impl App for Live {
@@ -23,11 +25,14 @@ impl App for Live {
     }
 
     fn view(&self, _: &Tokens) -> Element<Vec<Word>> {
-        let live = Element::live_text("live", &self.words)
+        let mut live = Element::live_text("live", &self.words)
             .text_style(TextStyle::new(0, 22.0, 28.0))
             .color(Color::hex(0xf2f3f5, 1.0))
             .word_enter(self.enter)
             .width(328.0);
+        if let Some(c) = self.tint {
+            live = live.envelope_tint(c);
+        }
         Element::panel("panel").pad(16.0).fill(Color::hex(0x1d1f24, 1.0)).width(360.0).height(120.0).child(live)
     }
 }
@@ -50,7 +55,7 @@ fn options() -> Options<Vec<Word>> {
 }
 
 fn check(enter: Transition) -> vo::envelope::Report {
-    let app = Live { words: Vec::new(), enter };
+    let app = Live { words: Vec::new(), enter, tint: None };
     check_scenario(app, &scenario(), 60.0, options(), &Envelope::default())
 }
 
@@ -84,7 +89,7 @@ fn blur_on_arrival_is_caught() {
 
 #[test]
 fn the_budget_is_measured_per_frame() {
-    let app = Live { words: Vec::new(), enter: Transition::fade() };
+    let app = Live { words: Vec::new(), enter: Transition::fade(), tint: None };
     let Some(b) = measure_budget(app, &scenario(), 30.0, options()).expect("render") else {
         eprintln!("skipped: this adapter has no GPU timestamps inside encoders");
         return;
@@ -95,4 +100,28 @@ fn the_budget_is_measured_per_frame() {
     assert!(!b.sections.is_empty(), "{b}");
     eprintln!("{b}");
     b.within(50.0, 50.0).expect("a plain card fits a generous budget");
+}
+
+#[test]
+fn the_tint_marks_arrivals_that_break_the_envelope() {
+    let tint = Color::hex(0xff0000, 1.0);
+    let red = |c: &Color| c.r > 0.99 && c.g < 0.01 && c.b < 0.01;
+    let count = |enter: Transition| {
+        let app = Live { words: Vec::new(), enter, tint: Some(tint) };
+        let (mut early, mut late) = (0, 0);
+        sample_scenario(app, &scenario(), 60.0, options(), &mut |_, t, list| {
+            for _ in list.glyphs.iter().filter(|g| g.word != NO_WORD && red(&g.color)) {
+                if t < 2.7 {
+                    early += 1;
+                } else {
+                    late += 1;
+                }
+            }
+        });
+        (early, late)
+    };
+    let (early, late) = count(Transition::fade());
+    assert!(early > 0, "a fade-in is tinted while it is faint");
+    assert_eq!(late, 0, "nothing is tinted at rest");
+    assert_eq!(count(Transition::NONE), (0, 0));
 }
