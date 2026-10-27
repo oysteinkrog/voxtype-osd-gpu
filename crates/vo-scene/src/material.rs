@@ -17,6 +17,9 @@
 //!   line, warm ground below.
 //! - [`Material::gradient`]: two or three colour stops along a line in layer space, for one
 //!   gradient across a whole word.
+//! - [`Material::aurora`]: a mesh gradient of up to four soft colour blobs drifting over the
+//!   element's box, brighter and larger with the app's energy. [`Material::haze`] is the same
+//!   function as a warm glow that fades out between its blobs.
 //!
 //! Phosphor persistence is a layer property, not a material: see `Element::phosphor`.
 //!
@@ -44,14 +47,19 @@ pub mod func {
     pub const HOLOGRAM: u32 = 2;
     pub const CHROME: u32 = 3;
     pub const GRADIENT: u32 = 4;
+    pub const AURORA: u32 = 5;
 }
 
 /// `Material::flags` bit for chrome: key the bands to layer y instead of the glyph's em y.
 pub const CHROME_LAYER: u32 = 1;
 
-/// `Material::flags` bit for a gradient: its ends are fractions of the element's box, which
-/// the scene maps to layer space ([`Material::in_box`]).
+/// `Material::flags` bit for a gradient or an aurora: its geometry is in fractions of the
+/// element's box, which the scene maps to layer space ([`Material::in_box`]).
 pub const GRADIENT_BOX: u32 = 2;
+
+/// `Material::flags` bit for an aurora: a glow that fades out between the blobs (a haze)
+/// instead of a mesh that fills the whole box.
+pub const AURORA_GLOW: u32 = 4;
 
 /// One material: a function and its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -121,6 +129,7 @@ impl Material {
             func::NEON if age < p[1][2] as f64 => Some(1.0 / 20.0),
             func::NEON if p[1][3] > 0.0 => Some(1.0 / 30.0),
             func::HOLOGRAM if p[1][2] != 0.0 || p[2][0] > 0.0 => Some(1.0 / 30.0),
+            func::AURORA if p[5][1] > 0.0 => Some(1.0 / 30.0),
             f if f >= CUSTOM_FIRST && self.fps > 0.0 => Some(1.0 / self.fps as f64),
             _ => None,
         }
@@ -192,10 +201,19 @@ impl Material {
         m
     }
 
-    /// The material with ends given as fractions of a box mapped onto `rect` (layer space).
-    /// Other materials come back unchanged. The scene calls this with the element's box.
+    /// The material with geometry given as fractions of a box mapped onto `rect` (layer
+    /// space). Other materials come back unchanged. The scene calls this with the element's
+    /// box.
     pub fn in_box(self, rect: Rect) -> Material {
-        if self.func != func::GRADIENT || self.flags & GRADIENT_BOX == 0 {
+        if self.flags & GRADIENT_BOX == 0 {
+            return self;
+        }
+        if self.func == func::AURORA {
+            let mut m = self.param(4, [rect.x, rect.y, rect.w, rect.h]);
+            m.flags &= !GRADIENT_BOX;
+            return m;
+        }
+        if self.func != func::GRADIENT {
             return self;
         }
         let [x0, y0, x1, y1] = self.params[3];
@@ -204,6 +222,30 @@ impl Material {
         let mut m = self.param(3, [ax, ay, bx, by]);
         m.flags &= !GRADIENT_BOX;
         m
+    }
+
+    /// A mesh gradient over the element's box: one soft blob per colour (two to four), each
+    /// drifting on its own slow path, blended in OKLab. Defaults: blobs a third of the box
+    /// wide, drifting at 0.12 cycles a second, energy 0, painted over (not added).
+    pub fn aurora(colors: &[Color]) -> Aurora {
+        let colors = if colors.is_empty() { &[Color::WHITE][..] } else { &colors[..colors.len().min(4)] };
+        let c = std::array::from_fn(|i| colors[i % colors.len()]);
+        Aurora { colors: c, energy: 0.0, speed: 0.12, size: 0.34, additive: 0.0, glow: false }
+    }
+
+    /// A warm haze: two soft glows of `color` drifting slowly inside the element's box, light
+    /// added rather than painted over, fading to nothing between them. The colour's alpha is
+    /// its strength.
+    pub fn haze(color: Color) -> Aurora {
+        let warm = Color { a: color.a * 0.7, ..color };
+        Aurora {
+            colors: [color, warm, Color::TRANSPARENT, Color::TRANSPARENT],
+            energy: 0.0,
+            speed: 0.05,
+            size: 0.3,
+            additive: 0.85,
+            glow: true,
+        }
     }
 
     /// Three stops: `c0` at `p0`, `c1` at fraction `mid` of the way, `c2` at `p1`.
@@ -304,6 +346,60 @@ impl From<Hologram> for Material {
             .color(0, h.tint)
             .param(1, [h.period, h.depth, h.scroll, h.additive])
             .param(2, [h.flicker, h.rate, h.edge, 0.0])
+    }
+}
+
+/// A mesh gradient or haze, built with [`Material::aurora`] or [`Material::haze`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aurora {
+    /// One blob per colour; fewer than four colours repeat.
+    pub colors: [Color; 4],
+    /// 0 to 1, from the app (a level or a signal): blobs grow, brighten and swirl harder.
+    pub energy: f32,
+    /// Drift in cycles a second; 0 holds the blobs still.
+    pub speed: f32,
+    /// A blob's radius as a fraction of the box's shorter side.
+    pub size: f32,
+    /// How much of the light is added instead of painted over, 0 to 1.
+    pub additive: f32,
+    /// Fade out between blobs instead of filling the box.
+    pub glow: bool,
+}
+
+impl Aurora {
+    /// Sets the energy for this frame, 0 to 1. The drift keeps its speed, so a changing
+    /// energy never makes the blobs jump.
+    pub fn energy(self, energy: f32) -> Aurora {
+        Aurora { energy: energy.clamp(0.0, 1.0), ..self }
+    }
+    pub fn speed(self, cycles_per_sec: f32) -> Aurora {
+        Aurora { speed: cycles_per_sec.max(0.0), ..self }
+    }
+    pub fn size(self, size: f32) -> Aurora {
+        Aurora { size: size.clamp(0.02, 2.0), ..self }
+    }
+    pub fn additive(self, additive: f32) -> Aurora {
+        Aurora { additive: additive.clamp(0.0, 1.0), ..self }
+    }
+    pub fn glow(self, glow: bool) -> Aurora {
+        Aurora { glow, ..self }
+    }
+}
+
+impl From<Aurora> for Material {
+    fn from(a: Aurora) -> Material {
+        let mut m = Material::builtin(func::AURORA)
+            .color(0, a.colors[0])
+            .color(1, a.colors[1])
+            .color(2, a.colors[2])
+            .color(3, a.colors[3])
+            .param(4, [0.0, 0.0, 1.0, 1.0])
+            .param(5, [a.energy, a.speed, a.size, a.additive]);
+        m.flags |= GRADIENT_BOX;
+        if a.glow {
+            m.flags |= AURORA_GLOW;
+        }
+        m
     }
 }
 
@@ -418,6 +514,25 @@ mod tests {
         assert_eq!(placed.in_box(Rect::new(0.0, 0.0, 1.0, 1.0)), placed);
         let neon: Material = Material::neon(3.0).into();
         assert_eq!(neon.in_box(Rect::new(1.0, 2.0, 3.0, 4.0)), neon);
+    }
+
+    #[test]
+    fn an_aurora_fills_its_box_and_drifts() {
+        let m: Material = Material::aurora(&[Color::hex(0x2be0c8, 1.0), Color::hex(0x7a3cff, 1.0)]).energy(2.0).into();
+        assert_eq!(m.func, func::AURORA);
+        // Two colours repeat over the four blobs.
+        assert_eq!(m.params[2], m.params[0]);
+        assert_eq!(m.params[5][0], 1.0);
+        assert_eq!(m.colors, 0b1111);
+        let placed = m.in_box(Rect::new(10.0, 20.0, 300.0, 100.0));
+        assert_eq!(placed.params[4], [10.0, 20.0, 300.0, 100.0]);
+        assert_eq!(placed.flags & GRADIENT_BOX, 0);
+        assert_eq!(m.next_frame(0.0), Some(1.0 / 30.0));
+        let still: Material = Material::aurora(&[Color::WHITE]).speed(0.0).into();
+        assert_eq!(still.next_frame(0.0), None);
+        let haze: Material = Material::haze(Color::hex(0xffb070, 0.5)).into();
+        assert_eq!(haze.flags & AURORA_GLOW, AURORA_GLOW);
+        assert!(haze.params[5][3] > 0.5);
     }
 
     #[test]

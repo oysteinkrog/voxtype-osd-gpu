@@ -147,7 +147,10 @@ fn mat_neon (m: Material, i: MatIn) -> vec4f {
     // The bloom outside the tube: light added (a third painted over, so it reads on a light
     // backdrop too), falling off exponentially from the edge.
     let d = max (i.edge, 0.0) / (m.p[1].x * i.ppu);
-    let g = m.p[1].y * (0.65 * exp (-d) + 0.35 * exp (-4.0 * d * d)) * (1.0 - i.cov);
+    // Tapered to nothing at the quad's edge (the reach): an sRGB target shows even 1/1000 of
+    // linear light, so a tail cut off there would draw the quad's outline.
+    let fade = clamp (1.0 - max (i.edge, 0.0) / max (m.timing.y * i.ppu, 1e-3), 0.0, 1.0);
+    let g = m.p[1].y * (0.65 * exp (-d) + 0.35 * exp (-4.0 * d * d)) * (1.0 - i.cov) * fade * fade;
     out += vec4f (edge_rgb * g, 0.33 * min (g, 1.0));
   }
   return out * (a * bright);
@@ -231,6 +234,61 @@ fn mat_gradient (m: Material, i: MatIn) -> vec4f {
   return vec4f (c.rgb * cov, cov);
 }
 
+// Aurora and haze. p0 to p3: blob colours. p4: the box, x y w h in layer units. p5: energy,
+// drift (cycles a second), blob radius (a fraction of the box's shorter side), additive share.
+// Flag 4: a glow that fades out between the blobs (haze) instead of a mesh filling the box.
+fn mat_aurora (m: Material, i: MatIn) -> vec4f {
+  let a = i.color.a;
+  if (a <= 0.0 || i.cov <= 0.0) {
+    return vec4f (0.0);
+  }
+  let b = m.p[4];
+  let s = max (min (b.z, b.w), 1e-3);
+  // The point from the box's centre, in units of its shorter side.
+  let q = (i.p - b.xy - 0.5 * b.zw) / s;
+  let half = 0.5 * b.zw / s;
+  let e = clamp (m.p[5].x, 0.0, 1.0);
+  let t = 6.2831853 * m.p[5].y * m.timing.x;
+  // A slow warp, stronger with energy, so the blobs are not circles.
+  let w = q + (0.05 + 0.08 * e) * vec2f (sin (q.y * 3.1 + t * 0.7), cos (q.x * 2.7 - t * 0.6));
+  let r = m.p[5].z * (1.0 + 0.45 * e);
+  // Each blob drifts on its own Lissajous path inside the box. Colours mix in premultiplied
+  // OKLab. A mesh weighs the blobs by inverse square distance, smooth everywhere however
+  // far apart they are; a glow by a Gaussian, so it fades out between them.
+  let glow = (m.head.y & 4u) != 0u;
+  var acc = vec4f (0.0);
+  var wsum = 0.0;
+  for (var k = 0u; k < 4u; k++) {
+    let f = f32 (k);
+    let c = half * 0.72 * vec2f (sin (t * (0.9 + 0.23 * f) + f * 1.7), cos (t * (0.7 + 0.31 * f) + f * 2.3));
+    let d = w - c;
+    let x = dot (d, d) / (r * r);
+    var wk = exp (-x);
+    if (!glow) {
+      let v = x + 0.6;
+      wk = 1.0 / (v * sqrt (v));
+    }
+    let col = m.p[k];
+    acc += wk * vec4f (col.xyz * col.w, col.w);
+    wsum += wk;
+  }
+  if (acc.w <= 1e-6) {
+    return vec4f (0.0);
+  }
+  var rgb = max (mat_lab_to_linear (acc.xyz / acc.w), vec3f (0.0));
+  var alpha: f32;
+  if (glow) {
+    alpha = 1.0 - exp (-acc.w * (0.7 + 0.6 * e));
+  } else {
+    alpha = acc.w / max (wsum, 1e-6);
+    rgb *= 0.8 + 0.4 * e;
+  }
+  // Soft gradients band in 8 bits: a half-step of noise breaks the steps up.
+  rgb += (mat_rand (i.px.x, i.px.y) - 0.5) / 255.0;
+  let cov = i.cov * a * clamp (alpha, 0.0, 1.0);
+  return vec4f (max (rgb, vec3f (0.0)) * cov, cov * (1.0 - m.p[5].w));
+}
+
 // Material `id` (1-based) at one fragment. 0 is plain paint.
 fn material (id: u32, i: MatIn) -> vec4f {
   if (id == 0u) {
@@ -242,6 +300,7 @@ fn material (id: u32, i: MatIn) -> vec4f {
     case 2u: { return mat_hologram (m, i); }
     case 3u: { return mat_chrome (m, i); }
     case 4u: { return mat_gradient (m, i); }
+    case 5u: { return mat_aurora (m, i); }
     // vo: custom material cases
     default: { return i.color * i.cov; }
   }

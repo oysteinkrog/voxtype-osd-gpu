@@ -319,20 +319,26 @@ fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
     mi.ppu = layer.t.z;
     mi.seed = f32 (in.mat.y);
     mi.em = vec2f (0.0);
+    // The fill and the stroke each go through the material, the stroke over the fill.
+    var out = vec4f (0.0);
+    if (fill_kind != PAINT_NONE) {
+      mi.color = paint (fill_kind, in.fill_c0, in.fill_c1, in.fill_p, p);
+      mi.cov = fill_cov;
+      mi.edge = dp;
+      mi.centre = 0.0;
+      mi.half_w = 0.0;
+      out = material (in.mat.x, mi);
+    }
     if (stroked) {
       mi.color = paint (stroke_kind, in.stroke_c0, in.stroke_c1, in.stroke_p, p);
       mi.cov = stroke_cov;
       mi.edge = abs (dp) - hw;
       mi.centre = abs (dp);
       mi.half_w = hw;
-    } else {
-      mi.color = paint (fill_kind, in.fill_c0, in.fill_c1, in.fill_p, p);
-      mi.cov = fill_cov;
-      mi.edge = dp;
-      mi.centre = 0.0;
-      mi.half_w = 0.0;
+      let s = material (in.mat.x, mi);
+      out = s + out * (1.0 - s.a);
     }
-    return material (in.mat.x, mi);
+    return out;
   }
 
   let fill = paint ((in.kinds >> 8u) & 0xffu, in.fill_c0, in.fill_c1, in.fill_p, p) * fill_cov;

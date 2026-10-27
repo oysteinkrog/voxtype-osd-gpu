@@ -3,6 +3,8 @@
 //! material registered at run time. Goldens at 1x and 2x, a determinism check, and checks
 //! that the neon blooms past its stroke and the hologram adds light. Phosphor: a white trace
 //! sweeping on a trail layer whose channels fade at their own rates leaves a green afterglow.
+//! Aurora and haze (FX-130, FX-149): a mesh of drifting blobs over a panel and a warm haze
+//! inside one, with a check that energy brightens the mesh.
 //!
 //! GPU test: `just test-gpu` runs it. Goldens hold the premultiplied bytes as read back.
 
@@ -290,4 +292,52 @@ fn phosphor_golden() {
     };
     assert!(g > r + 30 && g > b + 30, "afterglow is green: {:?}", px(&img, 390, 100));
     assert_eq!(img.px, run("material-phosphor-again").px);
+}
+
+/// An aurora mesh over the left panel at `energy`, and a warm haze inside the right one.
+fn aurora_card(t: f32, energy: f32) -> DisplayList {
+    let mut b = Builder::new();
+    b.shape(ShapeInstance::rrect(rr(0.0, 0.0, W, H, 0.0), Paint::solid(hex(0x07080d))));
+    let mesh =
+        Material::from(Material::aurora(&[hex(0x18c8b0), hex(0x6a2cff), hex(0xff3d9a), hex(0x2a7bff)]).energy(energy));
+    let mesh = b.list.add_material(mesh.at(t).in_box(Rect::new(20.0, 20.0, 340.0, 260.0)));
+    b.shape(ShapeInstance::rrect(rr(20.0, 20.0, 340.0, 260.0, 22.0), Paint::solid(Color::WHITE)).with_material(mesh));
+    b.shape(ShapeInstance::rrect(rr(380.0, 20.0, 200.0, 260.0, 18.0), Paint::solid(hex(0x1a1410))));
+    let haze = Material::from(Material::haze(Color::hex(0xffa860, 0.6)));
+    let haze = b.list.add_material(haze.at(t).in_box(Rect::new(380.0, 20.0, 200.0, 260.0)));
+    b.shape(ShapeInstance::rrect(rr(380.0, 20.0, 200.0, 260.0, 18.0), Paint::solid(Color::WHITE)).with_material(haze));
+    b.finish()
+}
+
+#[test]
+fn aurora_golden() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let img = render(&mut off, "material-aurora-1x", &aurora_card(2.0, 0.3), 1.0);
+    support::check(&img, Tolerance::default()).unwrap();
+    // The haze adds light inside its panel but leaves room dark between its glows.
+    let haze: Vec<u32> = (40..260).step_by(20).map(|y| px(&img, 480, y)[0] as u32).collect();
+    assert!(haze.iter().max().unwrap() > &(haze.iter().min().unwrap() + 20), "haze varies: {haze:?}");
+    // It moves: a second later the mesh is somewhere else.
+    let later = render(&mut off, "later", &aurora_card(3.0, 0.3), 1.0);
+    assert_ne!(img.px, later.px);
+}
+
+#[test]
+fn energy_brightens_the_aurora() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let sum = |img: &Image| -> u64 {
+        let mut s = 0u64;
+        for y in (30..270).step_by(4) {
+            for x in (30..350).step_by(4) {
+                let p = px(img, x, y);
+                s += p[0] as u64 + p[1] as u64 + p[2] as u64;
+            }
+        }
+        s
+    };
+    let calm = sum(&render(&mut off, "calm", &aurora_card(2.0, 0.0), 1.0));
+    let loud = sum(&render(&mut off, "loud", &aurora_card(2.0, 1.0), 1.0));
+    assert!(loud * 100 > calm * 115, "energy 1 is brighter: {loud} vs {calm}");
 }
