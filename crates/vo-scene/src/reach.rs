@@ -150,7 +150,8 @@ pub fn particle_reach(sim: &crate::emitter::EmitterSim, look: &crate::emitter::E
     let life = sim.life.max(0.0) * (1.0 + sim.life_jitter.abs());
     // With drag `k` a speed `v` carries a particle at most `v / k`; without drag, `v life`.
     let coast = if sim.drag > 1e-3 { (1.0 / sim.drag).min(life) } else { life };
-    let push = |accel: f32| accel.abs() * (0.5 * life * life).min(if sim.drag > 1e-3 { life / sim.drag } else { f32::MAX });
+    let push =
+        |accel: f32| accel.abs() * (0.5 * life * life).min(if sim.drag > 1e-3 { life / sim.drag } else { f32::MAX });
     let g = (sim.gravity[0] * sim.gravity[0] + sim.gravity[1] * sim.gravity[1]).sqrt();
     let shock = sim.shock.map_or(0.0, |s| push(s.strength).min(s.speed * life));
     let travel = sim.spawn_speed.abs() * coast + push(g) + push(sim.noise) + shock;
@@ -238,12 +239,8 @@ pub(crate) fn own_reach(r: &ReachIn) -> Insets {
         motion.bottom = motion.bottom.max(grow + (y * k).max(0.0));
     }
     // What the app declared for drawing the framework cannot see (canvas, GPU elements).
-    let declared = Insets::new(
-        one(Slot::ReachLeft),
-        one(Slot::ReachTop),
-        one(Slot::ReachRight),
-        one(Slot::ReachBottom),
-    );
+    let declared =
+        Insets::new(one(Slot::ReachLeft), one(Slot::ReachTop), one(Slot::ReachRight), one(Slot::ReachBottom));
     // Effects sit on the moved box, so they add to the motion.
     motion.plus(effects.max(Insets::uniform(uniform))).max(declared).non_negative()
 }
@@ -455,7 +452,8 @@ mod tests {
     #[test]
     fn particles_reach_their_travel() {
         use crate::emitter::{EmitterLook, EmitterSim, Shape};
-        let sim = EmitterSim { shape: Shape::Disc { radius: 10.0 }, spawn_speed: 50.0, drag: 2.0, ..Default::default() };
+        let sim =
+            EmitterSim { shape: Shape::Disc { radius: 10.0 }, spawn_speed: 50.0, drag: 2.0, ..Default::default() };
         let look = EmitterLook { size: 2.0, ..Default::default() };
         // 10 for the disc, 50 / 2 = 25 of coasting, 4 for the sprite.
         assert!((particle_reach(&sim, &look) - 39.0).abs() < 1e-3);

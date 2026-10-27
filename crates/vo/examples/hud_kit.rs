@@ -115,12 +115,7 @@ fn sheet(out: &std::path::Path) {
     let cell = Size::new(600.0, 300.0);
     let rows: Vec<Vec<Vec<u8>>> = boards()
         .iter()
-        .map(|b| {
-            b.times
-                .iter()
-                .map(|&t| off.render_to_rgba(&board_list(b, cell, 1.0, t), [600, 300], 1.0))
-                .collect()
-        })
+        .map(|b| b.times.iter().map(|&t| off.render_to_rgba(&board_list(b, cell, 1.0, t), [600, 300], 1.0)).collect())
         .collect();
     let cols = rows.iter().map(Vec::len).max().unwrap_or(1);
     let (cw, ch, gap) = (600usize, 300usize, 8usize);
@@ -153,7 +148,9 @@ fn bench() {
     let mut r = Renderer::new(&device, &queue);
     let qs =
         device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
-    let buf = |usage| device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage, mapped_at_creation: false });
+    let buf = |usage| {
+        device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage, mapped_at_creation: false })
+    };
     let resolve = buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buf(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
     let period = queue.get_timestamp_period() as f64;

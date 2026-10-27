@@ -56,7 +56,12 @@ fn surface_margin_from_effect_reach_keeps_the_glow() {
     // The glow (6 ln(512 x 1.4) = 39.4) reaches further than the shadow (10 + 3 x 8).
     assert!((reach.top - 39.45).abs() < 0.1 && reach.bottom == reach.top, "{reach:?}");
     let fit = surface_for(content, reach);
-    let m = Insets::new(fit.origin.x, fit.origin.y, fit.size.w - content.w - fit.origin.x, fit.size.h - content.h - fit.origin.y);
+    let m = Insets::new(
+        fit.origin.x,
+        fit.origin.y,
+        fit.size.w - content.w - fit.origin.x,
+        fit.size.h - content.h - fit.origin.y,
+    );
     let view = Element::column("margin").pad_edges(m.top, m.right, m.bottom, m.left).child(toast());
     let mut img = render(view.clone(), fit.size, 0.0);
     assert!(edge_alpha(&img) <= 1, "ink at the edge: {}", edge_alpha(&img));
