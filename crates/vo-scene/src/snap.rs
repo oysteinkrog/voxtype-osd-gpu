@@ -14,7 +14,8 @@ pub struct Snap {
     pub at: f32,
     /// Gap between the two ends when fully apart.
     pub gap: f32,
-    /// How far each end lifts off the line, outward from the shape.
+    /// How far each end lifts off the line, outward from the shape; negative curls it
+    /// inward.
     pub curl: f32,
     /// Length of each end that bends.
     pub hook: f32,

@@ -46,6 +46,8 @@ pub struct GlyphOutline {
     pub ink: Rect,
     /// Where the pen box runs: from `pos.x` by the glyph's advance.
     pub advance: f32,
+    /// Byte offset of the glyph's cluster in the shaped text.
+    pub cluster: u32,
 }
 
 impl GlyphOutline {
@@ -78,7 +80,16 @@ impl WordOutline {
             let path = glyph_path(&face, g.glyph, size);
             let outline = Outline::new(&path, TOLERANCE).transform(&Affine::translate(pos.x, pos.y));
             let ink = bounds(&outline).unwrap_or(Rect::new(pos.x, pos.y, 0.0, 0.0));
-            glyphs.push(GlyphOutline { font: g.font, glyph: g.glyph, pos, size, outline, ink, advance: g.advance });
+            glyphs.push(GlyphOutline {
+                font: g.font,
+                glyph: g.glyph,
+                pos,
+                size,
+                outline,
+                ink,
+                advance: g.advance,
+                cluster: g.cluster,
+            });
         }
         let ink = glyphs.iter().filter(|g| g.has_ink()).map(|g| g.ink).reduce(union).unwrap_or_default();
         WordOutline { glyphs, ink }

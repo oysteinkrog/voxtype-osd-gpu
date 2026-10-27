@@ -99,6 +99,7 @@ pub mod spectrum;
 pub mod stage;
 pub mod status_icon;
 pub mod story;
+pub mod stroke_write;
 pub mod svg;
 pub mod swap;
 pub mod text;
