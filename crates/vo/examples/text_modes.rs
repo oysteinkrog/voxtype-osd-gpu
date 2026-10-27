@@ -9,6 +9,11 @@
 //!   a right-aligned cell; and two countdowns whose digits roll down (`Roll::Down`), one by the
 //!   second and one in 0.1 s steps at 10 Hz.
 //!
+//! - `log` (T15, T16): the tall log. Each paragraph has a time stamp in a gutter, aligned to its
+//!   first line, that rolls in with `digit_roll`. The newest paragraph is bright and slightly
+//!   larger, the ones before dim in 300 ms, and a marker dot glides to the newest paragraph.
+//!   The log is bottom-anchored in a clip that fades at the top, and the rows spring upward.
+//!
 //!   cargo run --release -p vo --example text_modes -- --mode ticker [--out DIR] [--check]
 //!
 //! Writes `DIR/<mode>.mp4` and `DIR/<mode>-sheet.png` (default DIR
@@ -31,8 +36,12 @@ const FPS: f64 = 60.0;
 const SIZE: Size = Size::new(960.0, 240.0);
 
 fn bg() -> Element<Msg> {
+    bg_sized(SIZE)
+}
+
+fn bg_sized(size: Size) -> Element<Msg> {
     Element::panel("root")
-        .size(SIZE.w, SIZE.h)
+        .size(size.w, size.h)
         .fill_gradient(Color::hex(0x0e1016, 1.0), Color::hex(0x161a24, 1.0))
         .align_items(AlignItems::CENTER)
         .justify(JustifyContent::CENTER)
@@ -284,6 +293,149 @@ impl App for Telemetry {
     }
 }
 
+// T15 and T16: the tall log.
+
+const LOG_SIZE: Size = Size::new(760.0, 420.0);
+const LOG_TEXT_W: f32 = 520.0;
+const LOG_GAP: f32 = 14.0;
+/// Paragraphs: when the first word comes, the stamp, and the text.
+const LOG: [(f64, &str, &str); 4] = [
+    (0.2, "00:00", "Open the popup in tall mode and keep the newest paragraph bright."),
+    (2.0, "00:12", "The one before dims in three hundred milliseconds while the marker moves down."),
+    (3.8, "00:31", "Each stamp sits beside the first line of its paragraph and rolls in."),
+    (5.6, "00:47", "Older text scrolls up under a soft edge at the top of the log."),
+];
+const LOG_WORD_GAP: f64 = 0.16;
+/// The newest paragraph's scale.
+const ACTIVE_SCALE: f32 = 1.03;
+
+struct Log {
+    /// `(paragraph, words shown)` per tick, in tick order.
+    steps: Vec<(f64, usize, usize)>,
+    step: Option<usize>,
+    measure: ShapedLayout,
+    style: TextStyle,
+}
+
+impl Log {
+    fn new(fonts: &FontRegistry) -> Log {
+        let mut steps = Vec::new();
+        for (p, (start, _, text)) in LOG.iter().enumerate() {
+            for w in 0..text.split(' ').count() {
+                steps.push((start + w as f64 * LOG_WORD_GAP, p, w + 1));
+            }
+        }
+        Log { steps, step: None, measure: ShapedLayout::new(fonts.clone()), style: TextStyle::new(0, 20.0, 28.0) }
+    }
+
+    /// The paragraphs on screen, with how many words of each show.
+    fn shown(&self) -> Vec<(usize, usize)> {
+        let Some(i) = self.step else { return Vec::new() };
+        let (_, last, words) = self.steps[i];
+        let mut out: Vec<(usize, usize)> = (0..last).map(|p| (p, LOG[p].2.split(' ').count())).collect();
+        out.push((last, words));
+        out
+    }
+
+    fn height(&self, text: &str) -> f32 {
+        self.measure.layout(text, &self.style, Some(LOG_TEXT_W)).size.h
+    }
+}
+
+impl App for Log {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        for (i, (t, _, _)) in self.steps.iter().enumerate() {
+            cx.after(*t, Msg::Tick(i));
+        }
+    }
+
+    fn update(&mut self, msg: Msg, _: &mut Cx<Msg>) {
+        if let Msg::Tick(i) = msg {
+            self.step = Some(i);
+        }
+    }
+
+    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
+        let shown = self.shown();
+        let newest = shown.len().saturating_sub(1);
+        let rows_spring = Spring::critical_to_98(0.26);
+        let dim_spring = Spring::critical_to_98(0.3);
+        let mut active_y = 0.0;
+        let mut y = 0.0;
+        let rows = shown.iter().map(|&(p, n)| {
+            let (_, stamp, text) = LOG[p];
+            let words: Vec<Word> =
+                text.split(' ').take(n).enumerate().map(|(i, w)| Word { id: i as u32, text: w.to_string() }).collect();
+            let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+            let h = self.height(&joined);
+            if p == shown[newest].0 {
+                active_y = y;
+            }
+            y += h + LOG_GAP;
+            let active = p == shown[newest].0;
+            // Scale about the left edge: the scale is about the box centre, so move the box
+            // back by half the growth.
+            let s = if active { ACTIVE_SCALE } else { 1.0 };
+            let body = Element::live_text(format!("t{p}"), &words)
+                .text_style(self.style)
+                .color(text_color())
+                .width(LOG_TEXT_W)
+                .word_enter(Transition::fade().offset(0.0, 6.0))
+                .opacity(if active { 1.0 } else { 0.42 })
+                .scale(s)
+                .offset(LOG_TEXT_W * (s - 1.0) / 2.0, h * (s - 1.0) / 2.0)
+                .motion(Prop::Opacity, dim_spring)
+                .motion(Prop::Scale, dim_spring)
+                .motion(Prop::Offset, dim_spring);
+            let stamp_style = TextStyle::new(0, 15.0, self.style.line_height);
+            let stamp_color = if active { Color::hex(0xffa64d, 1.0) } else { dim_color() };
+            let gutter = Element::row(format!("g{p}")).width(64.0).child(digit_roll(
+                format!("s{p}"),
+                stamp,
+                stamp_style,
+                stamp_color,
+                Spring::SOFT,
+            ));
+            Element::row(format!("p{p}"))
+                .align_items(AlignItems::FLEX_START)
+                .child(gutter)
+                .child(body)
+                .motion(Prop::Position, rows_spring)
+        });
+        let rows: Vec<Element<Msg>> = rows.collect();
+        let total = (y - LOG_GAP).max(0.0);
+        // Bottom-anchored: the rows' column sits at the bottom of the clip and grows upward.
+        let log_h = 300.0;
+        let text = Element::column("rows").gap(LOG_GAP).children(rows).motion(Prop::Position, rows_spring);
+        // The marker rail: one dot, offset to the newest paragraph's first line.
+        let lh = self.style.line_height;
+        let dot = Element::shape("dot", vo::scene::display::ShapeKind::Circle)
+            .size(8.0, 8.0)
+            .fill(Color::hex(0xffa64d, 1.0))
+            .opacity(if shown.is_empty() { 0.0 } else { 1.0 })
+            .offset(0.0, (log_h - total).max(0.0) + active_y + lh / 2.0 - 4.0 - (total - log_h).max(0.0))
+            .motion(Prop::Offset, rows_spring);
+        let rail = Element::column("rail").width(14.0).height(log_h).child(dot);
+        let clip = Element::layer("clip")
+            .size(64.0 + LOG_TEXT_W + 20.0, log_h)
+            .justify(JustifyContent::FLEX_END)
+            .fade_edges(0.0, 48.0, 0.0, 0.0)
+            .child(text);
+        let card = Element::panel("card")
+            .direction_row()
+            .pad(22.0)
+            .gap(10.0)
+            .radius(18.0)
+            .fill(Color::hex(0x1b1f2b, 1.0))
+            .stroke(Color::hex(0xffffff, 0.07), 1.0)
+            .child(rail)
+            .child(clip);
+        bg_sized(LOG_SIZE).child(card)
+    }
+}
+
 // Running a mode.
 
 fn fonts() -> FontRegistry {
@@ -327,8 +479,10 @@ fn contact_sheet(frames: &[Frame]) -> Frame {
 
 /// Exports `make()` for `duration` seconds, writes the contact sheet of the frames at
 /// `sheet_at`, and with `check` renders again and compares the frame hashes.
+#[allow(clippy::too_many_arguments)]
 fn run<A: App<Msg = Msg>>(
     mode: &str,
+    size: Size,
     out: &std::path::Path,
     check: bool,
     duration: f64,
@@ -337,7 +491,7 @@ fn run<A: App<Msg = Msg>>(
 ) {
     let fonts = fonts();
     let options = || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
-    let scenario = Scenario { size: SIZE, scale: 1.0, duration, inputs: Vec::new() };
+    let scenario = Scenario { size, scale: 1.0, duration, inputs: Vec::new() };
     let mp4 = out.join(format!("{mode}.mp4"));
     let spec = Export { fps: FPS, duration, png_dir: None, video: Some(Video::h264(&mp4)) };
     let sheet_frames: Vec<u64> = sheet_at.iter().map(|t| (t * FPS).round() as u64).collect();
@@ -382,10 +536,15 @@ fn main() {
     }
     let fonts = fonts();
     match mode.as_str() {
-        "ticker" => run(&mode, &out, check, 7.5, &[0.6, 1.4, 2.2, 2.9, 3.0, 3.1, 4.5, 7.4], || Ticker::new(&fonts)),
-        "telemetry" => {
-            run(&mode, &out, check, TELEMETRY_SECS, &[0.3, 0.55, 1.0, 1.52, 3.0, 4.02, 4.6, 5.9], Telemetry::new)
+        "ticker" => {
+            run(&mode, SIZE, &out, check, 7.5, &[0.6, 1.4, 2.2, 2.9, 3.0, 3.1, 4.5, 7.4], || Ticker::new(&fonts))
         }
-        _ => panic!("unknown mode {mode}; known: ticker, telemetry"),
+        "telemetry" => {
+            run(&mode, SIZE, &out, check, TELEMETRY_SECS, &[0.3, 0.55, 1.0, 1.52, 3.0, 4.02, 4.6, 5.9], Telemetry::new)
+        }
+        "log" => {
+            run(&mode, LOG_SIZE, &out, check, 8.2, &[1.0, 2.0, 2.15, 2.4, 3.9, 5.0, 5.7, 8.1], || Log::new(&fonts))
+        }
+        _ => panic!("unknown mode {mode}; known: ticker, telemetry, log"),
     }
 }
