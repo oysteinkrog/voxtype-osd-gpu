@@ -6,6 +6,9 @@
 #   cold first frame     VO_BUDGET_FIRST_FRAME_MS   default 300, median of the live runs
 #   frames while idle    VO_BUDGET_IDLE_FRAMES      default 0, every live run
 #
+# It also runs the frame_chain example once, live: 60 frames, each asked for from inside the
+# frame before it. A host that drops a request made during a frame stops after one.
+#
 # Other settings: VO_BUDGET_RUNS (live runs, default 3), VO_BUDGET_ARGS (extra toast arguments,
 # for example --cpu-first-frame), VO_BUDGET_DIR (work folder, default /var/tmp/claude/vo-budget).
 #
@@ -13,7 +16,8 @@
 # toast (which only stops its timer, so it must cost no frame), then clicks its close button.
 # "First frame" is the first frame on screen since exec, from wp_presentation feedback.
 #
-# Expects release builds of the toast and fake_click examples; the just recipe makes them.
+# Expects release builds of the toast, fake_click and frame_chain examples; the just recipe
+# makes them.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,13 +31,13 @@ args=${VO_BUDGET_ARGS:-}
 width=1280
 height=800
 
-for b in toast fake_click; do
+for b in toast fake_click frame_chain; do
     [ -x "$bin/$b" ] || { echo "budget: $bin/$b is missing; run 'just budget'" >&2; exit 2; }
 done
 command -v kwin_wayland >/dev/null || { echo "budget: kwin_wayland is not installed" >&2; exit 2; }
 
 mkdir -p "$work"
-rm -rf "$work/offline-a" "$work/offline-b" "$work"/live-*
+rm -rf "$work/offline-a" "$work/offline-b" "$work"/live-* "$work"/chain*
 fail=0
 over() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 bad() { echo "budget: FAIL $*"; fail=1; }
@@ -102,6 +106,22 @@ for i in $(seq "$runs"); do
     [ "$clicked" -gt 0 ] || bad "live run $i: the click never reached the toast, so hover and click were not tested"
     [ -n "$first" ] && firsts+=("$first")
 done
+
+# A frame asked for from inside a frame must be drawn.
+cat > "$work/chain.sh" <<'EOF'
+#!/usr/bin/env bash
+"$1" --frames 60 --secs 5 > "$2" 2>&1
+echo "frame_chain exit $?" >> "$2"
+EOF
+chmod +x "$work/chain.sh"
+mkdir -p "$work/xdg-config"
+XDG_CONFIG_HOME=$work/xdg-config WAYLAND_DISPLAY=no-such-wl DISPLAY= \
+    timeout 30 dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
+    --socket "vo-budget-$$-chain" --width "$width" --height "$height" \
+    --exit-with-session "$work/chain.sh $bin/frame_chain $work/chain.log" > "$work/kwin-chain.log" 2>&1 || true
+echo "budget: $(grep -m1 '^frame_chain: ' "$work/chain.log" 2>/dev/null || echo 'frame_chain: no result')"
+grep -q 'frame_chain exit 0' "$work/chain.log" 2>/dev/null \
+    || bad "frame_chain: a frame asked for during a frame was not drawn (see $work/chain.log)"
 
 if [ "${#firsts[@]}" -gt 0 ]; then
     median=$(printf '%s\n' "${firsts[@]}" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }')
