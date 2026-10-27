@@ -93,6 +93,8 @@ pub struct FontRegistry {
     /// Filled paths, drawn as glyphs of `path::PATH_FONT` (`add_path`).
     paths: Arc<RwLock<Vec<Arc<kurbo::BezPath>>>>,
     fallback: Arc<RwLock<Fallback>>,
+    /// Font files already read, by path: the faces of one collection share its bytes.
+    files: Arc<RwLock<HashMap<PathBuf, Bytes>>>,
 }
 
 #[derive(Default)]
@@ -127,9 +129,20 @@ impl FontRegistry {
     }
 
     /// Reads and adds face `index` of a font file or collection (`.ttc`).
+    /// A file is read once: a second face of it, or the same face again, shares the bytes,
+    /// so the weights of a 13 MB `.ttc` cost 13 MB and not 13 MB each.
     pub fn add_file_face(&self, path: &Path, index: u32) -> Result<FontId, FontError> {
-        let data = std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?;
-        self.add_face(Arc::new(data), index).map_err(|e| FontError::Parse(path.to_path_buf(), e))
+        let cached = self.files.read().expect("font file lock").get(path).cloned();
+        let data = match cached {
+            Some(data) => data,
+            None => {
+                let data: Bytes =
+                    Arc::new(std::fs::read(path).map_err(|e| FontError::Io(path.to_path_buf(), e))?);
+                self.files.write().expect("font file lock").insert(path.to_path_buf(), data.clone());
+                data
+            }
+        };
+        self.add_face(data, index).map_err(|e| FontError::Parse(path.to_path_buf(), e))
     }
 
     /// Finds `pattern` through fontconfig and adds the face it picks. The pattern is a
@@ -290,6 +303,16 @@ pub fn test_font_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faces_of_one_file_share_its_bytes() {
+        let fonts = FontRegistry::new();
+        let a = fonts.add_file(&test_font_path()).unwrap();
+        let b = fonts.clone().add_file(&test_font_path()).unwrap();
+        assert_ne!(a, b);
+        let (fa, fb) = (fonts.get(a).unwrap(), fonts.get(b).unwrap());
+        assert_eq!(fa.data().as_ptr(), fb.data().as_ptr());
+    }
 
     #[test]
     fn ids_count_up_and_clones_share_the_table() {
