@@ -285,6 +285,10 @@ impl<M> Element<M> {
             size,
             t,
         });
+        // A clipping layer hides what its children draw outside its box.
+        if matches!(self.kind, Kind::Layer { clip: true, .. }) {
+            return own;
+        }
         self.children.iter().fold(own, |acc, c| {
             let mut r = c.effect_reach(t);
             // A repeater's children sit on its ring or path, which may leave its box.
@@ -400,12 +404,28 @@ impl<M> Scene<M> {
             None => ink,
             Some(a) => union(a, ink),
         });
-        // Children sit in this node's space; their offsets are in their own reach.
+        // Children sit in this node's space; their offsets are in their own reach. A clipping
+        // layer hides what they draw outside its box (a digit roll's column of digits).
         let inner = Point::new(b.x, b.y);
+        let mut kids: Option<Rect> = None;
         for &c in &n.children {
-            self.ink_walk(c, inner, t, acc);
+            self.ink_walk(c, inner, t, &mut kids);
+        }
+        let clips = matches!(n.kind, Kind::Layer { clip: true, .. });
+        if let Some(k) = kids.and_then(|k| if clips { intersect(k, b) } else { Some(k) }) {
+            *acc = Some(match *acc {
+                None => k,
+                Some(a) => union(a, k),
+            });
         }
     }
+}
+
+/// The overlap of `a` and `b`, `None` when they do not meet.
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+    let (x1, y1) = (a.right().min(b.right()), a.bottom().min(b.bottom()));
+    (x1 >= x0 && y1 >= y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
 fn union(a: Rect, b: Rect) -> Rect {
@@ -478,5 +498,31 @@ mod tests {
         let look = EmitterLook { size: 2.0, ..Default::default() };
         // 10 for the disc, 50 / 2 = 25 of coasting, 4 for the sprite.
         assert!((particle_reach(&sim, &look) - 39.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_clipping_layer_hides_its_childrens_ink() {
+        // A digit roll: a one-line clipped layer holding a column of ten digits.
+        let roll = || {
+            Element::<()>::layer("roll")
+                .clip()
+                .size(20.0, 14.0)
+                .child(Element::panel("column").size(20.0, 140.0).fill(Color::WHITE).layout(|s| s.flex_shrink = 0.0))
+        };
+        assert_eq!(roll().effect_reach(0.0), Insets::ZERO);
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(20.0, 14.0), 1.0);
+        scene.apply(roll(), 0.0);
+        assert_eq!(scene.effect_reach(0.0), Insets::ZERO);
+        // Without the clip the column reaches 126 below.
+        let mut open: Scene<()> = Scene::new();
+        open.set_viewport(0.0, Size::new(20.0, 14.0), 1.0);
+        open.apply(
+            Element::layer("roll")
+                .size(20.0, 14.0)
+                .child(Element::panel("column").size(20.0, 140.0).fill(Color::WHITE).layout(|s| s.flex_shrink = 0.0)),
+            0.0,
+        );
+        assert!((open.effect_reach(0.0).bottom - 126.0).abs() < 1e-3);
     }
 }
