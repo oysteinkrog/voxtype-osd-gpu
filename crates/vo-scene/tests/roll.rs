@@ -76,3 +76,29 @@ fn the_shown_digit_sits_in_the_window() {
         assert_eq!((w.size.h, l.size.h), (LH, LH));
     }
 }
+
+#[test]
+fn a_countdown_borrow_drops_the_new_column_in_from_above() {
+    use vo_scene::roll::{digit_roll_with, Roll};
+    let down = |text: &str| {
+        let style = TextStyle::new(0, 20.0, LH);
+        let roll = digit_roll_with("n", text, style, Color::WHITE, Spring::from_frequency(6.0, 1.0), Roll::Down);
+        Element::column("root").child(roll)
+    };
+    let mut scene = Scene::new();
+    scene.apply(down("1.0"), 0.0);
+    let old = column(&scene, 0, "1.");
+    let window = scene.find(&["root", "n", "n-d0"]).unwrap();
+    let top = y(&scene, window, 4.0);
+    scene.apply(down("0.9"), 5.0);
+    let new = column(&scene, 0, "0.");
+    // The new column starts one line above 9, so the 9 comes down into the window.
+    assert!((y(&scene, new, 5.0) - (top - 10.0 * LH)).abs() < 0.01);
+    assert!((y(&scene, new, 9.0) - (top - 9.0 * LH)).abs() < 0.01);
+    // The old one, showing 0, leaves downward.
+    assert!(y(&scene, old, 5.08) > top + 1.0, "old column at {}", y(&scene, old, 5.08));
+    // Within a column a countdown rolls down: 9 to 8 moves the column down by a line.
+    scene.apply(down("0.8"), 10.0);
+    assert_eq!(column(&scene, 0, "0."), new);
+    assert!((y(&scene, new, 14.0) - (top - 8.0 * LH)).abs() < 0.01);
+}
