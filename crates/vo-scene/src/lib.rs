@@ -25,6 +25,7 @@
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `emitter`: particle emitters and particle words, simulated by the renderer.
+//! - `emitter_signals`: emitter inputs driven by the signal bus (level, pitch, onsets).
 //! - `gpu`: elements drawn by app GPU code, such as a 3D scene.
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `roll`: digit roll, numbers whose changed digits roll like an odometer (FX04).
@@ -47,6 +48,7 @@ pub mod display;
 pub mod dots;
 pub mod element;
 pub mod emitter;
+pub mod emitter_signals;
 pub mod flow;
 pub mod font;
 pub mod geom;
