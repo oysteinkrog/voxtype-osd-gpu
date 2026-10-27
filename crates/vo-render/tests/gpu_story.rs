@@ -221,3 +221,38 @@ fn container_morph_golden() {
     let img = grid("story-container", 340, 130, rows);
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+#[test]
+fn meters_golden() {
+    use vo_scene::meters::{Countdown, Hairline};
+    let accent = Color::hex(0x7dd3fc, 1.0);
+    // Reports that go up, dip (a re-estimate) and go up again.
+    let reports: Arc<[(f64, f32)]> =
+        Arc::from([(0.0, 0.15), (0.4, 0.45), (0.5, 0.3), (0.9, 0.42), (1.2, 0.8), (1.6, 1.0)].as_slice());
+    let line = Arc::new(Hairline { reports, color: accent, ..Hairline::default() });
+    let thick = Arc::new(Hairline { width: 3.0, ..(*line).clone() });
+    let ring = Arc::new(Countdown { start: 0.0, secs: 4.0, color: accent, ..Countdown::default() });
+    let frame = |f: Frame| f;
+    let lines = |h: Arc<Hairline>| -> Vec<Frame> {
+        [0.05, 0.45, 0.55, 0.95, 1.3, 2.0]
+            .iter()
+            .map(|&t| {
+                let h = h.clone();
+                frame(Arc::new(move |r: Rect, p: &mut Painter| {
+                    h.paint(t, Rect::new(r.x + 12.0, r.y, r.w - 24.0, r.h), p)
+                }))
+            })
+            .collect()
+    };
+    let rings: Vec<Frame> = [0.0, 0.8, 1.6, 2.4, 3.2, 4.0]
+        .iter()
+        .map(|&t| {
+            let ring = ring.clone();
+            frame(Arc::new(move |r: Rect, p: &mut Painter| {
+                ring.paint(t, Rect::new(r.x + 0.5 * r.w - 22.0, r.y + 0.5 * r.h - 22.0, 44.0, 44.0), p)
+            }))
+        })
+        .collect();
+    let img = sheet("story-meters", 150.0, 56.0, vec![lines(line), lines(thick), rings]);
+    support::check(&img, Tolerance::default()).unwrap();
+}
