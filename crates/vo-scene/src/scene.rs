@@ -190,7 +190,9 @@ impl<M> Node<M> {
         let prop = Slot::prop(slot);
         if self.reduced {
             match prop {
-                Prop::Position | Prop::Size | Prop::Offset | Prop::Scale | Prop::Rotation => return Motion::Snap,
+                Prop::Position | Prop::Size | Prop::Offset | Prop::Scale | Prop::Rotation | Prop::TextSize => {
+                    return Motion::Snap
+                }
                 // No flashing: glow, bloom and shadow follow a level only slowly.
                 Prop::Glow | Prop::Bloom | Prop::Shadow => return Motion::Spring(Spring::SLOW),
                 _ => {}
@@ -910,6 +912,7 @@ impl<M> Scene<M> {
         let n = &mut self.nodes[id];
         n.default_motion = effective;
         let relayout = n.style != style || (kind.is_text() && n.kind != kind);
+        let old_size = text_size(&n.kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;
         changed |= n.binds != binds;
@@ -927,6 +930,17 @@ impl<M> Scene<M> {
         n.handlers = handlers;
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
+        }
+        // A new font size grows from the old one when the view asks for it (FX-048): the
+        // drawn size starts at old over new and springs to 1, over the new layout.
+        if let (Some(from), Some(to)) = (old_size, text_size(&n.kind)) {
+            if from != to && to > 0.0 && n.motion.iter().any(|(p, _)| *p == Prop::TextSize) {
+                let slot = Slot::TextZoom as u8;
+                let now = n.value(slot, t);
+                n.start_at(slot, now * (from / to) as f64, t, retention);
+                n.set_target(slot, 1.0, t, retention);
+                changed = true;
+            }
         }
         changed |= n.sync_words(t, retention);
         let ripples_on = n.ripples().map(|r| r.active);
@@ -1376,6 +1390,7 @@ impl<M> Scene<M> {
             }
             Kind::LiveText { words, style, particles, inline, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
+                let z = n.value(Slot::TextZoom as u8, t) as f32;
                 if let Some(look) = particles {
                     let pw = out.particle_words.get_or_insert_with(|| ParticleWords { t, words: Vec::new() });
                     pw.words.extend(n.words.iter().map(|w| ParticleWord { word: w.id, since: w.since, look: *look }));
@@ -1447,8 +1462,8 @@ impl<M> Scene<M> {
                         push_glyph_fx(out, e);
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
-                            pos: Point::new(origin.x + g.pos.x + dx, origin.y + g.pos.y + dy),
-                            size: style.size * m.scale,
+                            pos: Point::new(origin.x + (g.pos.x + dx) * z, origin.y + (g.pos.y + dy) * z),
+                            size: style.size * m.scale * z,
                             font: g.font,
                             glyph: g.glyph,
                             word,
@@ -1463,8 +1478,8 @@ impl<M> Scene<M> {
                         }
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
-                            pos: Point::new(origin.x + gh.pos.x + dx, origin.y + gh.pos.y + dy),
-                            size: style.size * gh.scale,
+                            pos: Point::new(origin.x + (gh.pos.x + dx) * z, origin.y + (gh.pos.y + dy) * z),
+                            size: style.size * gh.scale * z,
                             font: gh.font,
                             glyph: gh.glyph,
                             word: gh.word,
@@ -1475,7 +1490,7 @@ impl<M> Scene<M> {
                 if let Some((bar, tint, blink)) = n.live.caret(t) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {
-                        let r = Rect::new(origin.x + bar.x, origin.y + bar.y, bar.w, bar.h);
+                        let r = Rect::new(origin.x + bar.x * z, origin.y + bar.y * z, bar.w * z, bar.h * z);
                         push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                         out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * bar.w), Paint::solid(c)));
                     }
@@ -1710,6 +1725,7 @@ impl<M> Scene<M> {
         }
         let fx = n.text_fx(t).faded(alpha);
         let spans = (!fx.is_none() && fx.wipe > 0.0).then(|| glyph_spans(&n.shaped, size));
+        let z = n.value(Slot::TextZoom as u8, t) as f32;
         for (i, g) in n.shaped.glyphs.iter().enumerate() {
             if g.glyph == OBJECT_GLYPH {
                 continue;
@@ -1720,8 +1736,8 @@ impl<M> Scene<M> {
             }
             push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
             out.glyphs.push(GlyphInstance {
-                pos: Point::new(origin.x + g.pos.x, origin.y + g.pos.y),
-                size,
+                pos: Point::new(origin.x + g.pos.x * z, origin.y + g.pos.y * z),
+                size: size * z,
                 font: g.font,
                 glyph: g.glyph,
                 word: word_of(g.cluster),
@@ -1817,6 +1833,14 @@ fn fit_view(view: Rect, origin: Point, size: Size) -> Affine {
 }
 
 /// `style` with `alpha` multiplied into both colours.
+/// The font size of a label or live text.
+fn text_size(kind: &Kind) -> Option<f32> {
+    match kind {
+        Kind::Label { style, .. } | Kind::LiveText { style, .. } => Some(style.size),
+        _ => None,
+    }
+}
+
 fn faded(style: &crate::path::StrokeStyle, alpha: f32) -> crate::path::StrokeStyle {
     crate::path::StrokeStyle { c0: style.c0.fade(alpha), c1: style.c1.fade(alpha), ..*style }
 }

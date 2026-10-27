@@ -129,6 +129,9 @@ pub(crate) enum Slot {
     TextShadowX = 79,
     TextShadowY = 80,
     TextOutline = 81,
+    /// Text size morph (FX-048): the drawn size as a factor of the laid-out size, 1 at rest.
+    /// Set by the scene when the font size changes, not by elements.
+    TextZoom = 82,
     /// Stage turns in radians and the push toward the viewer in logical units
     /// (`crate::stage`).
     RotateX = 100,
@@ -145,7 +148,7 @@ pub(crate) enum Slot {
 impl Slot {
     /// Value of a slot no element has set.
     pub(crate) fn default_value(slot: u8) -> f64 {
-        if slot == Slot::Opacity as u8 || slot == Slot::Scale as u8 {
+        if slot == Slot::Opacity as u8 || slot == Slot::Scale as u8 || slot == Slot::TextZoom as u8 {
             1.0
         } else {
             0.0
@@ -177,6 +180,7 @@ impl Slot {
             s if s == Slot::Morph as u8 => Prop::Morph,
             s if s <= Slot::TextHaloRadius as u8 => Prop::TextFx,
             s if (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&s) => Prop::TextFx,
+            s if s == Slot::TextZoom as u8 => Prop::TextSize,
             s if s <= Slot::StyleFlicker as u8 => Prop::Style,
             _ => Prop::Wave,
         }
@@ -245,6 +249,10 @@ pub enum Prop {
     Morph,
     /// Text blur, dissolve, wipe, chromatic offset and halo.
     TextFx,
+    /// A label's or live text's font size (FX-048). Name it in `.motion()` and a new size
+    /// grows or shrinks from the old one, with the new size's line breaks from the start;
+    /// without it a new size jumps.
+    TextSize,
     /// A layer's style: chromatic aberration, glitch, scanlines, curvature, vignette and
     /// flicker.
     Style,
