@@ -80,7 +80,9 @@ impl GpuPainter for Painter3d {
     }
 }
 
-/// Adds a [`Painter3d`] to `renderer`, so it draws the 3D elements of the lists it renders.
+/// Adds a [`Painter3d`] and a [`crate::HeroPainter`] to `renderer`, so it draws the 3D and
+/// hero elements of the lists it renders.
 pub fn install(renderer: &mut Renderer) {
     renderer.add_painter(Box::new(Painter3d::default()));
+    renderer.add_painter(Box::new(crate::HeroPainter::default()));
 }
