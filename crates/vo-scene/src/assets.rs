@@ -52,10 +52,15 @@ pub static ASSETS: &[Asset] = &[
         "SairaExtraCondensed-ExtraBold-Latin.otf",
         "Saira ExtraCondensed ExtraBold, Latin: a heavy extra-condensed face"
     ),
+    // Roboto Flex for variable font breathing (MO-81), about 300 KB. Made from
+    // RobotoFlex-VF.ttf 3.200 by `fonttools varLib.instancer` (other axes dropped, wdth=75:125
+    // opsz=8:72 wght=300:900), then `pyftsubset --unicodes=<ASCII, Latin-1 letters, common
+    // punctuation> --layout-features=kern,liga,locl --no-hinting`; the exact command is in
+    // assets/fonts/subset.sh.
     font!(
         "flex",
         "RobotoFlex-Variable-Latin.ttf",
-        "Roboto Flex, Latin, variable: weight 100 to 900, width 75 to 125, optical size 8 to 72, slant -10 to 0"
+        "Roboto Flex, Latin, variable: weight 300 to 900, width 75 to 125, optical size 8 to 72, slant -10 to 0"
     ),
     font!("jp-labels", "NotoSansJP-Regular-Labels.otf", "Noto Sans CJK JP Regular: kana and label kanji"),
     font!("jp-labels-bold", "NotoSansJP-Bold-Labels.otf", "Noto Sans CJK JP Bold: kana and label kanji"),
