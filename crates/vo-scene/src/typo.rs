@@ -105,11 +105,14 @@ pub struct WordTypo {
     pub kick: Option<(u32, Typo)>,
     /// Springs for this word's channels, instead of the element's.
     pub motion: Option<TypoMotion>,
+    /// Seconds the word holds its `arrive` or `kick` values before it springs to `rest`:
+    /// for words that settle in spoken order (MO-05, `vo_core::timeline::spoken_offsets`).
+    pub delay: f64,
 }
 
 impl WordTypo {
     pub fn rest(rest: Typo) -> WordTypo {
-        WordTypo { rest, arrive: None, kick: None, motion: None }
+        WordTypo { rest, arrive: None, kick: None, motion: None, delay: 0.0 }
     }
 
     pub fn arrive(self, from: Typo) -> WordTypo {
@@ -122,6 +125,10 @@ impl WordTypo {
 
     pub fn motion(self, m: TypoMotion) -> WordTypo {
         WordTypo { motion: Some(m), ..self }
+    }
+
+    pub fn delay(self, secs: f64) -> WordTypo {
+        WordTypo { delay: secs.max(0.0), ..self }
     }
 }
 
@@ -280,7 +287,13 @@ impl TypoState {
                     let from = if reduced { want.rest } else { want.arrive.unwrap_or(want.rest) };
                     let ch = std::array::from_fn(|c| {
                         let rest = if c == 3 || c == 1 { Rest::PIXELS } else { Rest::UNIT };
-                        Channel::new(t, from.get(c) as f64, m.get(c)).with_rest(rest).with_retention(retention)
+                        let mut ch =
+                            Channel::new(t, from.get(c) as f64, m.get(c)).with_rest(rest).with_retention(retention);
+                        // Held at the arrive values until the delay is over.
+                        if !reduced && want.delay > 0.0 && from.get(c) != want.rest.get(c) {
+                            ch.retarget(t + want.delay, want.rest.get(c) as f64);
+                        }
+                        ch
                     });
                     changed = true;
                     // A word that arrives with a kick takes it as already seen.
@@ -306,7 +319,7 @@ impl TypoState {
                     let v = to.get(c) as f64;
                     if v != target {
                         ch.snap(t, v);
-                        ch.retarget(t, target);
+                        ch.retarget(t + want.delay, target);
                         changed = true;
                         continue;
                     }
@@ -363,6 +376,18 @@ mod tests {
         s.sync(1.05, &[7], Some(&kicked), false, 1.0);
         assert!(s.sample(7, 1.05).unwrap().baseline < 2.0);
         assert!(s.sample(7, 2.0).unwrap().baseline.abs() < 1e-3);
+    }
+
+    #[test]
+    fn delay_holds_the_arrive_values() {
+        let mut s = TypoState::default();
+        let w = WordTypo::rest(Typo::REST).arrive(Typo::REST.baseline(2.0)).delay(0.3);
+        s.sync(1.0, &[4], Some(&Typos::new().word(4, w)), false, 1.0);
+        // Re-applying the same view while it waits keeps the delay.
+        s.sync(1.1, &[4], Some(&Typos::new().word(4, w)), false, 1.0);
+        assert_eq!(s.sample(4, 1.25).unwrap().baseline, 2.0);
+        assert!(s.sample(4, 1.4).unwrap().baseline < 2.0);
+        assert!(s.sample(4, 2.5).unwrap().baseline.abs() < 1e-3);
     }
 
     #[test]

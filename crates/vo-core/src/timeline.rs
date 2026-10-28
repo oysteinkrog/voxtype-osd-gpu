@@ -39,6 +39,75 @@ pub enum Timeline {
     Stagger { gap: f64, cap: f64, items: Vec<Timeline> },
     /// The child starts `by` seconds late.
     Delay { by: f64, item: Box<Timeline> },
+    /// Child `i` starts at its spoken time, scaled (MO-05): see [`spoken`].
+    Spoken { times: Vec<Option<f64>>, fit: SpokenFit, items: Vec<Timeline> },
+}
+
+/// How spoken times become start times (MO-05): the rhythm is replayed at `scale` of its
+/// speed, and the whole run is stretched or squeezed to last between `min` and `max`
+/// seconds from the first start to the last.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpokenFit {
+    pub scale: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Default for SpokenFit {
+    /// A quarter of the spoken time, 200 to 600 ms in all.
+    fn default() -> SpokenFit {
+        SpokenFit { scale: 0.25, min: 0.2, max: 0.6 }
+    }
+}
+
+/// Start offsets for items said at `times` (seconds, any origin), first at 0 (MO-05). A
+/// missing time sits between its neighbours' times in proportion, or after the last known
+/// one at the mean gap; with fewer than two known times the items are evenly spaced over
+/// `fit.min`. Times never run backwards. Under reduced motion, callers start everything at
+/// once instead.
+pub fn spoken_offsets(times: &[Option<f64>], fit: SpokenFit) -> Vec<f64> {
+    let n = times.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let known: Vec<(usize, f64)> = times.iter().enumerate().filter_map(|(i, t)| t.map(|t| (i, t))).collect();
+    let even = |total: f64| (0..n).map(|i| total * i as f64 / (n - 1) as f64).collect::<Vec<f64>>();
+    if known.len() < 2 {
+        return even(fit.min.max(0.0));
+    }
+    // Fill the gaps, then keep the order.
+    let (first, last) = (known[0], known[known.len() - 1]);
+    let mean = (last.1 - first.1) / (last.0 - first.0) as f64;
+    let mut raw = vec![0.0; n];
+    for (i, r) in raw.iter_mut().enumerate() {
+        *r = match known.iter().position(|k| k.0 >= i) {
+            Some(j) if known[j].0 == i => known[j].1,
+            Some(0) => first.1 - mean * (first.0 - i) as f64,
+            Some(j) => {
+                let (a, b) = (known[j - 1], known[j]);
+                a.1 + (b.1 - a.1) * (i - a.0) as f64 / (b.0 - a.0) as f64
+            }
+            None => last.1 + mean * (i - last.0) as f64,
+        };
+    }
+    for i in 1..n {
+        raw[i] = raw[i].max(raw[i - 1]);
+    }
+    let span = raw[n - 1] - raw[0];
+    if span <= 1e-9 {
+        return even(fit.min.max(0.0));
+    }
+    let total = (span * fit.scale).clamp(fit.min, fit.max.max(fit.min));
+    raw.iter().map(|r| (r - raw[0]) * total / span).collect()
+}
+
+/// Starts item `i` at its spoken time `times[i]`, replayed by `fit` (MO-05). Groups of words
+/// move in spoken order at a scaled copy of the spoken rhythm, not a fixed stagger.
+pub fn spoken(times: Vec<Option<f64>>, fit: SpokenFit, items: impl IntoIterator<Item = Timeline>) -> Timeline {
+    let items: Vec<Timeline> = items.into_iter().collect();
+    let mut times = times;
+    times.resize(items.len(), None);
+    Timeline::Spoken { times, fit, items }
 }
 
 /// A named clip of `dur` seconds.
@@ -90,7 +159,7 @@ impl Timeline {
             Timeline::Marker(_) => 0.0,
             Timeline::All(items) => items.iter().map(Timeline::duration).fold(0.0, f64::max),
             Timeline::Chain(items) => items.iter().map(Timeline::duration).sum(),
-            Timeline::Sequence { items, .. } | Timeline::Stagger { items, .. } => {
+            Timeline::Sequence { items, .. } | Timeline::Stagger { items, .. } | Timeline::Spoken { items, .. } => {
                 items.iter().zip(self.offsets()).map(|(c, off)| off + c.duration()).fold(0.0, f64::max)
             }
             Timeline::Delay { by, item } => by + item.duration(),
@@ -102,7 +171,8 @@ impl Timeline {
             Timeline::All(items)
             | Timeline::Chain(items)
             | Timeline::Sequence { items, .. }
-            | Timeline::Stagger { items, .. } => items,
+            | Timeline::Stagger { items, .. }
+            | Timeline::Spoken { items, .. } => items,
             Timeline::Delay { item, .. } => std::slice::from_ref(item),
             _ => &[],
         }
@@ -128,6 +198,7 @@ impl Timeline {
                 (0..items.len()).map(|i| stagger_fit(i, items.len(), *gap, *cap)).collect()
             }
             Timeline::Delay { by, .. } => vec![*by],
+            Timeline::Spoken { times, fit, .. } => spoken_offsets(times, *fit),
             _ => Vec::new(),
         }
     }
@@ -322,6 +393,26 @@ mod tests {
         assert!((s.duration() - 3.0).abs() < 1e-12);
         assert_eq!(s.spans().first().unwrap().name, "bg");
         assert!(s.spans().windows(2).all(|w| w[0].start <= w[1].start));
+    }
+
+    #[test]
+    fn spoken_replays_the_rhythm_scaled_and_clamped() {
+        let fit = SpokenFit::default();
+        // 0, 0.4, 2.0 s spoken: a quarter is 0.5 s, inside 0.2 to 0.6.
+        let o = spoken_offsets(&[Some(10.0), Some(10.4), Some(12.0)], fit);
+        assert!((o[1] - 0.1).abs() < 1e-9 && (o[2] - 0.5).abs() < 1e-9, "{o:?}");
+        // 8 s spoken squeezes to 0.6 s; 0.2 s spoken stretches to 0.2 s.
+        assert!((spoken_offsets(&[Some(0.0), Some(8.0)], fit)[1] - 0.6).abs() < 1e-9);
+        assert!((spoken_offsets(&[Some(0.0), Some(0.2)], fit)[1] - 0.2).abs() < 1e-9);
+        // Missing times interpolate; no times spread evenly over the minimum.
+        let o = spoken_offsets(&[Some(0.0), None, Some(2.0)], fit);
+        assert!((o[1] - 0.25).abs() < 1e-9);
+        assert_eq!(spoken_offsets(&[None, None, None], fit), vec![0.0, 0.1, 0.2]);
+        // Never backwards.
+        let o = spoken_offsets(&[Some(1.0), Some(0.5), Some(2.0)], fit);
+        assert!(o[1] >= o[0] && o[2] >= o[1]);
+        let s = spoken(vec![Some(0.0), Some(1.6)], fit, [clip("a", 0.1), clip("b", 0.1)]).schedule();
+        assert!((s.span("b").unwrap().start - 0.4).abs() < 1e-9);
     }
 
     #[test]
