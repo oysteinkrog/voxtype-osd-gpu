@@ -49,6 +49,9 @@ pub struct DepthStack {
     pub slowdown: f64,
     /// The glass of a sheet, or `None` for text alone.
     pub sheet: Option<Sheet>,
+    /// Frost (EG-04, `Element::frost`) of each sheet, in logical units: the sheets and lines
+    /// behind a sheet show blurred through it. 0 for none (the default).
+    pub frost: f32,
 }
 
 /// The glass pane under a line.
@@ -77,6 +80,7 @@ impl Default for DepthStack {
             spring_secs: 0.22,
             slowdown: 0.05,
             sheet: None,
+            frost: 0.0,
         }
     }
 }
@@ -187,7 +191,12 @@ impl DepthStack {
             None => Element::column(format!("{}-pane", key.0)).size(sheet.w, sheet.h),
         };
         let pane = pane.child(content);
-        let layer = Element::layer(key)
+        let mut layer = Element::layer(key);
+        if self.frost > 0.0 {
+            // Cut to the pane's rounded box.
+            layer = layer.frost(self.frost).radius(self.sheet.map_or(0.0, |s| s.radius));
+        }
+        let layer = layer
             .size(sheet.w, sheet.h)
             .layout(|s| {
                 s.position = taffy::Position::Absolute;

@@ -119,6 +119,13 @@ pub struct Layer {
     pub backdrop: Option<Backdrop>,
     /// A displacement of the backdrop (EG-03). Only with a full-resolution backdrop.
     pub displace: Option<Displace>,
+    /// A blur of the layer's own content (EG-04, `Element::layer_blur`). The layer is drawn
+    /// offscreen. `None` costs nothing.
+    pub blur: Option<LayerBlur>,
+    /// Frost (EG-04, `Element::frost`): the backdrop is drawn back blurred inside the layer's
+    /// rounded box, in place of its tint. The blur's standard deviation in layer units, 0 for
+    /// none. Only with a full-resolution backdrop.
+    pub frost: f32,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -139,9 +146,22 @@ impl Layer {
             warp: None,
             backdrop: None,
             displace: None,
+            blur: None,
+            frost: 0.0,
             items: 0..0,
         }
     }
+}
+
+/// A Gaussian blur of a layer's content (EG-04).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct LayerBlur {
+    /// The standard deviation in layer units, above 0. The blur reaches three times as far.
+    pub radius: f32,
+    /// The newest line of live text, in surface space (logical units), when it is drawn
+    /// inside this layer: drawn sharp, as without the blur (the reading-line envelope). Found
+    /// by the scene after the whole list is built.
+    pub keep: Option<Rect>,
 }
 
 /// How finely a backdrop is captured.

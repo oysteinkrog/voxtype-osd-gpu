@@ -48,6 +48,11 @@
 //!   sampler and the image slots. Only a backdrop captured in the surface the draw goes to
 //!   is read: the capture runs earlier in that surface's passes. Other draws keep the plain
 //!   pipelines and bind group.
+//! - **Blur** (EG-04, `blur`): a layer with a blur is drawn offscreen with room for the blur's
+//!   reach, then blurred across into a pooled texture and back down into its own texture
+//!   before it is composited. Frost blurs a backdrop: in the pass break after the capture,
+//!   across into a pooled texture, then down straight into the surface inside the backdrop's
+//!   rounded box. Both take the effect path; a frame without one makes nothing for it.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -63,6 +68,7 @@ use vo_scene::material::IMAGE_SLOTS;
 use vo_scene::path::PATH_FONT;
 use vo_scene::stage::Warp;
 
+use crate::blur::{BlurBlock, BlurGpu};
 use crate::color::linear_premul;
 use crate::displace::{DisplaceBlock, DisplaceGpu};
 use crate::dots::GpuDot;
@@ -482,6 +488,19 @@ struct BackdropPlan {
     tex: Option<usize>,
     /// The dynamic offset of its displacement block (EG-03), when it is drawn back displaced.
     displace: Option<u32>,
+    /// Its frost (EG-04), when it is drawn back blurred.
+    frost: Option<BlurPlan>,
+}
+
+/// A blur's two passes this frame (EG-04): the pooled texture between them and the dynamic
+/// offsets of their blocks, across then down.
+struct BlurPlan {
+    sigma_px: f32,
+    /// The kept reading line in target pixels, for a layer blur.
+    keep: Option<[f32; 4]>,
+    /// Pool index, taken in `place_surfaces`.
+    tmp: Option<usize>,
+    blocks: [u32; 2],
 }
 
 /// A GPU item placed for this frame.
@@ -533,6 +552,8 @@ struct Surface {
     style: bool,
     /// Byte offset of the `Compose` block its `CompositeFx` draw reads (`compose`).
     compose: u32,
+    /// A layer blur (EG-04), run after the surface is drawn.
+    blur: Option<BlurPlan>,
 }
 
 impl Surface {
@@ -550,6 +571,7 @@ impl Surface {
             layer: None,
             style: false,
             compose: 0,
+            blur: None,
         }
     }
 
@@ -705,6 +727,8 @@ pub struct Renderer {
     backdrops: Vec<BackdropPlan>,
     /// Displacement blocks and their bind group (EG-03), made on the first frame with one.
     displace: Option<DisplaceGpu>,
+    /// Blur pipelines and blocks (EG-04), made on the first frame with a blur or frost.
+    blur: Option<BlurGpu>,
     /// Material textures (EG-02), made on first use, and the image slots.
     mat_tex: Option<MatTextures>,
     material_images: [Option<wgpu::TextureView>; IMAGE_SLOTS],
@@ -790,6 +814,7 @@ impl Renderer {
             dither_motion: false,
             backdrops: Vec::new(),
             displace: None,
+            blur: None,
             mat_tex: None,
             material_images: Default::default(),
             warned_backdrop: false,
@@ -1068,7 +1093,9 @@ impl Renderer {
         self.queue.write_buffer(&self.signals_buf, 0, bytemuck::cast_slice(&list.signals.as_floats()));
         let (w, h) = (target.width(), target.height());
         let effects = self.quality == Quality::Full
-            && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some() || l.backdrop.is_some());
+            && list.layers.iter().any(|l| {
+                bloom_of(&l.target).is_some() || l.trail.is_some() || l.backdrop.is_some() || l.blur.is_some()
+            });
         let format = if effects { EFFECT_FORMAT } else { target.format() };
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
         self.shapes.clear();
@@ -1086,6 +1113,9 @@ impl Renderer {
         self.backdrops.clear();
         if let Some(d) = &mut self.displace {
             d.clear();
+        }
+        if let Some(b) = &mut self.blur {
+            b.clear();
         }
         self.frame += 1;
         for p in &mut self.pool {
@@ -1199,8 +1229,10 @@ impl Renderer {
         let mut backdrop = parent.backdrop;
         if let Some(b) = layer.backdrop.filter(|_| wants) {
             let displace = layer.displace.as_ref().filter(|_| b.res == BackdropRes::Full);
-            backdrop =
-                self.place_backdrop(f, &b, displace, surface, parent, &to_px, ppu, warp, opacity).map(|i| (i, surface));
+            let frost = if b.res == BackdropRes::Full && displace.is_none() { layer.frost * ppu } else { 0.0 };
+            backdrop = self
+                .place_backdrop(f, &b, displace, frost, surface, parent, &to_px, ppu, warp, opacity)
+                .map(|i| (i, surface));
         }
         let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
@@ -1240,6 +1272,16 @@ impl Renderer {
                         fade: None,
                         decay: t.decay,
                         fresh: None,
+                    });
+                }
+                // A trail would blur its own afterglow again every frame: no blur on one.
+                if let Some(b) = layer.blur.filter(|b| f.effects && b.radius > 0.0 && s.trail.is_none()) {
+                    let k = f.scale;
+                    s.blur = Some(BlurPlan {
+                        sigma_px: crate::blur::sigma_px(b.radius * ppu),
+                        keep: b.keep.map(|r| [r.x * k, r.y * k, (r.x + r.w) * k, (r.y + r.h) * k]),
+                        tmp: None,
+                        blocks: [0; 2],
                     });
                 }
                 self.surfaces.push(s);
@@ -1476,6 +1518,7 @@ impl Renderer {
         f: &Frame,
         b: &vo_scene::display::Backdrop,
         displace: Option<&vo_scene::display::Displace>,
+        frost_px: f32,
         surface: usize,
         parent: &LayerState,
         to_px: &Affine,
@@ -1494,11 +1537,19 @@ impl Renderer {
         if area[2] <= area[0] || area[3] <= area[1] {
             return None;
         }
+        // A frost (EG-04) reads what is around the box too, out to the blur's reach.
+        let frost_px = crate::blur::sigma_px(frost_px);
+        let cap = if frost_px > 0.0 {
+            let r = crate::blur::reach_px(frost_px) as f32;
+            intersect([area[0] - r, area[1] - r, area[2] + r, area[3] + r], [0.0, 0.0, w, h])
+        } else {
+            area
+        };
         // Whole-pixel origin, sizes rounded up so a moving or growing box keeps its texture.
-        let (x0, y0) = (area[0].floor() as i32, area[1].floor() as i32);
+        let (x0, y0) = (cap[0].floor() as i32, cap[1].floor() as i32);
         let full = [
-            ((area[2].ceil() as i32 - x0).max(1) as u32).next_multiple_of(ALIGN),
-            ((area[3].ceil() as i32 - y0).max(1) as u32).next_multiple_of(ALIGN),
+            ((cap[2].ceil() as i32 - x0).max(1) as u32).next_multiple_of(ALIGN),
+            ((cap[3].ceil() as i32 - y0).max(1) as u32).next_multiple_of(ALIGN),
         ];
         let step = match b.res {
             BackdropRes::Full => 1,
@@ -1511,6 +1562,7 @@ impl Renderer {
             step,
             tex: None,
             displace: None,
+            frost: None,
         });
         let state = LayerState {
             to_px: *to_px,
@@ -1553,6 +1605,15 @@ impl Renderer {
             let block = DisplaceBlock::new(d, to_px, ppu, f.scale, laid, area);
             let gpu = self.displace.get_or_insert_with(|| DisplaceGpu::new(&self.device));
             self.backdrops[index as usize].displace = Some(gpu.push(&block));
+        } else if frost_px > 0.0 && opacity > 0.0 {
+            // Drawn back blurred (EG-04) in the capture's pass break, in place of the tint.
+            grow(&mut self.surfaces[surface].bounds, area);
+            let gpu =
+                self.blur.get_or_insert_with(|| BlurGpu::new(&self.device, EFFECT_FORMAT, Some(&self.layer_layout)));
+            let across = gpu.push(&BlurBlock::new([1.0, 0.0], frost_px, [x0, y0], [x0, y0], None));
+            let down = gpu.push(&BlurBlock::new([0.0, 1.0], frost_px, [x0, y0], [0, 0], None));
+            self.backdrops[index as usize].frost =
+                Some(BlurPlan { sigma_px: frost_px, keep: None, tmp: None, blocks: [across, down] });
         } else if b.tint.a > 0.0 && opacity > 0.0 {
             cmds.push(cmd(Pipe::Backdrop));
             grow(&mut self.surfaces[surface].bounds, area);
@@ -1618,7 +1679,8 @@ impl Renderer {
                 s.size = [0, 0];
                 return;
             }
-            let pad = s.bloom.as_ref().map_or(0.0, |p| (3 << p.levels) as f32);
+            let pad = s.bloom.as_ref().map_or(0.0, |p| (3 << p.levels) as f32)
+                + s.blur.as_ref().map_or(0.0, |b| crate::blur::reach_px(b.sigma_px) as f32);
             // Content past the target only matters through the bloom's reach.
             let limit = [-pad, -pad, target[0] as f32 + pad, target[1] as f32 + pad];
             let b = intersect([b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad], limit);
@@ -1844,6 +1906,17 @@ impl Renderer {
                 None => self.acquire(w, h, self.surfaces[si].format(format)),
             };
             self.surfaces[si].tex = Some(tex);
+            if let Some(b) = &self.surfaces[si].blur {
+                let (sigma, keep, o) = (b.sigma_px, b.keep, self.surfaces[si].origin);
+                let tmp = self.acquire(w, h, self.surfaces[si].format(format));
+                let gpu = self
+                    .blur
+                    .get_or_insert_with(|| BlurGpu::new(&self.device, EFFECT_FORMAT, Some(&self.layer_layout)));
+                let across = gpu.push(&BlurBlock::new([1.0, 0.0], sigma, o, o, None));
+                let down = gpu.push(&BlurBlock::new([0.0, 1.0], sigma, o, o, keep));
+                let b = self.surfaces[si].blur.as_mut().unwrap();
+                (b.tmp, b.blocks) = (Some(tmp), [across, down]);
+            }
             if self.surfaces[si].bloom.is_none() {
                 continue;
             }
@@ -1899,6 +1972,10 @@ impl Renderer {
                     let bi = c.range.start as usize;
                     let [w, h] = self.backdrops[bi].size;
                     self.backdrops[bi].tex = Some(self.acquire(w, h, EFFECT_FORMAT));
+                    if self.backdrops[bi].frost.is_some() {
+                        let tmp = self.acquire(w, h, EFFECT_FORMAT);
+                        self.backdrops[bi].frost.as_mut().unwrap().tmp = Some(tmp);
+                    }
                 }
             }
         }
@@ -2137,6 +2214,9 @@ impl Renderer {
         if let Some(d) = &mut self.displace {
             d.upload(&self.device, &self.queue, &self.material_images);
         }
+        if let Some(b) = &mut self.blur {
+            b.upload(&self.device, &self.queue);
+        }
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
@@ -2234,6 +2314,13 @@ impl Renderer {
                 pass.set_pipeline(self.cached_pipeline(format, Pipe::TrailMax, BlendMode::Normal));
                 pass.set_bind_group(0, &self.pool[fresh].bind, &[]);
                 pass.draw(0..3, 0..1);
+            }
+            if let (Some(b), Some(gpu), Some(tex)) = (&s.blur, &self.blur, s.tex) {
+                if let Some(tmp) = b.tmp {
+                    let (layer, tmp) = (&self.pool[tex].view, &self.pool[tmp].view);
+                    gpu.pass(&self.device, enc, layer, tmp, b.blocks[0], false);
+                    gpu.pass(&self.device, enc, tmp, layer, b.blocks[1], true);
+                }
             }
             self.mark(enc, Section::Draw { surface: i });
             if let Some(b) = &s.bloom {
@@ -2354,6 +2441,15 @@ impl Renderer {
                 pass.set_bind_group(1, &self.uniform_buf.as_ref().expect("uploaded").1, &[c.uniform]);
                 pass.set_bind_group(3, &self.signals_bind, &[]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                let plan = &self.backdrops[c.range.start as usize];
+                if let (Some(frost), Some(gpu)) = (&plan.frost, &self.blur) {
+                    let (Some(tmp), Some(scissor)) = (frost.tmp, surface_scissor(c.scissor, surface)) else { return };
+                    let (sharp, tmp) = (&self.pool[tex].view, &self.pool[tmp].view);
+                    gpu.pass(&self.device, enc, sharp, tmp, frost.blocks[0], false);
+                    let layers = (&self.uniform_buf.as_ref().expect("uploaded").1, c.uniform);
+                    gpu.frost(&self.device, enc, tmp, sharp, view, scissor, layers, frost.blocks[1]);
+                }
             }
             _ => unreachable!("not a pass break"),
         }

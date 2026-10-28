@@ -20,7 +20,7 @@ use crate::bind::Bound;
 use crate::display::MATERIAL_SHIFT;
 use crate::display::{
     Backdrop, BackdropRes, BlendMode, Bloom, Displace, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape,
-    Item, ItemKind, Layer, LayerStyle, LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
+    Item, ItemKind, Layer, LayerBlur, LayerStyle, LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::display::{BloomBand, BloomShape};
 use crate::dots::Dots;
@@ -402,6 +402,10 @@ impl<M> Node<M> {
 
     fn motion_for(&self, slot: u8) -> Motion {
         let prop = Slot::prop(slot);
+        // Blur radii (EG-04) jump under reduced motion.
+        if self.reduced && (slot == Slot::LayerBlur as u8 || slot == Slot::Frost as u8) {
+            return Motion::Snap;
+        }
         if self.reduced {
             match prop {
                 Prop::Position | Prop::Size | Prop::Offset | Prop::Scale | Prop::Rotation | Prop::TextSize => {
@@ -1744,13 +1748,20 @@ impl<M> Scene<M> {
             Kind::Layer { displace: Some((d, keep_reading)), mask: None, .. } => n.displace(d, *keep_reading, t),
             _ => None,
         };
+        // Layer blur and frost (EG-04): a radius of 0 emits nothing.
+        let radius_of = |slot: Slot| match n.kind {
+            Kind::Layer { mask: None, .. } if n.has(slot as u8) => n.value(slot as u8, t).max(0.0) as f32,
+            _ => 0.0,
+        };
+        let blur = Some(radius_of(Slot::LayerBlur)).filter(|r| *r > 0.0).map(|radius| LayerBlur { radius, keep: None });
+        let frost = radius_of(Slot::Frost);
         let backdrop = match n.kind {
             Kind::Layer { backdrop: Some((res, tint)), mask: None, .. } => {
-                let res = if displace.is_some() { BackdropRes::Full } else { res };
+                let res = if displace.is_some() || frost > 0.0 { BackdropRes::Full } else { res };
                 Some(Backdrop { rect: RRect::new(Rect::from_size(size), radius(n, t)), res, tint })
             }
             // A displacement reads a full-resolution backdrop it does not tint.
-            Kind::Layer { mask: None, .. } if displace.is_some() => Some(Backdrop {
+            Kind::Layer { mask: None, .. } if displace.is_some() || frost > 0.0 => Some(Backdrop {
                 rect: RRect::new(Rect::from_size(size), radius(n, t)),
                 res: BackdropRes::Full,
                 tint: Color::TRANSPARENT,
@@ -1770,7 +1781,7 @@ impl<M> Scene<M> {
                     n.children.iter().any(|c| matches!(self.nodes[*c].kind, Kind::Layer { mask: Some(_), .. }));
                 let target = match mask {
                     Some(m) => LayerTarget::Mask(m),
-                    None if offscreen || masked => LayerTarget::Offscreen { bloom },
+                    None if offscreen || masked || blur.is_some() => LayerTarget::Offscreen { bloom },
                     None => LayerTarget::Direct,
                 };
                 (blend, clip, fade, target, alpha * opacity, 1.0)
@@ -1796,6 +1807,8 @@ impl<M> Scene<M> {
             warp,
             backdrop,
             displace,
+            blur,
+            frost,
             items: 0..0,
         });
         let mut own = Vec::new();
@@ -2688,13 +2701,18 @@ pub(crate) fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
 /// Fills `keep` on each displacement that keeps the reading line (EG-03): the row of the
 /// newest live-text word, found as the envelope check finds it (the newest word's median
 /// baseline, every glyph within half an em of it), boxed generously in surface space.
+///
+/// A layer blur (EG-04) gets the same box when the newest word is drawn inside the blurred
+/// layer, so the reading line stays sharp; a blurred layer of older lines blurs all of it.
 fn keep_reading_line(out: &mut DisplayList) {
-    if !out.layers.iter().any(|l| l.displace.is_some_and(|d| d.keep_reading)) {
+    let displaced = out.layers.iter().any(|l| l.displace.is_some_and(|d| d.keep_reading));
+    let blurred = out.layers.iter().any(|l| l.blur.is_some());
+    if !displaced && !blurred {
         return;
     }
-    // Each live-text glyph in surface space: word, pen x, baseline y, em.
-    let mut glyphs: Vec<(u32, f32, f32, f32)> = Vec::new();
-    for layer in &out.layers {
+    // Each live-text glyph in surface space: word, pen x, baseline y, em, layer.
+    let mut glyphs: Vec<(u32, f32, f32, f32, u32)> = Vec::new();
+    for (li, layer) in out.layers.iter().enumerate() {
         let m = layer.transform;
         let k = (m.a * m.d - m.b * m.c).abs().sqrt();
         for item in &out.items[layer.items.start as usize..layer.items.end as usize] {
@@ -2704,7 +2722,7 @@ fn keep_reading_line(out: &mut DisplayList) {
             for g in &out.glyphs[item.start as usize..(item.start + item.len) as usize] {
                 if g.word != NO_WORD {
                     let p = m.apply(g.pos);
-                    glyphs.push((g.word, p.x, p.y, g.size * k));
+                    glyphs.push((g.word, p.x, p.y, g.size * k, li as u32));
                 }
             }
         }
@@ -2724,6 +2742,31 @@ fn keep_reading_line(out: &mut DisplayList) {
     for l in &mut out.layers {
         if let Some(d) = l.displace.as_mut().filter(|d| d.keep_reading) {
             d.keep = Some(keep);
+        }
+    }
+    if !blurred {
+        return;
+    }
+    let mut holders: Vec<u32> = glyphs.iter().filter(|g| g.0 == newest).map(|g| g.4).collect();
+    holders.dedup();
+    for li in 0..out.layers.len() {
+        if out.layers[li].blur.is_none() {
+            continue;
+        }
+        let inside = holders.iter().any(|&h| {
+            let mut at = Some(h);
+            while let Some(l) = at {
+                if l as usize == li {
+                    return true;
+                }
+                at = out.layers[l as usize].parent;
+            }
+            false
+        });
+        if inside {
+            if let Some(b) = out.layers[li].blur.as_mut() {
+                b.keep = Some(keep);
+            }
         }
     }
 }

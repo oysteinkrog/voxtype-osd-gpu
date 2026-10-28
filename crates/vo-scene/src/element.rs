@@ -142,6 +142,10 @@ pub(crate) enum Slot {
     TextZoom = 82,
     /// Displacement strength (EG-03, `Element::displace_strength`), 0 for none.
     DisplaceStrength = 83,
+    /// Layer blur (EG-04, `Element::layer_blur`) and frost (`Element::frost`): standard
+    /// deviations in logical units, 0 for none. Under reduced motion they jump.
+    LayerBlur = 84,
+    Frost = 85,
     /// Stage turns in radians and the push toward the viewer in logical units
     /// (`crate::stage`).
     RotateX = 100,
@@ -206,6 +210,7 @@ impl Slot {
             s if (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&s) => Prop::TextFx,
             s if s == Slot::TextZoom as u8 => Prop::TextSize,
             s if s == Slot::DisplaceStrength as u8 => Prop::Style,
+            s if s == Slot::LayerBlur as u8 || s == Slot::Frost as u8 => Prop::Style,
             s if s <= Slot::StyleFlicker as u8 => Prop::Style,
             _ => Prop::Wave,
         }
@@ -227,6 +232,8 @@ impl Slot {
             || slot == Slot::BloomRadius as u8
             || slot == Slot::RimWidth as u8
             || slot == Slot::TextBlur as u8
+            || slot == Slot::LayerBlur as u8
+            || slot == Slot::Frost as u8
             || slot == Slot::TextChroma as u8
             || slot == Slot::TextHaloRadius as u8
             || (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&slot)
@@ -1979,6 +1986,35 @@ impl<M> Element<M> {
         if let Kind::Layer { displace: Some((_, keep)), .. } = &mut self.kind {
             *keep = !moves;
         }
+        self
+    }
+
+    /// Blurs the layer's own content (EG-04): a Gaussian of standard deviation `radius`
+    /// logical units, reaching three times as far. Animated like a style; under reduced
+    /// motion it jumps to its target. 0 draws the layer as without it, with no pass. The
+    /// layer is drawn offscreen. The newest line of live text inside the layer stays sharp
+    /// (the reading-line envelope). Only on the full quality tier; `minimal` and `no-bloom`
+    /// draw the layer sharp.
+    pub fn layer_blur(mut self, radius: f32) -> Element<M> {
+        if !matches!(self.kind, Kind::Layer { mask: None, .. }) {
+            debug_assert!(false, "layer_blur on a node that is not a layer: {}", self.key);
+            return self;
+        }
+        self.set(Slot::LayerBlur as u8, radius.max(0.0));
+        self
+    }
+
+    /// Frosts what is under the layer (EG-04): its backdrop (EG-01) is captured at full
+    /// resolution and drawn back blurred by `radius` logical units (standard deviation) inside
+    /// the layer's rounded box, before the layer's own content, so a sheet frosts the lines
+    /// behind it. Replaces a backdrop's tint; tint with the layer's own fill. Animated like
+    /// `layer_blur`; 0 captures and draws nothing. Only on the full quality tier.
+    pub fn frost(mut self, radius: f32) -> Element<M> {
+        if !matches!(self.kind, Kind::Layer { mask: None, .. }) {
+            debug_assert!(false, "frost on a node that is not a layer: {}", self.key);
+            return self;
+        }
+        self.set(Slot::Frost as u8, radius.max(0.0));
         self
     }
 
