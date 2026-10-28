@@ -8,6 +8,9 @@
 //! change; between rebuilds the canvas follows the signal bus, so the waveform and playhead
 //! move every frame. Word labels and gap labels are keyed by word id, so a word that wraps to
 //! the next row moves there.
+//!
+//! The waveform reads the bus history, which keeps 4 s by default: give it the length of the
+//! recordings shown (`Signals::with_cap`).
 
 use std::ops::Range;
 
