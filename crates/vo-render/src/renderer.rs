@@ -731,6 +731,16 @@ impl Renderer {
             .sum()
     }
 
+    /// Forgets what earlier frames left behind: particles, feedback trails and pooled
+    /// textures (which also frees their GPU memory). Pipelines, the glyph atlas, materials
+    /// and painters stay. For a renderer kept warm and reused on a new surface.
+    pub fn forget_frames(&mut self) {
+        self.particles = ParticleLayer::new(self.fonts.clone());
+        self.pool.clear();
+        self.scene = None;
+        self.surfaces.clear();
+    }
+
     /// The quality tier. Starts from `VO_QUALITY`, else `Full`.
     pub fn quality(&self) -> Quality {
         self.quality

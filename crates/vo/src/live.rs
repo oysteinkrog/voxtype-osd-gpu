@@ -37,6 +37,9 @@ struct Live<A: App> {
     driver: Option<Driver<A>>,
     options_rest: Option<Options<A::Msg>>,
     renderer: Option<Renderer>,
+    /// A renderer kept from an earlier session on the same device (`Resident`), taken by the
+    /// first GPU frame.
+    warm: Option<Renderer>,
     /// Draws the first frames while the GPU device is made; dropped once the GPU draws.
     cpu: Option<CpuRenderer>,
     /// The host's number of the first GPU frame, for the startup report.
@@ -226,9 +229,7 @@ impl<A: App> Live<A> {
         } else {
             self.surface = host.open(&self.spec)?;
             let gpu = host.gpu()?;
-            let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone());
-            options.configure(&mut r);
-            self.renderer = Some(r);
+            self.renderer = Some(main_renderer(&mut self.warm, &gpu, &options));
         }
         if let Some(inbox) = &options.inbox {
             inbox.connect(host.waker());
@@ -361,12 +362,8 @@ impl<A: App> HostApp for Live<A> {
             }
             HostEvent::GpuReady { .. } => match host.gpu() {
                 Ok(gpu) => {
-                    let fonts = self.options_rest.as_ref().map(|o| o.fonts.clone()).unwrap_or_default();
-                    let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
-                    if let Some(o) = &self.options_rest {
-                        o.configure(&mut r);
-                    }
-                    self.renderer = Some(r);
+                    let options = self.options_rest.as_ref().expect("started");
+                    self.renderer = Some(main_renderer(&mut self.warm, &gpu, options));
                     // The GPU draws a frame even when the scene has settled: that frame
                     // replaces the CPU one.
                     self.driver().dirty = true;
@@ -428,39 +425,132 @@ impl<A: App> HostApp for Live<A> {
     }
 }
 
+/// The main surface's renderer: the warm one if it reads the same font table, else a new one.
+/// A warm renderer keeps its `renderer_setup` from the session that made it.
+fn main_renderer<M>(warm: &mut Option<Renderer>, gpu: &vo_host::Gpu, options: &Options<M>) -> Renderer {
+    match warm.take().filter(|r| r.fonts().same_table(&options.fonts)) {
+        Some(mut r) => {
+            r.forget_frames();
+            r.set_quality(options.quality);
+            r.set_light(options.light);
+            r
+        }
+        None => {
+            let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, options.fonts.clone());
+            options.configure(&mut r);
+            r
+        }
+    }
+}
+
+impl<A: App> Live<A> {
+    fn new(app: A, spec: OverlaySpec, options: Options<A::Msg>, warm: Option<Renderer>) -> Live<A> {
+        let tokens = options.tokens.clone();
+        Live {
+            pending: Some((app, options)),
+            spec,
+            tokens,
+            driver: None,
+            options_rest: None,
+            renderer: None,
+            warm,
+            cpu: None,
+            first_gpu_frame: None,
+            settled_list: None,
+            host_asked: false,
+            surface: 0,
+            list: DisplayList::default(),
+            region: None,
+            blur: None,
+            paced: None,
+            frames: 0,
+            extras: Vec::new(),
+            startup_logged: false,
+            finished: false,
+            error: None,
+        }
+    }
+}
+
 /// Runs `app` as a live overlay on the platform host until the app exits or the compositor
 /// closes the surface.
 #[cfg(feature = "wayland")]
 pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::Msg>) -> Result<(), HostError> {
     use vo_host::Host;
     let host = vo_host_wayland::WaylandHost::connect()?;
-    let tokens = options.tokens.clone();
-    let mut live = Live {
-        pending: Some((app, options)),
-        spec,
-        tokens,
-        driver: None,
-        options_rest: None,
-        renderer: None,
-        cpu: None,
-        first_gpu_frame: None,
-        settled_list: None,
-        host_asked: false,
-        surface: 0,
-        list: DisplayList::default(),
-        region: None,
-        blur: None,
-        paced: None,
-        frames: 0,
-        extras: Vec::new(),
-        startup_logged: false,
-        finished: false,
-        error: None,
-    };
+    let mut live = Live::new(app, spec, options, None);
     let result = host.run(&mut live);
     match live.error.take() {
         Some(e) => Err(e),
         None => result,
+    }
+}
+
+/// An overlay that shows again and again in one process, such as a dictation popup. Between
+/// shows it keeps the display connection, the GPU device and the main surface's renderer
+/// (pipelines, glyph atlas, painters), so a show after the first draws its first frame on
+/// the GPU without making any of them again. It holds no surface between shows.
+///
+/// Any error drops all of it; the next show connects again.
+#[cfg(feature = "wayland")]
+pub struct Resident {
+    /// First, so it is dropped before the device's host.
+    renderer: Option<Renderer>,
+    host: Option<vo_host_wayland::WaylandHost>,
+}
+
+#[cfg(feature = "wayland")]
+impl Default for Resident {
+    fn default() -> Self {
+        Resident::new()
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl Resident {
+    /// Holds nothing until the first show.
+    pub fn new() -> Resident {
+        Resident { renderer: None, host: None }
+    }
+
+    /// Runs `app` as one show, like [`run_overlay_with`], and keeps the warm state for the
+    /// next. The renderer keeps the `renderer_setup` of the show that made it; quality and
+    /// light mode follow each show's options.
+    pub fn run<A: App>(&mut self, app: A, spec: OverlaySpec, options: Options<A::Msg>) -> Result<(), HostError> {
+        // A compositor that went away while hidden: connect again for this show.
+        if self.host.as_mut().is_some_and(|h| h.check().is_err()) {
+            self.release();
+        }
+        if self.host.is_none() {
+            self.renderer = None;
+            self.host = Some(vo_host_wayland::WaylandHost::connect()?);
+        }
+        let host = self.host.as_mut().expect("connected");
+        let mut live = Live::new(app, spec, options, self.renderer.take());
+        let result = host.run_session(&mut live);
+        let result = match live.error.take() {
+            Some(e) => Err(e),
+            None => result,
+        };
+        match result {
+            Ok(()) => self.renderer = live.renderer.take(),
+            Err(_) => {
+                drop(live);
+                self.release();
+            }
+        }
+        result
+    }
+
+    /// Drops the renderer, the device and the connection. The next show makes them again.
+    pub fn release(&mut self) {
+        self.renderer = None;
+        self.host = None;
+    }
+
+    /// Whether a connection and device are kept from an earlier show.
+    pub fn is_warm(&self) -> bool {
+        self.host.is_some()
     }
 }
 

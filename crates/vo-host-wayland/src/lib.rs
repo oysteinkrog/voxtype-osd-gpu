@@ -431,6 +431,8 @@ pub struct State {
 pub struct WaylandHost {
     state: State,
     event_loop: EventLoop<'static, State>,
+    /// Sessions run so far (`run_session`).
+    sessions: u32,
 }
 
 /// The device the host asks for. Dev builds and the preview get GPU timestamps when the
@@ -548,7 +550,7 @@ impl WaylandHost {
         WaylandSource::new(state.conn.clone(), queue)
             .insert(event_loop.handle())
             .map_err(|e| HostError::Connect(format!("wayland source: {e}")))?;
-        Ok(WaylandHost { state, event_loop })
+        Ok(WaylandHost { state, event_loop, sessions: 0 })
     }
 }
 
@@ -834,8 +836,12 @@ impl State {
             self.draw_cpu(i, app);
             return;
         }
+        let first_gpu = self.surfaces[i].first_gpu.is_none();
         if self.surfaces[i].dirty_config || self.surfaces[i].config.is_none() {
             self.configure_swapchain(i);
+            if first_gpu {
+                self.stage("swapchain configured");
+            }
         }
         let tex = {
             let s = &self.surfaces[i];
@@ -859,12 +865,18 @@ impl State {
             self.surfaces[i].feedback.push_back((on_child, frame));
         }
         self.surfaces[i].first_gpu.get_or_insert(frame);
+        if first_gpu {
+            self.stage("texture acquired");
+        }
         let size = [tex.texture.width(), tex.texture.height()];
         // Cleared before the app runs, so a request_frame made inside frame is kept.
         self.surfaces[i].want_frame = false;
         self.in_frame = Some(id);
         app.frame(self, &Frame { id, t, frame, size, scale, texture: &tex.texture });
         self.in_frame = None;
+        if first_gpu {
+            self.stage("frame drawn");
+        }
         let Ok(i) = self.index(id) else { return };
         if std::mem::take(&mut self.close_after_frame) {
             // The app closed this surface while drawing it. The swapchain texture goes first:
@@ -1246,16 +1258,62 @@ impl HostCtl for WaylandHost {
     }
 }
 
-impl Host for WaylandHost {
-    fn run(mut self, app: &mut dyn HostApp) -> Result<(), HostError> {
+impl WaylandHost {
+    /// Reads what the compositor sent while no session ran: output changes go to the output
+    /// state, anything else was for surfaces that are gone. An error means the connection is
+    /// gone and the host must connect again.
+    pub fn check(&mut self) -> Result<(), HostError> {
+        self.state.conn.flush().map_err(|e| HostError::Connect(e.to_string()))?;
+        self.event_loop
+            .dispatch(Some(Duration::ZERO), &mut self.state)
+            .map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
+        self.state.events.clear();
+        Ok(())
+    }
+
+    /// Runs `app` until it exits, like [`Host::run`], but keeps the connection, the Vulkan
+    /// instance and the device for the next session. A resident overlay that shows again and
+    /// again calls this once per show: from the second show on the first frame draws on the
+    /// GPU at once, with no instance, device or swapchain thread to wait for. Host times
+    /// start again from zero at each session.
+    pub fn run_session(&mut self, app: &mut dyn HostApp) -> Result<(), HostError> {
+        self.sessions += 1;
+        if self.sessions > 1 {
+            let state = &mut self.state;
+            state.origin = monotonic();
+            state.diag = HostDiag { exec_to_origin: since_exec(), ..HostDiag::default() };
+            state.exit = false;
+            state.timer = None;
+            state.in_frame = None;
+            state.close_after_frame = false;
+            state.gpu_failed = None;
+            self.check()?;
+            self.state.stage("session start");
+        }
         let state = &mut self.state;
+        let result = Self::session_loop(&mut self.event_loop, state, app);
+        // A device thread still running holds the display and surface pointers: wait for it,
+        // and keep the device it made.
+        state.bg_target = None;
+        state.poll_gpu(true);
+        state.surfaces.clear();
+        state.events.clear();
+        let _ = state.conn.flush();
+        result
+    }
+
+    fn session_loop(
+        event_loop: &mut EventLoop<'static, State>,
+        state: &mut State,
+        app: &mut dyn HostApp,
+    ) -> Result<(), HostError> {
         app.start(state);
         let mut events = Vec::new();
         while !state.exit {
             let _ = state.conn.flush();
             let timeout = state.timeout();
             state.diag.loop_wakeups += 1;
-            self.event_loop.dispatch(timeout, state).map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
+            event_loop.dispatch(timeout, state).map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
             if state.timer.is_some_and(|t| state.now() >= t) {
                 state.timer = None;
                 let t = state.now();
@@ -1276,15 +1334,18 @@ impl Host for WaylandHost {
                 i += 1;
             }
         }
-        // A device thread still running holds the display and surface pointers: wait for it.
-        state.bg_target = None;
-        state.bg.take().map(|rx| rx.recv());
-        // Surfaces before the device and the instance, all before the connection.
-        state.surfaces.clear();
-        state.gpu = None;
-        state.instance = None;
-        let _ = state.conn.flush();
         Ok(())
+    }
+}
+
+impl Host for WaylandHost {
+    fn run(mut self, app: &mut dyn HostApp) -> Result<(), HostError> {
+        let result = self.run_session(app);
+        // The device and the instance before the connection.
+        self.state.gpu = None;
+        self.state.instance = None;
+        let _ = self.state.conn.flush();
+        result
     }
 }
 

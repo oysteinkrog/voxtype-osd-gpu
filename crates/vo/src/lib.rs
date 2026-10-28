@@ -34,7 +34,7 @@ pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};
 #[cfg(feature = "export")]
 pub use export::{export, export_with, frame_hash, Export, ExportError, ExportReport, Video};
 #[cfg(feature = "wayland")]
-pub use live::run_overlay_with;
+pub use live::{run_overlay_with, Resident};
 pub use offline::{render_offline, render_offline_with, Input, OfflineError, Scenario};
 pub use surfaces::SurfaceView;
 
