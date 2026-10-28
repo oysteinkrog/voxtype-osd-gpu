@@ -6,6 +6,11 @@
 #   cold first frame     VO_BUDGET_FIRST_FRAME_MS   default 300, median of the live runs
 #   frames while idle    VO_BUDGET_IDLE_FRAMES      default 0, every live run
 #
+# The toast has no idle motion, so it must draw nothing while idle. The idle_loop example keeps
+# one ambient loop running while idle (MOTION-PLAN rule 8: idle loops at most 30 frames per
+# second); it runs live for 10 s and fails when it draws more than VO_BUDGET_IDLE_LOOP_FPS
+# (default 30) frames per second, or when its exit does not settle before vo's 3 s cap.
+#
 # It also runs the frame_chain example once, live: 60 frames, each asked for from inside the
 # frame before it. A host that drops a request made during a frame stops after one.
 #
@@ -21,7 +26,7 @@
 # toast (which only stops its timer, so it must cost no frame), then clicks its close button.
 # "First frame" is the first frame on screen since exec, from wp_presentation feedback.
 #
-# Expects release builds of the toast, fake_click, frame_chain and effect_cost examples; the
+# Expects release builds of the toast, idle_loop, fake_click, frame_chain and effect_cost examples; the
 # just recipe makes them.
 set -euo pipefail
 
@@ -31,19 +36,20 @@ work=${VO_BUDGET_DIR:-/var/tmp/claude/vo-budget}
 heap_mb=${VO_BUDGET_HEAP_MB:-15}
 first_ms=${VO_BUDGET_FIRST_FRAME_MS:-300}
 idle_max=${VO_BUDGET_IDLE_FRAMES:-0}
+loop_fps=${VO_BUDGET_IDLE_LOOP_FPS:-30}
 effect_ms=${VO_BUDGET_EFFECT_MS:-2}
 runs=${VO_BUDGET_RUNS:-3}
 args=${VO_BUDGET_ARGS:-}
 width=1280
 height=800
 
-for b in toast fake_click frame_chain effect_cost; do
+for b in toast idle_loop fake_click frame_chain effect_cost; do
     [ -x "$bin/$b" ] || { echo "budget: $bin/$b is missing; run 'just budget'" >&2; exit 2; }
 done
 command -v kwin_wayland >/dev/null || { echo "budget: kwin_wayland is not installed" >&2; exit 2; }
 
 mkdir -p "$work"
-rm -rf "$work/offline-a" "$work/offline-b" "$work"/live-* "$work"/chain*
+rm -rf "$work/offline-a" "$work/offline-b" "$work"/live-* "$work"/chain* "$work"/idle-loop*
 fail=0
 over() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 bad() { echo "budget: FAIL $*"; fail=1; }
@@ -129,6 +135,29 @@ echo "budget: $(grep -m1 '^frame_chain: ' "$work/chain.log" 2>/dev/null || echo 
 grep -q 'frame_chain exit 0' "$work/chain.log" 2>/dev/null \
     || bad "frame_chain: a frame asked for during a frame was not drawn (see $work/chain.log)"
 
+# One ambient loop while idle: paced at the ambient rate, and dropped at the exit so it settles.
+cat > "$work/idle-loop.sh" <<'EOF'
+#!/usr/bin/env bash
+"$1" --secs 10 > "$2" 2>&1
+echo "idle_loop exit $?" >> "$2"
+EOF
+chmod +x "$work/idle-loop.sh"
+XDG_CONFIG_HOME=$work/xdg-config WAYLAND_DISPLAY=no-such-wl DISPLAY= \
+    timeout 30 dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
+    --socket "vo-budget-$$-idle-loop" --width "$width" --height "$height" \
+    --exit-with-session "$work/idle-loop.sh $bin/idle_loop $work/idle-loop.log" > "$work/kwin-idle-loop.log" 2>&1 || true
+loop_line=$(grep -m1 '^idle_loop: ' "$work/idle-loop.log" 2>/dev/null || echo 'idle_loop: no result')
+echo "budget: $loop_line, limit $loop_fps per second"
+if ! grep -q 'idle_loop exit 0' "$work/idle-loop.log" 2>/dev/null; then
+    bad "idle_loop: did not exit cleanly (see $work/idle-loop.log)"
+else
+    loop_rate=$(grep -oP '\(\K[0-9.]+(?= per second\))' <<< "$loop_line" || true)
+    settle=$(grep -oP 'exit settled after \K[0-9.]+' <<< "$loop_line" || true)
+    { [ -n "$loop_rate" ] && ! over "$loop_rate" "$loop_fps"; } \
+        || bad "idle_loop: ${loop_rate:-?} frames per second while idle, limit $loop_fps"
+    { [ -n "$settle" ] && over 3 "$settle"; } || bad "idle_loop: the exit took ${settle:-?} s to settle, cap 3 s"
+fi
+
 if [ "${#firsts[@]}" -gt 0 ]; then
     median=$(printf '%s\n' "${firsts[@]}" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }')
     max=$(printf '%s\n' "${firsts[@]}" | sort -n | tail -1)
@@ -147,7 +176,7 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "budget: ok (heap <= $heap_mb MB, first frame <= $first_ms ms, idle frames <= $idle_max, effects <= $effect_ms ms)"
+    echo "budget: ok (heap <= $heap_mb MB, first frame <= $first_ms ms, idle frames <= $idle_max, idle loop <= $loop_fps per second, effects <= $effect_ms ms)"
 else
     exit 1
 fi

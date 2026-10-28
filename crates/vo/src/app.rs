@@ -430,6 +430,49 @@ mod tests {
         assert!(d.moving(1.0 + EXIT_MOTION_MAX) && d.done(1.0 + EXIT_MOTION_MAX), "until the cap");
     }
 
+    /// An app with an idle loop that drops it from the view once it asks to exit, as the
+    /// idle-motion rule asks (MOTION-PLAN rule 8).
+    struct Breather {
+        exiting: bool,
+    }
+
+    impl App for Breather {
+        type Msg = ();
+
+        fn update(&mut self, _: (), cx: &mut Cx<()>) {
+            self.exiting = true;
+            cx.exit();
+        }
+
+        fn view(&self, _: &Tokens) -> Element<()> {
+            let dot = Element::shape("dot", vo_scene::display::ShapeKind::Circle).size(20.0, 20.0);
+            let dot = if self.exiting {
+                dot
+            } else {
+                dot.ambient(vo_scene::LoopProp::Scale, vo_scene::Loop::pulse(0.2, 1.6))
+                    .ambient(vo_scene::LoopProp::Rotation, vo_scene::Loop::spin(2.0))
+            };
+            Element::column("root").size(100.0, 100.0).child(dot)
+        }
+    }
+
+    #[test]
+    fn an_idle_loop_dropped_at_exit_settles_before_the_cap() {
+        let mut d = Driver::new(Breather { exiting: false }, Scene::new(), Tokens::default(), 0.0);
+        assert!(d.moving(5.0) && !d.done(5.0), "the idle loop runs while open");
+        let exit = 5.3;
+        d.dispatch((), exit);
+        let deadline = d.exit_deadline().unwrap();
+        // Step at the ambient rate until nothing moves.
+        let mut t = exit;
+        while d.moving(t) && t < deadline + 1.0 {
+            t += 1.0 / 30.0;
+        }
+        assert!(t < deadline, "still moving at the cap: settled at {t}, cap {deadline}");
+        assert!(d.done(t) && !d.overdue(t), "the run ends because it settled, not by the cap");
+        assert!(t - exit < 1.5, "settles well inside the cap: took {:.2} s", t - exit);
+    }
+
     #[test]
     fn late_messages_move_up_to_the_last_event() {
         let mut d = Driver::new(Log::default(), Scene::new(), Tokens::default(), 0.0);

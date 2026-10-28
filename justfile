@@ -50,7 +50,7 @@ lint:
 # Budget gate: own heap, cold first frame and frames while idle, offline and live in a private
 # nested KWin. Limits and options are env vars, listed at the top of scripts/budget.sh.
 budget:
-    {{hb}} cargo build --release -p vo --example toast --example effect_cost -p vo-host-wayland --example fake_click --example frame_chain
+    {{hb}} cargo build --release -p vo --example toast --example idle_loop --example effect_cost -p vo-host-wayland --example fake_click --example frame_chain
     scripts/budget.sh
 
 # Preview and scrub an example in a window, replayed to the same time after Rust edits (agents: nested KWin only).
