@@ -601,7 +601,8 @@ impl GpuPainter for GlyphFxPainter {
             };
             let live = match src.effect {
                 Effect::Ink(ink) => age < ink.secs + ink.trace_secs,
-                Effect::Morph(m) => !(reduced && g.part == Part::Old) && age <= m.secs + 0.05,
+                // After the morph the new word stays drawn until the text takes it back.
+                Effect::Morph(m) => !((reduced || age > m.secs) && g.part == Part::Old),
                 Effect::Light(..) => true,
             };
             if !live || g.color.a <= 0.0 {
