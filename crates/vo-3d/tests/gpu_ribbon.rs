@@ -115,7 +115,7 @@ fn back_shows_past_a_quarter_turn() {
     let item = RibbonItem { ribbon, level: LevelTrack::default(), look };
     let (_, _, px) = draw(&gpu, &item, t, 300, 150, 1.0);
     let (mut ribbon_px, mut back_px) = (0, 0);
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0 {
         if p[3] < 128 {
             continue;
         }
