@@ -84,6 +84,14 @@ osd-build:
     cd {{fork}} && {{hb}} cargo build --features osd-gtk4 --bin voxtype-osd-gtk4
     @echo "binary: {{fork}}/target/debug/voxtype-osd-gtk4"
 
+# Dev profile: the fork's release profile is LTO with one codegen unit. Not part of `all`,
+# which must not depend on the fork. Runs: envelope and exit check, plain, cancelled and
+# reduced motion, plus a look switch (scripts/osd-vo-looks.sh in the fork).
+# voxtype fork: build the vo popup, then check every look with its default motion.
+osd-looks:
+    cd {{fork}} && {{hb}} cargo build --features osd-vo --bin voxtype-osd-vo
+    cd {{fork}} && scripts/osd-vo-looks.sh target/debug/voxtype-osd-vo
+
 # voxtype fork: unit tests of the overlay modules (`osd::` in the lib, no features, so it
 # shares the build with every other `cargo test --lib` there).
 osd-test *args:
