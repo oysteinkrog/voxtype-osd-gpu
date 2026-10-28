@@ -727,7 +727,7 @@ impl Flow {
         // Width escrow (MO-22): words that move along their line wait for a quiet moment.
         let escrow = motion.revisions.escrow && revisions::escrow_holds(&old, words, &placed, size);
         let hold = if escrow { t + revisions::ESCROW_QUIET } else { t };
-        let mut next = Vec::with_capacity(words.len());
+        let mut next: Vec<FlowWord> = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
         let (mut stagger, mut arrived) = (0u32, false);
         // How far the last kept word's line moved, `(line, from old x to new x)`. A new word
@@ -767,10 +767,21 @@ impl Flow {
                 }
                 // A word on the newest line of a front drop shows in place, whole, once the
                 // line before has scrolled out of its row, so text never crosses text.
-                if scroll.is_some() && !reduced && p.line == stage.newest {
+                let dropped = scroll.is_some() && !reduced && p.line == stage.newest;
+                if dropped {
+                    self.drop_hold = Some((p.line, t + overflow::DROP_HOLD));
                     for g in &mut glyphs {
                         g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
                         g.opacity.retarget(t + overflow::DROP_HOLD, 1.0);
+                    }
+                }
+                // A word that joins, in a later update, a line whose words are still held
+                // back waits for them, so the line never shows its later words first.
+                let held = self.drop_hold.filter(|&(line, until)| line == p.line && until > t);
+                if let Some((_, until)) = held.filter(|_| !reduced && !dropped) {
+                    for g in &mut glyphs {
+                        g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
+                        g.opacity.retarget(until, 1.0);
                     }
                 }
                 next.push(FlowWord {
@@ -1451,6 +1462,8 @@ pub(crate) struct Flow {
     spine: spine::Spines,
     /// The margin bell (MO-31).
     bell: bell::Bells,
+    /// The newest line of the last front drop and when its words show (MO-33).
+    drop_hold: Option<(u32, f64)>,
     /// Caret `(x, y)` on the baseline, and its bar size `(width, ascent, descent)`.
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.

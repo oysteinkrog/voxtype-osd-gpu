@@ -409,6 +409,29 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
 }
 
 #[test]
+fn a_word_that_joins_a_held_line_waits_for_it() {
+    // The front drops and word 11 is held on the new line; word 12 arrives on that line
+    // while 11 still waits. It waits too, so the line never shows its second word first.
+    let mut s = scene();
+    s.apply(view(&words(&TEN), Some(200.0), false), 0.0);
+    let before = s.sample(1.0);
+    let y0 = first(&before, 1).1;
+    let mut kept: Vec<(u32, &str)> = TEN.iter().copied().filter(|(id, _)| first(&before, *id).1 != y0).collect();
+    kept.push((11, "a"));
+    s.apply(view(&words(&kept), Some(200.0), false), 1.0);
+    kept.push((12, "b"));
+    s.apply(view(&words(&kept), Some(200.0), false), 1.05);
+    let settled = s.sample(5.0);
+    let rows = (first(&settled, 11).1, first(&settled, 12).1);
+    assert_eq!(rows.0, rows.1, "both on the new line: {rows:?}");
+    let shown = |t: f64, id: u32| s.sample(t).glyphs.iter().any(|g| g.word == id && g.color.a > 0.01);
+    for t in [1.06, 1.1] {
+        assert!(!shown(t, 11) && !shown(t, 12), "at {t} the line waits");
+    }
+    assert!(shown(1.2, 11) && shown(1.2, 12), "both show once the line is clear");
+}
+
+#[test]
 fn a_new_first_line_that_shifts_along_scrolls_with_the_block() {
     // A look that puts "…" on the new first word moves that line along as the front drops.
     // Its words still scroll with the block and slide along their row, drawn once: no copy
