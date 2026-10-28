@@ -18,9 +18,11 @@
 //!
 //! The trait does not assume the CPU: a GPU sim keeps its state in buffers, `step` records a
 //! compute dispatch, and its snapshot is a GPU-side buffer copy. [`reference::Diffusion`] is a
-//! small CPU sim used by the tests. [`water`] (feature `gpu`, on by default) is the GPU water
-//! surface.
+//! small CPU sim used by the tests. With the `gpu` feature (on by default), [`water`] is the GPU
+//! water surface and [`fluid`] the GPU ink and smoke (stable fluids with velocity and dye).
 
+#[cfg(feature = "gpu")]
+pub mod fluid;
 pub mod reference;
 pub mod snapshot;
 #[cfg(feature = "gpu")]
