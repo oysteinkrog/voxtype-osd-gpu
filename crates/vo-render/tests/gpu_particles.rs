@@ -546,7 +546,12 @@ fn live_text_forms_through_particle_text() {
                 model.update(hyp);
                 let view = Element::column("root")
                     .pad(20.0)
-                    .child(Element::live_text("live", model.words()).text_style(TextStyle::new(0, 30.0, 40.0)));
+                    // Particle text animates the glyphs itself: the plain swap, not the palimpsest.
+                    .child(
+                        Element::live_text("live", model.words())
+                            .text_style(TextStyle::new(0, 30.0, 40.0))
+                            .word_revise(vo_scene::flow::Revise::Swap),
+                    );
                 scene.apply(view, te);
                 text.update(&mut p, te, &scene.sample(te).glyphs);
                 next += 1;

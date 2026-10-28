@@ -14,6 +14,9 @@
 //!   or full stop scales in from the baseline with a small overshoot, 140 ms. Other new
 //!   letters rise in and removed ones rise out. When less than half the word is kept it
 //!   crossfades instead.
+//! - **Palimpsest (MO-20).** The default. `Revise::Palimpsest` diffs like `Revise::Glyphs`,
+//!   but survivors keep their ink, removed letters sink into a short-lived ghost and new
+//!   letters arrive in place (module `palimpsest`).
 //! - **Removal.** A word that goes fades out where it was in 120 ms.
 //! - **Rewrap.** A word that lands on another line fades out where it was and in at its new
 //!   place, sliding with the words before it there, so it never crosses other words. With
@@ -44,6 +47,9 @@ use crate::font::FontId;
 use crate::geom::{Color, Point, Rect};
 use crate::lines::LineLook;
 use crate::text::ShapedText;
+
+#[path = "motion/palimpsest.rs"]
+pub mod palimpsest;
 
 #[path = "motion/letter_physics.rs"]
 pub mod letter_physics;
@@ -124,8 +130,12 @@ pub enum Rewrap {
 pub enum Revise {
     /// The new glyphs replace the old ones at once. The word still moves and resizes by
     /// spring. For text whose glyphs something else animates, such as particle text.
-    #[default]
     Swap,
+    /// The palimpsest (MO-20), the default: letters that survive stay; removed ones sink
+    /// 4 px into a 20 % ghost that holds for 500 ms; new ones arrive in place. See
+    /// [`palimpsest`].
+    #[default]
+    Palimpsest,
     /// The old glyphs fade out over 120 ms while the new ones fade in at the same place.
     Crossfade,
     /// Only the glyphs that changed move: a grapheme diff of the old and new word.
@@ -727,6 +737,7 @@ impl Flow {
                             o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                             o.spread = false;
                         }
+                        Revise::Palimpsest => self.palimpsest(&mut o, w, &p, &graphemes, &make, reduced),
                         Revise::Roll => self.roll(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Ghost => self.displace(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Crossfade | Revise::Glyphs => self.crossfade(&mut o, &p, &graphemes, &make),

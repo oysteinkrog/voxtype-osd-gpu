@@ -69,7 +69,9 @@ fn live_words_enter_and_change_with_their_own_motion() {
         Element::column("root").child(
             Element::live_text("live", words)
                 .word_enter(Transition::fade().offset(0.0, 6.0))
-                .word_change(Transition::NONE.opacity(0.5)),
+                .word_change(Transition::NONE.opacity(0.5))
+                // The whole word takes the change: no palimpsest per letter (MO-20).
+                .word_revise(vo_scene::flow::Revise::Swap),
         )
     };
     let w = |id, t: &str| Word { id, text: t.into() };
