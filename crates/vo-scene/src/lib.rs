@@ -34,6 +34,7 @@
 //! - `dots`: dot grids whose dots come from a source drawn from the frame time.
 //! - `emitter`: particle emitters and particle words, simulated by the renderer.
 //! - `emitter_signals`: emitter inputs driven by the signal bus (level, pitch, onsets).
+//! - `final_pass`: a reading pass across live text, placed by the finishing fraction.
 //! - `gpu`: elements drawn by app GPU code, such as a 3D scene.
 //! - `glass`: the glass material and its display list item (FX06 to FX08).
 //! - `material`: materials for shapes, glyphs and strokes: neon, hologram, chrome, gradient
@@ -68,6 +69,7 @@ pub mod element;
 pub mod emitter;
 pub mod emitter_signals;
 pub mod erase;
+pub mod final_pass;
 pub mod flow;
 pub mod font;
 pub mod frame;
@@ -114,7 +116,7 @@ pub use taffy;
 pub use ambient::{Loop, LoopProp, Ripples};
 pub use bind::Param;
 pub use display::DisplayList;
-pub use element::{Element, Key, Motion, Prop, TextStyle, Transition};
+pub use element::{Element, Key, MarkShape, Motion, Prop, TextStyle, Transition, WordMark};
 pub use font::{FontId, FontRegistry};
 pub use frame::{Corner, Edge, Frame, Grid, Notch, Stripes};
 pub use graticule::{Axis, Graticule};
