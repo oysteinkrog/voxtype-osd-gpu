@@ -442,6 +442,10 @@ fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static>
     wgpu::DeviceDescriptor {
         label: Some("vo-host-wayland"),
         required_features: if want { timestamps } else { wgpu::Features::empty() },
+        // The default (`Performance`) reserves large memory blocks up front: 201 MiB of VRAM
+        // for the dictation popup on an NVIDIA card, against 21 MiB with this hint, and no
+        // slower to draw.
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     }
 }
