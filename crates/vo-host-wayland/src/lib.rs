@@ -301,17 +301,61 @@ struct BgGpu {
     stages: [f64; 2],
 }
 
-/// Makes the instance, then waits for the first surface, then makes the adapter, the device
-/// and the swapchain, all off the main thread. Swapchain setup asks the compositor for
+/// The Vulkan instance on the connection's display.
+fn new_instance(display: DisplayHandle) -> wgpu::Instance {
+    let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
+    desc.backends = wgpu::Backends::VULKAN;
+    wgpu::Instance::new(desc)
+}
+
+/// The Vulkan instance, made on its own thread from the moment the connection exists, so
+/// the driver loads while the host binds globals, learns the outputs and opens the first
+/// surface (about 70 ms of a cold start). Whoever needs the instance first joins the thread.
+/// Dropping it joins too: the thread holds the display pointer, so it must end before the
+/// connection does.
+struct EarlyInstance(Option<std::thread::JoinHandle<(wgpu::Instance, f64)>>);
+
+impl EarlyInstance {
+    fn start(display: DisplayHandle, origin: f64) -> EarlyInstance {
+        let spawned = std::thread::Builder::new()
+            .name("vo-instance".into())
+            .spawn(move || (new_instance(display), monotonic() - origin));
+        // Without a thread the instance is made where it is first needed, as before.
+        EarlyInstance(spawned.ok())
+    }
+
+    /// The instance and the host clock time it was ready, once; `None` when there is no
+    /// thread or it was already taken. A panic on the thread comes back as an error.
+    fn take(&mut self) -> Option<Result<(wgpu::Instance, f64), String>> {
+        let h = self.0.take()?;
+        Some(h.join().map_err(|_| "the Vulkan instance thread panicked".to_string()))
+    }
+}
+
+impl Drop for EarlyInstance {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Makes the instance (or takes the early one), then waits for the first surface, then makes
+/// the adapter, the device and the swapchain, all off the main thread. Swapchain setup asks the compositor for
 /// buffer formats in several round trips, about 10 ms in a nested KWin, so it belongs here
 /// too. The Vulkan WSI uses its own event queue, so this is safe while the main thread
 /// dispatches.
-fn make_gpu(display: DisplayHandle, origin: f64, target: mpsc::Receiver<BgTarget>) -> Result<BgGpu, String> {
+fn make_gpu(
+    display: DisplayHandle,
+    origin: f64,
+    target: mpsc::Receiver<BgTarget>,
+    mut early: EarlyInstance,
+) -> Result<BgGpu, String> {
     let raw_display = display.0;
-    let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
-    desc.backends = wgpu::Backends::VULKAN;
-    let instance = wgpu::Instance::new(desc);
-    let t_instance = monotonic() - origin;
+    let (instance, t_instance) = match early.take() {
+        Some(made) => made?,
+        None => (new_instance(display), monotonic() - origin),
+    };
     let surface = target.recv().ok().and_then(|BgTarget(ptr, w, h)| {
         let window = RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(ptr as *mut std::ffi::c_void)?));
         // SAFETY: the pointer is a live `wl_surface`. The host waits for this thread before it
@@ -343,6 +387,8 @@ fn make_gpu(display: DisplayHandle, origin: f64, target: mpsc::Receiver<BgTarget
 }
 
 pub struct State {
+    /// First, so it is dropped (its thread joined) before the connection.
+    early: EarlyInstance,
     pub(crate) conn: Connection,
     pub(crate) qh: QueueHandle<State>,
     pub(crate) registry: RegistryState,
@@ -408,6 +454,7 @@ impl WaylandHost {
         let origin = monotonic();
         let exec_to_origin = since_exec();
         let conn = Connection::connect_to_env().map_err(|e| HostError::Connect(e.to_string()))?;
+        let early = EarlyInstance::start(display_handle_of(&conn), origin);
         let (globals, queue) = registry_queue_init::<State>(&conn).map_err(|e| HostError::Connect(e.to_string()))?;
         let qh = queue.handle();
         let compositor = CompositorState::bind(&globals, &qh).map_err(|e| HostError::Connect(e.to_string()))?;
@@ -456,6 +503,7 @@ impl WaylandHost {
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
         let mut state = State {
+            early,
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &qh),
             seats: SeatState::new(&globals, &qh),
@@ -529,9 +577,7 @@ impl State {
     }
 
     fn display_handle(&self) -> DisplayHandle {
-        DisplayHandle(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            NonNull::new(self.conn.backend().display_ptr() as *mut std::ffi::c_void).expect("display pointer"),
-        )))
+        display_handle_of(&self.conn)
     }
 
     /// Takes the device thread's answer if it is there; with `wait`, waits for it.
@@ -592,7 +638,7 @@ impl State {
         // before the Wayland surfaces (field order), and the host drops all surfaces before the
         // connection.
         unsafe {
-            self.instance().create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            self.instance()?.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(display),
                 raw_window_handle: window,
             })
@@ -604,14 +650,21 @@ impl State {
         self.surfaces.iter().position(|s| s.id == id).ok_or(HostError::UnknownSurface(id))
     }
 
-    fn instance(&mut self) -> &wgpu::Instance {
+    fn instance(&mut self) -> Result<&wgpu::Instance, HostError> {
         if self.instance.is_none() {
-            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(self.display_handle()));
-            desc.backends = wgpu::Backends::VULKAN;
-            self.instance = Some(wgpu::Instance::new(desc));
-            self.stage("instance");
+            match self.early.take() {
+                Some(made) => {
+                    let (instance, t) = made.map_err(HostError::Gpu)?;
+                    self.instance = Some(instance);
+                    self.diag.stages.push(("instance", t));
+                }
+                None => {
+                    self.instance = Some(new_instance(self.display_handle()));
+                    self.stage("instance");
+                }
+            }
         }
-        self.instance.as_ref().unwrap()
+        Ok(self.instance.as_ref().unwrap())
     }
 
     fn apply_input(&self, wl: &WlSurface, mode: &InputMode) {
@@ -845,6 +898,13 @@ impl State {
     }
 }
 
+/// The connection's display as a [`DisplayHandle`].
+fn display_handle_of(conn: &Connection) -> DisplayHandle {
+    DisplayHandle(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+        NonNull::new(conn.backend().display_ptr() as *mut std::ffi::c_void).expect("display pointer"),
+    )))
+}
+
 /// A display handle for `wgpu::Instance`, which wants an owned `HasDisplayHandle`.
 #[derive(Debug)]
 struct DisplayHandle(RawDisplayHandle);
@@ -882,7 +942,7 @@ impl HostCtl for State {
         if let Some(g) = &self.gpu {
             return Ok(g.gpu.clone());
         }
-        self.instance();
+        self.instance()?;
         let instance = self.instance.as_ref().unwrap();
         let surface = self.surfaces.first().and_then(|s| s.wgpu.as_ref());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -915,8 +975,9 @@ impl HostCtl for State {
         let (tx, rx) = mpsc::channel();
         let (target_tx, target_rx) = mpsc::channel();
         let (display, origin) = (self.display_handle(), self.origin);
+        let early = EarlyInstance(self.early.0.take());
         let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
-            let _ = tx.send(make_gpu(display, origin, target_rx));
+            let _ = tx.send(make_gpu(display, origin, target_rx, early));
             ping.ping();
         });
         if spawned.is_err() {
