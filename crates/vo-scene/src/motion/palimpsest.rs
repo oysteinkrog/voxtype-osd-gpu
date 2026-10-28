@@ -75,6 +75,7 @@ pub fn joined_script(text: &str) -> bool {
 
 impl Flow {
     /// MO-20: the palimpsest revision of word `o` to `w`, placed at `p`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn palimpsest(
         &mut self,
         o: &mut FlowWord,

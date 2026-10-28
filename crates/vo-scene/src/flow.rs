@@ -1074,6 +1074,7 @@ impl Flow {
 
     /// The glyph diff (T08, T09). Returns false, changing nothing, when less than half the
     /// word is kept: a crossfade reads better then.
+    #[allow(clippy::too_many_arguments)]
     fn revise_glyphs(
         &mut self,
         o: &mut FlowWord,
