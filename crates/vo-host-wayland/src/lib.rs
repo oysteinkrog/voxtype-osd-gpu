@@ -313,6 +313,9 @@ fn new_instance(display: DisplayHandle) -> wgpu::Instance {
 /// surface (about 70 ms of a cold start). Whoever needs the instance first joins the thread.
 /// Dropping it joins too: the thread holds the display pointer, so it must end before the
 /// connection does.
+/// Runs on the device thread with the new device, before the host takes it (`warm_up`).
+pub type WarmUp = Box<dyn FnOnce(&Gpu) + Send>;
+
 struct EarlyInstance(Option<std::thread::JoinHandle<(wgpu::Instance, f64)>>);
 
 impl EarlyInstance {
@@ -433,6 +436,8 @@ pub struct WaylandHost {
     event_loop: EventLoop<'static, State>,
     /// Sessions run so far (`run_session`).
     sessions: u32,
+    /// `warm_up` started the device thread.
+    warming: bool,
 }
 
 /// The device the host asks for. Dev builds and the preview get GPU timestamps when the
@@ -550,7 +555,7 @@ impl WaylandHost {
         WaylandSource::new(state.conn.clone(), queue)
             .insert(event_loop.handle())
             .map_err(|e| HostError::Connect(format!("wayland source: {e}")))?;
-        Ok(WaylandHost { state, event_loop, sessions: 0 })
+        Ok(WaylandHost { state, event_loop, sessions: 0, warming: false })
     }
 }
 
@@ -584,6 +589,37 @@ impl State {
 
     fn display_handle(&self) -> DisplayHandle {
         display_handle_of(&self.conn)
+    }
+
+    /// Starts the device thread. Without `then` it waits for the first GPU surface (`open`
+    /// sends it) and sets up its swapchain too; with `then` it makes the device with no
+    /// surface and runs `then` with it on that thread before handing it over.
+    fn spawn_gpu(&mut self, then: Option<WarmUp>) -> bool {
+        let Ok((ping, source)) = calloop::ping::make_ping() else { return false };
+        if self.loop_handle.insert_source(source, |_, _, state: &mut State| state.poll_gpu(false)).is_err() {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (target_tx, target_rx) = mpsc::channel();
+        let (display, origin) = (self.display_handle(), self.origin);
+        let early = EarlyInstance(self.early.0.take());
+        let warm = then.is_some();
+        let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
+            let made = make_gpu(display, origin, target_rx, early);
+            if let (Ok(b), Some(then)) = (&made, then) {
+                then(&Gpu { device: b.device.clone(), queue: b.queue.clone(), adapter: b.adapter.get_info().name });
+            }
+            let _ = tx.send(made);
+            ping.ping();
+        });
+        if spawned.is_err() {
+            return false;
+        }
+        self.bg = Some(rx);
+        // A warm-up has no surface to wait for: dropping the sender lets the thread go on.
+        self.bg_target = if warm { None } else { Some(target_tx) };
+        self.stage("gpu thread started");
+        true
     }
 
     /// Takes the device thread's answer if it is there; with `wait`, waits for it.
@@ -984,27 +1020,8 @@ impl HostCtl for State {
         if !self.caps.cpu_first_frame || self.gpu.is_some() || self.instance.is_some() {
             return false;
         }
-        let Ok((ping, source)) = calloop::ping::make_ping() else { return false };
-        if self.loop_handle.insert_source(source, |_, _, state: &mut State| state.poll_gpu(false)).is_err() {
-            return false;
-        }
-        let (tx, rx) = mpsc::channel();
-        let (target_tx, target_rx) = mpsc::channel();
-        let (display, origin) = (self.display_handle(), self.origin);
-        let early = EarlyInstance(self.early.0.take());
-        let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
-            let _ = tx.send(make_gpu(display, origin, target_rx, early));
-            ping.ping();
-        });
-        if spawned.is_err() {
-            return false;
-        }
-        self.bg = Some(rx);
-        self.bg_target = Some(target_tx);
-        self.stage("gpu thread started");
-        true
+        self.spawn_gpu(None)
     }
-
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
         if spec.keyboard != Keyboard::None {
             return Err(HostError::Unsupported("keyboard interactivity other than None (M1)".into()));
@@ -1271,6 +1288,21 @@ impl WaylandHost {
         Ok(())
     }
 
+    /// Makes the GPU device on a background thread before any session and runs `then` with it
+    /// on that thread, for example to build and warm a renderer. Returns at once, so it never
+    /// holds up a session: one that starts before the thread is done draws its first frames
+    /// on the CPU, as a cold start does, and takes the device once it is ready. Returns false
+    /// and does nothing when there is a device already or one is being made, or when the
+    /// compositor cannot show CPU frames.
+    pub fn warm_up(&mut self, then: WarmUp) -> bool {
+        let s = &mut self.state;
+        if s.bg.is_some() || s.gpu.is_some() || s.instance.is_some() || !s.caps.cpu_first_frame {
+            return false;
+        }
+        self.warming = s.spawn_gpu(Some(then));
+        self.warming
+    }
+
     /// Runs `app` until it exits, like [`Host::run`], but keeps the connection, the Vulkan
     /// instance and the device for the next session. A resident overlay that shows again and
     /// again calls this once per show: from the second show on the first frame draws on the
@@ -1278,7 +1310,9 @@ impl WaylandHost {
     /// start again from zero at each session.
     pub fn run_session(&mut self, app: &mut dyn HostApp) -> Result<(), HostError> {
         self.sessions += 1;
-        if self.sessions > 1 {
+        // After a warm-up the connect stages are old news too, and `check` takes a device the
+        // warm-up thread has finished.
+        if self.sessions > 1 || self.warming {
             let state = &mut self.state;
             state.origin = monotonic();
             state.diag = HostDiag { exec_to_origin: since_exec(), ..HostDiag::default() };
@@ -1335,6 +1369,17 @@ impl WaylandHost {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for WaylandHost {
+    /// A device thread still running (a warm-up the host never used) holds the display
+    /// pointer: it must end before the connection does.
+    fn drop(&mut self) {
+        self.state.bg_target = None;
+        if let Some(rx) = self.state.bg.take() {
+            let _ = rx.recv();
+        }
     }
 }
 

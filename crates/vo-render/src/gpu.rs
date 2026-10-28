@@ -31,7 +31,7 @@ use vo_scene::geom::{Affine, Rect};
 use vo_scene::gpu::GpuSource;
 
 /// Draws GPU items whose source it knows. Add one with `Renderer::add_painter`.
-pub trait GpuPainter {
+pub trait GpuPainter: Send {
     /// Called once per frame that has GPU items, before the first `paint`.
     fn begin_frame(&mut self) {}
     /// Draws the item if this painter knows `cx.source`, and returns whether it did. The

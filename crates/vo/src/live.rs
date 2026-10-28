@@ -40,6 +40,8 @@ struct Live<A: App> {
     /// A renderer kept from an earlier session on the same device (`Resident`), taken by the
     /// first GPU frame.
     warm: Option<Renderer>,
+    /// Where a warm-up still running puts its renderer (`Resident::warm_up`).
+    warming: Option<WarmSlot>,
     /// Draws the first frames while the GPU device is made; dropped once the GPU draws.
     cpu: Option<CpuRenderer>,
     /// The host's number of the first GPU frame, for the startup report.
@@ -229,6 +231,7 @@ impl<A: App> Live<A> {
         } else {
             self.surface = host.open(&self.spec)?;
             let gpu = host.gpu()?;
+            self.take_warming();
             self.renderer = Some(main_renderer(&mut self.warm, &gpu, &options));
         }
         if let Some(inbox) = &options.inbox {
@@ -362,6 +365,7 @@ impl<A: App> HostApp for Live<A> {
             }
             HostEvent::GpuReady { .. } => match host.gpu() {
                 Ok(gpu) => {
+                    self.take_warming();
                     let options = self.options_rest.as_ref().expect("started");
                     self.renderer = Some(main_renderer(&mut self.warm, &gpu, options));
                     // The GPU draws a frame even when the scene has settled: that frame
@@ -443,7 +447,19 @@ fn main_renderer<M>(warm: &mut Option<Renderer>, gpu: &vo_host::Gpu, options: &O
     }
 }
 
+/// A renderer a warm-up thread is building, and then holds until a show takes it.
+type WarmSlot = std::sync::Arc<std::sync::Mutex<Option<Renderer>>>;
+
 impl<A: App> Live<A> {
+    /// The warm-up's renderer, if it is done and no warm renderer is held yet. The device
+    /// thread fills the slot before it hands the device over, so once the host has the device
+    /// the slot is filled.
+    fn take_warming(&mut self) {
+        if self.warm.is_none() {
+            self.warm = self.warming.take().and_then(|slot| slot.lock().ok()?.take());
+        }
+    }
+
     fn new(app: A, spec: OverlaySpec, options: Options<A::Msg>, warm: Option<Renderer>) -> Live<A> {
         let tokens = options.tokens.clone();
         Live {
@@ -454,6 +470,7 @@ impl<A: App> Live<A> {
             options_rest: None,
             renderer: None,
             warm,
+            warming: None,
             cpu: None,
             first_gpu_frame: None,
             settled_list: None,
@@ -496,8 +513,24 @@ pub fn run_overlay_with<A: App>(app: A, spec: OverlaySpec, options: Options<A::M
 pub struct Resident {
     /// First, so it is dropped before the device's host.
     renderer: Option<Renderer>,
+    /// The renderer `warm_up` is building, until a show takes it.
+    warming: Option<WarmSlot>,
     host: Option<vo_host_wayland::WaylandHost>,
 }
+
+/// What [`Resident::warm_up`] draws once, offscreen, so the pipelines and glyphs a show uses
+/// exist before the first show: display lists like the app's own frames, drawn at `size`
+/// pixels and `scale`.
+pub struct WarmFrames {
+    pub lists: Vec<DisplayList>,
+    pub size: [u32; 2],
+    pub scale: f32,
+}
+
+/// The swapchain format the Wayland host picks when the compositor offers it, as KWin does.
+/// Pipelines are made per format, so warming another format would not help the first show.
+#[cfg(feature = "wayland")]
+const WARM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 #[cfg(feature = "wayland")]
 impl Default for Resident {
@@ -510,7 +543,59 @@ impl Default for Resident {
 impl Resident {
     /// Holds nothing until the first show.
     pub fn new() -> Resident {
-        Resident { renderer: None, host: None }
+        Resident { renderer: None, warming: None, host: None }
+    }
+
+    /// Gets the first show ready before it comes: connects, then on a background thread makes
+    /// the GPU device and the renderer the way a show would (`options`' fonts, quality, light
+    /// and `renderer_setup`), draws `frames` once offscreen to build the pipelines and glyph
+    /// atlas, and gives freed memory back. `frames` runs on that thread too.
+    ///
+    /// Only the connection is made here (well under a millisecond), so a show that comes
+    /// during the warm-up is not held up: it starts as a cold show does and takes the device
+    /// and renderer when they are ready. Returns whether a warm-up started; it does not when
+    /// the device is already warm.
+    pub fn warm_up<M>(
+        &mut self,
+        options: &Options<M>,
+        frames: impl FnOnce() -> WarmFrames + Send + 'static,
+    ) -> Result<bool, HostError> {
+        if self.host.is_none() {
+            self.renderer = None;
+            self.warming = None;
+            self.host = Some(vo_host_wayland::WaylandHost::connect()?);
+        }
+        let slot = WarmSlot::default();
+        let (fonts, quality, light, setup) =
+            (options.fonts.clone(), options.quality, options.light, options.renderer_setup.clone());
+        let filled = slot.clone();
+        let then: vo_host_wayland::WarmUp = Box::new(move |gpu| {
+            let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
+            r.set_quality(quality);
+            r.set_light(light);
+            if let Some(setup) = &setup {
+                setup(&mut r);
+            }
+            let warm = frames();
+            let [w, h] = warm.size;
+            let mut target = Target::new(&gpu.device, w.max(1), h.max(1), WARM_FORMAT);
+            for list in &warm.lists {
+                r.render_at(list, warm.scale, &mut target);
+            }
+            let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            r.forget_frames();
+            drop(target);
+            drop(warm);
+            trim_heap();
+            if let Ok(mut s) = filled.lock() {
+                *s = Some(r);
+            }
+        });
+        let started = self.host.as_mut().expect("connected").warm_up(then);
+        if started {
+            self.warming = Some(slot);
+        }
+        Ok(started)
     }
 
     /// Runs `app` as one show, like [`run_overlay_with`], and keeps the warm state for the
@@ -527,13 +612,18 @@ impl Resident {
         }
         let host = self.host.as_mut().expect("connected");
         let mut live = Live::new(app, spec, options, self.renderer.take());
+        live.warming = self.warming.take();
         let result = host.run_session(&mut live);
         let result = match live.error.take() {
             Some(e) => Err(e),
             None => result,
         };
         match result {
-            Ok(()) => self.renderer = live.renderer.take(),
+            Ok(()) => {
+                self.renderer = live.renderer.take();
+                // A show too short to reach the GPU leaves the warm-up's renderer for the next.
+                self.warming = live.warming.take();
+            }
             Err(_) => {
                 drop(live);
                 self.release();
@@ -546,6 +636,7 @@ impl Resident {
     /// Drops the renderer, the device and the connection. The next show makes them again.
     pub fn release(&mut self) {
         self.renderer = None;
+        self.warming = None;
         self.host = None;
     }
 

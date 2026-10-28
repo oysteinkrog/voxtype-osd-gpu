@@ -562,6 +562,12 @@ pub struct Renderer {
     dither_motion: bool,
 }
 
+// `vo::Resident` builds a renderer on a warm-up thread and hands it to the host's thread.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Renderer>();
+};
+
 struct FxShared {
     /// `src`, `low`, a sampler: the pyramid passes, the final pass and the bloom composite.
     sampled_layout: wgpu::BindGroupLayout,
