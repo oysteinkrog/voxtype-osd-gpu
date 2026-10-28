@@ -532,7 +532,7 @@ impl Water {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(&self.heights[self.cur], 0, &rb, 0, bytes);
         self.queue.submit([enc.finish()]);
-        self.map(&rb).chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+        self.map(&rb).as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
     }
 
     /// Reads the height texture back as tightly packed `Rgba16Float` rows (8 bytes a cell).
@@ -610,8 +610,7 @@ impl Water {
             enc.copy_buffer_to_buffer(&resolve, 0, &rb, 0, 32);
         });
         self.submit();
-        let stamps: Vec<u64> =
-            self.map(&rb).chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
+        let stamps: Vec<u64> = self.map(&rb).as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
         let period = self.queue.get_timestamp_period() as f64 * 1e-6;
         self.restore(&saved);
         self.flush();
