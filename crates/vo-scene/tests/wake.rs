@@ -34,3 +34,41 @@ fn a_replayed_scene_wakes_like_the_live_one() {
     // After the last fade has settled, nothing.
     assert_eq!(replayed.next_wake(9.0), None);
 }
+
+/// A card that fades out on exit, holding `child`.
+fn card(child: Element<()>) -> Element<()> {
+    Element::column("root").size(100.0, 100.0).child(
+        Element::column("card")
+            .size(80.0, 80.0)
+            .presence(vo_scene::Transition::NONE, vo_scene::Transition::fade())
+            .child(child),
+    )
+}
+
+#[test]
+fn a_canvas_inside_a_node_that_has_left_does_not_keep_the_scene_awake() {
+    let mut s = Scene::new();
+    // A canvas that draws for ever, such as a CRT's scanlines.
+    s.apply(card(Element::canvas("screen", f64::INFINITY, |_, _, _| {}).size(40.0, 40.0)), 0.0);
+    assert_eq!(s.next_wake(0.5), Some(0.5));
+    s.apply(Element::column("root").size(100.0, 100.0), 1.0);
+    assert_eq!(s.next_wake(1.05), Some(1.05), "the card fades out");
+    // No later apply drops the card: the scene must still go quiet once its exit is over.
+    assert_eq!(s.next_wake(10.0), None);
+}
+
+#[test]
+fn a_slow_spin_inside_a_fading_exit_ends_with_the_fade() {
+    let spin = |period| {
+        Element::shape("ticks", ShapeKind::Circle)
+            .size(40.0, 40.0)
+            .fill(Color::WHITE)
+            .ambient(vo_scene::LoopProp::Rotation, vo_scene::Loop::spin(period))
+    };
+    let mut s = Scene::new();
+    // One turn in two minutes: coasting on to its next whole turn would take minutes.
+    s.apply(card(spin(120.0)), 0.0);
+    s.apply(Element::column("root").size(100.0, 100.0), 1.0);
+    assert_eq!(s.next_wake(1.05), Some(1.05), "the card fades out");
+    assert_eq!(s.next_wake(5.0), None, "hidden by its fade, the spin is gone with it");
+}

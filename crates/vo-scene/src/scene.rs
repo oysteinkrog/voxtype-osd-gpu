@@ -1100,7 +1100,14 @@ impl<M> Scene<M> {
     }
 
     pub fn next_wake(&self, t: f64) -> Option<f64> {
-        let moving = self.nodes.values().any(|n| {
+        // A node under one that has finished leaving is gone, though `drop_gone` only removes
+        // it at the next `apply`: its loops, emitters and canvases must not keep the scene awake.
+        let nodes: Vec<&Node<M>> = if self.nodes.values().any(|n| n.leaving.is_some_and(|(_, until)| until <= t)) {
+            self.nodes.values().filter(|n| !self.gone_by(n, t)).collect()
+        } else {
+            self.nodes.values().collect()
+        };
+        let moving = nodes.iter().copied().any(|n| {
             n.chans.iter().any(|(_, c)| !c.resting_at(t))
                 || (n.alive(t) && self.bound_moving(n, t))
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| !c.resting_at(t))
@@ -1142,7 +1149,7 @@ impl<M> Scene<M> {
             .values()
             .flat_map(|n| n.chans.iter().map(|(_, c)| c.settled_at()).chain([n.since]))
             .fold(f64::NEG_INFINITY, f64::max);
-        let fading = self.nodes.values().any(|n| {
+        let fading = nodes.iter().copied().any(|n| {
             n.alive(t) && n.has(Slot::TrailHalfLife as u8) && t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
         });
         if fading {
@@ -1153,15 +1160,15 @@ impl<M> Scene<M> {
             .values()
             .filter(|n| n.alive(t) && !n.reduced && matches!(n.kind, Kind::Panel))
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
-            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
-            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.ambient_wake(t)))
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.ambient_wake(t)))
             // Asked about a moment before a recorded event (a replay or a seek): wake for it.
-            .chain(self.nodes.values().flat_map(|n| {
+            .chain(nodes.iter().copied().flat_map(|n| {
                 let words = n.words.iter().flat_map(|w| w.channels());
                 n.chans.iter().map(|(_, c)| c).chain(words).filter_map(move |c| c.next_start(t))
             }))
-            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
-            .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
             // Materials that flicker or scroll (FX15), at their own capped rate.
             .chain(
                 self.nodes
@@ -1496,6 +1503,19 @@ impl<M> Scene<M> {
         revived
     }
 
+    /// Whether `n` or one of its ancestors has finished leaving by `t`.
+    fn gone_by(&self, n: &Node<M>, t: f64) -> bool {
+        let done = |n: &Node<M>| n.leaving.is_some_and(|(_, until)| until <= t);
+        let mut cur = Some(n);
+        while let Some(c) = cur {
+            if done(c) {
+                return true;
+            }
+            cur = c.parent.and_then(|p| self.nodes.get(p));
+        }
+        false
+    }
+
     /// Starts the exit motion. Returns false when the node should go at once.
     fn start_leaving(&mut self, id: NodeId, t: f64) -> bool {
         let retention = self.retention;
@@ -1509,8 +1529,12 @@ impl<M> Scene<M> {
             n.set_target(slot, v, t, retention);
         }
         self.changed = true;
+        // An exit that fades to nothing hides the ambient loops as they settle: the node goes
+        // when its exit ends. A slow spin coasting to its next whole turn would otherwise keep
+        // a hidden node for minutes.
+        let hides = exit.opacity.is_some_and(|o| o <= 0.0);
         self.stop_ambient(id, t);
-        let until = self.subtree_settled_at(id);
+        let until = self.subtree_settled_at(id, !hides);
         if until <= t {
             return false;
         }
@@ -1526,9 +1550,12 @@ impl<M> Scene<M> {
         }
     }
 
-    fn subtree_settled_at(&self, id: NodeId) -> f64 {
+    /// When `id` and everything under it are at rest: their channels, and their ambient loops
+    /// when `ambient`.
+    fn subtree_settled_at(&self, id: NodeId, ambient: bool) -> f64 {
         let n = &self.nodes[id];
-        n.children.iter().map(|&c| self.subtree_settled_at(c)).fold(n.settled_at().max(n.ambient_rest_at()), f64::max)
+        let own = if ambient { n.settled_at().max(n.ambient_rest_at()) } else { n.settled_at() };
+        n.children.iter().map(|&c| self.subtree_settled_at(c, ambient)).fold(own, f64::max)
     }
 
     /// Removes leaving nodes whose exit has settled by `t`.
