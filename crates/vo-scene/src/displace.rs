@@ -150,12 +150,7 @@ impl Displace {
                 let live = r.rings(t);
                 let mut rings = [Ring::default(); DISPLACE_RINGS];
                 rings[..live.len()].copy_from_slice(&live);
-                DisplaceField::Ripples {
-                    rings,
-                    count: live.len() as u32,
-                    wavelength: r.wavelength,
-                    width: r.width,
-                }
+                DisplaceField::Ripples { rings, count: live.len() as u32, wavelength: r.wavelength, width: r.width }
             }
             Displace::Noise { scale, amount, speed, seed } => {
                 DisplaceField::Noise { scale: scale.max(1e-3), amount: *amount, seed: *seed, turn: turn(*speed) }

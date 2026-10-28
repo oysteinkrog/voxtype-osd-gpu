@@ -45,20 +45,18 @@ fn words() -> Vec<Word> {
 
 /// Bars of a waveform: 48 capsules whose heights follow two sines.
 fn waveform() -> El {
-    Element::row("wave").gap(3.0).align_items(vo_scene::taffy::AlignItems::CENTER).height(40.0).children((0..48u32).map(|i| {
-        let x = i as f32;
-        let h = 6.0 + 30.0 * (0.5 + 0.5 * (x * 0.37).sin() * (x * 0.11).cos()).abs();
-        Element::panel(i as u64).size(4.0, h).radius(2.0).fill(Color::hex(0x6cb6ff, 1.0))
-    }))
+    Element::row("wave").gap(3.0).align_items(vo_scene::taffy::AlignItems::CENTER).height(40.0).children(
+        (0..48u32).map(|i| {
+            let x = i as f32;
+            let h = 6.0 + 30.0 * (0.5 + 0.5 * (x * 0.37).sin() * (x * 0.11).cos()).abs();
+            Element::panel(i as u64).size(4.0, h).radius(2.0).fill(Color::hex(0x6cb6ff, 1.0))
+        }),
+    )
 }
 
 fn ripples() -> Displace {
     Displace::Ripples(
-        Ripples::new()
-            .onset(0.2, Point::new(110.0, 60.0))
-            .onset(0.5, Point::new(250.0, 70.0))
-            .amp(5.0)
-            .wave(16.0, 9.0),
+        Ripples::new().onset(0.2, Point::new(110.0, 60.0)).onset(0.5, Point::new(250.0, 70.0)).amp(5.0).wave(16.0, 9.0),
     )
 }
 
@@ -160,7 +158,8 @@ fn displace_goldens() {
     let gpu = support::gpu();
     let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
     off.renderer.set_material_image(0, Some(constant_offsets(&gpu)));
-    let mut images = vec![render(&mut off, "dp-ripples", &scene(&fonts, Fx::Displace(ripples(), 1.0), false).sample(0.8))];
+    let mut images =
+        vec![render(&mut off, "dp-ripples", &scene(&fonts, Fx::Displace(ripples(), 1.0), false).sample(0.8))];
     for (name, d) in sources() {
         images.push(render(&mut off, name, &scene(&fonts, Fx::Displace(d, 1.0), false).sample(0.8)));
     }

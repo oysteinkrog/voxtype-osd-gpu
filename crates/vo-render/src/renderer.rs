@@ -1199,9 +1199,8 @@ impl Renderer {
         let mut backdrop = parent.backdrop;
         if let Some(b) = layer.backdrop.filter(|_| wants) {
             let displace = layer.displace.as_ref().filter(|_| b.res == BackdropRes::Full);
-            backdrop = self
-                .place_backdrop(f, &b, displace, surface, parent, &to_px, ppu, warp, opacity)
-                .map(|i| (i, surface));
+            backdrop =
+                self.place_backdrop(f, &b, displace, surface, parent, &to_px, ppu, warp, opacity).map(|i| (i, surface));
         }
         let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
@@ -1370,7 +1369,15 @@ impl Renderer {
                         }
                     }
                     let (pipe, b) = if tex { (Pipe::VectorTex, bd) } else { (Pipe::Vector, NO_BACKDROP) };
-                    self.push_cmd_with(draw_surface, pipe, start..self.vectors.len() as u32, uniform, blend, scissor, b);
+                    self.push_cmd_with(
+                        draw_surface,
+                        pipe,
+                        start..self.vectors.len() as u32,
+                        uniform,
+                        blend,
+                        scissor,
+                        b,
+                    );
                 }
                 // Particles, glass and GPU items have their own pipelines: not in a mask.
                 ItemKind::Emitters | ItemKind::Glass | ItemKind::Gpu if mask_out != 0.0 => {}
@@ -1498,7 +1505,13 @@ impl Renderer {
             BackdropRes::Half => 2,
         };
         let index = self.backdrops.len() as u32;
-        self.backdrops.push(BackdropPlan { origin: [x0, y0], size: full.map(|v| v / step), step, tex: None, displace: None });
+        self.backdrops.push(BackdropPlan {
+            origin: [x0, y0],
+            size: full.map(|v| v / step),
+            step,
+            tex: None,
+            displace: None,
+        });
         let state = LayerState {
             to_px: *to_px,
             ppu,

@@ -19,8 +19,8 @@ use vo_core::spring::Spring;
 use crate::bind::Bound;
 use crate::display::MATERIAL_SHIFT;
 use crate::display::{
-    Backdrop, BackdropRes, BlendMode, Displace, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
-    LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
+    Backdrop, BackdropRes, BlendMode, Bloom, Displace, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape,
+    Item, ItemKind, Layer, LayerStyle, LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::display::{BloomBand, BloomShape};
 use crate::dots::Dots;

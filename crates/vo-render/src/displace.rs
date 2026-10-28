@@ -172,12 +172,7 @@ impl DisplaceGpu {
     }
 
     /// Writes this frame's blocks and binds them with the image slots.
-    pub(crate) fn upload(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        images: &[Option<wgpu::TextureView>],
-    ) {
+    pub(crate) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[Option<wgpu::TextureView>]) {
         if self.data.is_empty() {
             self.bind = None;
             return;
@@ -206,7 +201,10 @@ impl DisplaceGpu {
         ];
         for i in 0..4 {
             let view = images.get(i).and_then(|v| v.as_ref()).unwrap_or(&self.empty);
-            entries.push(wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(view) });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2 + i as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
         }
         self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vo-displace"),
