@@ -1245,6 +1245,7 @@ dependencies = [
  "vo-host-wayland",
  "vo-render",
  "vo-scene",
+ "vo-sim",
  "wgpu",
 ]
 
@@ -1370,6 +1371,8 @@ dependencies = [
  "bytemuck",
  "png",
  "pollster",
+ "vo-render",
+ "vo-scene",
  "wgpu",
 ]
 

@@ -19,7 +19,8 @@
 //! The trait does not assume the CPU: a GPU sim keeps its state in buffers, `step` records a
 //! compute dispatch, and its snapshot is a GPU-side buffer copy. [`reference::Diffusion`] is a
 //! small CPU sim used by the tests. With the `gpu` feature (on by default), [`water`] is the GPU
-//! water surface and [`fluid`] the GPU ink and smoke (stable fluids with velocity and dye).
+//! water surface and [`fluid`] the GPU ink and smoke (stable fluids with velocity and dye). With
+//! the `render` feature (on by default), [`water_render`] draws the water as a pool in a vo scene.
 
 #[cfg(feature = "gpu")]
 pub mod fluid;
@@ -27,6 +28,8 @@ pub mod reference;
 pub mod snapshot;
 #[cfg(feature = "gpu")]
 pub mod water;
+#[cfg(feature = "render")]
+pub mod water_render;
 
 pub use snapshot::{SnapshotPolicy, SnapshotStore, DEFAULT_CAP_BYTES, DEFAULT_INTERVAL_TICKS};
 
@@ -138,6 +141,15 @@ impl<S: Sim> Timeline<S> {
         if tick <= self.tick {
             self.stale = true;
         }
+    }
+
+    /// Drops every event and every snapshot. The next [`Timeline::goto_tick`] replays from
+    /// the start state.
+    pub fn clear_events(&mut self) {
+        self.events.clear();
+        self.cursor = 0;
+        self.store.invalidate_from(0);
+        self.stale = true;
     }
 
     /// The state at the last tick at or before `t`.

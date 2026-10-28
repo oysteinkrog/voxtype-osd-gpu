@@ -7,13 +7,17 @@ publish = false
 description = "Fixed-tick simulations that replay: timed events, snapshots and seek to any time. The core has no dependencies and no GPU assumption; the `gpu` feature adds the GPU water surface and fluid"
 
 [features]
-default = ["gpu"]
+default = ["gpu", "render"]
 # GPU sims (`water`, `fluid`). Off for a CPU-only user of the timeline.
 gpu = ["dep:wgpu", "dep:bytemuck"]
+# Drawing the sims in a vo scene (`water_render`): the water material and its painter.
+render = ["gpu", "dep:vo-render", "dep:vo-scene"]
 
 [dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "vulkan"], optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
+vo-render = { path = "../vo-render", optional = true }
+vo-scene = { path = "../vo-scene", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
@@ -22,6 +26,10 @@ png = "0.18"
 [[test]]
 name = "gpu_water"
 required-features = ["gpu"]
+
+[[test]]
+name = "gpu_water_render"
+required-features = ["render"]
 
 [[test]]
 name = "gpu_fluid"

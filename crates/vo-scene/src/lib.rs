@@ -112,6 +112,7 @@ pub mod text;
 pub mod timed;
 pub mod trace;
 pub mod typo;
+pub mod water;
 pub mod word_voice;
 
 /// The layout engine, for `Element::layout` and the alignment types the builder takes.
