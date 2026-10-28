@@ -539,6 +539,7 @@ impl Resident {
                 self.release();
             }
         }
+        trim_heap();
         result
     }
 
@@ -553,6 +554,23 @@ impl Resident {
         self.host.is_some()
     }
 }
+
+/// Gives memory freed during a show back to the system. glibc keeps freed heap pages for
+/// reuse; after the GPU driver's first shader compile that is about 35 MB the hidden popup
+/// would hold all day. Runs after the surface is gone, so it costs no show any time.
+#[cfg(all(feature = "wayland", target_os = "linux", target_env = "gnu"))]
+fn trim_heap() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    // SAFETY: malloc_trim only takes the allocator's own locks and has no preconditions.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(all(feature = "wayland", not(all(target_os = "linux", target_env = "gnu"))))]
+fn trim_heap() {}
 
 /// The placement once the effect margin has grown the surface by `insets` around the content:
 /// the content stays where it was without the margin. `Centered` is left as it is.
