@@ -17,6 +17,9 @@
 //! - **Palimpsest (MO-20).** The default. `Revise::Palimpsest` diffs like `Revise::Glyphs`,
 //!   but survivors keep their ink, removed letters sink into a short-lived ghost and new
 //!   letters arrive in place (module `palimpsest`).
+//! - **Around a revision (MO-21 to MO-23).** Opt-in with `revisions`: width escrow holds
+//!   the neighbours through a burst, a hinge brackets moved word breaks, and paired margin
+//!   marks point from an older changed line to the newest one (module `revisions`).
 //! - **Removal.** A word that goes fades out where it was in 120 ms.
 //! - **Rewrap.** A word that lands on another line fades out where it was and in at its new
 //!   place, sliding with the words before it there, so it never crosses other words. With
@@ -50,6 +53,8 @@ use crate::text::ShapedText;
 
 #[path = "motion/palimpsest.rs"]
 pub mod palimpsest;
+#[path = "motion/revisions.rs"]
+pub mod revisions;
 
 #[path = "motion/letter_physics.rs"]
 pub mod letter_physics;
@@ -253,6 +258,8 @@ pub struct LiveMotion {
     pub stable: Option<Vec<WordId>>,
     /// The active-line reading stage (T14).
     pub reading: Option<Reading>,
+    /// Width escrow, correction hinge and revision address (MO-21 to MO-23).
+    pub revisions: revisions::RevisionMotion,
     /// New letters drop into the line as small rigid bodies (MO-83).
     pub letters: Option<letter_physics::LetterPhysics>,
     /// The caret as a magnet that pulls new words in, with its field drawn (MO-89).
@@ -662,6 +669,10 @@ impl Flow {
             None => Vec::new(),
         };
         self.update_spine(t, motion.spine, &old, &front, words.is_empty(), reduced);
+        self.start_marks(t, &old, words, &placed, motion, reduced);
+        // Width escrow (MO-22): words that move along their line wait for a quiet moment.
+        let escrow = motion.revisions.escrow && revisions::escrow_holds(&old, words, &placed, size);
+        let hold = if escrow { t + revisions::ESCROW_QUIET } else { t };
         let mut next = Vec::with_capacity(words.len());
         let mut index = vec![None; shaped.glyphs.len()];
         let (mut stagger, mut arrived) = (0u32, false);
@@ -703,7 +714,13 @@ impl Flow {
                 next.push(FlowWord {
                     id: w.id,
                     text: w.text.clone(),
-                    x: make.to(p.x - back, p.x, FLIP, Rest::PIXELS),
+                    x: if hold > t {
+                        let mut c = make.ch(p.x - back, FLIP, Rest::PIXELS);
+                        c.retarget(hold, p.x as f64);
+                        c
+                    } else {
+                        make.to(p.x - back, p.x, FLIP, Rest::PIXELS)
+                    },
                     // A word that arrives with a scroll comes up with the block.
                     y: match scroll {
                         Some(dy) if !reduced => make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS),
@@ -789,7 +806,7 @@ impl Flow {
                 // slides along the stage instead of jumping a line.
                 move_to(&mut o.roll, stage.roll, at, REWRAP, reduced);
             } else {
-                move_to(&mut o.x, p.x, t, FLIP, reduced);
+                revisions::move_after(&mut o.x, p.x, t, hold, FLIP, reduced);
                 move_to(&mut o.y, p.y, t, FLIP, reduced);
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
             }
@@ -825,6 +842,15 @@ impl Flow {
         }
         let glide = if scroll.is_some() { SCROLL } else { CARET_GLIDE };
         self.update_caret(t, motion.caret, glide, retention, reduced);
+        if hold > t {
+            // The caret waits with the words it follows.
+            if let Some((cx, ..)) = &mut self.caret {
+                let (to, now) = (cx.target(), cx.value(t));
+                revisions::cancel_pending(cx, t);
+                cx.retarget(t, now);
+                cx.retarget(hold, to);
+            }
+        }
     }
 
     /// FX-065: the old glyphs roll up and fade, the new ones roll in from below and fade in,
@@ -1303,7 +1329,7 @@ impl Flow {
         let extras = self.margin_settled_at().max(self.spine_settled_at());
         let leaving = self.leaving.iter().map(|l| l.done_at()).fold(extras, f64::max);
         let leaving = leaving.max(self.letters_settled_at()).max(self.magnet_settled_at());
-        words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving, f64::max)
+        words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving.max(self.marks.settled_at()), f64::max)
     }
 
     /// When the caret's blink next needs a frame, if there is a caret.
@@ -1369,6 +1395,8 @@ pub(crate) struct Flow {
     open: Vec<(u32, Channel)>,
     /// The settling accent, if any.
     accent: Option<Color>,
+    /// Running correction hinges and revision addresses (MO-21, MO-23).
+    marks: revisions::Marks,
     /// Letter physics, off under reduced motion.
     letters: Option<letter_physics::LetterPhysics>,
     /// The magnetic caret, and whether it is still (reduced motion).

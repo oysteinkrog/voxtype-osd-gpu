@@ -2038,6 +2038,13 @@ impl<M> Scene<M> {
                         out.shapes.push(line);
                     }
                 }
+                // Correction hinges and revision addresses (MO-21, MO-23).
+                for m in n.live.marks(t) {
+                    let r = m.rect;
+                    let r = Rect::new(origin.x + r.x * z, origin.y + r.y * z, r.w * z, r.h * z);
+                    push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                    out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(color.fade(m.alpha))));
+                }
                 if let Some((bar, tint, blink)) = n.live.caret(t) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {

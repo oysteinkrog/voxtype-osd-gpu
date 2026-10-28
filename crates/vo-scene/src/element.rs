@@ -1442,6 +1442,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: what a revision does around the changed word (MO-21 to MO-23): width
+    /// escrow, the correction hinge and the revision address. All off by default. See
+    /// [`crate::flow::revisions`].
+    pub fn revision_motion(mut self, r: crate::flow::revisions::RevisionMotion) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.revisions = r,
+            _ => debug_assert!(false, "revision_motion on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: how a word moves to another line when the text reflows. `Rewrap::Fade` by
     /// default; `Rewrap::Glide` glides it there (T11).
     pub fn word_rewrap(mut self, r: Rewrap) -> Element<M> {
