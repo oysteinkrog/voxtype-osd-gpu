@@ -58,6 +58,15 @@ pub struct Envelope {
     /// differ by less than `still_px` in position and size and 0.5 % in ink.
     pub still_frames: usize,
     pub still_px: f32,
+    /// The word ids of the transcript. Other live text, such as a status row whose words
+    /// carry made-up ids, never sets the reading line. All ids by default.
+    pub transcript: std::ops::Range<u32>,
+    /// A word that first shows within this many seconds after a frame is already the newest
+    /// word in that frame. A look that holds a new word back while the line before scrolls
+    /// out of its row (MO-33) has its reading line where that word will be, not on the row
+    /// that is moving up. The default covers the flow's 120 ms hold, its fade in and two
+    /// frames at 30 fps.
+    pub pending: f64,
 }
 
 impl Default for Envelope {
@@ -73,6 +82,8 @@ impl Default for Envelope {
             until: f64::INFINITY,
             still_frames: 3,
             still_px: 0.05,
+            transcript: 0..u32::MAX,
+            pending: 0.2,
         }
     }
 }
@@ -352,11 +363,22 @@ impl Tracker {
                     None => report.leaving += 1,
                 }
             }
-            let Some(newest) = glyphs.iter().map(|g| self.tracks[g.0].key.0).max() else {
+            glyphs.retain(|g| env.transcript.contains(&self.tracks[g.0].key.0));
+            // Words drawn now, and words about to show, with where each glyph comes to rest.
+            let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
+            let pending = soon.flat_map(|(i, f)| {
+                f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(|&ti| {
+                    let tr = &self.tracks[ti];
+                    let r = rests[ti][0]?;
+                    env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y))
+                })
+            });
+            let rests_now = glyphs.iter().map(|g| (self.tracks[g.0].key.0, g.2.pos.y));
+            let all: Vec<(u32, f32)> = rests_now.chain(pending).collect();
+            let Some(newest) = all.iter().map(|a| a.0).max() else {
                 continue;
             };
-            let mut ys: Vec<f32> =
-                glyphs.iter().filter(|g| self.tracks[g.0].key.0 == newest).map(|g| g.2.pos.y).collect();
+            let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == newest).map(|a| a.1).collect();
             ys.sort_by(f32::total_cmp);
             let line_y = ys[ys.len() / 2];
             let inside = fr.t >= env.from && fr.t <= env.until;
@@ -738,6 +760,41 @@ mod tests {
         let ink = r.by_kind().into_iter().find(|s| s.kind == "ink").unwrap();
         assert!((ink.worst.breach.value() - 0.1).abs() < 1e-4);
         assert_eq!(ink.worst.frame, 4, "the frame it arrives in");
+    }
+
+    /// The line before scrolls up a row from frame 4 while the new word is held back, and
+    /// the new word shows at its place in frame 4 + `hold`.
+    fn held(hold: usize, env: &Envelope) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..20usize {
+            let up = (n.saturating_sub(4).min(6) as f32) * 4.0;
+            let mut g = word(1, 10.0, 64.0 - up, 9.0, 1.0);
+            if n >= 4 + hold {
+                g.extend(word(2, 10.0, 64.0, 9.0, 1.0));
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(env)
+    }
+
+    #[test]
+    fn a_held_word_keeps_the_reading_line_off_the_row_that_scrolls_up() {
+        held(5, &Envelope::default()).assert_ok();
+        let r = held(5, &Envelope { pending: 0.0, ..Envelope::default() });
+        assert!(r.by_kind().iter().any(|s| s.kind == "off-row"), "without pending the scrolling row is checked: {r}");
+    }
+
+    #[test]
+    fn a_status_row_outside_the_transcript_is_not_the_reading_line() {
+        let mut tr = Tracker::new();
+        for n in 0..20 {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            // A status row with a made-up id that moves down a row as the panel grows.
+            g.extend(word(1 << 30, 10.0, 80.0 + n.min(6) as f32 * 5.0, 9.0, 1.0));
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        assert!(!tr.check(&Envelope::default()).is_ok());
+        tr.check(&Envelope { transcript: 0..1 << 20, ..Envelope::default() }).assert_ok();
     }
 
     #[test]
