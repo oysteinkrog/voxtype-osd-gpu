@@ -15,6 +15,7 @@
 
 use std::time::Instant;
 
+use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
@@ -49,6 +50,10 @@ const CASES: &[&str] = &[
     "material backdrop",
     "glass",
     "glass octagon",
+    "layer blur r0",
+    "layer blur r8",
+    "frost r8",
+    "frost stack",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -120,6 +125,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         }
         _ => {}
     }
+    if case == "frost stack" {
+        return frost_stack(size, k);
+    }
     let layer = Element::layer("fx").child(card);
     let layer = match case {
         "offscreen" => layer.offscreen(),
@@ -128,6 +136,11 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "trail" => layer.trail(0.25),
         "crt style" => layer.chromatic(2.0 * k).scanlines(0.35, 3.0 * k).crt(0.12).vignette(0.4),
         "glitch" => layer.glitch(0.6),
+        // A blur of the card (EG-04); radius 0 must add no pass at all.
+        "layer blur r0" => layer.layer_blur(0.0),
+        "layer blur r8" => layer.layer_blur(8.0 * k),
+        // The stripes under the card frosted inside its box (EG-04).
+        "frost r8" => layer.frost(8.0 * k).radius(14.0 * k),
         // A layer the card's size that captures what is under it and draws it back tinted
         // (EG-01), the base cost of glass, blur and ripples over a backdrop.
         "backdrop" => layer.backdrop(BackdropRes::Full, Color::hex(0xff6b6b, 1.0)),
@@ -137,7 +150,7 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         _ => layer,
     };
     let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
-    if !case.contains("backdrop") {
+    if !case.contains("backdrop") && !case.starts_with("frost") {
         return root.child(layer);
     }
     // Stripes under the card, so the tinted backdrop shows in the preview and the sheets.
@@ -148,6 +161,39 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         }))
         .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
     root.child(stripes).child(layer)
+}
+
+/// Three depth-stack sheets that frost the two older lines behind them (EG-04): the whole
+/// frame has to stay under 1 ms at 600x300.
+fn frost_stack(size: Size, k: f32) -> Element<Msg> {
+    let stack = DepthStack {
+        sheet: Some(Sheet {
+            fill: Color::hex(0x16222c, 0.35),
+            edge: Color::hex(0x9fd8ff, 0.35),
+            edge_width: 1.0,
+            radius: 6.0 * k,
+            pad: (14.0 * k, 6.0 * k),
+        }),
+        step_z: 70.0 * k,
+        step_rise: 18.0 * k,
+        frost: 3.0 * k,
+        ..DepthStack::default()
+    };
+    let lines: Vec<(vo::scene::Key, &str)> =
+        ["the oldest line goes back", "an older line behind glass", "the newest line reads"]
+            .iter()
+            .map(|l| (vo::scene::Key::from(l.to_string()), *l))
+            .collect();
+    let content = |text: &&str, d: usize, _: &Place| {
+        Element::label(format!("t{d}"), text.to_string())
+            .text_style(TextStyle::new(0, 20.0 * k, 26.0 * k))
+            .color(Color::hex(0xf2f3f5, 1.0))
+    };
+    let sheet = Size::new(size.w * 0.7, 40.0 * k);
+    Element::panel("root")
+        .size(size.w, size.h)
+        .fill(Color::hex(0x0b0f14, 1.0))
+        .child(stack.view("stack", size, sheet, &lines, content, false))
 }
 
 fn fonts() -> FontRegistry {
