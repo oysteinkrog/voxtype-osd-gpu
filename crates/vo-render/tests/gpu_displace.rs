@@ -260,7 +260,7 @@ fn displace_replays_and_seeks() {
     let gpu = support::gpu();
     let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
     let mut all = vec![("ripples", ripples())];
-    all.extend(sources().into_iter().take(2).map(|(n, d)| (n, d)));
+    all.extend(sources().into_iter().take(2));
     for (name, d) in all {
         let s = scene(&fonts, Fx::Displace(d, 1.0), false);
         let a = render(&mut off, "a", &s.sample(0.8));
