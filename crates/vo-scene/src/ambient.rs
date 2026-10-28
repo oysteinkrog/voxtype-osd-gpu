@@ -28,6 +28,10 @@ pub enum LoopProp {
     Scale,
     /// Radians.
     Rotation,
+    /// Stage turns in radians and the push toward the viewer (`crate::stage`).
+    RotateX,
+    RotateY,
+    TranslateZ,
     StrokeWidth,
     GlowRadius,
     GlowStrength,
@@ -50,6 +54,9 @@ impl LoopProp {
             LoopProp::OffsetY => Slot::OffsetY,
             LoopProp::Scale => Slot::Scale,
             LoopProp::Rotation => Slot::Rotation,
+            LoopProp::RotateX => Slot::RotateX,
+            LoopProp::RotateY => Slot::RotateY,
+            LoopProp::TranslateZ => Slot::TranslateZ,
             LoopProp::StrokeWidth => Slot::StrokeWidth,
             LoopProp::GlowRadius => Slot::GlowRadius,
             LoopProp::GlowStrength => Slot::GlowStrength,
