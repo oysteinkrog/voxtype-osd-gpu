@@ -56,6 +56,7 @@
 //! - `geom`: points, sizes, rects, colours and 2D transforms in logical units (`f32`).
 
 pub mod ambient;
+pub mod arrival;
 pub mod assets;
 pub mod bars;
 pub mod bind;

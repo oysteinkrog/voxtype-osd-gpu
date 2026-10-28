@@ -503,7 +503,7 @@ impl<M> Node<M> {
         for w in words {
             let old = self.words.binary_search_by_key(&w.id, |a| a.id).ok();
             let start = match old {
-                None => Some(from(enter)),
+                None => Some(from(&live.arrival.apply(*enter))),
                 Some(i) if self.words[i].text != w.text && *change != Transition::NONE => Some(from(change)),
                 Some(_) => None,
             };

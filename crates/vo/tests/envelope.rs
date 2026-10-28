@@ -3,6 +3,7 @@
 //! the same scenario offline and is skipped on an adapter without timestamps.
 
 use vo::envelope::{check_scenario, measure_budget, sample_scenario, Envelope};
+use vo::scene::arrival::Arrival;
 use vo::scene::display::NO_WORD;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::font::{test_font_path, FontRegistry};
@@ -15,6 +16,7 @@ struct Live {
     words: Vec<Word>,
     enter: Transition,
     tint: Option<Color>,
+    arrival: Arrival,
 }
 
 impl App for Live {
@@ -29,6 +31,7 @@ impl App for Live {
             .text_style(TextStyle::new(0, 22.0, 28.0))
             .color(Color::hex(0xf2f3f5, 1.0))
             .word_enter(self.enter)
+            .word_arrival(self.arrival)
             .width(328.0);
         if let Some(c) = self.tint {
             live = live.envelope_tint(c);
@@ -54,8 +57,13 @@ fn options() -> Options<Vec<Word>> {
     Options { fonts, reduced_motion: false, ..Options::default() }
 }
 
+/// With the enter transition as given (`Arrival::Free`), so the check sees it.
 fn check(enter: Transition) -> vo::envelope::Report {
-    let app = Live { words: Vec::new(), enter, tint: None };
+    check_with(enter, Arrival::Free)
+}
+
+fn check_with(enter: Transition, arrival: Arrival) -> vo::envelope::Report {
+    let app = Live { words: Vec::new(), enter, tint: None, arrival };
     check_scenario(app, &scenario(), 60.0, options(), &Envelope::default())
 }
 
@@ -88,8 +96,21 @@ fn blur_on_arrival_is_caught() {
 }
 
 #[test]
+fn by_default_every_arrival_is_pulled_inside_the_envelope() {
+    for enter in [
+        Transition::fade(),
+        Transition::fade().offset(0.0, 10.0),
+        Transition::NONE.offset(0.0, -12.0),
+        Transition::NONE.blur(6.0).dissolve(1.0).wipe(1.0),
+    ] {
+        let r = check_with(enter, Arrival::Readable);
+        assert!(r.is_ok(), "{enter:?}\n{r}");
+    }
+}
+
+#[test]
 fn the_budget_is_measured_per_frame() {
-    let app = Live { words: Vec::new(), enter: Transition::fade(), tint: None };
+    let app = Live { words: Vec::new(), enter: Transition::fade(), tint: None, arrival: Arrival::Free };
     let Some(b) = measure_budget(app, &scenario(), 30.0, options()).expect("render") else {
         eprintln!("skipped: this adapter has no GPU timestamps inside encoders");
         return;
@@ -107,7 +128,7 @@ fn the_tint_marks_arrivals_that_break_the_envelope() {
     let tint = Color::hex(0xff0000, 1.0);
     let red = |c: &Color| c.r > 0.99 && c.g < 0.01 && c.b < 0.01;
     let count = |enter: Transition| {
-        let app = Live { words: Vec::new(), enter, tint: Some(tint) };
+        let app = Live { words: Vec::new(), enter, tint: Some(tint), arrival: Arrival::Free };
         let (mut early, mut late) = (0, 0);
         sample_scenario(app, &scenario(), 60.0, options(), &mut |_, t, list| {
             for _ in list.glyphs.iter().filter(|g| g.word != NO_WORD && red(&g.color)) {

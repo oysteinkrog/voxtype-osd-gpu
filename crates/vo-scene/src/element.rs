@@ -1441,8 +1441,6 @@ impl<M> Element<M> {
         self
     }
 
-    /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
-    /// grapheme diff that moves only the changed glyphs. `Revise::Palimpsest` (MO-20) by default.
     /// Live text: draws glyphs on the newest line in `tint` while they break the
     /// reading-line envelope (MO-08: ink under 70 %, more than 3 px off the baseline, scaled
     /// or blurred), so the check is visible live. For the station and tests, not for looks.
@@ -1454,6 +1452,19 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: how a new word's enter transition (`word_enter`) is applied.
+    /// `Arrival::Readable` by default pulls it inside the reading-line envelope, so the word
+    /// is readable in the frame it arrives; `Arrival::Free` takes it as given.
+    pub fn word_arrival(mut self, a: crate::arrival::Arrival) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.arrival = a,
+            _ => debug_assert!(false, "word_arrival on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
+    /// grapheme diff that moves only the changed glyphs. `Revise::Palimpsest` (MO-20) by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.revise = r,

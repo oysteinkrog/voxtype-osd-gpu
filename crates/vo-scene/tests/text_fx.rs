@@ -81,8 +81,11 @@ fn a_label_blurs_in_through_its_enter_transition() {
 fn live_words_enter_with_their_own_effects() {
     let mut s = scene();
     let view = |words: &[Word]| {
-        Element::column("root")
-            .child(Element::live_text("live", words).word_enter(Transition::NONE.blur(6.0).dissolve(1.0).wipe(1.0)))
+        Element::column("root").child(
+            Element::live_text("live", words)
+                .word_enter(Transition::NONE.blur(6.0).dissolve(1.0).wipe(1.0))
+                .word_arrival(vo_scene::arrival::Arrival::Free),
+        )
     };
     let w = |id, t: &str| Word { id, text: t.into() };
     s.apply(view(&[w(1, "open")]), 0.0);

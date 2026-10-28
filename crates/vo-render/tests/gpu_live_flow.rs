@@ -35,6 +35,7 @@ fn view_with(w: &[Word], revise: Revise, case: CaseChange) -> Element<()> {
         .word_rewrap(Rewrap::Glide)
         .word_case(case)
         .word_enter(Transition::fade())
+        .word_arrival(vo_scene::arrival::Arrival::Free)
         .caret(Caret { color: Some(Color::hex(0x6cb6ff, 1.0)), ..Caret::default() })
         .width(W - 32.0);
     Element::panel("panel").pad(16.0).radius(12.0).fill(Color::hex(0x1d1f24, 1.0)).width(W).height(H).child(live)
@@ -279,6 +280,7 @@ fn rewrap_fade_golden() {
             .text_style(TextStyle::new(0, 22.0, 28.0))
             .color(Color::hex(0xf2f3f5, 1.0))
             .word_enter(Transition::fade())
+            .word_arrival(vo_scene::arrival::Arrival::Free)
             .word_revise(Revise::Swap)
             .width(W - 32.0);
         Element::panel("panel").pad(16.0).radius(12.0).fill(Color::hex(0x1d1f24, 1.0)).width(W).height(H).child(live)

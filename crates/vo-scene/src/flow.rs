@@ -271,6 +271,9 @@ pub struct LiveMotion {
     /// Draws glyphs on the newest line that break the reading-line envelope in this colour
     /// (`Element::envelope_tint`, MO-08).
     pub envelope_tint: Option<crate::geom::Color>,
+    /// How a new word's enter transition is applied: inside the reading-line envelope by
+    /// default (`Element::word_arrival`, `crate::arrival`).
+    pub arrival: crate::arrival::Arrival,
     /// A mark beside the newest line that splits when the text wraps (MO-32).
     pub margin: Option<margin::MarginMark>,
     /// A record in the top margin of each line that left from the front (MO-34).

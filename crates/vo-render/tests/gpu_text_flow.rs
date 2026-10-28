@@ -62,6 +62,7 @@ fn centred(w: &[Word]) -> Element<()> {
             .text_style(TextStyle::new(0, 20.0, 26.0).centered().balanced())
             .color(ink())
             .word_enter(Transition::fade())
+            .word_arrival(vo_scene::arrival::Arrival::Free)
             .width(W - 24.0),
     )
 }
