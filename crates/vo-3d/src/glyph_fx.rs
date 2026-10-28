@@ -84,6 +84,8 @@ pub struct Light {
     pub sweep_secs: f32,
     /// How strong the accent on the letters is.
     pub sheen: f32,
+    /// How far in from the element's edges the light fades in, in logical pixels.
+    pub edge_fade: f32,
 }
 
 impl Default for Light {
@@ -98,6 +100,7 @@ impl Default for Light {
             falloff: 320.0,
             sweep_secs: 14.0,
             sheen: 0.85,
+            edge_fade: 28.0,
         }
     }
 }
@@ -685,7 +688,7 @@ impl GpuPainter for GlyphFxPainter {
                 let lp = cx.to_px.apply(Point::new(cx.rect.x + at.x, cx.rect.y + at.y));
                 u.light = [lp.x, lp.y, inten, reduced as u32 as f32];
                 u.p0 = [light.shadow_len * scale, light.shadow, light.caustics, light.cell * scale];
-                u.p1 = [light.falloff * scale, 0.6, light.sheen, 0.0];
+                u.p1 = [light.falloff * scale, 0.6, light.sheen, light.edge_fade * scale];
                 u.c0 = lin(light.color);
                 u.c1 = lin(light.accent);
                 match side {

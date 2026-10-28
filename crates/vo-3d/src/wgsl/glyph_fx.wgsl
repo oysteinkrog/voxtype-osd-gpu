@@ -203,7 +203,8 @@ fn ink (g: Glyph, px: vec2f) -> vec4f {
   pig = clamp (max (pig, trace), 0.0, 0.85);
 
   // Outside: the cloud past the edge, pulled back in as the bloom ends.
-  let reach = fx.p0.y * (1.0 + fx.p1.x * level) * fade + 1e-3;
+  // At small sizes the cloud reaches at least 5 pixels, so it still reads.
+  let reach = max (fx.p0.y, 5.0 / g.place.z) * (1.0 + fx.p1.x * level) * fade + 1e-3;
   let out = max (d, 0.0);
   var cloud = spread * exp (-out / reach) * (0.25 + 1.3 * fib * fib) * smoothstep (-0.01, 0.02, d);
   cloud *= 0.7 * fade * (1.0 - cov);
@@ -295,7 +296,7 @@ fn morph (q: Quad, px: vec2f) -> vec4f {
 // ---- MO-84: light through letters ---------------------------------------------------------
 //
 // p0: shadow length (pixels), shadow strength, caustic strength, caustic scale (pixels per
-// cell). p1: glow falloff (pixels), caustic speed, sheen on the letters, 0. c0: the light,
+// cell). p1: glow falloff (pixels), caustic speed, sheen on the letters, edge fade (pixels). c0: the light,
 // c1: the accent the letters nearest the light take.
 
 // A soft caustic net at `uv` (cells), 0..1: the classic iterated water pattern.
@@ -348,10 +349,13 @@ fn light_under (px: vec2f) -> vec4f {
   // An onset sends a ring of light out from the source.
   let ring_r = fx.time.w * 600.0;
   let ring = exp (-pow ((dist - ring_r) / 40.0, 2.0)) * exp (-fx.time.w * 4.0) * 0.5;
-  let lit = glow * (0.3 + net * (0.5 + glow) + ring) * (1.0 - fx.p0.y * occ);
+  // The light fades out toward the box's edges, so the box never shows as a lit card.
+  let edge = min (min (px.x - fx.rect.x, fx.rect.x + fx.rect.z - px.x), min (px.y - fx.rect.y, fx.rect.y + fx.rect.w - px.y));
+  let soft = smoothstep (0.0, min (fx.p1.w, 0.5 * min (fx.rect.z, fx.rect.w)), edge);
+  let lit = soft * glow * (0.22 + net * (0.5 + glow) + ring) * (1.0 - fx.p0.y * occ);
   let rgb = fx.c0.rgb * lit;
   // Shadows also darken a little of what is below, so they read on a lit panel.
-  let shade = 0.25 * fx.p0.y * occ * glow;
+  let shade = soft * 0.25 * fx.p0.y * occ * glow;
   return finish (rgb, shade);
 }
 
