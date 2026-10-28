@@ -1068,6 +1068,15 @@ impl<M> Element<M> {
         self
     }
 
+    /// `child` painted behind the children so far, as the first child. For absolutely
+    /// placed marks under text; an in-flow child would also move to the front of the flow.
+    pub fn child_behind(mut self, mut child: Element<M>) -> Element<M> {
+        self.adopt(&child);
+        crate::repeat::adopt(&self.kind, &mut child.style);
+        self.children.insert(0, child);
+        self
+    }
+
     pub fn children(mut self, children: impl IntoIterator<Item = Element<M>>) -> Element<M> {
         for c in children {
             self = self.child(c);
