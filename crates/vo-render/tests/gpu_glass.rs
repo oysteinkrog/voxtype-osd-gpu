@@ -166,7 +166,9 @@ fn shaped_glass_goldens() {
     let gpu = support::gpu();
     let mut off = Offscreen::new(&gpu.device, &gpu.queue);
     let mut failures = Vec::new();
-    for (name, t, scale) in [("glass-shapes-1x", 2.0, 1.0), ("glass-shapes-1.25x", 2.0, 1.25), ("glass-shapes-sheen-1x", 0.25, 1.0)] {
+    for (name, t, scale) in
+        [("glass-shapes-1x", 2.0, 1.0), ("glass-shapes-1.25x", 2.0, 1.25), ("glass-shapes-sheen-1x", 0.25, 1.0)]
+    {
         let img = render(&mut off, name, &shaped(t, false, true, true), scale);
         if let Err(e) = support::check(&img, Tolerance::default()) {
             failures.push(e);
@@ -244,7 +246,7 @@ fn tilted_card_follows_its_warp() {
     let height = |x: u32| (0..img.h).filter(|&y| img.px[((y * img.w + x) * 4 + 3) as usize] > 128).count();
     let cols: Vec<u32> = (0..img.w).filter(|&x| height(x) > 0).collect();
     let (x0, x1) = (*cols.first().unwrap(), *cols.last().unwrap());
- // Measured just inside the rounded corners: the near edge is about 113 px, the far one 107.
+    // Measured just inside the rounded corners: the near edge is about 113 px, the far one 107.
     let (left, right) = (height(x0 + 18), height(x1 - 18));
     assert!(left >= right + 4, "left edge {left} px, right edge {right} px: no perspective");
     let [cx, _, cw, _] = CARD;

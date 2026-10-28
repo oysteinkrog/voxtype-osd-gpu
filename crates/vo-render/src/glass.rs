@@ -16,8 +16,8 @@
 
 use vo_scene::display::InputRegion;
 use vo_scene::geom::Color;
-pub use vo_scene::glass::{blur_rects, push_outline, Glass, GlassInstance, GlassKind, GlassShape};
 use vo_scene::geom::Point;
+pub use vo_scene::glass::{blur_rects, push_outline, Glass, GlassInstance, GlassKind, GlassShape};
 use vo_scene::path::VectorSeg;
 
 use crate::color::srgb_to_linear;
@@ -271,7 +271,8 @@ impl GlassPass {
         let mut data = Vec::with_capacity(draws.len() * INSTANCE as usize);
         let mut points = Vec::new();
         for d in draws {
-            let outline = d.glass.shape.points(d.rect, d.radius).map_or([0.0; 4], |pts| push_points(&pts, d.rect, &mut points));
+            let outline =
+                d.glass.shape.points(d.rect, d.radius).map_or([0.0; 4], |pts| push_points(&pts, d.rect, &mut points));
             data.extend_from_slice(&floats(&instance(d, scale, outline)));
         }
         if !points.is_empty() {

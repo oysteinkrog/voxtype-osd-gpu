@@ -76,7 +76,8 @@ fn view<M: Clone + 'static>() -> Element<M> {
             .glass(look.glass.with_orbit(look.hues[0]))
             .child(caption(&format!("{key}-t"), text, look))
     };
-    let tilted = Element::layer("tilt").rotate_y(20f32.to_radians()).child(card("tilted", &DARK, "turned 20 degrees about y"));
+    let tilted =
+        Element::layer("tilt").rotate_y(20f32.to_radians()).child(card("tilted", &DARK, "turned 20 degrees about y"));
     let rotated = Element::layer("turn").rotate(8f32.to_radians()).child(card("rotated", &LIGHT, "rotated 8 degrees"));
     let bottom = Element::row("cards").gap(60.0).child(tilted).child(rotated);
     Element::column("root")

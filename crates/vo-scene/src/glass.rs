@@ -123,13 +123,12 @@ impl GlassShape {
             GlassShape::Ellipse => {
                 // Enough points that the chord sits within 0.1 px of the curve at 1x.
                 let r = 0.5 * w.max(h);
-                let n = ((std::f32::consts::PI / (1.0 - 0.1 / r.max(0.2)).clamp(-1.0, 1.0).acos()).ceil() as usize).clamp(16, 160);
+                let n = ((std::f32::consts::PI / (1.0 - 0.1 / r.max(0.2)).clamp(-1.0, 1.0).acos()).ceil() as usize)
+                    .clamp(16, 160);
                 oval(n, 0.0)
             }
             GlassShape::Polygon { sides, turn } => oval(sides.max(3) as usize, turn),
-            GlassShape::Wavy { amplitude, wavelength } => {
-                wavy(rect, radius, amplitude.abs(), wavelength.max(2.0))
-            }
+            GlassShape::Wavy { amplitude, wavelength } => wavy(rect, radius, amplitude.abs(), wavelength.max(2.0)),
         };
         (pts.len() >= 3).then(|| clockwise(pts))
     }
@@ -187,10 +186,12 @@ fn wavy(rect: [f32; 4], radius: f32, amp: f32, wavelength: f32) -> Vec<Point> {
 /// `pts` turned clockwise on screen (y down), if they run the other way.
 fn clockwise(mut pts: Vec<Point>) -> Vec<Point> {
     let n = pts.len();
-    let twice_area: f32 = (0..n).map(|i| {
-        let (a, b) = (pts[i], pts[(i + 1) % n]);
-        a.x * b.y - b.x * a.y
-    }).sum();
+    let twice_area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
     if twice_area < 0.0 {
         pts.reverse();
     }
