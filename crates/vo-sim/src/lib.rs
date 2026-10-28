@@ -18,10 +18,13 @@
 //!
 //! The trait does not assume the CPU: a GPU sim keeps its state in buffers, `step` records a
 //! compute dispatch, and its snapshot is a GPU-side buffer copy. [`reference::Diffusion`] is a
-//! small CPU sim used by the tests.
+//! small CPU sim used by the tests. [`water`] (feature `gpu`, on by default) is the GPU water
+//! surface.
 
 pub mod reference;
 pub mod snapshot;
+#[cfg(feature = "gpu")]
+pub mod water;
 
 pub use snapshot::{SnapshotPolicy, SnapshotStore, DEFAULT_CAP_BYTES, DEFAULT_INTERVAL_TICKS};
 

@@ -4,6 +4,25 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Fixed-tick simulations that replay: timed events, snapshots and seek to any time. No dependencies, no GPU assumption"
+description = "Fixed-tick simulations that replay: timed events, snapshots and seek to any time. The core has no dependencies and no GPU assumption; the `gpu` feature adds the GPU water surface"
+
+[features]
+default = ["gpu"]
+# GPU sims (`water`). Off for a CPU-only user of the timeline.
+gpu = ["dep:wgpu", "dep:bytemuck"]
 
 [dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl", "vulkan"], optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
+png = "0.18"
+
+[[test]]
+name = "gpu_water"
+required-features = ["gpu"]
+
+[[example]]
+name = "water_demo"
+required-features = ["gpu"]
