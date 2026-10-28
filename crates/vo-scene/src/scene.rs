@@ -1609,6 +1609,7 @@ impl<M> Scene<M> {
                     retention,
                     reduced: n.reduced,
                     crossfade: particles.is_none(),
+                    width: l.size.width,
                 };
                 n.live.update(t, input);
             }

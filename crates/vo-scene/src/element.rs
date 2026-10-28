@@ -1463,6 +1463,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the margin bell (MO-31). The newest line's letters tighten a little as
+    /// it nears the right edge and relax when the text wraps; with a carriage return the new
+    /// line arrives a few pixels right and settles. See [`crate::flow::bell`].
+    pub fn margin_bell(mut self, b: crate::flow::bell::Bell) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.bell = Some(b),
+            _ => debug_assert!(false, "margin_bell on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: what a word whose text changes does with its glyphs: swap, crossfade, or a
     /// grapheme diff that moves only the changed glyphs. `Revise::Palimpsest` (MO-20) by default.
     pub fn word_revise(mut self, r: Revise) -> Element<M> {

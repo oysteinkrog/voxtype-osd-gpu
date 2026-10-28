@@ -278,6 +278,8 @@ pub struct LiveMotion {
     pub margin: Option<margin::MarginMark>,
     /// A record in the top margin of each line that left from the front (MO-34).
     pub spine: Option<spine::Spine>,
+    /// The newest line tightens as it nears the edge and relaxes on the wrap (MO-31).
+    pub bell: Option<bell::Bell>,
     /// Per-word typographic channels (MO-03).
     pub typo: Option<crate::typo::Typos>,
     /// Words whose glyphs something else draws for now, such as a GPU effect that morphs a
@@ -316,6 +318,8 @@ pub(crate) struct FlowInput<'a> {
     /// Revised words may crossfade or diff. Off for particle words, whose changed glyphs
     /// re-form from particles instead.
     pub crossfade: bool,
+    /// Width of the text box, for the margin bell.
+    pub width: f32,
 }
 
 /// Where a word is on screen, sprung toward where the layout put it.
@@ -670,7 +674,7 @@ impl Make {
 impl Flow {
     /// Takes the new layout of the node's words at `t` and springs every word toward it.
     pub fn update(&mut self, t: f64, input: FlowInput<'_>) {
-        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade } = input;
+        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width } = input;
         self.size = size;
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
@@ -733,6 +737,14 @@ impl Flow {
                         g.opacity.retarget(t + INSERT_DELAY, 1.0);
                     }
                 }
+                // A word on the newest line of a front drop shows in place, whole, once the
+                // line before has scrolled out of its row, so text never crosses text.
+                if scroll.is_some() && !reduced && p.line == stage.newest {
+                    for g in &mut glyphs {
+                        g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
+                        g.opacity.retarget(t + overflow::DROP_HOLD, 1.0);
+                    }
+                }
                 next.push(FlowWord {
                     id: w.id,
                     text: w.text.clone(),
@@ -743,9 +755,12 @@ impl Flow {
                     } else {
                         make.to(p.x - back, p.x, FLIP, Rest::PIXELS)
                     },
-                    // A word that arrives with a scroll comes up with the block.
+                    // A word that arrives with a scroll comes up with the block, except on
+                    // the newest line, which is read where it stands (reading-line envelope).
                     y: match scroll {
-                        Some(dy) if !reduced => make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS),
+                        Some(dy) if !reduced && p.line != stage.newest => {
+                            make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS)
+                        }
                         _ => make.ch(p.y, FLIP, Rest::PIXELS),
                     },
                     width: make.ch(p.width, FLIP, Rest::PIXELS),
@@ -857,6 +872,7 @@ impl Flow {
         self.words = next;
         self.index = index;
         self.update_margin(t, motion.margin, reduced);
+        self.update_bell(t, motion.bell, width, reduced);
         self.ghosts.retain(|g| g.opacity.target() > 0.0 || g.opacity.settled_at() > t);
         self.leaving.retain(|l| l.done_at() > t);
         if arrived {
@@ -1207,6 +1223,7 @@ impl Flow {
             (dx, dy) = (dx + l.dx, dy + l.dy);
         }
         dx += self.magnet_snap(w, t);
+        dx += self.bell_dx(w, w.x.target() as f32 + g.x.target() as f32, t);
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
@@ -1284,6 +1301,7 @@ impl Flow {
         let alpha = caret_alpha(t - self.arrived);
         let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32 + self.opened(w.line, t));
         let (x, y) = (x.value(t) as f32, y.value(t) as f32 + roll);
+        let x = x + self.bell_caret_dx(x, t);
         Some((Rect::new(x, y - up, *w, up + down), style.color, alpha))
     }
 
@@ -1348,7 +1366,7 @@ impl Flow {
         let ghosts = self.ghosts.iter().flat_map(|g| [&g.opacity, &g.rise, &g.scale, &g.slide]);
         let ghosts = ghosts.chain(self.open.iter().map(|(_, c)| c));
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
-        let extras = self.margin_settled_at().max(self.spine_settled_at());
+        let extras = self.margin_settled_at().max(self.spine_settled_at()).max(self.bell_settled_at());
         let leaving = self.leaving.iter().map(|l| l.done_at()).fold(extras, f64::max);
         let leaving = leaving.max(self.letters_settled_at()).max(self.magnet_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving.max(self.marks.settled_at()), f64::max)
@@ -1386,6 +1404,9 @@ pub mod margin;
 #[path = "motion/spine.rs"]
 pub mod spine;
 
+#[path = "motion/bell.rs"]
+pub mod bell;
+
 /// The live text motion state of one node.
 #[derive(Default)]
 pub(crate) struct Flow {
@@ -1401,6 +1422,8 @@ pub(crate) struct Flow {
     margin: margin::Margin,
     /// The overflow spine (MO-34).
     spine: spine::Spines,
+    /// The margin bell (MO-31).
+    bell: bell::Bells,
     /// Caret `(x, y)` on the baseline, and its bar size `(width, ascent, descent)`.
     caret: Option<(Channel, Channel, Caret, [f32; 3])>,
     /// When words last arrived, changed or went.
