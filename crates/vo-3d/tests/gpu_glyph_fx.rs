@@ -11,13 +11,13 @@ mod support;
 use support::{Image, Tolerance};
 use vo_3d::glyph_fx::{Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
 use vo_render::{Renderer, Target};
+use vo_scene::Scene;
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::taffy;
 use vo_scene::taffy::prelude::{auto, length};
 use vo_scene::text::{ShapedLayout, TextLayout};
-use vo_scene::Scene;
 
 const W: u32 = 600;
 const H: u32 = 300;
@@ -123,8 +123,10 @@ fn blue_pixels(f: &[u8]) -> usize {
 /// Share of pixels that differ by more than `tol` in any channel.
 fn differ(a: &[u8], b: &[u8], tol: u8) -> f64 {
     let n = a
-        .chunks_exact(4)
-        .zip(b.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > tol))
         .count();
     n as f64 / (W * H) as f64
@@ -235,7 +237,7 @@ fn morph_flows_from_old_word_to_new() {
     // Mid-way it is neither, and still has plenty of ink.
     let (mo, mn) = (differ(&frames[2], &plain_old, 60), differ(&frames[2], &plain_new, 60));
     assert!(mo > 0.004 && mn > 0.004, "the middle is one of the words: {mo} {mn}");
-    let ink = |f: &[u8]| f.chunks_exact(4).filter(|p| p[0] > 128).count();
+    let ink = |f: &[u8]| f.as_chunks::<4>().0.iter().filter(|p| p[0] > 128).count();
     assert!(ink(&frames[2]) as f64 > 0.7 * ink(&plain_new) as f64, "the middle loses its ink");
     // Reduced motion: the new word at once.
     assert!(differ(&frames[5], &plain_new, 60) < 0.004);
