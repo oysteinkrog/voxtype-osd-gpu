@@ -10,7 +10,7 @@ use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, InputRegion};
 
-use crate::app::{App, Driver};
+use crate::app::{App, Driver, EXIT_MOTION_MAX};
 use crate::{Options, Tokens};
 
 /// Channel history kept by a live overlay, in seconds. Seeking is an offline need.
@@ -92,9 +92,12 @@ impl<A: App> Live<A> {
         let next = d.timers.next_at();
         let paced = paced.filter(|&w| w > now);
         let extra_paced = self.sync_extras(host, now);
-        let wake = [next, paced, extra_paced].into_iter().flatten().min_by(f64::total_cmp);
+        let deadline = self.driver().exit_deadline();
+        let wake = [next, paced, extra_paced, deadline].into_iter().flatten().min_by(f64::total_cmp);
         host.wake_at(wake);
-        if self.driver().done(now) && !self.driver().dirty && !self.driver().extras.list.iter().any(|e| e.dirty) {
+        let d = self.driver();
+        let drawn = !d.dirty && !d.extras.list.iter().any(|e| e.dirty);
+        if d.done(now) && (drawn || d.overdue(now)) {
             self.finish(host);
         }
     }
@@ -228,6 +231,10 @@ impl<A: App> Live<A> {
         if std::mem::replace(&mut self.finished, true) {
             return;
         }
+        let t = host.now();
+        if self.driver().overdue(t) && self.driver().moving(t) {
+            eprintln!("vo: still moving {EXIT_MOTION_MAX} s after the exit, closing anyway");
+        }
         let host_diag = host.diag().clone();
         if let Some(d) = self.diag() {
             d.exit(&host_diag);
@@ -319,7 +326,7 @@ impl<A: App> Live<A> {
             }
         }
         let host_diag = host.diag().clone();
-        let moving = self.driver().moving(t);
+        let moving = self.driver().moving(t) && !self.driver().overdue(t);
         self.driver().dirty = false;
         if let Some(d) = self.diag() {
             d.frame(n, t, &host_diag);

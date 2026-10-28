@@ -174,6 +174,9 @@ pub fn channel<M>() -> (Proxy<M>, Inbox<M>) {
     (Proxy { tx, waker: waker.clone() }, Inbox { rx, waker })
 }
 
+/// Seconds the exit motion may run after the app asks to exit.
+pub(crate) const EXIT_MOTION_MAX: f64 = 3.0;
+
 /// Feeds messages, timers and pointer events into the app and the scene, in time order.
 pub(crate) struct Driver<A: App> {
     pub(crate) app: A,
@@ -181,6 +184,8 @@ pub(crate) struct Driver<A: App> {
     tokens: Tokens,
     pub(crate) timers: Timers<A::Msg>,
     exit: bool,
+    /// When the app asked to exit.
+    exit_at: Option<f64>,
     last_t: f64,
     /// The scene changed since the last frame, so the host needs a new one.
     pub(crate) dirty: bool,
@@ -209,7 +214,8 @@ impl<A: App> Driver<A> {
         let mut exit = false;
         app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit });
         let extras = Extras::new(make);
-        let mut d = Driver { app, scene, tokens, timers, exit, last_t: t, dirty: true, margin: None, extras };
+        let exit_at = exit.then_some(t);
+        let mut d = Driver { app, scene, tokens, timers, exit, exit_at, last_t: t, dirty: true, margin: None, extras };
         let view = d.view();
         d.scene.apply(view, t);
         d.extras.apply(d.app.surfaces(&d.tokens), t);
@@ -238,6 +244,9 @@ impl<A: App> Driver<A> {
         let t = t.max(self.last_t);
         self.last_t = t;
         self.app.update(msg, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit });
+        if self.exit && self.exit_at.is_none() {
+            self.exit_at = Some(t);
+        }
         let view = self.view();
         // A message that changes nothing drawn, such as a hover that only stops a timer,
         // costs no frame.
@@ -291,9 +300,21 @@ impl<A: App> Driver<A> {
         self.scene.next_wake(t).is_some()
     }
 
-    /// The app asked to exit and nothing moves any more at `t`, on any surface.
+    /// The app asked to exit and nothing moves any more at `t`, on any surface, or the exit
+    /// motion has run for `EXIT_MOTION_MAX`.
     pub(crate) fn done(&self, t: f64) -> bool {
-        self.exit && !self.moving(t) && !self.extras.moving(t)
+        self.exit && (self.overdue(t) || (!self.moving(t) && !self.extras.moving(t)))
+    }
+
+    /// The app asked to exit `EXIT_MOTION_MAX` or more before `t`. A motion that loops for
+    /// ever would otherwise keep the run, and a resident overlay's next show, waiting.
+    pub(crate) fn overdue(&self, t: f64) -> bool {
+        self.exit_deadline().is_some_and(|d| t >= d)
+    }
+
+    /// When the run ends even if something still moves.
+    pub(crate) fn exit_deadline(&self) -> Option<f64> {
+        self.exit_at.map(|e| e + EXIT_MOTION_MAX)
     }
 }
 
@@ -374,6 +395,34 @@ mod tests {
         d.pointer(&ev);
         assert_eq!(d.timers.next_at(), None, "the hover stopped the timer");
         assert!(!d.dirty && !d.moving(1.0), "but asked for no frame");
+    }
+
+    /// An app with a dial that spins for ever.
+    struct Spinner;
+
+    impl App for Spinner {
+        type Msg = ();
+
+        fn update(&mut self, _: (), cx: &mut Cx<()>) {
+            cx.exit();
+        }
+
+        fn view(&self, _: &Tokens) -> Element<()> {
+            let dial = Element::shape("dial", vo_scene::display::ShapeKind::Circle)
+                .size(40.0, 40.0)
+                .ambient(vo_scene::LoopProp::Rotation, vo_scene::Loop::spin(1.0));
+            Element::column("root").size(100.0, 100.0).child(dial)
+        }
+    }
+
+    #[test]
+    fn a_motion_that_never_stops_ends_the_run_after_exit_motion_max() {
+        let mut d = Driver::new(Spinner, Scene::new(), Tokens::default(), 0.0);
+        assert!(d.moving(1.0) && !d.done(1.0));
+        d.dispatch((), 1.0);
+        assert_eq!(d.exit_deadline(), Some(1.0 + EXIT_MOTION_MAX));
+        assert!(d.moving(2.0) && !d.done(2.0), "the exit motion plays");
+        assert!(d.moving(1.0 + EXIT_MOTION_MAX) && d.done(1.0 + EXIT_MOTION_MAX), "until the cap");
     }
 
     #[test]
