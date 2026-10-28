@@ -111,3 +111,111 @@ fn a_word_takes_its_final_text_once_the_pass_reaches_it() {
     s.apply(view_with(Some(1.0), &finals), 3.0);
     assert_eq!(last(&s.sample(4.0), 3), Some('.'));
 }
+
+/// The opacity of `word`'s last glyph.
+fn alpha(list: &DisplayList, word: u32) -> f32 {
+    list.glyphs.iter().rfind(|g| g.word == word).unwrap().color.a
+}
+
+#[test]
+fn words_ahead_of_the_front_are_spoken_ink_and_behind_it_set_type() {
+    let mut s = Scene::<()>::new();
+    s.apply(view(None), 0.0);
+    assert_eq!(alpha(&s.sample(0.5), 1), 1.0, "no pass, no spoken ink");
+    // 0.6 of 127 is 76: past line 1 (72), short of "three" (72 to 127).
+    s.apply(view(Some(0.6)), 1.0);
+    let list = s.sample(2.0);
+    assert_eq!(alpha(&list, 1), 1.0, "set type behind the front");
+    let a3 = alpha(&list, 3);
+    assert!((a3 - 0.72).abs() < 0.02, "spoken ink ahead: {a3}");
+    assert!(a3 >= 0.7, "the reading-line envelope keeps ink at 70 % or more");
+    // Spoken ink comes in over 200 ms, not in a step.
+    let mut s = Scene::<()>::new();
+    s.apply(view(None), 0.0);
+    s.apply(view(Some(0.0)), 1.0);
+    assert!(alpha(&s.sample(1.05), 3) > 0.8, "it eases in");
+    // Spoken ink is tracked looser: "three" is wider ahead of the front than set.
+    let span = |list: &DisplayList| {
+        let xs: Vec<f32> = list.glyphs.iter().filter(|g| g.word == 3).map(|g| g.pos.x).collect();
+        xs.last().unwrap() - xs[0]
+    };
+    let mut s = Scene::<()>::new();
+    s.apply(view(Some(0.0)), 0.0);
+    let loose = span(&s.sample(1.0));
+    s.apply(view(Some(1.0)), 1.0);
+    let set = span(&s.sample(2.0));
+    assert!(loose > set && loose - set <= 0.025 * 20.0 * 4.0 + 1e-3, "{loose} {set}");
+}
+
+#[test]
+fn a_changed_word_nods_and_gets_a_bracket_and_only_changed_words_do() {
+    let finals: Vec<Word> =
+        [(1, "one"), (2, "Two"), (3, "three.")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+    let y = |list: &DisplayList, word: u32| list.glyphs.iter().find(|g| g.word == word).unwrap().pos.y;
+    let brackets = |list: &DisplayList| list.shapes.iter().filter(|s| s.kind == ShapeKind::Line).count();
+    let mut s = Scene::<()>::new();
+    s.apply(view_with(Some(0.0), &finals), 0.0);
+    let rest = y(&s.sample(0.5), 2);
+    assert_eq!(brackets(&s.sample(0.5)), 1, "only the hairline");
+    s.apply(view_with(Some(0.6), &finals), 1.0);
+    let dip = y(&s.sample(1.11), 2);
+    assert!(dip > rest + 1.5 && dip <= rest + 2.0 + 1e-3, "a 2 px nod: {rest} {dip}");
+    assert_eq!(y(&s.sample(1.11), 1), y(&s.sample(0.5), 1), "an unchanged word does not nod");
+    let later = s.sample(2.0);
+    assert!((y(&later, 2) - rest).abs() < 1e-3, "and back");
+    assert_eq!(brackets(&later), 1 + 2 * 3, "the hairline and a bracket of three strokes per changed word");
+    // The capital grows on line 1, which is not the newest line.
+    let size = |list: &DisplayList| list.glyphs.iter().find(|g| g.word == 2).unwrap().size;
+    assert!(size(&s.sample(1.0)) < 0.85 * 20.0 && (size(&later) - 20.0).abs() < 1e-3);
+    // The new full stop pops in: transparent when the word changes, whole 90 ms later.
+    let comma = |list: &DisplayList| {
+        list.glyphs.iter().find(|g| g.word == 3 && g.glyph == '.' as u32).map_or(0.0, |g| g.color.a)
+    };
+    let mut s = Scene::<()>::new();
+    s.apply(view_with(Some(0.0), &finals), 0.0);
+    s.apply(view_with(Some(0.6), &finals), 1.0);
+    assert!(comma(&s.sample(1.0)) < 0.05);
+    assert!(comma(&s.sample(1.2)) > 0.7, "in, as spoken ink since it is ahead of the front");
+}
+
+#[test]
+fn reduced_motion_keeps_the_swap_and_bracket_without_the_nod() {
+    let finals: Vec<Word> =
+        [(1, "one"), (2, "Two"), (3, "three.")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+    let mut s = Scene::<()>::new().with_reduced_motion(true);
+    s.apply(view_with(Some(0.0), &finals), 0.0);
+    let rest = s.sample(0.5).glyphs.iter().find(|g| g.word == 2).unwrap().pos.y;
+    s.apply(view_with(Some(0.6), &finals), 1.0);
+    let list = s.sample(1.11);
+    let g: Vec<_> = list.glyphs.iter().filter(|g| g.word == 2).collect();
+    assert_eq!(g[0].pos.y, rest, "no nod");
+    assert_eq!(char::from_u32(g[0].glyph), Some('T'), "the swap");
+    assert_eq!(g[0].size, 20.0, "no growth");
+    assert_eq!(list.shapes.iter().filter(|s| s.kind == ShapeKind::Line).count(), 1 + 6, "the brackets at once");
+}
+
+#[test]
+fn an_app_built_on_the_final_words_sets_every_live_text_in_its_view() {
+    let finals: Vec<Word> =
+        [(1, "One"), (2, "two"), (3, "three")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+    let live: Vec<Word> =
+        [(1, "one"), (2, "two"), (3, "three")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+    let build = |at: f32| {
+        let text = Element::live_text("live", &finals).text_style(TextStyle::new(0, 20.0, 26.0)).width(80.0).color(INK);
+        let root = Element::column("root").child(Element::column("inner").child(text));
+        let mut seen = 0;
+        let root = root.map_live_texts(&mut |e| {
+            seen += 1;
+            assert_eq!(e.live_words().map(|w| w.len()), Some(3));
+            e.final_from(&live).final_pass(FinalPass::new(at))
+        });
+        assert_eq!(seen, 1);
+        root
+    };
+    let first = |list: &DisplayList| char::from_u32(list.glyphs.iter().find(|g| g.word == 1).unwrap().glyph);
+    let mut s = Scene::<()>::new();
+    s.apply(build(0.0), 0.0);
+    assert_eq!(first(&s.sample(0.5)), Some('o'), "the live text until the pass reaches it");
+    s.apply(build(0.2), 1.0);
+    assert_eq!(first(&s.sample(1.5)), Some('O'));
+}

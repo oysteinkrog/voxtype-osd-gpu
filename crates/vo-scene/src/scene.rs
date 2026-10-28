@@ -119,6 +119,9 @@ pub(crate) struct Node<M> {
     pub words_at: f64,
     /// Live text: the current-word mark's motion.
     pub mark: Option<MarkAnim>,
+    /// Live text: when the final pass appeared, and the words it changed (MO-40).
+    pub pass_since: Option<f64>,
+    pub pass_changed: Vec<final_pass::Changed>,
     /// Live text: where each word is on screen, sprung toward its laid-out place.
     pub live: Flow,
     /// The motion of a property no `.motion()` call names: the scene's default.
@@ -302,23 +305,45 @@ fn line_extent(boxes: &[(u32, f32, f32, f32)], baseline: f32) -> (f32, f32) {
 }
 
 /// Live text with a final pass and final words: each word the pass has reached, by the
-/// node's last layout, takes its final text.
-fn release_finals<M>(n: &Node<M>, kind: &mut Kind) {
-    let Kind::LiveText { words, pass: Some(pass), finals, .. } = kind else { return };
-    let Kind::LiveText { words: old, .. } = &n.kind else { return };
+/// node's last layout, takes its final text (`final_pass::merge`). Records the words that
+/// changed, for their nod and bracket, and when the pass appeared.
+fn release_finals<M>(n: &mut Node<M>, kind: &mut Kind, t: f64) {
+    let Kind::LiveText { words, pass, finals, .. } = kind else { return };
+    let Some(pass) = pass else {
+        n.pass_since = None;
+        n.pass_changed.clear();
+        return;
+    };
+    n.pass_since.get_or_insert(t);
     if finals.is_empty() {
+        n.pass_changed.clear();
         return;
     }
-    let boxes = word_boxes(&n.shaped, &word_starts(old));
+    let boxes = match &n.kind {
+        Kind::LiveText { words: old, .. } => word_boxes(&n.shaped, &word_starts(old)),
+        _ => Vec::new(),
+    };
     let lines = final_pass::read_lines(&boxes);
     let pos = pass.at * final_pass::total(&lines);
-    for w in words.iter_mut() {
-        let reached =
-            boxes.iter().find(|b| b.0 == w.id).is_some_and(|b| final_pass::reading_at(&lines, b.3, b.1) < pos);
-        if let Some(f) = finals.iter().find(|f| f.id == w.id).filter(|_| reached) {
-            w.text.clone_from(&f.text);
+    let all = pass.at >= 1.0;
+    let reached = |id: u32| {
+        all || boxes.iter().find(|b| b.0 == id).is_some_and(|b| final_pass::reading_at(&lines, b.3, b.1) < pos)
+    };
+    let (shown, changed) = final_pass::merge(words, finals, reached);
+    *words = shown;
+    n.pass_changed.retain(|c| words.iter().any(|w| w.id == c.id));
+    for (id, old) in changed {
+        if !n.pass_changed.iter().any(|c| c.id == id) {
+            n.pass_changed.push(final_pass::Changed { id, at: t, old });
         }
     }
+}
+
+/// The character at byte offset `cluster` of the words joined by spaces.
+fn glyph_char(words: &[vo_core::words::Word], starts: &[(u32, u32)], cluster: u32) -> Option<char> {
+    let i = starts.partition_point(|(s, _)| *s <= cluster).checked_sub(1)?;
+    let w = words.get(i)?;
+    w.text.get((cluster - starts[i].0) as usize..)?.chars().next()
 }
 
 /// `a` mixed toward `b` by `k`, straight alpha.
@@ -1081,6 +1106,8 @@ impl<M> Scene<M> {
                 || n.words.iter().flat_map(|w| w.channels()).any(|c| !c.resting_at(t))
                 || n.mark.iter().flat_map(|m| m.channels()).any(|c| c.settled_at() > t)
                 || n.words.iter().any(|w| w.passed.is_some_and(|p| t < p + final_pass::PULSE))
+                || n.pass_changed.iter().any(|c| t < c.at + final_pass::NOD.max(final_pass::GROW))
+                || n.pass_since.is_some_and(|s| t < s + final_pass::SPOKEN_IN)
                 || n.live.settled_at() > t
                 || n.typo.settled_at() > t
                 || (n.alive(t) && n.sheen_progress(t).is_some())
@@ -1288,6 +1315,8 @@ impl<M> Scene<M> {
             words_at: t,
             live: Flow::default(),
             mark: None,
+            pass_since: None,
+            pass_changed: Vec::new(),
             default_motion: self.inherited_motion(default_motion, parent),
             reduced: self.reduced_motion,
             ambient: Default::default(),
@@ -1345,7 +1374,7 @@ impl<M> Scene<M> {
         let n = &mut self.nodes[id];
         n.default_motion = effective;
         let mut kind = kind;
-        release_finals(n, &mut kind);
+        release_finals(n, &mut kind, t);
         let relayout = n.style != style || n.kind.layout_differs(&kind);
         let old_size = text_size(&n.kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
@@ -1942,6 +1971,29 @@ impl<M> Scene<M> {
                     };
                     let newest_y =
                         envelope_tint.map(|_| n.shaped.glyphs.iter().map(|g| g.pos.y).fold(f32::MIN, f32::max));
+                    let set = pass.as_ref().and_then(|_| n.pass_lines()).map(|(p, _, lines)| {
+                        let pos = p.at * final_pass::total(&lines);
+                        let newest = lines.iter().map(|l| l.baseline).fold(f32::NEG_INFINITY, f32::max);
+                        let w = match n.pass_since {
+                            Some(since) if !(n.reduced || p.still) => {
+                                final_pass::ease_in(t - since, final_pass::SPOKEN_IN)
+                            }
+                            _ => 1.0,
+                        };
+                        (p, lines, pos, newest, w)
+                    });
+                    // Each word's glyph count, and how many of its glyphs are drawn, for the
+                    // spoken ink's loose tracking.
+                    let mut counts: Vec<(u32, u32, u32)> = Vec::new();
+                    if set.is_some() {
+                        for g in &n.shaped.glyphs {
+                            let word = word_of(g.cluster);
+                            match counts.iter_mut().find(|c| c.0 == word) {
+                                Some(c) => c.1 += 1,
+                                None => counts.push((word, 1, 0)),
+                            }
+                        }
+                    }
                     for (i, (g, &span)) in n.shaped.glyphs.iter().zip(&spans).enumerate() {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
@@ -1959,6 +2011,44 @@ impl<M> Scene<M> {
                             dx += (v.tracking - 1.0) * (g.pos.x + 0.5 * g.advance - middle);
                             dy -= v.baseline;
                             weight = v.weight;
+                        }
+                        let mut grow = 1.0;
+                        let mut pop = 0.0;
+                        if let Some((p, lines, pos, newest, w)) = &set {
+                            // Spoken ink ahead of the front, set type behind it (MO-40).
+                            let r = final_pass::reading_at(lines, g.pos.y, 0.5 * (span.0 + span.1));
+                            let a = final_pass::ahead(r, *pos, p.front) * w;
+                            k *= 1.0 - (1.0 - p.ink) * a;
+                            if let Some(c) = counts.iter_mut().find(|c| c.0 == word) {
+                                dx += p.loose * style.size * (c.2 as f32 - 0.5 * (c.1 as f32 - 1.0)) * a;
+                                c.2 += 1;
+                            }
+                            if let Some(c) = n.pass_changed.iter().find(|c| c.id == word) {
+                                let dt = t - c.at;
+                                if !(n.reduced || p.still) {
+                                    dy += p.nod * final_pass::nod(dt);
+                                }
+                                let ch = glyph_char(words, &starts, g.cluster);
+                                let first = starts.iter().any(|s| s.1 == word && s.0 == g.cluster);
+                                if ch.is_some_and(|ch| ch.is_ascii_punctuation()) && !c.old.contains(ch.unwrap()) {
+                                    // New punctuation pops in.
+                                    if !(n.reduced || p.still) {
+                                        k *= final_pass::ease_in(dt, final_pass::POP);
+                                        pop = 1.0 - final_pass::ease_in(dt, 2.0 * final_pass::POP);
+                                    }
+                                } else if first
+                                    && ch.is_some_and(char::is_uppercase)
+                                    && c.old.chars().next().is_some_and(char::is_lowercase)
+                                    && !(n.reduced || p.still)
+                                {
+                                    // A new capital grows, except on the newest line.
+                                    if g.pos.y < *newest {
+                                        grow = 0.82 + 0.18 * final_pass::ease_in(dt, final_pass::GROW);
+                                    } else {
+                                        pop = 1.0 - final_pass::ease_in(dt, 2.0 * final_pass::POP);
+                                    }
+                                }
+                            }
                         }
                         if k <= 0.0 || g.glyph == OBJECT_GLYPH || live.elsewhere.contains(&word) {
                             continue;
@@ -1991,12 +2081,13 @@ impl<M> Scene<M> {
                             (Some(p), Some(at)) => p.lift * final_pass::pulse(t - at),
                             _ => 0.0,
                         };
+                        let lift = lift.max(pop);
                         let color =
                             if lift > 0.0 { mix(color, Color { a: color.a, ..Color::WHITE }, lift) } else { color };
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + (g.pos.x + dx) * z, origin.y + (g.pos.y + dy) * z),
-                            size: style.size * m.scale * z,
+                            size: style.size * m.scale * grow * z,
                             font: g.font,
                             glyph: g.glyph,
                             word,
@@ -2045,6 +2136,30 @@ impl<M> Scene<M> {
                 if let (Some(p), Some((baseline, x))) =
                     (pass, n.pass_lines().and_then(|(p, _, l)| final_pass::locate(&l, p.at)))
                 {
+                    // A bracket under each word the pass changed (MO-40).
+                    if p.bracket.a > 0.0 && !n.pass_changed.is_empty() {
+                        let s = style.size;
+                        let boxes = word_boxes(&n.shaped, &starts);
+                        for c in &n.pass_changed {
+                            let Some(&(_, x0, x1, b)) = boxes.iter().find(|b| b.0 == c.id) else { continue };
+                            let k = if n.reduced || p.still {
+                                1.0
+                            } else {
+                                final_pass::ease_in(t - c.at, final_pass::BRACKET_IN)
+                            };
+                            let paint = Paint::solid(p.bracket.fade(alpha * k));
+                            let (y, tick) = (origin.y + b + 0.2 * s, 0.14 * s);
+                            let (l, r) = (origin.x + x0, origin.x + x1);
+                            for (from, to) in [
+                                (Point::new(l, y - tick), Point::new(l, y)),
+                                (Point::new(l, y), Point::new(r, y)),
+                                (Point::new(r, y), Point::new(r, y - tick)),
+                            ] {
+                                push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                                out.shapes.push(ShapeInstance::line(from, to, 0.0, Paint::NONE).with_hairline(paint));
+                            }
+                        }
+                    }
                     if p.line.a > 0.0 {
                         let s = style.size;
                         let top = Point::new(origin.x + x, origin.y + baseline - 0.95 * s);

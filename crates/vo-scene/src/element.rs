@@ -1582,6 +1582,38 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the words given to `live_text` are the final text; show `live` instead,
+    /// each word until the final pass reaches it (MO-40). The same as `final_words` with the
+    /// two lists the other way round, for an app whose view is built from the final words.
+    pub fn final_from(mut self, live: &[Word]) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { words, finals, .. } => {
+                *finals = std::mem::replace(words, live.to_vec());
+            }
+            _ => debug_assert!(false, "final_from on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: the words it shows. `None` for any other element.
+    pub fn live_words(&self) -> Option<&[Word]> {
+        match &self.kind {
+            Kind::LiveText { words, .. } => Some(words),
+            _ => None,
+        }
+    }
+
+    /// Runs `f` on every live text in this tree, children first, and keeps what it returns.
+    /// For an app that adds one behaviour to every live text its views build.
+    pub fn map_live_texts(mut self, f: &mut dyn FnMut(Element<M>) -> Element<M>) -> Element<M> {
+        self.children = std::mem::take(&mut self.children).into_iter().map(|c| c.map_live_texts(f)).collect();
+        if matches!(self.kind, Kind::LiveText { .. }) {
+            f(self)
+        } else {
+            self
+        }
+    }
+
     /// Live text: inline objects (FX-063). Each id names a word whose text is
     /// [`OBJECT_TEXT`](crate::inline::OBJECT_TEXT) (make one with `Inline::word`); the word
     /// takes the object's width in the line, wraps like a word, springs when the width
