@@ -17,9 +17,13 @@
 //!
 //! Glass on other outlines and on turned layers (EG-06), offline:
 //!   glass_demo --shapes DIR
+//!
+//! Refracting glass (EG-05): lens disc, prism, thick slab and bubble, offline:
+//!   glass_demo --refract DIR [--light]   (or VO_LIGHT=1)
 
 mod app;
 mod live;
+mod refract;
 mod shapes;
 
 use std::path::{Path, PathBuf};
@@ -670,6 +674,9 @@ fn main() {
         run_offline(&PathBuf::from(dir));
     } else if let Some(dir) = val("--shapes") {
         shapes::run(&PathBuf::from(dir));
+    } else if let Some(dir) = val("--refract") {
+        let light = args.iter().any(|a| a == "--light") || std::env::var("VO_LIGHT").is_ok_and(|v| v == "1");
+        refract::run(&PathBuf::from(dir), light);
     } else if args.iter().any(|a| a == "--live") {
         let secs = val("--secs").and_then(|s| s.parse().ok()).unwrap_or(8.0);
         let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
@@ -683,7 +690,7 @@ fn main() {
         app::live(look, secs, args.iter().any(|a| a == "--still"));
     } else {
         eprintln!(
-            "usage: glass_demo --offline DIR | --shapes DIR | --live [--secs S] [--no-blur] [--light] \
+            "usage: glass_demo --offline DIR | --shapes DIR | --refract DIR [--light] | --live [--secs S] [--no-blur] [--light] \
              | --app-offline DIR [--light] | --app-live [--secs S] [--light] [--still]"
         );
         std::process::exit(2);

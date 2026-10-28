@@ -11,6 +11,12 @@
 // the frame turns with the panel, so tint, bevel, rim and sheen follow it, and the light
 // (fixed on screen) is turned into that frame by `glass_turn`. A panel is either the rounded
 // rect, drawn exactly, or a closed polygon outline (EG-06) read from `glass_point`.
+//
+// Refraction (EG-05): with `refract.x` 0 or more, the panel reads what the popup drew under
+// it (`tex_backdrop`, the layer's backdrop) at an offset: magnified about the box centre,
+// bent along the outline's normal by the profile, one offset per colour channel. The prelude
+// also defines `glass_frag_px`, a fragment's target pixel. The textured pipeline swaps the
+// stub helpers below for `material_tex.wgsl` (`material::with_textures`).
 
 struct GlassIn {
   // Panel rect x, y, w, h.
@@ -31,6 +37,11 @@ struct GlassIn {
   // Outline (EG-06): first point, point count (0: the rounded rect), arc length of the top
   // centre and the perimeter, in the units of the points.
   @location(7) outline: vec4f,
+  // Refraction (EG-05): profile (-1 off, 0 flat, 1 dome, 2 slab, 3 prism, 4 bubble), bend
+  // (logical pixels), magnification, dispersion.
+  @location(8) refract: vec4f,
+  // Film amount, wobble (logical pixels), the prism's unit direction.
+  @location(9) refract2: vec4f,
 };
 
 struct GlassOut {
@@ -44,7 +55,19 @@ struct GlassOut {
   @location(6) @interpolate(flat) fx: vec4f,
   @location(7) @interpolate(flat) shadow: vec4f,
   @location(8) @interpolate(flat) outline: vec4f,
+  @location(9) @interpolate(flat) refract: vec4f,
+  @location(10) @interpolate(flat) refract2: vec4f,
 };
+
+// vo: texture helpers begin
+fn tex_backdrop (px: vec2f) -> vec4f {
+  return vec4f (0.0);
+}
+
+fn tex_image (slot: u32, uv: vec2f) -> vec4f {
+  return vec4f (0.0);
+}
+// vo: texture helpers end
 
 // The nearest point of an outline: signed distance (negative inside), outward unit normal,
 // and arc length from the first point, all in physical pixels.
@@ -175,6 +198,58 @@ fn bevel_slope (t: f32) -> f32 {
   return min (u / sqrt (1.0 - u * u), 6.0);
 }
 
+// The refraction offset at `p` in the panel frame (physical pixels), before dispersion:
+// where the backdrop is read, relative to `p`. `inside` is the distance in from the edge,
+// `gn` the outward normal, `centre` the box centre, `k` physical pixels per logical pixel;
+// `rf` and `rf2` the instance's refraction blocks, `bevel` its bevel width (logical pixels)
+// and `time` its age.
+fn refract_offset (rf: vec4f, rf2: vec4f, bevel: f32, time: f32, p: vec2f, inside: f32, gn: vec2f, centre: vec2f, half: vec2f, k: f32) -> vec2f {
+  let profile = rf.x;
+  let bend = rf.y * k;
+  // Magnification about the centre: read nearer to it.
+  var off = (centre - p) * (1.0 - 1.0 / rf.z);
+  let bw = max (bevel * k, 1.0);
+  if (profile > 0.5 && profile < 1.5) {
+    // Dome: the slope rises over the bevel band towards the edge.
+    let t = clamp (inside / bw, 0.0, 1.0);
+    off -= gn * bend * (1.0 - t) * (1.0 - t);
+  } else if (profile > 1.5 && profile < 2.5) {
+    // Slab: flat on top, the bevel's quarter circle at the edge.
+    let t = clamp (inside / bw, 0.0, 1.0);
+    off -= gn * bend * bevel_slope (t) / 6.0;
+  } else if (profile > 2.5 && profile < 3.5) {
+    // Prism: one tilt over the whole face.
+    off += rf2.zw * bend;
+  } else if (profile > 3.5) {
+    // Bubble: a sphere cap over the whole shape, steepest at the rim.
+    let t = clamp (inside / max (min (half.x, half.y), 1.0), 0.0, 1.0);
+    off -= gn * bend * (1.0 - t) * (1.0 - t);
+  }
+  let wobble = rf2.y * k;
+  if (wobble != 0.0) {
+    // A slow wave over the face: a pure function of the panel's age.
+    let q = (p - centre) / k;
+    off += wobble * vec2f (sin (q.y * 0.09 + time * 1.7), cos (q.x * 0.08 + time * 1.3));
+  }
+  return off;
+}
+
+// The backdrop under fragment `frag` read through the glass: each channel at the offset
+// `off` (panel frame) scaled by 1 - d, 1 and 1 + d, turned onto the screen.
+fn refract_read (frag: vec2f, off: vec2f, disp: f32) -> vec4f {
+  let at = glass_frag_px (frag);
+  let turn = glass_turn ();
+  let r = tex_backdrop (at + turn * (off * (1.0 - disp)));
+  let g = tex_backdrop (at + turn * off);
+  let b = tex_backdrop (at + turn * (off * (1.0 + disp)));
+  return vec4f (r.r, g.g, b.b, max (g.a, max (r.a, b.a)));
+}
+
+// Thin-film colour (EG-05) for a film thickness `th` (about 0 to 1): interference bands.
+fn film_colour (th: f32) -> vec3f {
+  return 0.5 + 0.5 * cos (6.2831853 * (2.0 * th + vec3f (0.0, 0.33, 0.67)));
+}
+
 @fragment fn fs_glass (in: GlassOut) -> @location(0) vec4f {
   let k = in.shape.y;
   let half = 0.5 * in.rect.zw;
@@ -255,6 +330,19 @@ fn bevel_slope (t: f32) -> f32 {
     rim[c] = max (dot (nc, l) - l.z, 0.0);
   }
   var light = (rim * 0.6 + vec3f (spec * 0.9 + fres * 0.3)) * in.fx.y * (1.0 - 0.7 * t);
+  // Thin film (EG-05): colour bands by a thickness that thins towards the rim, drifting only
+  // while the panel wobbles; strongest at the rim and none at the centre.
+  if (in.refract2.x > 0.0) {
+    let rr = clamp (inside / max (min (half.x, half.y), 1.0), 0.0, 1.0);
+    var drift = 0.0;
+    if (in.refract2.y != 0.0) {
+      drift = 0.08 * sin (in.shape.z * 0.9 + (in.p.x - in.p.y) / (60.0 * k));
+    }
+    let th = 0.25 + 0.6 * rr + drift;
+    // Nothing at the centre, where text sits (AX01 counts little of the glass's own light).
+    let rim_w = pow (1.0 - rr, 1.5);
+    light += film_colour (th) * in.refract2.x * rim_w * 0.3;
+  }
   // The shaded side of the bevel darkens the tint.
   let shade = max (-facing, 0.0) * mix (0.35, 0.25, dark);
 
@@ -311,7 +399,16 @@ fn bevel_slope (t: f32) -> f32 {
   let add_a = clamp (max (add.r, max (add.g, add.b)), 0.0, 1.0);
   let a_panel = clamp (a_tint + add_a * (1.0 - a_tint) + edge_dark * (1.0 - a_tint), 0.0, 1.0);
   var panel = vec4f (min (rgb * a_tint + add, vec3f (a_panel)), a_panel);
-  panel = mix (panel, vec4f (in.accent.rgb, 1.0), paint * 0.9) * cover;
+  panel = mix (panel, vec4f (in.accent.rgb, 1.0), paint * 0.9);
+  if (in.refract.x >= 0.0) {
+    // The panel over the backdrop read through it (EG-05). Over opaque drawing this covers
+    // the unmoved backdrop under it exactly.
+    let centre = in.rect.xy + half;
+    let off = refract_offset (in.refract, in.refract2, in.fx.x, in.shape.z, in.p, inside, gn, centre, half, k);
+    let seen = refract_read (in.clip.xy, off, in.refract.w);
+    panel = panel + seen * (1.0 - panel.a);
+  }
+  panel = panel * cover;
   // The shadow goes under the panel's antialiased edge.
   panel = panel + vec4f (0.0, 0.0, 0.0, shadow) * (1.0 - panel.a);
   return finish (panel * opacity * glass_clip (in.clip.xy));

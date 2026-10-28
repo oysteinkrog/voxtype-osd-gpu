@@ -64,6 +64,116 @@ pub struct Glass {
     /// The outline the glass follows (EG-06). Tint, bevel, rim light, sheen and the orbiting
     /// rim all follow it. The default is the panel's rounded rect.
     pub shape: GlassShape,
+    /// How the glass bends what is under it (EG-05). The default bends nothing.
+    pub refract: Refract,
+}
+
+/// The surface profile a refracting glass bends with (EG-05). Its slope comes from the
+/// outline's signed distance (EG-06), so it follows any [`GlassShape`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub enum LensProfile {
+    /// No slope: only [`Refract::magnify`] bends.
+    #[default]
+    Flat,
+    /// A lens: the slope rises over the bevel band towards the edge, pulling what is under
+    /// the rim in towards the centre.
+    Dome,
+    /// A thick slab: flat on top, a steep bend only over the bevel band at its edge.
+    Slab,
+    /// A prism: one even tilt over the whole face, moving what is under it `bend` along the
+    /// direction `angle` (radians, clockwise from +x on screen, y down).
+    Prism { angle: f32 },
+    /// A bubble: a sphere cap over the whole shape, bending most at the rim.
+    Bubble,
+}
+
+impl LensProfile {
+    /// The id the shader switches on.
+    pub fn id(&self) -> u32 {
+        match self {
+            LensProfile::Flat => 0,
+            LensProfile::Dome => 1,
+            LensProfile::Slab => 2,
+            LensProfile::Prism { .. } => 3,
+            LensProfile::Bubble => 4,
+        }
+    }
+}
+
+/// Refraction (EG-05): glass that reads what the popup has drawn under it (its layer's
+/// backdrop, EG-01, through the texture path of EG-02) at an offset from its surface normal.
+///
+/// It needs a backdrop in the surface the glass draws into: put the panel in a layer with
+/// `Element::backdrop(BackdropRes::Full, Color::TRANSPARENT)`. Without one, or on a tier
+/// without effects, the glass draws as plain glass. It never reads the desktop.
+///
+/// Where the backdrop is partly transparent, the refracted copy lands over the unmoved one,
+/// so a half-transparent backdrop shows a little stronger under the glass. Over opaque
+/// drawing it is exact.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Refract {
+    pub profile: LensProfile,
+    /// The most the profile moves what is under the glass, logical pixels, where the
+    /// profile is steepest.
+    pub bend: f32,
+    /// Magnification about the centre of the glass's box: 1 is none, 1.5 shows what is
+    /// under the centre half as large again.
+    pub magnify: f32,
+    /// Per-channel dispersion: red is moved by `1 - dispersion` of the offset and blue by
+    /// `1 + dispersion`, green by the offset itself. 0 is none; 0.1 to 0.3 gives rainbow
+    /// edges.
+    pub dispersion: f32,
+    /// Thin-film iridescence, 0 to 1: a soap-bubble colour play added as light, strongest at
+    /// the rim.
+    pub film: f32,
+    /// An animated wobble of the bend, logical pixels; 0 is still. It and the film's drift
+    /// stop under reduced motion; the bend itself stays (it is not motion).
+    pub wobble: f32,
+}
+
+impl Default for Refract {
+    fn default() -> Refract {
+        Refract::NONE
+    }
+}
+
+impl Refract {
+    /// Bends nothing: plain glass.
+    pub const NONE: Refract =
+        Refract { profile: LensProfile::Flat, bend: 0.0, magnify: 1.0, dispersion: 0.0, film: 0.0, wobble: 0.0 };
+
+    /// A lens disc magnifying `magnify` times at its centre.
+    pub const fn lens(magnify: f32) -> Refract {
+        Refract { profile: LensProfile::Dome, bend: 6.0, magnify, dispersion: 0.12, ..Refract::NONE }
+    }
+
+    /// A prism moving what is under it `bend` logical pixels along `angle`, with rainbow edges.
+    pub const fn prism(angle: f32, bend: f32) -> Refract {
+        Refract { profile: LensProfile::Prism { angle }, bend, dispersion: 0.2, ..Refract::NONE }
+    }
+
+    /// A thick slab: plain in the middle, bent at the edge.
+    pub const fn slab() -> Refract {
+        Refract { profile: LensProfile::Slab, bend: 10.0, dispersion: 0.15, ..Refract::NONE }
+    }
+
+    /// A soap bubble: a slight magnification, a strong bend at the rim and a thin-film sheen.
+    pub const fn bubble() -> Refract {
+        Refract { profile: LensProfile::Bubble, bend: 8.0, magnify: 1.08, dispersion: 0.1, film: 0.8, ..Refract::NONE }
+    }
+
+    /// Whether anything under the glass moves: the glass then reads its backdrop.
+    pub fn bends(&self) -> bool {
+        (self.magnify - 1.0).abs() > 1e-4
+            || (self.profile != LensProfile::Flat && self.bend.abs() > 1e-4)
+            || self.wobble.abs() > 1e-4
+    }
+
+    /// The same refraction without anything that moves over time (reduced motion).
+    pub const fn still(mut self) -> Refract {
+        self.wobble = 0.0;
+        self
+    }
 }
 
 /// The outline of a glass panel (EG-06), laid out in the panel's box. A display list item
@@ -216,6 +326,7 @@ impl Glass {
             orbit: false,
             blur_behind: true,
             shape: GlassShape::Rounded,
+            refract: Refract::NONE,
         }
     }
 
@@ -235,6 +346,7 @@ impl Glass {
             orbit: false,
             blur_behind: true,
             shape: GlassShape::Rounded,
+            refract: Refract::NONE,
         }
     }
 
@@ -242,6 +354,73 @@ impl Glass {
     pub const fn with_shape(mut self, shape: GlassShape) -> Glass {
         self.shape = shape;
         self
+    }
+
+    /// The same glass bending what is under it (EG-05).
+    pub const fn with_refract(mut self, refract: Refract) -> Glass {
+        self.refract = refract;
+        self
+    }
+
+    /// The same glass with nothing that moves over time: no sheen, no orbit, no wobble. The
+    /// scene draws reduced motion with it.
+    pub const fn still(mut self) -> Glass {
+        self.sheen = false;
+        self.orbit = false;
+        self.refract = self.refract.still();
+        self
+    }
+
+    /// Dark or light glass of `kind`.
+    pub const fn of_kind(kind: GlassKind) -> Glass {
+        match kind {
+            GlassKind::Dark => Glass::dark(),
+            GlassKind::Light => Glass::light(),
+        }
+    }
+
+    /// The text colours a preset of `kind` is checked against (AX01): body text and captions.
+    pub const fn preset_texts(kind: GlassKind) -> [Color; 2] {
+        match kind {
+            GlassKind::Dark => [Color::rgba(0.96, 0.97, 0.98, 1.0), Color::rgba(0.82, 0.84, 0.88, 1.0)],
+            GlassKind::Light => [Color::rgba(0.07, 0.08, 0.10, 1.0), Color::rgba(0.24, 0.26, 0.30, 1.0)],
+        }
+    }
+
+    /// `self` with the lowest tint alpha that keeps [`Glass::preset_texts`] at 4.5:1 (AX01), so
+    /// as much of the bent backdrop shows as text allows.
+    fn clearest(self) -> Glass {
+        let t = self.tint;
+        self.tinted_for(Color::rgba(t.r, t.g, t.b, 1.0), &Glass::preset_texts(self.kind), 4.5).unwrap_or(self)
+    }
+
+    /// A lens disc (EG-05): a circle in a square box, magnifying 1.5 times at its centre.
+    pub fn lens(kind: GlassKind) -> Glass {
+        Glass { sheen: false, ..Glass::of_kind(kind) }
+            .with_shape(GlassShape::Ellipse)
+            .with_refract(Refract::lens(1.5))
+            .clearest()
+    }
+
+    /// A prism (EG-05): a triangle face moving what is under it to the right, with rainbow edges.
+    pub fn prism(kind: GlassKind) -> Glass {
+        Glass { sheen: false, ..Glass::of_kind(kind) }
+            .with_shape(GlassShape::Polygon { sides: 3, turn: 0.0 })
+            .with_refract(Refract::prism(0.0, 12.0))
+            .clearest()
+    }
+
+    /// A thick glass slab (EG-05): the panel's rounded rect, bent at its edge.
+    pub fn slab(kind: GlassKind) -> Glass {
+        Glass { bevel: 16.0, ..Glass::of_kind(kind) }.with_refract(Refract::slab()).clearest()
+    }
+
+    /// A bubble with thin-film iridescence (EG-05), slowly wobbling (still under reduced motion).
+    pub fn bubble(kind: GlassKind) -> Glass {
+        Glass { sheen: false, shadow: [0.0; 3], ..Glass::of_kind(kind) }
+            .with_shape(GlassShape::Ellipse)
+            .with_refract(Refract { wobble: 1.5, ..Refract::bubble() })
+            .clearest()
     }
 
     /// The same glass with the orbiting rim on.
@@ -307,12 +486,12 @@ impl Glass {
     }
 
     /// When the panel next needs a frame, or `None` once it is still: 60 fps during the
-    /// sheen, then 30 fps for the orbit.
+    /// sheen, then 30 fps for the orbit or a refraction wobble (EG-05).
     pub fn next_frame(&self, since: f64, t: f64) -> Option<f64> {
         let age = t - since;
         if self.sheen && age < SHEEN_SECS {
             Some(t + 1.0 / 60.0)
-        } else if self.orbit {
+        } else if self.orbit || self.refract.wobble != 0.0 {
             Some(t + 1.0 / ORBIT_FPS)
         } else {
             None

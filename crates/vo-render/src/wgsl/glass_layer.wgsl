@@ -47,9 +47,16 @@ fn glass_aa (frag: vec2f) -> f32 {
   o.fx = g.fx;
   o.shadow = g.shadow;
   o.outline = g.outline;
+  o.refract = g.refract;
+  o.refract2 = g.refract2;
   return o;
 }
 
 fn glass_clip (frag: vec2f) -> f32 {
   return clip_coverage (frag);
+}
+
+// Target pixels (as seen) of a fragment, where the backdrop (EG-01) holds what is under it.
+fn glass_frag_px (frag: vec2f) -> vec2f {
+  return frag + layer.origin.xy;
 }

@@ -9,6 +9,12 @@
 //! them as instanced quads into a target, either before the panel content ([`GlassBlend::Over`])
 //! or after it, landing behind it ([`GlassBlend::Behind`]).
 //!
+//! Refraction (EG-05, [`Refract`]): inside the renderer's display list pass, a glass whose
+//! layer has a backdrop (EG-01) in the surface it draws into reads that backdrop at an offset
+//! from its surface normal, magnified and split per colour channel. It is drawn by the
+//! textured glass pipeline, whose group 2 is the material textures' (EG-02). Without a
+//! backdrop, and in [`GlassPass`], it draws as plain glass.
+//!
 //! A client cannot read the desktop behind it. Without compositor blur the panel is a tint
 //! with a bevel; with it, the compositor blurs the desktop under [`blur_region`]. Either way
 //! the interior tint must keep text readable over any backdrop; [`Glass::contrast`] is the
@@ -17,7 +23,9 @@
 use vo_scene::display::InputRegion;
 use vo_scene::geom::Color;
 use vo_scene::geom::Point;
-pub use vo_scene::glass::{blur_rects, push_outline, Glass, GlassInstance, GlassKind, GlassShape};
+pub use vo_scene::glass::{
+    blur_rects, push_outline, Glass, GlassInstance, GlassKind, GlassShape, LensProfile, Refract,
+};
 use vo_scene::path::VectorSeg;
 
 use crate::color::srgb_to_linear;
@@ -102,13 +110,13 @@ pub fn glass_layer_shader_source() -> String {
 /// [`GlassPass`] in layer units, with the layer block doing the mapping to pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GlassGpu([f32; 32]);
+pub struct GlassGpu([f32; 40]);
 
 impl GlassGpu {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-            6 => Float32x4, 7 => Float32x4
+            6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: INSTANCE,
@@ -119,10 +127,23 @@ impl GlassGpu {
 
     /// `g` with `opacity` (the layer's) multiplied into its alpha. A shaped panel appends
     /// its outline to `points` (x, y, arc length, 0 in layer units), which the pass binds as
-    /// group 0; `segs` is the display list's `vector_segs`, for a path outline.
-    pub fn new(g: &GlassInstance, opacity: f32, segs: &[VectorSeg], points: &mut Vec<[f32; 4]>) -> GlassGpu {
+    /// group 0; `segs` is the display list's `vector_segs`, for a path outline. `refract`
+    /// says the draw reads a backdrop (EG-05): without one the refraction is off.
+    pub fn new(
+        g: &GlassInstance,
+        opacity: f32,
+        segs: &[VectorSeg],
+        points: &mut Vec<[f32; 4]>,
+        refract: bool,
+    ) -> GlassGpu {
         let outline = g.outline_points(segs).map_or([0.0; 4], |pts| push_points(&pts, g.rect, points));
-        GlassGpu(instance(&GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind), 1.0, outline))
+        let d = GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind);
+        GlassGpu(instance(&d, 1.0, outline, refract))
+    }
+
+    /// Whether the panel bends what is under it (EG-05) and so wants the textured pipeline.
+    pub fn refracts(g: &GlassInstance) -> bool {
+        g.glass.refract.bends()
     }
 
     /// Layer-space bounds of what the panel draws, shadow included: x0, y0, x1, y1.
@@ -133,8 +154,8 @@ impl GlassGpu {
     }
 }
 
-/// Bytes per instance: eight vec4.
-const INSTANCE: u64 = 8 * 16;
+/// Bytes per instance: ten vec4.
+const INSTANCE: u64 = 10 * 16;
 
 /// Appends the closed polygon `pts` to `out` as x, y and the arc length at each point, and
 /// returns the instance's outline block: first point, count, the arc length of the point
@@ -212,10 +233,6 @@ impl GlassPass {
             GlassBlend::Behind => (wgpu::BlendFactor::OneMinusDstAlpha, wgpu::BlendFactor::One),
         };
         let comp = wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add };
-        let attributes = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-            6 => Float32x4, 7 => Float32x4
-        ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vo-glass"),
             layout: Some(&pl),
@@ -223,11 +240,7 @@ impl GlassPass {
                 module: &module,
                 entry_point: Some("vs_glass"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: INSTANCE,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attributes,
-                })],
+                buffers: &[Some(GlassGpu::layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -273,7 +286,8 @@ impl GlassPass {
         for d in draws {
             let outline =
                 d.glass.shape.points(d.rect, d.radius).map_or([0.0; 4], |pts| push_points(&pts, d.rect, &mut points));
-            data.extend_from_slice(&floats(&instance(d, scale, outline)));
+            // No backdrop here: refraction is off (EG-05).
+            data.extend_from_slice(&floats(&instance(d, scale, outline, false)));
         }
         if !points.is_empty() {
             let bytes: Vec<u8> = points.iter().flat_map(floats).collect();
@@ -366,10 +380,17 @@ fn floats<const N: usize>(v: &[f32; N]) -> Vec<u8> {
 
 /// The instance block of `d` at `s` physical pixels per logical pixel; `outline` from
 /// [`push_points`], in logical units (the shader scales it), or zero for the rounded rect.
-fn instance(d: &GlassDraw, s: f32, outline: [f32; 4]) -> [f32; 32] {
+/// `refract` turns the refraction on (EG-05); its film is drawn either way.
+fn instance(d: &GlassDraw, s: f32, outline: [f32; 4], refract: bool) -> [f32; 40] {
     let g = &d.glass;
     let lin = |c: Color| [srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)];
     let (tint, accent) = (lin(g.tint), lin(g.accent));
+    let r = &g.refract;
+    let on = refract && r.bends();
+    let angle = match r.profile {
+        LensProfile::Prism { angle } => angle,
+        _ => 0.0,
+    };
     [
         d.rect[0] * s,
         d.rect[1] * s,
@@ -403,6 +424,14 @@ fn instance(d: &GlassDraw, s: f32, outline: [f32; 4]) -> [f32; 32] {
         outline[1],
         outline[2],
         outline[3],
+        if on { r.profile.id() as f32 } else { -1.0 },
+        r.bend,
+        r.magnify.max(1e-3),
+        r.dispersion,
+        r.film.clamp(0.0, 1.0),
+        if on { r.wobble } else { 0.0 },
+        angle.cos(),
+        angle.sin(),
     ]
 }
 
@@ -437,6 +466,12 @@ mod tests {
     fn shaders_validate_in_naga() {
         validate(&glass_view_shader_source());
         validate(&[include_str!("wgsl/common.wgsl"), GLASS_LAYER_WGSL, GLASS_WGSL].join("\n"));
+        // The textured variant reads the backdrop (EG-05).
+        let tex = crate::material::with_textures(
+            &[include_str!("wgsl/common.wgsl"), GLASS_LAYER_WGSL, GLASS_WGSL].join("\n"),
+        );
+        assert!(tex.contains("var mat_backdrop"));
+        validate(&tex);
     }
 
     #[test]

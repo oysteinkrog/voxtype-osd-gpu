@@ -1844,7 +1844,8 @@ impl<M> Scene<M> {
             out.glass.push(GlassInstance {
                 rect: [m.e, m.f, size.w, size.h],
                 radius: radius(n, t),
-                glass: *g,
+                // Under reduced motion a refraction keeps its bend but not its wobble (EG-05).
+                glass: if n.reduced { Glass { refract: g.refract.still(), ..*g } } else { *g },
                 alpha,
                 age: (t - n.since) as f32,
                 sheen,

@@ -381,6 +381,8 @@ enum Pipe {
     ShapeTex,
     GlyphTex,
     VectorTex,
+    /// Glass that bends its backdrop (EG-05): the glass draw with the textured group 2.
+    GlassTex,
 }
 
 impl Pipe {
@@ -395,12 +397,13 @@ impl Pipe {
             Pipe::ShapeTex => Pipe::Shape,
             Pipe::GlyphTex => Pipe::Glyph,
             Pipe::VectorTex => Pipe::Vector,
+            Pipe::GlassTex => Pipe::Glass,
             p => p,
         }
     }
 
     fn is_textured(self) -> bool {
-        matches!(self, Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex)
+        matches!(self, Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex)
     }
 }
 
@@ -672,8 +675,8 @@ pub struct Renderer {
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
     /// Module slots: see `Renderer::pipeline`; 9 to 11 are the textured shape, glyph and
-    /// vector shaders (EG-02).
-    modules: [Option<wgpu::ShaderModule>; 13],
+    /// vector shaders (EG-02), 13 the textured glass (EG-05).
+    modules: [Option<wgpu::ShaderModule>; 14],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
@@ -1459,6 +1462,8 @@ impl Renderer {
                 ItemKind::Glass => {
                     let start = self.glass.len() as u32;
                     let mut b = EMPTY;
+                    // Refraction (EG-05) reads the layer's backdrop, through the textured pipeline.
+                    let tex = bd != NO_BACKDROP && f.list.glass[range.clone()].iter().any(GlassGpu::refracts);
                     for g in &f.list.glass[range] {
                         let [x0, y0, x1, y1] = GlassGpu::reach(g);
                         let r = vo_scene::geom::Rect::new(x0, y0, x1 - x0, y1 - y0);
@@ -1468,10 +1473,11 @@ impl Renderer {
                         if self.quality == Quality::Minimal {
                             g.glass.shadow[0] = 0.0;
                         }
-                        self.glass.push(GlassGpu::new(&g, opacity, &f.list.vector_segs, &mut self.vector_segs));
+                        self.glass.push(GlassGpu::new(&g, opacity, &f.list.vector_segs, &mut self.vector_segs, tex));
                     }
                     grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(b), scissor));
-                    self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);
+                    let (pipe, b) = if tex { (Pipe::GlassTex, bd) } else { (Pipe::Glass, NO_BACKDROP) };
+                    self.push_cmd_with(draw_surface, pipe, start..self.glass.len() as u32, uniform, blend, scissor, b);
                 }
                 ItemKind::Gpu => {
                     let start = self.gpu_items.len() as u32;
@@ -2585,7 +2591,9 @@ impl Renderer {
                 | Pipe::CompositeFxRest => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
                 Pipe::Gpu | Pipe::Capture => unreachable!("a pass break"),
-                Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("drawn as their base"),
+                Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex => {
+                    unreachable!("drawn as their base")
+                }
             }
         }
     }
@@ -2608,6 +2616,7 @@ impl Renderer {
             10 => ("vo-glyphs-tex", with_textures(&glyph_shader_source_with(&self.material_fns))),
             11 => ("vo-vectors-tex", with_textures(&vector_shader_source_with(&self.material_fns))),
             7 => ("vo-glass", glass_layer_shader_source()),
+            13 => ("vo-glass-tex", with_textures(&glass_layer_shader_source())),
             8 => ("vo-trail", TRAIL_WGSL.to_string()),
             _ => ("vo-bloom", bloom_shader_source()),
         };
@@ -2666,6 +2675,7 @@ impl Renderer {
             Pipe::ShapeTex => 9,
             Pipe::GlyphTex => 10,
             Pipe::VectorTex => 11,
+            Pipe::GlassTex => 13,
         };
         if self.modules[slot].is_none() {
             self.modules[slot] = Some(self.shader_module(slot));
@@ -2689,7 +2699,7 @@ impl Renderer {
             Pipe::Fade => [None, None],
             Pipe::TrailMax => [Some(&self.composite_layout), None],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
-            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("taken as their base"),
+            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex => unreachable!("taken as their base"),
         };
         // The signal block is group 3 of every pipeline that draws into a layer.
         let signals = groups[1].filter(|l| std::ptr::eq(*l, &self.layer_layout)).map(|_| &self.signals_layout);
@@ -2704,7 +2714,7 @@ impl Renderer {
         let groups = [groups[0], groups[1], None, signals];
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: if matches!(pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) {
+            bind_group_layouts: if matches!(pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) || textured {
                 &with_materials
             } else if pipe == Pipe::Displace {
                 &with_displace
@@ -2731,7 +2741,7 @@ impl Renderer {
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
             Pipe::TrailMax => ("vs_trail", "fs_trail_max", vec![]),
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
-            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("taken as their base"),
+            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex => unreachable!("taken as their base"),
         };
         let blend_state = match pipe {
             // A displacement writes back what it does not move, so it replaces.

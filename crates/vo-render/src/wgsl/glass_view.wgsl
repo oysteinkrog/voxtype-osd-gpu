@@ -46,6 +46,8 @@ fn glass_aa (frag: vec2f) -> f32 {
   o.fx = g.fx;
   o.shadow = g.shadow;
   o.outline = g.outline;
+  o.refract = g.refract;
+  o.refract2 = g.refract2;
   return o;
 }
 
@@ -65,4 +67,8 @@ fn finish (c: vec4f) -> vec4f {
 
 fn glass_clip (frag: vec2f) -> f32 {
   return 1.0;
+}
+
+fn glass_frag_px (frag: vec2f) -> vec2f {
+  return frag;
 }

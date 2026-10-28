@@ -20,7 +20,7 @@ use vo::scene::displace::{Displace, Onset, Ripples};
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Point, Rect, Size};
-use vo::scene::glass::{Glass, GlassShape};
+use vo::scene::glass::{Glass, GlassKind, GlassShape};
 use vo::scene::material::Material;
 use vo::scene::path::StrokeStyle;
 use vo::scene::water::{PoolDrop, WaterPool};
@@ -53,6 +53,8 @@ const CASES: &[&str] = &[
     "material backdrop",
     "glass",
     "glass octagon",
+    "glass lens",
+    "glass prism",
     "layer blur r0",
     "layer blur r8",
     "frost r8",
@@ -129,6 +131,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
             let g = Glass::dark().with_orbit(Color::hex(0x4cc9f0, 1.0)).with_shape(GlassShape::chamfer(12.0 * k));
             card = card.fill(Color::TRANSPARENT).glass(g)
         }
+        // Refracting glass (EG-05) over the stripes: a lens disc and a prism.
+        "glass lens" => card = card.fill(Color::TRANSPARENT).glass(Glass::lens(GlassKind::Dark)),
+        "glass prism" => card = card.fill(Color::TRANSPARENT).glass(Glass::prism(GlassKind::Dark)),
         _ => {}
     }
     if case == "frost stack" {
@@ -153,14 +158,14 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "backdrop half" => layer.backdrop(BackdropRes::Half, Color::hex(0xff6b6b, 1.0)),
         // A backdrop that only captures, read by the panel's material (EG-02).
         "material backdrop" => layer.backdrop(BackdropRes::Full, Color::TRANSPARENT),
+        // The glass reads the stripes under it through a backdrop that only captures (EG-05).
+        "glass lens" | "glass prism" => layer.backdrop(BackdropRes::Full, Color::TRANSPARENT),
         // The stripes under the card drawn back displaced (EG-03): four rings alive at any
         // time, one every 0.3 s, and a turning noise field.
         "displace ripples" => {
             let last = (t / 0.3).floor() * 0.3;
-            let onsets = (0..4).map(|n| Onset {
-                t: last - n as f64 * 0.3,
-                at: Point::new((80.0 + 90.0 * n as f32) * k, 60.0 * k),
-            });
+            let onsets = (0..4)
+                .map(|n| Onset { t: last - n as f64 * 0.3, at: Point::new((80.0 + 90.0 * n as f32) * k, 60.0 * k) });
             layer.displace(Displace::Ripples(Ripples::new().onsets(onsets).amp(5.0 * k).speed(160.0 * k)))
         }
         "displace noise" => layer.displace(Displace::Noise { scale: 50.0 * k, amount: 4.0 * k, speed: 0.25, seed: 3 }),
@@ -170,7 +175,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     if case == "water pool" {
         return root.child(layer).child(water_pool(size, t).view("water"));
     }
-    if !case.contains("backdrop") && !case.starts_with("frost") && !case.starts_with("displace") {
+    let refracts = matches!(case, "glass lens" | "glass prism");
+    if !case.contains("backdrop") && !case.starts_with("frost") && !case.starts_with("displace") && !refracts {
         return root.child(layer);
     }
     // Stripes under the card, so the tinted backdrop shows in the preview and the sheets.
