@@ -68,7 +68,7 @@ impl<T> SnapshotStore<T> {
 
     /// Whether a snapshot is due at `tick` and not stored yet. Tick 0 never is.
     pub fn wants(&self, tick: u64) -> bool {
-        tick > 0 && tick % self.interval == 0 && self.items.binary_search_by_key(&tick, |s| s.0).is_err()
+        tick > 0 && tick.is_multiple_of(self.interval) && self.items.binary_search_by_key(&tick, |s| s.0).is_err()
     }
 
     /// Stores a snapshot of `bytes` bytes taken at `tick`, thinning first if it would go over
@@ -80,7 +80,7 @@ impl<T> SnapshotStore<T> {
         while self.bytes + bytes > self.policy.cap_bytes {
             self.thin();
         }
-        if tick % self.interval != 0 {
+        if !tick.is_multiple_of(self.interval) {
             // Thinning moved the grid away from this tick.
             return;
         }
@@ -112,7 +112,7 @@ impl<T> SnapshotStore<T> {
         let interval = self.interval;
         let mut bytes = 0;
         self.items.retain(|s| {
-            let keep = s.0 % interval == 0;
+            let keep = s.0.is_multiple_of(interval);
             if keep {
                 bytes += s.1;
             }
