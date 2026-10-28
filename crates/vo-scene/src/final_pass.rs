@@ -10,7 +10,7 @@
 //! itself.
 //!
 //! The pass sets the type (MO-40). A soft front `front` wide moves with it. Ahead of the
-//! front words are spoken ink: `ink` of their opacity and tracked `loose` em wider per glyph.
+//! front words are spoken ink: `ink` of their opacity and tracked `loose` em wider per glyph (0.018).
 //! Behind it they are set type. A word whose final text differs changes as the front reaches
 //! it, nods `nod` px down and back, and gets a hairline bracket under it; its new
 //! punctuation pops in and a new capital grows from 82 % (not on the newest line, where the
@@ -37,7 +37,8 @@ pub struct FinalPass {
     /// Opacity of spoken ink ahead of the front, 0 to 1. At least 0.7 keeps the reading-line
     /// envelope; 1 turns spoken ink off.
     pub ink: f32,
-    /// Extra tracking of spoken ink, in em per glyph. At most 0.025 keeps the envelope.
+    /// Extra tracking of spoken ink, in em per glyph. At most 0.018 keeps even narrow words
+    /// under the envelope's 5 % tracking change.
     pub loose: f32,
     /// How far a changed word dips when the front reaches it, in layout units.
     pub nod: f32,
@@ -55,7 +56,7 @@ impl FinalPass {
             lift: 0.6,
             front: 40.0,
             ink: 0.72,
-            loose: 0.025,
+            loose: 0.018,
             nod: 2.0,
             bracket: Color::rgba(1.0, 1.0, 1.0, 0.45),
             still: false,

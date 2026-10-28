@@ -144,7 +144,7 @@ fn words_ahead_of_the_front_are_spoken_ink_and_behind_it_set_type() {
     let loose = span(&s.sample(1.0));
     s.apply(view(Some(1.0)), 1.0);
     let set = span(&s.sample(2.0));
-    assert!(loose > set && loose - set <= 0.025 * 20.0 * 4.0 + 1e-3, "{loose} {set}");
+    assert!(loose > set && loose - set <= 0.018 * 20.0 * 4.0 + 1e-3, "{loose} {set}");
 }
 
 #[test]
