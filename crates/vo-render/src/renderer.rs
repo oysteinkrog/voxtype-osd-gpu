@@ -1398,7 +1398,7 @@ impl Renderer {
                         if self.quality == Quality::Minimal {
                             g.glass.shadow[0] = 0.0;
                         }
-                        self.glass.push(GlassGpu::new(&g, opacity));
+                        self.glass.push(GlassGpu::new(&g, opacity, &f.list.vector_segs, &mut self.vector_segs));
                     }
                     grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(b), scissor));
                     self.push_cmd(draw_surface, Pipe::Glass, start..self.glass.len() as u32, uniform, blend, scissor);
@@ -2395,6 +2395,8 @@ impl Renderer {
                     pass.draw(0..4, c.range.clone());
                 }
                 Pipe::Glass => {
+                    // Outlines (EG-06) share the vector segment buffer.
+                    pass.set_bind_group(0, &self.vector_segs_buf.as_ref().unwrap().1, &[]);
                     pass.set_vertex_buffer(0, self.glass_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
@@ -2523,8 +2525,8 @@ impl Renderer {
         let pipe = pipe.base();
         let groups: [Option<&wgpu::BindGroupLayout>; 2] = match pipe {
             Pipe::Shape => [None, Some(&self.layer_layout)],
-            Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
-            Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
+            Pipe::Dot => [None, Some(&self.layer_layout)],
+            Pipe::Vector | Pipe::Glass => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
             Pipe::Composite | Pipe::CompositeRest | Pipe::Capture | Pipe::Backdrop => {
                 [Some(&self.composite_layout), Some(&self.layer_layout)]

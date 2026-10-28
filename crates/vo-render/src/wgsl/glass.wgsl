@@ -2,9 +2,15 @@
 // instanced quad per panel. Fragment units are physical pixels; colours are linear light,
 // premultiplied.
 //
-// A prelude goes in front of this file and defines `vs_glass`, `finish` and `glass_clip`:
-// `glass_view.wgsl` for `GlassPass` on its own, or `common.wgsl` plus `glass_layer.wgsl`
-// inside the renderer's display list pass.
+// A prelude goes in front of this file and defines `vs_glass`, `finish`, `glass_clip`,
+// `glass_point`, `glass_origin`, `glass_turn` and `glass_aa`: `glass_view.wgsl` for
+// `GlassPass` on its own, or `common.wgsl` plus `glass_layer.wgsl` inside the renderer's
+// display list pass.
+//
+// Fragment positions are in the panel's own frame, in physical pixels: on a rotated layer
+// the frame turns with the panel, so tint, bevel, rim and sheen follow it, and the light
+// (fixed on screen) is turned into that frame by `glass_turn`. A panel is either the rounded
+// rect, drawn exactly, or a closed polygon outline (EG-06) read from `glass_point`.
 
 struct GlassIn {
   // Panel rect x, y, w, h.
@@ -22,6 +28,9 @@ struct GlassIn {
   @location(5) fx: vec4f,
   // Shadow alpha, shadow blur, shadow y offset (logical pixels), blur behind (0 or 1).
   @location(6) shadow: vec4f,
+  // Outline (EG-06): first point, point count (0: the rounded rect), arc length of the top
+  // centre and the perimeter, in the units of the points.
+  @location(7) outline: vec4f,
 };
 
 struct GlassOut {
@@ -34,7 +43,71 @@ struct GlassOut {
   @location(5) @interpolate(flat) anim: vec4f,
   @location(6) @interpolate(flat) fx: vec4f,
   @location(7) @interpolate(flat) shadow: vec4f,
+  @location(8) @interpolate(flat) outline: vec4f,
 };
+
+// The nearest point of an outline: signed distance (negative inside), outward unit normal,
+// and arc length from the first point, all in physical pixels.
+struct Near {
+  d: f32,
+  n: vec2f,
+  s: f32,
+};
+
+// `p` against the closed polygon `o` (see `GlassIn::outline`), clockwise on screen, its
+// points scaled by `k` into the panel frame. Inside by the nonzero winding rule.
+fn outline_near (p: vec2f, o: vec4f, k: f32) -> Near {
+  let first = u32 (o.x);
+  let count = u32 (o.y);
+  let origin = glass_origin ();
+  var best = 1e30;
+  var bv = vec2f (0.0);
+  var be = vec2f (1.0, 0.0);
+  var bs = 0.0;
+  var wind = 0;
+  var a4 = glass_point (first + count - 1u);
+  var a = a4.xy * k + origin;
+  for (var i = 0u; i < count; i++) {
+    let b4 = glass_point (first + i);
+    let b = b4.xy * k + origin;
+    let e = b - a;
+    let w = p - a;
+    let h = clamp (dot (w, e) / max (dot (e, e), 1e-12), 0.0, 1.0);
+    let v = w - e * h;
+    let d2 = dot (v, v);
+    if (d2 < best) {
+      best = d2;
+      bv = v;
+      be = e;
+      // The closing edge (last point to the first) starts at the last point's arc length.
+      bs = a4.z * k + h * length (e);
+    }
+    let c = e.x * w.y - e.y * w.x;
+    if (a.y <= p.y) {
+      if (b.y > p.y && c > 0.0) {
+        wind += 1;
+      }
+    } else if (b.y <= p.y && c < 0.0) {
+      wind -= 1;
+    }
+    a4 = b4;
+    a = b;
+  }
+  let sgn = select (1.0, -1.0, wind != 0);
+  let dist = sqrt (best);
+  var n: vec2f;
+  if (dist > 1e-3) {
+    n = sgn * bv / dist;
+  } else {
+    // On the edge: clockwise on screen (y down), outward is the edge turned left.
+    n = normalize (vec2f (be.y, -be.x));
+  }
+  var r: Near;
+  r.d = sgn * dist;
+  r.n = n;
+  r.s = bs;
+  return r;
+}
 
 fn sd_box (q: vec2f, half: vec2f, r: f32) -> f32 {
   let d = abs (q) - half + vec2f (r);
@@ -107,16 +180,37 @@ fn bevel_slope (t: f32) -> f32 {
   let half = 0.5 * in.rect.zw;
   let q = in.p - (in.rect.xy + half);
   let r = min (in.shape.x, min (half.x, half.y));
-  let d = sd_box (q, half, r);
-  let cover = clamp (0.5 - d, 0.0, 1.0);
+  let shaped = in.outline.y > 0.0;
+  // Distance, outward normal and border position: exact for the rounded rect, from the
+  // polygon for an outline.
+  var d: f32;
+  var gn: vec2f;
+  var near: Near;
+  if (shaped) {
+    near = outline_near (in.p, in.outline, k);
+    d = near.d;
+    gn = near.n;
+  } else {
+    d = sd_box (q, half, r);
+    gn = grad_box (q, half, r);
+  }
+  let cover = clamp (0.5 - d * glass_aa (in.clip.xy), 0.0, 1.0);
   let dark = in.shape.w;
   let opacity = in.anim.w;
+  // Screen directions in the panel frame: the light and the shadow's drop.
+  let turn = transpose (glass_turn ());
 
   // Drop shadow, outside the panel only: the glass is see-through, so a shadow under it
   // would darken the backdrop the blur shows.
   var shadow = 0.0;
   if (in.shadow.x > 0.0) {
-    let ds = sd_box (q - vec2f (0.0, in.shadow.z * k), half, r);
+    let drop = turn * vec2f (0.0, in.shadow.z * k);
+    var ds: f32;
+    if (shaped) {
+      ds = outline_near (in.p - drop, in.outline, k).d;
+    } else {
+      ds = sd_box (q - drop, half, r);
+    }
     let blur = max (in.shadow.y * k, 1.0);
     shadow = in.shadow.x * exp (-pow (max (ds, 0.0) / blur, 2.0)) * smoothstep (-blur, 0.0, ds);
     shadow *= 1.0 - cover;
@@ -129,11 +223,11 @@ fn bevel_slope (t: f32) -> f32 {
   // Bevel: normal tilted outward along the SDF gradient.
   let bw = max (in.fx.x * k, 1.0);
   let t = clamp (inside / bw, 0.0, 1.0);
-  let gn = grad_box (q, half, r);
   let n = normalize (vec3f (gn * bevel_slope (t), 1.0));
 
-  // Light from the upper left, a little in front.
-  let l = normalize (vec3f (-0.45, -0.75, 0.55));
+  // Light from the upper left of the screen, a little in front.
+  let l0 = normalize (vec3f (-0.45, -0.75, 0.55));
+  let l = vec3f (turn * l0.xy, l0.z);
   let h = normalize (l + vec3f (0.0, 0.0, 1.0));
   let spec = pow (max (dot (n, h), 0.0), 48.0);
   let fres = 0.04 + 0.96 * pow (1.0 - n.z, 5.0);
@@ -187,8 +281,15 @@ fn bevel_slope (t: f32) -> f32 {
   // at an even speed, on the edge line plus a short inner glow.
   var orbit = vec3f (0.0);
   if (in.anim.x >= 0.0) {
-    let total = 4.0 * (half.x + half.y - 2.0 * r) + 6.2831853 * r;
-    let behind = fract (in.anim.x - border_param (q, half, r)) * total;
+    var total = 4.0 * (half.x + half.y - 2.0 * r) + 6.2831853 * r;
+    var at = 0.0;
+    if (shaped) {
+      total = in.outline.w * k;
+      at = fract ((near.s - in.outline.z * k) / max (total, 1e-3));
+    } else {
+      at = border_param (q, half, r);
+    }
+    let behind = fract (in.anim.x - at) * total;
     let ahead = total - behind;
     let tail = 0.16 * total;
     let along = exp (-behind / tail) + exp (-pow (ahead / (3.0 * k), 2.0));

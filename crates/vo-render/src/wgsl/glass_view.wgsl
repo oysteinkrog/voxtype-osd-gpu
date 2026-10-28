@@ -8,6 +8,25 @@ struct View {
 };
 
 @group(0) @binding(0) var<uniform> view: View;
+// Outline points (EG-06): x, y and arc length in logical pixels.
+@group(0) @binding(1) var<storage, read> glass_points: array<vec4f>;
+
+fn glass_point (i: u32) -> vec4f {
+  return glass_points[i];
+}
+
+fn glass_origin () -> vec2f {
+  return vec2f (0.0);
+}
+
+// Panels here are never turned.
+fn glass_turn () -> mat2x2f {
+  return mat2x2f (vec2f (1.0, 0.0), vec2f (0.0, 1.0));
+}
+
+fn glass_aa (frag: vec2f) -> f32 {
+  return 1.0;
+}
 
 @vertex fn vs_glass (@builtin(vertex_index) vi: u32, g: GlassIn) -> GlassOut {
   let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
@@ -26,6 +45,7 @@ struct View {
   o.anim = g.anim;
   o.fx = g.fx;
   o.shadow = g.shadow;
+  o.outline = g.outline;
   return o;
 }
 

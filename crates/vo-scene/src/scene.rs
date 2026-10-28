@@ -1807,6 +1807,7 @@ impl<M> Scene<M> {
                 orbit_strength,
                 to_surface: out.layers[layer as usize].transform,
                 surface_alpha: alpha * layer_chain_opacity(&out.layers, layer),
+                outline: None,
             });
         }
         let firsts = [out.shapes.len(), out.glyphs.len(), out.vectors.len()];

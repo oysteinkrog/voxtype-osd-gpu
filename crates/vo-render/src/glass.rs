@@ -1,5 +1,9 @@
 //! Glass panels (FX06), their animated rim (FX08) and the compositor blur region (FX07).
 //!
+//! A panel is its rounded rect or any outline (EG-06, [`GlassShape`] or a filled path in
+//! [`GlassInstance::outline`]); the outline goes to the shader as a polygon. Inside the
+//! renderer's display list pass glass also follows rotated and perspective-tilted layers.
+//!
 //! [`Glass`] is the material (defined in `vo_scene::glass`, so elements can ask for it):
 //! tint, alphas, accent and light settings, with a dark and a light preset. [`GlassDraw`] is one panel at one instant. [`GlassPass`] draws a batch of
 //! them as instanced quads into a target, either before the panel content ([`GlassBlend::Over`])
@@ -12,7 +16,9 @@
 
 use vo_scene::display::InputRegion;
 use vo_scene::geom::Color;
-pub use vo_scene::glass::{blur_rects, Glass, GlassInstance, GlassKind};
+pub use vo_scene::glass::{blur_rects, push_outline, Glass, GlassInstance, GlassKind, GlassShape};
+use vo_scene::geom::Point;
+use vo_scene::path::VectorSeg;
 
 use crate::color::srgb_to_linear;
 
@@ -36,8 +42,9 @@ pub struct GlassDraw {
 
 impl GlassDraw {
     /// The draw for a display list item whose layer maps its space to target logical units
-    /// by a scale `k` and an offset `(dx, dy)`. Glass is drawn axis-aligned; rotation in the
-    /// layer transform is not supported.
+    /// by a scale `k` and an offset `(dx, dy)`. [`GlassPass`] draws axis-aligned and follows
+    /// `glass.shape`, not a path outline; the renderer's display list pass does both and
+    /// follows rotated and tilted layers.
     pub fn from_instance(g: &GlassInstance, k: f32, dx: f32, dy: f32, opacity: f32, blur_behind: bool) -> GlassDraw {
         GlassDraw {
             rect: [g.rect[0] * k + dx, g.rect[1] * k + dy, g.rect[2] * k, g.rect[3] * k],
@@ -95,13 +102,13 @@ pub fn glass_layer_shader_source() -> String {
 /// [`GlassPass`] in layer units, with the layer block doing the mapping to pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GlassGpu([f32; 28]);
+pub struct GlassGpu([f32; 32]);
 
 impl GlassGpu {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-            6 => Float32x4
+            6 => Float32x4, 7 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: INSTANCE,
@@ -110,9 +117,12 @@ impl GlassGpu {
         }
     }
 
-    /// `g` with `opacity` (the layer's) multiplied into its alpha.
-    pub fn new(g: &GlassInstance, opacity: f32) -> GlassGpu {
-        GlassGpu(instance(&GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind), 1.0))
+    /// `g` with `opacity` (the layer's) multiplied into its alpha. A shaped panel appends
+    /// its outline to `points` (x, y, arc length, 0 in layer units), which the pass binds as
+    /// group 0; `segs` is the display list's `vector_segs`, for a path outline.
+    pub fn new(g: &GlassInstance, opacity: f32, segs: &[VectorSeg], points: &mut Vec<[f32; 4]>) -> GlassGpu {
+        let outline = g.outline_points(segs).map_or([0.0; 4], |pts| push_points(&pts, g.rect, points));
+        GlassGpu(instance(&GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind), 1.0, outline))
     }
 
     /// Layer-space bounds of what the panel draws, shadow included: x0, y0, x1, y1.
@@ -123,12 +133,38 @@ impl GlassGpu {
     }
 }
 
-/// Bytes per instance: seven vec4.
-const INSTANCE: u64 = 7 * 16;
+/// Bytes per instance: eight vec4.
+const INSTANCE: u64 = 8 * 16;
+
+/// Appends the closed polygon `pts` to `out` as x, y and the arc length at each point, and
+/// returns the instance's outline block: first point, count, the arc length of the point
+/// nearest the top centre of `rect` (where the orbit's turn starts) and the perimeter.
+fn push_points(pts: &[Point], rect: [f32; 4], out: &mut Vec<[f32; 4]>) -> [f32; 4] {
+    let first = out.len();
+    let n = pts.len();
+    let top = Point::new(rect[0] + 0.5 * rect[2], rect[1]);
+    let (mut s, mut best, mut s_top) = (0.0f32, f32::INFINITY, 0.0f32);
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        out.push([a.x, a.y, s, 0.0]);
+        let (ex, ey) = (b.x - a.x, b.y - a.y);
+        let len = ex.hypot(ey);
+        let h = (((top.x - a.x) * ex + (top.y - a.y) * ey) / (len * len).max(1e-12)).clamp(0.0, 1.0);
+        let d = (a.x + ex * h - top.x).hypot(a.y + ey * h - top.y);
+        if d < best {
+            (best, s_top) = (d, s + h * len);
+        }
+        s += len;
+    }
+    [first as f32, n as f32, s_top, s]
+}
 
 pub struct GlassPass {
     pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
     view: wgpu::Buffer,
+    /// Outline points and the bind group that holds them with `view`.
+    points: wgpu::Buffer,
     bind: wgpu::BindGroup,
     instances: Option<wgpu::Buffer>,
     count: u32,
@@ -143,16 +179,28 @@ impl GlassPass {
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vo-glass"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vo-glass"),
@@ -166,7 +214,7 @@ impl GlassPass {
         let comp = wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add };
         let attributes = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-            6 => Float32x4
+            6 => Float32x4, 7 => Float32x4
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vo-glass"),
@@ -203,12 +251,9 @@ impl GlassPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-glass"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: view.as_entire_binding() }],
-        });
-        GlassPass { pipeline, view, bind, instances: None, count: 0, encode_srgb: !format.is_srgb() }
+        let points = points_buffer(device, 256);
+        let bind = bind_group(device, &layout, &view, &points);
+        GlassPass { pipeline, layout, view, points, bind, instances: None, count: 0, encode_srgb: !format.is_srgb() }
     }
 
     /// Uploads `draws` for a target of `size` physical pixels at `scale` physical pixels per
@@ -224,8 +269,18 @@ impl GlassPass {
         let view = [size[0] as f32, size[1] as f32, if self.encode_srgb { 1.0 } else { 0.0 }, 0.0];
         queue.write_buffer(&self.view, 0, &floats(&view));
         let mut data = Vec::with_capacity(draws.len() * INSTANCE as usize);
+        let mut points = Vec::new();
         for d in draws {
-            data.extend_from_slice(&floats(&instance(d, scale)));
+            let outline = d.glass.shape.points(d.rect, d.radius).map_or([0.0; 4], |pts| push_points(&pts, d.rect, &mut points));
+            data.extend_from_slice(&floats(&instance(d, scale, outline)));
+        }
+        if !points.is_empty() {
+            let bytes: Vec<u8> = points.iter().flat_map(floats).collect();
+            if self.points.size() < bytes.len() as u64 {
+                self.points = points_buffer(device, (bytes.len() as u64).next_power_of_two());
+                self.bind = bind_group(device, &self.layout, &self.view, &self.points);
+            }
+            queue.write_buffer(&self.points, 0, &bytes);
         }
         self.count = draws.len() as u32;
         if data.is_empty() {
@@ -279,11 +334,38 @@ impl GlassPass {
     }
 }
 
+fn points_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("vo-glass-points"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::Buffer,
+    points: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vo-glass"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: view.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: points.as_entire_binding() },
+        ],
+    })
+}
+
 fn floats<const N: usize>(v: &[f32; N]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-fn instance(d: &GlassDraw, s: f32) -> [f32; 28] {
+/// The instance block of `d` at `s` physical pixels per logical pixel; `outline` from
+/// [`push_points`], in logical units (the shader scales it), or zero for the rounded rect.
+fn instance(d: &GlassDraw, s: f32, outline: [f32; 4]) -> [f32; 32] {
     let g = &d.glass;
     let lin = |c: Color| [srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)];
     let (tint, accent) = (lin(g.tint), lin(g.accent));
@@ -316,6 +398,10 @@ fn instance(d: &GlassDraw, s: f32) -> [f32; 28] {
         g.shadow[1],
         g.shadow[2],
         if d.blur_behind { 1.0 } else { 0.0 },
+        outline[0],
+        outline[1],
+        outline[2],
+        outline[3],
     ]
 }
 

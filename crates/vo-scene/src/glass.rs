@@ -11,7 +11,9 @@
 use serde::Serialize;
 
 use crate::display::{DisplayList, IRect, InputRegion};
-use crate::geom::{Affine, Color, Point};
+use crate::frame::{Corner, Frame};
+use crate::geom::{Affine, Color, Point, Size};
+use crate::path::{Contour, VectorSeg};
 
 /// The sheen crosses the panel once in this many seconds after it enters.
 pub const SHEEN_SECS: f64 = 0.55;
@@ -59,6 +61,140 @@ pub struct Glass {
     pub orbit: bool,
     /// Ask the compositor to blur the desktop behind the panel, where it can.
     pub blur_behind: bool,
+    /// The outline the glass follows (EG-06). Tint, bevel, rim light, sheen and the orbiting
+    /// rim all follow it. The default is the panel's rounded rect.
+    pub shape: GlassShape,
+}
+
+/// The outline of a glass panel (EG-06), laid out in the panel's box. A display list item
+/// can instead carry any filled path ([`GlassInstance::outline`]).
+///
+/// Any shape but [`GlassShape::Rounded`] is drawn from a polygon: curves are flattened to
+/// within about a tenth of a pixel at 1x. The compositor blur region of a shaped panel is its
+/// bounding box (EG-07 shapes it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub enum GlassShape {
+    /// The panel's rounded rect, with its corner radius.
+    #[default]
+    Rounded,
+    /// Each corner square, chamfered, rounded or notched (as [`Frame`] corners), clockwise
+    /// from the top left.
+    Corners(#[serde(serialize_with = "debug_corners")] [Corner; 4]),
+    /// The ellipse filling the box: a circle in a square box.
+    Ellipse,
+    /// A regular polygon with `sides` corners on the box's ellipse, the first at the top,
+    /// turned clockwise by `turn` of a full turn. Three sides make a prism's face.
+    Polygon { sides: u32, turn: f32 },
+    /// The rounded rect with edges that wave in and out by `amplitude`, one wave about every
+    /// `wavelength` (rounded so whole waves close the loop). The waves stay inside the box.
+    Wavy { amplitude: f32, wavelength: f32 },
+}
+
+fn debug_corners<S: serde::Serializer>(c: &[Corner; 4], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{c:?}"))
+}
+
+impl GlassShape {
+    /// Every corner cut at 45 degrees, `size` along each edge: an octagon.
+    pub const fn chamfer(size: f32) -> GlassShape {
+        GlassShape::Corners([Corner::Chamfer(size); 4])
+    }
+
+    /// The outline in `rect` (x, y, w, h) clockwise on screen, or `None` for the rounded rect,
+    /// which the shader draws exactly. `radius` is the panel's corner radius, used by
+    /// [`GlassShape::Wavy`].
+    pub fn points(&self, rect: [f32; 4], radius: f32) -> Option<Vec<Point>> {
+        let [x, y, w, h] = rect;
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let at = |p: Point| Point::new(x + p.x, y + p.y);
+        let oval = |n: usize, turn: f32| -> Vec<Point> {
+            (0..n)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * (turn + i as f32 / n as f32) - std::f32::consts::FRAC_PI_2;
+                    Point::new(x + 0.5 * w * (1.0 + a.cos()), y + 0.5 * h * (1.0 + a.sin()))
+                })
+                .collect()
+        };
+        let pts = match *self {
+            GlassShape::Rounded => return None,
+            GlassShape::Corners(c) => Frame::new().corners(c).outline(Size::new(w, h)).into_iter().map(at).collect(),
+            GlassShape::Ellipse => {
+                // Enough points that the chord sits within 0.1 px of the curve at 1x.
+                let r = 0.5 * w.max(h);
+                let n = ((std::f32::consts::PI / (1.0 - 0.1 / r.max(0.2)).clamp(-1.0, 1.0).acos()).ceil() as usize).clamp(16, 160);
+                oval(n, 0.0)
+            }
+            GlassShape::Polygon { sides, turn } => oval(sides.max(3) as usize, turn),
+            GlassShape::Wavy { amplitude, wavelength } => {
+                wavy(rect, radius, amplitude.abs(), wavelength.max(2.0))
+            }
+        };
+        (pts.len() >= 3).then(|| clockwise(pts))
+    }
+}
+
+/// The rounded rect `rect` inset by `amp`, its edge moved along its normal by a sine.
+fn wavy(rect: [f32; 4], radius: f32, amp: f32, wavelength: f32) -> Vec<Point> {
+    let [x, y, w, h] = rect;
+    let (iw, ih) = (w - 2.0 * amp, h - 2.0 * amp);
+    if iw <= 0.0 || ih <= 0.0 {
+        return Vec::new();
+    }
+    let r = (radius - amp).clamp(0.0, 0.5 * iw.min(ih));
+    let base: Vec<Point> = Frame::new()
+        .corners([Corner::Round(r); 4])
+        .outline(Size::new(iw, ih))
+        .into_iter()
+        .map(|p| Point::new(x + amp + p.x, y + amp + p.y))
+        .collect();
+    let n = base.len();
+    let mut cum = Vec::with_capacity(n + 1);
+    cum.push(0.0f32);
+    for i in 0..n {
+        let (a, b) = (base[i], base[(i + 1) % n]);
+        cum.push(cum[i] + (b.x - a.x).hypot(b.y - a.y));
+    }
+    let total = cum[n];
+    let waves = (total / wavelength).round().max(1.0);
+    let samples = (waves as usize * 16).clamp(32, 512);
+    // Base point at arc length `s`.
+    let at = |s: f32| -> Point {
+        let s = s.rem_euclid(total);
+        let i = cum.partition_point(|c| *c <= s).saturating_sub(1).min(n - 1);
+        let (a, b) = (base[i], base[(i + 1) % n]);
+        let t = ((s - cum[i]) / (cum[i + 1] - cum[i]).max(1e-6)).clamp(0.0, 1.0);
+        Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+    };
+    let step = total / samples as f32;
+    (0..samples)
+        .map(|i| {
+            let s = i as f32 * step;
+            let p = at(s);
+            // The normal from a central difference, so it turns smoothly round the corners.
+            let (p0, p1) = (at(s - 0.5 * step), at(s + 0.5 * step));
+            let (tx, ty) = (p1.x - p0.x, p1.y - p0.y);
+            let len = tx.hypot(ty).max(1e-6);
+            // Clockwise on screen (y down): outward is the tangent turned left.
+            let (nx, ny) = (ty / len, -tx / len);
+            let k = amp * (std::f32::consts::TAU * waves * s / total).sin();
+            Point::new(p.x + nx * k, p.y + ny * k)
+        })
+        .collect()
+}
+
+/// `pts` turned clockwise on screen (y down), if they run the other way.
+fn clockwise(mut pts: Vec<Point>) -> Vec<Point> {
+    let n = pts.len();
+    let twice_area: f32 = (0..n).map(|i| {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        a.x * b.y - b.x * a.y
+    }).sum();
+    if twice_area < 0.0 {
+        pts.reverse();
+    }
+    pts
 }
 
 impl Glass {
@@ -78,6 +214,7 @@ impl Glass {
             sheen: true,
             orbit: false,
             blur_behind: true,
+            shape: GlassShape::Rounded,
         }
     }
 
@@ -96,7 +233,14 @@ impl Glass {
             sheen: true,
             orbit: false,
             blur_behind: true,
+            shape: GlassShape::Rounded,
         }
+    }
+
+    /// The same glass following `shape` (EG-06).
+    pub const fn with_shape(mut self, shape: GlassShape) -> Glass {
+        self.shape = shape;
+        self
     }
 
     /// The same glass with the orbiting rim on.
@@ -193,6 +337,62 @@ pub struct GlassInstance {
     pub to_surface: Affine,
     /// The panel's opacity on the surface: `alpha` times every enclosing layer's opacity.
     pub surface_alpha: f32,
+    /// Any filled path as the outline (EG-06): a range `[first, count]` into
+    /// `DisplayList::vector_segs` holding one closed contour in the layer's space, made by
+    /// [`push_outline`]. It wins over `glass.shape`. `rect` must hold it: it bounds the draw
+    /// and lays out the sheen. `None` uses `glass.shape`.
+    pub outline: Option<[u32; 2]>,
+}
+
+impl GlassInstance {
+    /// Whether the panel is something other than its rounded rect.
+    pub fn is_shaped(&self) -> bool {
+        self.outline.is_some() || self.glass.shape != GlassShape::Rounded
+    }
+
+    /// The outline as a polygon in the layer's space, clockwise on screen, or `None` for the
+    /// rounded rect. `segs` is the list's `vector_segs`.
+    pub fn outline_points(&self, segs: &[VectorSeg]) -> Option<Vec<Point>> {
+        let Some([first, count]) = self.outline else {
+            return self.glass.shape.points(self.rect, self.radius);
+        };
+        let segs = segs.get(first as usize..(first + count) as usize)?;
+        let mut pts = Vec::with_capacity(segs.len());
+        for s in segs {
+            // A straight segment has its control point on the chord; a curved one is cut in
+            // pieces, one per 2 layer units of bend.
+            let mid = Point::new(0.5 * (s.p0.x + s.p2.x), 0.5 * (s.p0.y + s.p2.y));
+            let bend = (s.p1.x - mid.x).hypot(s.p1.y - mid.y);
+            let n = if bend < 0.05 { 1 } else { ((bend / 2.0).sqrt().ceil() as usize * 4).clamp(4, 32) };
+            for i in 0..n {
+                let t = i as f32 / n as f32;
+                let u = 1.0 - t;
+                let q = |a: f32, b: f32, c: f32| u * u * a + 2.0 * u * t * b + t * t * c;
+                pts.push(Point::new(q(s.p0.x, s.p1.x, s.p2.x), q(s.p0.y, s.p1.y, s.p2.y)));
+            }
+        }
+        (pts.len() >= 3).then(|| clockwise(pts))
+    }
+}
+
+/// Appends `contour` (closed by a straight line if open) to `list.vector_segs` as a glass
+/// outline. Returns the range for [`GlassInstance::outline`] and the contour's bounding rect
+/// (x, y, w, h) for [`GlassInstance::rect`].
+pub fn push_outline(list: &mut DisplayList, contour: &Contour) -> ([u32; 2], [f32; 4]) {
+    let first = list.vector_segs.len() as u32;
+    list.vector_segs.extend_from_slice(&contour.segs);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for s in &contour.segs {
+        // A quadratic stays inside its control triangle.
+        for p in [s.p0, s.p1, s.p2] {
+            (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+        }
+    }
+    let count = list.vector_segs.len() as u32 - first;
+    if count == 0 {
+        return ([first, 0], [0.0; 4]);
+    }
+    ([first, count], [x0, y0, x1 - x0, y1 - y0])
 }
 
 /// Rectangles covering a rounded rect, one band per pixel row of the corner radius, each
@@ -218,7 +418,7 @@ pub fn blur_rects(rect: [f32; 4], radius: f32, out: &mut Vec<IRect>) {
 impl DisplayList {
     /// The compositor blur region in surface logical pixels: the union of the glass panels
     /// that ask for blur behind and are at least [`BLUR_MIN_ALPHA`] opaque. Empty when there
-    /// are none. A rotated layer gets its bounding box.
+    /// are none. A rotated layer gets its bounding box, and so does a shaped panel (EG-06).
     pub fn blur_region(&self) -> InputRegion {
         let mut rects = Vec::new();
         for g in self.glass.iter().filter(|g| g.glass.blur_behind && g.surface_alpha >= BLUR_MIN_ALPHA) {
@@ -229,7 +429,8 @@ impl DisplayList {
             let k = (m.a * m.a + m.b * m.b).sqrt();
             let (x0, y0) = (p0.x.min(p1.x), p0.y.min(p1.y));
             let r = [x0, y0, (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            blur_rects(r, if m.is_axis_aligned() { g.radius * k } else { 0.0 }, &mut rects);
+            let rounded = m.is_axis_aligned() && !g.is_shaped();
+            blur_rects(r, if rounded { g.radius * k } else { 0.0 }, &mut rects);
         }
         InputRegion { rects }
     }
