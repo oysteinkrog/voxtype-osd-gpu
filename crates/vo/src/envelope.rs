@@ -397,7 +397,7 @@ impl Tracker {
                 let dy = (s.pos.y - r.pos.y).abs();
                 if dy >= 0.5 * r.em {
                     flag(Breach::OffRow(dy));
-                } else if dy > env.baseline_px {
+                } else if dy > env.baseline_px + REST_SLACK_PX {
                     flag(Breach::Baseline(dy));
                 }
                 if r.ink > 1e-3 && s.ink < env.ink * r.ink {
@@ -442,15 +442,12 @@ impl Tracker {
     }
 }
 
-/// For each sample of `tr`, the first sample at or after it where the glyph is at rest, or
-/// `None` when it disappears before resting again. A glyph still drawn in the last frame
-/// rests at its last sample if nowhere sooner, so a short scenario does not hide arrivals.
-/// Per sample, where the glyph comes to rest. That is the next still sample, unless the
-/// sample is part of a hold on one row (at least `still_frames` samples, each within
-/// [`ROW_STILL_PX`] of the next in height) that ends half an em or more from that rest. A word
-/// still settling onto its row when the text scrolls a line, or on a centred line that keeps
-/// gliding along its row until it rolls away, rests on that row at the end of the hold, not
-/// on the row the text takes it to.
+/// Per sample, where the glyph comes to rest. That is the next still sample ([`rest_of`]),
+/// unless the sample is part of a hold on one row (at least `still_frames` samples, each
+/// within [`ROW_STILL_PX`] of the next in height) whose stillest sample is half an em or more
+/// from that rest. A word still settling onto its row when the text scrolls a line, or on a
+/// centred line that keeps gliding along its row until it rolls away, rests on that row
+/// where it is stillest, not on the row the text takes it to.
 fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>> {
     let mut rests = rest_of(tr, env, last_frame);
     let len = tr.samples.len();
@@ -463,10 +460,17 @@ fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>>
             e += 1;
         }
         if e + 1 - i >= env.still_frames.max(1) {
-            let end = &tr.samples[e];
+            // The stillest sample of the hold in height, the latest of equals: the word has
+            // settled most there, before the scroll that ends the hold sets off.
+            let speed = |j: usize| match j {
+                _ if j == i || tr.samples[j].ink < REST_INK => f32::MAX,
+                _ => (tr.samples[j].pos.y - tr.samples[j - 1].pos.y).abs(),
+            };
+            let calm = (i..=e).fold(i, |b, j| if speed(j) <= speed(b) + 0.01 { j } else { b });
+            let end = &tr.samples[calm];
             for rest in &mut rests[i..=e] {
                 if rest.is_some_and(|r| (tr.samples[r].pos.y - end.pos.y).abs() >= 0.5 * end.em) {
-                    *rest = Some(e);
+                    *rest = Some(calm);
                 }
             }
         }
@@ -478,17 +482,34 @@ fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>>
 /// Vertical movement per frame under which a glyph holds its row, in logical pixels.
 const ROW_STILL_PX: f32 = 1.5;
 
+/// How far a measured rest can be from where the glyph would settle, in logical pixels. A
+/// spring that overshoots creeps back by a few hundredths a frame, which counts as still, and
+/// the text often moves on before it is done.
+const REST_SLACK_PX: f32 = 0.1;
+
+/// Ink under which a glyph is gone to the eye. The faded tail of an exit is still, but the
+/// glyph is leaving, not resting there.
+const REST_INK: f32 = 0.02;
+
+/// For each sample of `tr`, where the glyph next comes to rest (the end of the next run of
+/// still samples), or `None` when it disappears before resting again. A glyph never rests
+/// below [`REST_INK`]. A glyph still drawn in the last frame rests at its last sample if
+/// nowhere sooner, so a short scenario does not hide arrivals.
 fn rest_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>> {
     let len = tr.samples.len();
     let k = env.still_frames.max(1);
     let mut still = vec![false; len];
     for (i, flag) in still.iter_mut().enumerate() {
-        *flag = i + k <= len && (i..i + k - 1).all(|j| tr.samples[j].still(&tr.samples[j + 1], env.still_px));
+        *flag = i + k <= len
+            && tr.samples[i].ink >= REST_INK
+            && (i..i + k - 1).all(|j| tr.samples[j].still(&tr.samples[j + 1], env.still_px));
     }
     let mut out = vec![None; len];
-    let mut next = (tr.last_frame() == last_frame).then_some(len - 1);
+    let mut next = (tr.last_frame() == last_frame && tr.samples[len - 1].ink >= REST_INK).then_some(len - 1);
     for i in (0..len).rev() {
-        if still[i] {
+        // A run of still samples rests at its end: a spring that overshoots is still for a
+        // moment at its turn, and then creeps back to where it settles.
+        if still[i] && !still.get(i + 1).copied().unwrap_or(false) {
             next = Some(i);
         }
         out[i] = next;
@@ -843,6 +864,50 @@ mod tests {
         // A word that slides a whole row while it arrives is still off its row.
         let r = run(6.0);
         assert!(before(&r) > 0, "{r}");
+    }
+
+    /// Word 1 resting, then word 2 drawn from frame 4 on at `at(k)` = `(dy, alpha)` in its
+    /// k-th frame, for `frames` frames in all.
+    fn track(frames: usize, at: impl Fn(usize) -> (f32, f32)) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..frames {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if n >= 4 {
+                let (dy, a) = at(n - 4);
+                g.extend(word(2, 50.0, 40.0 + dy, 9.0, a));
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default())
+    }
+
+    #[test]
+    fn a_spring_that_overshoots_rests_where_it_creeps_back_to() {
+        // Arrives 3 px low, overshoots by 0.3 px, then creeps back 0.04 px a frame.
+        const PATH: [f32; 12] = [3.0, 1.2, -0.2, -0.3, -0.3, -0.26, -0.22, -0.18, -0.14, -0.1, -0.06, -0.02];
+        let r = track(30, |k| (PATH.get(k).copied().unwrap_or(0.0), 1.0));
+        // Against the turn of the overshoot it would be 3.3 px off its rest.
+        r.assert_ok();
+    }
+
+    #[test]
+    fn a_word_still_rising_when_the_scroll_sets_off_rests_where_it_was_stillest() {
+        // Settles from 3 px low, then the block scrolls up a row; its first step is small.
+        const PATH: [f32; 8] = [3.0, 2.0, 1.2, 0.6, 0.25, 0.1, 0.05, -1.15];
+        let r = track(30, |k| (PATH.get(k).copied().unwrap_or(-24.0), 1.0));
+        let before = r.violations.iter().filter(|v| v.frame < 11).count();
+        assert_eq!(before, 0, "{r}");
+    }
+
+    #[test]
+    fn the_faded_tail_of_an_exit_is_not_a_rest() {
+        // Rests, then rises 8 px while it fades out, and lingers almost clear.
+        let r = track(40, |k| match k {
+            0..=8 => (0.0, 1.0),
+            9..=14 => (-(k as f32 - 8.0) * 8.0 / 6.0, 1.0 - (k as f32 - 8.0) / 6.2),
+            _ => (-8.0, 0.004 - (k as f32 - 15.0) * 0.0001),
+        });
+        r.assert_ok();
     }
 
     #[test]

@@ -772,7 +772,7 @@ impl Flow {
                     self.drop_hold = Some((p.line, t + overflow::DROP_HOLD));
                     for g in &mut glyphs {
                         g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
-                        g.opacity.retarget(t + overflow::DROP_HOLD, 1.0);
+                        g.opacity.snap(t + overflow::DROP_HOLD, 1.0);
                     }
                 }
                 // A word that joins, in a later update, a line whose words are still held
@@ -781,7 +781,7 @@ impl Flow {
                 if let Some((_, until)) = held.filter(|_| !reduced && !dropped) {
                     for g in &mut glyphs {
                         g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
-                        g.opacity.retarget(until, 1.0);
+                        g.opacity.snap(until, 1.0);
                     }
                 }
                 next.push(FlowWord {

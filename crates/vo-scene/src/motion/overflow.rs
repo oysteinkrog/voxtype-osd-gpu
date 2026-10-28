@@ -67,6 +67,8 @@ impl Fold {
 /// scrolls out of its row, then shows whole in one frame: the reading line never moves and
 /// text never crosses text.
 pub const DROP_HOLD: f64 = 0.12;
+/// The spring of a held word's opacity. The release itself is a snap, so no frame catches
+/// the word half shown.
 pub const DROP_STEP: vo_core::spring::Spring = vo_core::spring::Spring::critical_to_98(0.02);
 
 /// Share of the duration after which the line fades out, as it nears edge-on.

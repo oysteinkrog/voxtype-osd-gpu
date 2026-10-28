@@ -370,7 +370,7 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
     let line = first(&before, kept[0].0).1 - first(&settled, kept[0].0).1;
     assert!(line > 10.0, "the block moves up a line: {line}");
 
-    for t in [1.0, 1.03, 1.08, 1.15] {
+    for t in [1.0, 1.03, 1.08, 1.121, 1.15] {
         let f = s.sample(t);
         // The new word is on the reading line: it waits while the line before scrolls out of
         // its row, then shows whole at its place, never sliding (MO-33, reading-line envelope).
@@ -378,7 +378,8 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
         if t < 1.0 + vo_scene::flow::overflow::DROP_HOLD {
             assert!(new.is_empty(), "at {t} the new word waits");
         } else {
-            assert!(!new.is_empty() && new.iter().all(|g| g.color.a > 0.7), "at {t} the new word shows whole");
+            // In one step, so no frame catches it half shown.
+            assert!(!new.is_empty() && new.iter().all(|g| g.color.a > 0.999), "at {t} the new word shows whole");
             assert!((first(&f, 11).1 - first(&settled, 11).1).abs() < 1e-3, "at {t} the new word is in place");
         }
         // Every kept word is the same distance below its new place, with no sideways move.
