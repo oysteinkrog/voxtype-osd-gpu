@@ -83,6 +83,7 @@ impl Flow {
         graphemes: &[u32],
         make: &Make,
         reduced: bool,
+        joins: bool,
     ) {
         let t = make.t;
         let old_g: Vec<&str> = o.text.graphemes(true).collect();
@@ -122,7 +123,9 @@ impl Flow {
                     self.palimpsest_ghost(word, &g, s, make, false, false);
                     make.enter(n, gr, (0.0, 0.0, 1.0), CROSSFADE)
                 }
-                None => make.enter(n, gr, (ARRIVE_INK, 0.0, 1.0), ARRIVE),
+                // A letter that joins a word still fading in takes the word's fade, like the
+                // letters already there, so it is never fainter than they are (RD-04).
+                None => make.enter(n, gr, (if joins { 1.0 } else { ARRIVE_INK }, 0.0, 1.0), ARRIVE),
             };
             glyphs.push(g);
         }

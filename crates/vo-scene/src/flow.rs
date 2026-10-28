@@ -320,6 +320,10 @@ pub(crate) struct FlowInput<'a> {
     pub crossfade: bool,
     /// Width of the text box, for the margin bell.
     pub width: f32,
+    /// Words whose enter fade still runs. A letter that joins such a word comes in at full
+    /// ink of its own, so it rides the word's fade with the letters already there instead
+    /// of starting a fade of its own on top (RD-04).
+    pub entering: Vec<WordId>,
 }
 
 /// Where a word is on screen, sprung toward where the layout put it.
@@ -701,7 +705,7 @@ impl Make {
 impl Flow {
     /// Takes the new layout of the node's words at `t` and springs every word toward it.
     pub fn update(&mut self, t: f64, input: FlowInput<'_>) {
-        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width } = input;
+        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width, entering } = input;
         self.size = size;
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
@@ -821,14 +825,16 @@ impl Flow {
             if revised {
                 o.revisions += 1;
                 arrived = true;
-                let diffed = revise == Revise::Glyphs && self.revise_glyphs(&mut o, w, &p, &graphemes, &make, motion);
+                let joins = entering.contains(&w.id);
+                let diffed =
+                    revise == Revise::Glyphs && self.revise_glyphs(&mut o, w, &p, &graphemes, &make, motion, joins);
                 if !diffed {
                     match revise {
                         Revise::Swap => {
                             o.glyphs = p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                             o.spread = false;
                         }
-                        Revise::Palimpsest => self.palimpsest(&mut o, w, &p, &graphemes, &make, reduced),
+                        Revise::Palimpsest => self.palimpsest(&mut o, w, &p, &graphemes, &make, reduced, joins),
                         Revise::Roll => self.roll(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Ghost => self.displace(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Crossfade | Revise::Glyphs => self.crossfade(&mut o, &p, &graphemes, &make),
@@ -1076,6 +1082,7 @@ impl Flow {
         graphemes: &[u32],
         make: &Make,
         motion: &LiveMotion,
+        joins: bool,
     ) -> bool {
         let t = make.t;
         let old_g: Vec<&str> = o.text.graphemes(true).collect();
@@ -1143,7 +1150,8 @@ impl Flow {
                 GraphemeOp::Enter if is_punct(new_g.get(gr as usize).copied().unwrap_or("")) => {
                     make.enter(n, gr, (1.0, 0.0, 0.0), GLYPH_POP)
                 }
-                GraphemeOp::Enter => make.enter(n, gr, (0.0, RISE_EMS, 1.0), GLYPH_ROLL),
+                // A letter that joins a word still fading in takes the word's fade (RD-04).
+                GraphemeOp::Enter => make.enter(n, gr, (if joins { 1.0 } else { 0.0 }, RISE_EMS, 1.0), GLYPH_ROLL),
             };
             glyphs.push(g);
         }
@@ -1609,6 +1617,116 @@ mod tests {
         assert_eq!(ops.iter().filter(|o| matches!(o, Kept(_))).count(), 4);
         assert_eq!(leaves.iter().filter(|l| **l).count(), 1);
         assert_eq!(ops.iter().filter(|o| **o == Enter).count(), 1);
+    }
+
+    /// RD-04: a live word that grows or shrinks while its enter fade runs.
+    mod growing_word {
+        use crate::arrival::{Arrival, INK};
+        use crate::element::{Element, Prop, TextStyle, Transition};
+        use crate::font::{test_font_path, FontRegistry};
+        use crate::text::ShapedLayout;
+        use crate::Scene;
+        use vo_core::spring::Spring;
+        use vo_core::words::Word;
+
+        const STEP: f64 = 1.0 / 120.0;
+
+        fn scene(reduced: bool) -> Scene<()> {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            Scene::new().with_text(Box::new(ShapedLayout::new(fonts))).with_reduced_motion(reduced)
+        }
+
+        fn view(text: &str, enter: Transition, arrival: Arrival) -> Element<()> {
+            let w = [Word { id: 1, text: text.into() }];
+            Element::column("root").child(
+                Element::live_text("live", &w)
+                    .text_style(TextStyle::new(0, 20.0, 26.0))
+                    .width(400.0)
+                    .motion(Prop::Opacity, Spring::critical_to_98(0.2))
+                    .motion(Prop::Offset, Spring::critical_to_98(0.25))
+                    .word_enter(enter)
+                    .word_arrival(arrival),
+            )
+        }
+
+        /// The ink of each letter of the word as it stands at `t` (ghosts of removed letters
+        /// come after the word's own glyphs and are left out).
+        /// A letter at no ink is not drawn: it counts as 0.
+        fn inks(s: &mut Scene<()>, letters: usize, t: f64) -> Vec<f32> {
+            let list = s.sample(t);
+            let mut own: Vec<f32> =
+                list.glyphs.iter().filter(|g| g.word == 1).map(|g| g.color.a).take(letters).collect();
+            own.resize(letters, 0.0);
+            own
+        }
+
+        /// Runs `steps` (text at time) and returns the lowest ink of any letter at any frame
+        /// up to `end`, and every letter's ink at `end`.
+        fn run(steps: &[(&str, f64)], enter: Transition, arrival: Arrival, reduced: bool, end: f64) -> (f32, Vec<f32>) {
+            let mut s = scene(reduced);
+            let mut low = f32::MAX;
+            for (i, &(text, at)) in steps.iter().enumerate() {
+                s.apply(view(text, enter, arrival), at);
+                let until = steps.get(i + 1).map_or(end, |n| n.1);
+                let letters = text.len();
+                let mut t = at;
+                while t < until - 1e-9 {
+                    low = inks(&mut s, letters, t).into_iter().fold(low, f32::min);
+                    t += STEP;
+                }
+            }
+            let last = steps.last().unwrap().0.len();
+            (low, inks(&mut s, last, end))
+        }
+
+        const GROW: &[(&str, f64)] = &[("hel", 0.0), ("hello", 0.05)];
+        const GROW_TWICE: &[(&str, f64)] = &[("he", 0.0), ("hell", 0.04), ("hello", 0.09)];
+        const SHRINK: &[(&str, f64)] = &[("hellos", 0.0), ("hello", 0.05)];
+        const ALL: [&[(&str, f64)]; 3] = [GROW, GROW_TWICE, SHRINK];
+
+        fn enters() -> [Transition; 3] {
+            [
+                Transition::fade().offset(0.0, 7.0),
+                Transition::fade().offset(0.0, 5.0).blur(3.0),
+                Transition::fade().opacity(0.7),
+            ]
+        }
+
+        #[test]
+        fn every_letter_reaches_full_ink_at_the_end_of_the_fade() {
+            for steps in ALL {
+                for enter in enters() {
+                    for arrival in [Arrival::Readable, Arrival::Free] {
+                        let (_, end) = run(steps, enter, arrival, false, 1.0);
+                        assert!(
+                            end.iter().all(|&a| a >= 1.0 - 1.0 / 255.0),
+                            "{steps:?} {enter:?} {arrival:?}: {end:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_readable_word_is_readable_in_every_frame() {
+            for steps in ALL {
+                for enter in enters() {
+                    let (low, _) = run(steps, enter, Arrival::Readable, false, 1.0);
+                    assert!(low >= INK - 1.0 / 255.0, "{steps:?} {enter:?}: lowest ink {low}");
+                }
+            }
+        }
+
+        #[test]
+        fn reduced_motion_holds_the_same_ink() {
+            // Reduced motion drops the travel and keeps the fade (`Transition::reduced`).
+            for steps in ALL {
+                let (low, end) = run(steps, Transition::fade().offset(0.0, 7.0), Arrival::Readable, true, 1.0);
+                assert!(low >= INK - 1.0 / 255.0, "{steps:?}: lowest ink {low}");
+                assert!(end.iter().all(|&a| a >= 1.0 - 1.0 / 255.0), "{steps:?}: {end:?}");
+            }
+        }
     }
 
     #[test]

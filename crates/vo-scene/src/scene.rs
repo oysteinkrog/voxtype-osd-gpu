@@ -1610,6 +1610,12 @@ impl<M> Scene<M> {
                     reduced: n.reduced,
                     crossfade: particles.is_none(),
                     width: l.size.width,
+                    entering: n
+                        .words
+                        .iter()
+                        .filter(|a| a.opacity.target() >= 1.0 && a.opacity.value(t) < 1.0 - 1e-4)
+                        .map(|a| a.id)
+                        .collect(),
                 };
                 n.live.update(t, input);
             }
