@@ -125,8 +125,11 @@ pub struct FontRegistry {
     /// Font files already read, by path: the faces of one collection share its bytes.
     files: Arc<RwLock<HashMap<PathBuf, Bytes>>>,
     /// Instances made by `add_instance`, by base font and axis values in hundredths.
-    instances: Arc<RwLock<HashMap<(FontId, Vec<([u8; 4], i32)>), FontId>>>,
+    instances: Arc<RwLock<HashMap<InstanceKey, FontId>>>,
 }
+
+/// A variable font instance: its base font and its axis values (tag, hundredths).
+type InstanceKey = (FontId, Vec<([u8; 4], i32)>);
 
 #[derive(Default)]
 struct Fallback {
