@@ -16,9 +16,10 @@
 use std::time::Instant;
 
 use vo::scene::depth_stack::{DepthStack, Place, Sheet};
+use vo::scene::displace::{Displace, Onset, Ripples};
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
-use vo::scene::geom::{Color, Size};
+use vo::scene::geom::{Color, Point, Size};
 use vo::scene::glass::{Glass, GlassShape};
 use vo::scene::material::Material;
 use vo::scene::path::StrokeStyle;
@@ -54,6 +55,8 @@ const CASES: &[&str] = &[
     "layer blur r8",
     "frost r8",
     "frost stack",
+    "displace ripples",
+    "displace noise",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -147,10 +150,21 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "backdrop half" => layer.backdrop(BackdropRes::Half, Color::hex(0xff6b6b, 1.0)),
         // A backdrop that only captures, read by the panel's material (EG-02).
         "material backdrop" => layer.backdrop(BackdropRes::Full, Color::TRANSPARENT),
+        // The stripes under the card drawn back displaced (EG-03): four rings alive at any
+        // time, one every 0.3 s, and a turning noise field.
+        "displace ripples" => {
+            let last = (t / 0.3).floor() * 0.3;
+            let onsets = (0..4).map(|n| Onset {
+                t: last - n as f64 * 0.3,
+                at: Point::new((80.0 + 90.0 * n as f32) * k, 60.0 * k),
+            });
+            layer.displace(Displace::Ripples(Ripples::new().onsets(onsets).amp(5.0 * k).speed(160.0 * k)))
+        }
+        "displace noise" => layer.displace(Displace::Noise { scale: 50.0 * k, amount: 4.0 * k, speed: 0.25, seed: 3 }),
         _ => layer,
     };
     let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
-    if !case.contains("backdrop") && !case.starts_with("frost") {
+    if !case.contains("backdrop") && !case.starts_with("frost") && !case.starts_with("displace") {
         return root.child(layer);
     }
     // Stripes under the card, so the tinted backdrop shows in the preview and the sheets.
