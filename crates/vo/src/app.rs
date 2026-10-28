@@ -59,6 +59,17 @@ pub trait App {
     fn main_surface(&self) -> Option<(Size, Placement)> {
         None
     }
+
+    /// The most frames a second the main surface needs now, read after every update. `None`
+    /// (the default) draws at every vblank while anything moves. With `Some(fps)` a live
+    /// overlay spaces its main surface's frames at least `1 / fps` apart: a message that
+    /// changes the view, or a scene that moves, waits for the next paced slot, and that frame
+    /// shows the newest state. For a quiet stretch the app knows of, such as a popup on room
+    /// tone (MOTION-PLAN rule 8: silence is idle). Return `None` again as soon as the quiet
+    /// ends: the next change then draws at once. Extra surfaces and offline runs ignore it.
+    fn frame_pace(&self) -> Option<f64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

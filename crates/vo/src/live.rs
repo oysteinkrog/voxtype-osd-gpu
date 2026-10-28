@@ -64,6 +64,8 @@ struct Live<A: App> {
     blur: Option<InputRegion>,
     /// When a capped-rate animation (glass at 30 fps, FX08) wants its next frame.
     paced: Option<f64>,
+    /// The time of the last main frame, for the app's frame pace (`App::frame_pace`).
+    last_frame: Option<f64>,
     frames: u64,
     extras: Vec<LiveExtra>,
     startup_logged: bool,
@@ -81,13 +83,19 @@ impl<A: App> Live<A> {
         self.follow_main_surface(host);
         let now = host.now();
         let id = self.surface;
-        let paced = self.paced;
+        let mut paced = self.paced;
+        // Under the app's frame pace a change waits for its slot; a frame the host asked for
+        // (a resize, the GPU hand-over) does not.
+        let slot = pace_slot(self.last_frame, self.driver().app.frame_pace()).filter(|&s| s > now && !self.host_asked);
         let d = self.driver();
         // A capped-rate animation is not due at every event (each present is one), only at
         // its own wake time.
         let due = d.scene.next_wake(now).is_some_and(|w| w <= now) || paced.is_some_and(|w| w <= now);
         if d.dirty || due {
-            host.request_frame(id);
+            match slot {
+                Some(s) => paced = Some(s),
+                None => host.request_frame(id),
+            }
         }
         let next = d.timers.next_at();
         let paced = paced.filter(|&w| w > now);
@@ -328,6 +336,8 @@ impl<A: App> Live<A> {
         let host_diag = host.diag().clone();
         let moving = self.driver().moving(t) && !self.driver().overdue(t);
         self.driver().dirty = false;
+        self.last_frame = Some(t);
+        let pace = self.driver().app.frame_pace();
         if let Some(d) = self.diag() {
             d.frame(n, t, &host_diag);
         }
@@ -335,7 +345,13 @@ impl<A: App> Live<A> {
         if moving {
             // Glass animates at a capped rate (FX08): a wake time after `t` is a timer, not
             // the next vblank.
-            match self.driver().scene.next_wake(t) {
+            // Under the app's frame pace (`App::frame_pace`) the next frame waits a whole
+            // period; a later wake time stays later.
+            let wake = self.driver().scene.next_wake(t).map(|w| match pace_period(pace) {
+                Some(p) => w.max(t + p),
+                None => w,
+            });
+            match wake {
                 Some(w) if w > t => {
                     // The frame comes at the first vblank after the request, so ask half a
                     // 60 Hz refresh early, or a 30 fps loop lands at 20 fps.
@@ -466,6 +482,18 @@ impl<A: App> HostApp for Live<A> {
 
 /// The main surface's renderer: the warm one if it reads the same font table, else a new one.
 /// A warm renderer keeps its `renderer_setup` from the session that made it.
+/// Seconds between frames under an app frame pace (`App::frame_pace`), when it caps anything.
+fn pace_period(pace: Option<f64>) -> Option<f64> {
+    pace.filter(|f| f.is_finite() && *f > 0.0).map(|f| 1.0 / f)
+}
+
+/// The earliest host time to ask for the next main frame under an app frame pace, from the last
+/// frame's time: half a 60 Hz refresh before the slot, since the frame comes at the first vblank
+/// after the request (as for glass in `after_frame`).
+fn pace_slot(last_frame: Option<f64>, pace: Option<f64>) -> Option<f64> {
+    Some(last_frame? + pace_period(pace)? - 1.0 / 120.0)
+}
+
 fn main_renderer<M>(warm: &mut Option<Renderer>, gpu: &vo_host::Gpu, options: &Options<M>) -> Renderer {
     match warm.take().filter(|r| r.fonts().same_table(&options.fonts)) {
         Some(mut r) => {
@@ -518,6 +546,7 @@ impl<A: App> Live<A> {
             region: None,
             blur: None,
             paced: None,
+            last_frame: None,
             frames: 0,
             extras: Vec::new(),
             startup_logged: false,
@@ -851,5 +880,135 @@ mod resize_tests {
         // Asked once only.
         live.follow_main_surface(&mut host);
         assert_eq!(host.log.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use std::cell::Cell;
+
+    use vo_host::{Gpu, HostCaps, HostDiag, Waker};
+
+    use super::*;
+    use crate::app::Cx;
+
+    /// An app that redraws a counter on every message, at the pace the test sets.
+    struct Counter {
+        n: u32,
+        pace: Cell<Option<f64>>,
+    }
+
+    impl App for Counter {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {
+            self.n += 1;
+        }
+        fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            vo_scene::element::Element::column("root").size(100.0 + self.n as f32, 50.0)
+        }
+        fn frame_pace(&self) -> Option<f64> {
+            self.pace.get()
+        }
+    }
+
+    /// A host that counts frame requests and keeps the last wake time, at a clock the test sets.
+    #[derive(Default)]
+    struct Clock {
+        caps: HostCaps,
+        diag: HostDiag,
+        now: f64,
+        frames: u32,
+        wake: Option<f64>,
+    }
+
+    impl HostCtl for Clock {
+        fn caps(&self) -> &HostCaps {
+            &self.caps
+        }
+        fn diag(&self) -> &HostDiag {
+            &self.diag
+        }
+        fn now(&self) -> f64 {
+            self.now
+        }
+        fn gpu(&mut self) -> Result<Gpu, HostError> {
+            Err(HostError::Gpu("none in tests".into()))
+        }
+        fn open(&mut self, _: &OverlaySpec) -> Result<SurfaceId, HostError> {
+            Ok(7)
+        }
+        fn update(&mut self, _: SurfaceId, _: SurfaceChange) -> Result<(), HostError> {
+            Ok(())
+        }
+        fn close(&mut self, _: SurfaceId) {}
+        fn request_frame(&mut self, _: SurfaceId) {
+            self.frames += 1;
+        }
+        fn wake_at(&mut self, t: Option<f64>) {
+            self.wake = t;
+        }
+        fn waker(&self) -> Waker {
+            Waker::new(|| {})
+        }
+        fn exit(&mut self) {}
+    }
+
+    fn live(pace: Option<f64>) -> Live<Counter> {
+        let app = Counter { n: 0, pace: Cell::new(pace) };
+        let mut live = Live::new(app, OverlaySpec::default(), crate::Options::default(), None);
+        let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
+        live.driver = Some(driver);
+        live.driver().dirty = false;
+        live.last_frame = Some(1.0);
+        live
+    }
+
+    #[test]
+    fn a_paced_change_waits_for_its_slot() {
+        let mut live = live(Some(30.0));
+        let mut host = Clock { now: 1.01, ..Clock::default() };
+        live.driver().dispatch((), 1.01);
+        assert!(live.driver().dirty, "the view changed");
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 0, "no frame before the slot");
+        let slot = 1.0 + 1.0 / 30.0 - 1.0 / 120.0;
+        assert!(host.wake.is_some_and(|w| (w - slot).abs() < 1e-9), "wakes at the slot: {:?}", host.wake);
+        // The wake: now the frame comes, and it shows the newest state.
+        host.now = slot;
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 1);
+    }
+
+    #[test]
+    fn without_a_pace_a_change_draws_at_once() {
+        let mut live = live(None);
+        let mut host = Clock { now: 1.01, ..Clock::default() };
+        live.driver().dispatch((), 1.01);
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 1);
+        // The pace ends with the quiet: the next change draws at once too.
+        let mut live = self::live(Some(30.0));
+        live.driver().app.pace.set(None);
+        live.driver().dispatch((), 1.01);
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 2);
+    }
+
+    #[test]
+    fn a_frame_the_host_asked_for_is_not_paced() {
+        let mut live = live(Some(30.0));
+        let mut host = Clock { now: 1.01, ..Clock::default() };
+        live.driver().dirty = true;
+        live.host_asked = true;
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 1);
+    }
+
+    #[test]
+    fn a_moving_scene_under_a_pace_asks_a_period_later() {
+        assert_eq!(pace_period(Some(30.0)), Some(1.0 / 30.0));
+        assert_eq!(pace_period(Some(0.0)), None);
+        assert_eq!(pace_period(None), None);
+        assert_eq!(pace_slot(None, Some(30.0)), None);
     }
 }
