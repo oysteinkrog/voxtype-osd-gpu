@@ -64,8 +64,8 @@ pub struct Envelope {
     /// A word that first shows within this many seconds after a frame is already the newest
     /// word in that frame. A look that holds a new word back while the line before scrolls
     /// out of its row (MO-33) has its reading line where that word will be, not on the row
-    /// that is moving up. The default covers the flow's 120 ms hold, its fade in and two
-    /// frames at 30 fps.
+    /// that is moving up. The default covers holds up to about 0.2 s (the flow's 120 ms drop hold,
+    /// karaoke's 160 ms line wait), their fade in and a frame at 30 fps.
     pub pending: f64,
 }
 
@@ -83,7 +83,7 @@ impl Default for Envelope {
             still_frames: 3,
             still_px: 0.05,
             transcript: 0..u32::MAX,
-            pending: 0.2,
+            pending: 0.25,
         }
     }
 }
@@ -350,7 +350,7 @@ impl Tracker {
         let mut report = Report { frames: self.frames.len() as u64, ..Report::default() };
         let last_frame = self.frames.len().saturating_sub(1);
         // Per track, per sample: the sample index where it next comes to rest.
-        let rests: Vec<Vec<Option<usize>>> = self.tracks.iter().map(|tr| rest_of(tr, env, last_frame)).collect();
+        let rests: Vec<Vec<Option<usize>>> = self.tracks.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
 
         for (n, fr) in self.frames.iter().enumerate() {
             // (track, sample, rest sample)
@@ -445,6 +445,39 @@ impl Tracker {
 /// For each sample of `tr`, the first sample at or after it where the glyph is at rest, or
 /// `None` when it disappears before resting again. A glyph still drawn in the last frame
 /// rests at its last sample if nowhere sooner, so a short scenario does not hide arrivals.
+/// Per sample, where the glyph comes to rest. That is the next still sample, unless the
+/// sample is part of a hold on one row (at least `still_frames` samples, each within
+/// [`ROW_STILL_PX`] of the next in height) that ends half an em or more from that rest. A word
+/// still settling onto its row when the text scrolls a line, or on a centred line that keeps
+/// gliding along its row until it rolls away, rests on that row at the end of the hold, not
+/// on the row the text takes it to.
+fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>> {
+    let mut rests = rest_of(tr, env, last_frame);
+    let len = tr.samples.len();
+    // Only the height counts: a centred line glides along its row as words arrive.
+    let holds = |j: usize| (tr.samples[j].pos.y - tr.samples[j + 1].pos.y).abs() <= ROW_STILL_PX;
+    let mut i = 0;
+    while i < len {
+        let mut e = i;
+        while e + 1 < len && holds(e) {
+            e += 1;
+        }
+        if e + 1 - i >= env.still_frames.max(1) {
+            let end = &tr.samples[e];
+            for rest in &mut rests[i..=e] {
+                if rest.is_some_and(|r| (tr.samples[r].pos.y - end.pos.y).abs() >= 0.5 * end.em) {
+                    *rest = Some(e);
+                }
+            }
+        }
+        i = e + 1;
+    }
+    rests
+}
+
+/// Vertical movement per frame under which a glyph holds its row, in logical pixels.
+const ROW_STILL_PX: f32 = 1.5;
+
 fn rest_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>> {
     let len = tr.samples.len();
     let k = env.still_frames.max(1);
@@ -782,6 +815,34 @@ mod tests {
         held(5, &Envelope::default()).assert_ok();
         let r = held(5, &Envelope { pending: 0.0, ..Envelope::default() });
         assert!(r.by_kind().iter().any(|s| s.kind == "off-row"), "without pending the scrolling row is checked: {r}");
+    }
+
+    #[test]
+    fn a_word_still_settling_when_the_text_scrolls_rests_on_its_row() {
+        // Word 2 lands a row below word 1, settles by a pixel a frame, and the block then
+        // scrolls up a row before it is quite still.
+        let run = |settle: f32| {
+            let mut tr = Tracker::new();
+            for n in 0..30usize {
+                let up = (n.saturating_sub(10).min(6) as f32) * 4.0;
+                let mut g = word(1, 10.0, 40.0 - up, 9.0, 1.0);
+                if n >= 4 {
+                    let s = (10usize.saturating_sub(n).min(4)) as f32 * settle;
+                    g.extend(word(2, 10.0, 64.0 + s - up, 9.0, 1.0));
+                }
+                tr.push(n as f64 / 60.0, &list(g));
+            }
+            tr.check(&Envelope { pending: 0.0, ..Envelope::default() })
+        };
+        // Before the scroll (frame 10) the word is on its row. The scroll itself moves the
+        // reading line, which this check still reports.
+        let before =
+            |r: &Report| r.violations.iter().filter(|v| v.frame < 10 && matches!(v.breach, Breach::OffRow(_))).count();
+        let r = run(0.5);
+        assert_eq!(before(&r), 0, "it was on its row: {r}");
+        // A word that slides a whole row while it arrives is still off its row.
+        let r = run(6.0);
+        assert!(before(&r) > 0, "{r}");
     }
 
     #[test]
