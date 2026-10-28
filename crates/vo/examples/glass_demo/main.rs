@@ -14,9 +14,13 @@
 //!   glass_demo --app-offline DIR [--light]
 //!   glass_demo --app-live [--secs S] [--light] [--still]
 //! `--still` drops the waveform, so the orbit alone drives frames and they come at 30 fps.
+//!
+//! Glass on other outlines and on turned layers (EG-06), offline:
+//!   glass_demo --shapes DIR
 
 mod app;
 mod live;
+mod shapes;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -664,6 +668,8 @@ fn main() {
     let val = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
     if let Some(dir) = val("--offline") {
         run_offline(&PathBuf::from(dir));
+    } else if let Some(dir) = val("--shapes") {
+        shapes::run(&PathBuf::from(dir));
     } else if args.iter().any(|a| a == "--live") {
         let secs = val("--secs").and_then(|s| s.parse().ok()).unwrap_or(8.0);
         let look = if args.iter().any(|a| a == "--light") { LIGHT } else { DARK };
@@ -677,7 +683,7 @@ fn main() {
         app::live(look, secs, args.iter().any(|a| a == "--still"));
     } else {
         eprintln!(
-            "usage: glass_demo --offline DIR | --live [--secs S] [--no-blur] [--light] \
+            "usage: glass_demo --offline DIR | --shapes DIR | --live [--secs S] [--no-blur] [--light] \
              | --app-offline DIR [--light] | --app-live [--secs S] [--light] [--still]"
         );
         std::process::exit(2);
