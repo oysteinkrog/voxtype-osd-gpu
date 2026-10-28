@@ -12,6 +12,8 @@
 //! - `painter`: [`Painter3d`] and [`install`], 3D elements (`Element::gpu`) in a vo scene.
 //! - `sdf`: [`hero`], one raymarched hero object (chrome blob, aurora orb, jellyfish bell)
 //!   on the stage camera.
+//! - `grid`: [`grid_floor`], a perspective grid floor (FX-152) with a horizon glow and a pool
+//!   of light.
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
 //! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
@@ -28,10 +30,12 @@ pub mod field;
 pub mod frame;
 pub mod glyph_fx;
 pub mod glyph_sdf;
+pub mod grid;
 pub mod item;
 pub mod math;
 pub mod mesh;
 pub mod painter;
+mod quad;
 pub mod readback;
 pub mod render;
 pub mod sculpture;
@@ -46,6 +50,7 @@ pub use frame::{
     Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, OnStage, Orb,
     PointCloud, Pool, MAX_POOLS,
 };
+pub use grid::{grid_floor, GridFrame, GridItem, GridPainter, GridPool, GridSource};
 pub use item::{ItemPainter, ItemPlace, Source3d, StageAt};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};

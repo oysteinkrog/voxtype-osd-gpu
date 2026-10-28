@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use vo_render::color::linear_premul;
-use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_render::{GpuPainter, PaintCx};
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::gpu::GpuSource;
+
+use crate::quad::{clip_to_scissor, QuadPass};
 
 const HERO_WGSL: &str = include_str!("wgsl/sdf_hero.wgsl");
 
@@ -147,64 +148,13 @@ struct HeroUniform {
 }
 
 /// Draws [`HeroItem`] elements.
-#[derive(Default)]
 pub struct HeroPainter {
-    pipeline: Option<(wgpu::TextureFormat, wgpu::BindGroupLayout, wgpu::RenderPipeline)>,
+    pass: QuadPass,
 }
 
-impl HeroPainter {
-    fn pipeline(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        if self.pipeline.as_ref().is_some_and(|(f, ..)| *f == format) {
-            return;
-        }
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vo3d-hero"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vo3d-hero"),
-            source: wgpu::ShaderSource::Wgsl(HERO_WGSL.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vo3d-hero"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vo3d-hero"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_hero"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_hero"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(PREMULTIPLIED_OVER),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        self.pipeline = Some((format, layout, pipeline));
+impl Default for HeroPainter {
+    fn default() -> HeroPainter {
+        HeroPainter { pass: QuadPass::new("vo3d-hero", HERO_WGSL, "vs_hero", "fs_hero") }
     }
 }
 
@@ -240,12 +190,7 @@ impl GpuPainter for HeroPainter {
         let bound = f.bound();
         let eye = [cx.stage.origin[0], cx.stage.origin[1], cx.stage.perspective];
         let Some(q) = quad(eye, [centre.x, centre.y], bound * radius) else { return true };
-        let [sx, sy, sw, sh] = cx.scissor;
-        let q = [q[0].max(sx as f32), q[1].max(sy as f32), q[2].min((sx + sw) as f32), q[3].min((sy + sh) as f32)];
-        let q = [q[0].floor(), q[1].floor(), q[2].ceil(), q[3].ceil()];
-        if q[2] <= q[0] || q[3] <= q[1] {
-            return true;
-        }
+        let Some(q) = clip_to_scissor(cx, q) else { return true };
         let lin = |c: Color| {
             let p = linear_premul(c, 1.0);
             [p[0], p[1], p[2], c.a]
@@ -275,38 +220,7 @@ impl GpuPainter for HeroPainter {
             stretch: [f.stretch[0], f.stretch[1], f.stretch[2], material],
             c,
         };
-        self.pipeline(cx.device, cx.format);
-        let (_, layout, pipeline) = self.pipeline.as_ref().unwrap();
-        let buffer = cx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vo3d-hero"),
-            size: std::mem::size_of::<HeroUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM,
-            mapped_at_creation: true,
-        });
-        buffer.slice(..).get_mapped_range_mut().unwrap().copy_from_slice(bytemuck::bytes_of(&u));
-        buffer.unmap();
-        let bind = cx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo3d-hero"),
-            layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
-        });
-        let mut pass = cx.enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("vo3d-hero"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: cx.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_scissor_rect(q[0] as u32, q[1] as u32, (q[2] - q[0]) as u32, (q[3] - q[1]) as u32);
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..4, 0..1);
+        self.pass.draw(cx, q, bytemuck::bytes_of(&u));
         true
     }
 }

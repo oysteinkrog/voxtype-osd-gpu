@@ -80,10 +80,12 @@ impl GpuPainter for Painter3d {
     }
 }
 
-/// Adds a [`Painter3d`], a [`crate::HeroPainter`] and a [`crate::glyph_fx::GlyphFxPainter`]
-/// to `renderer`, so it draws the 3D, hero and glyph field elements of the lists it renders.
+/// Adds a [`Painter3d`], a [`crate::HeroPainter`], a [`crate::GridPainter`] and a
+/// [`crate::glyph_fx::GlyphFxPainter`] to `renderer`, so it draws the 3D, hero, grid floor and
+/// glyph field elements of the lists it renders.
 pub fn install(renderer: &mut Renderer) {
     renderer.add_painter(Box::new(Painter3d::default()));
     renderer.add_painter(Box::new(crate::HeroPainter::default()));
+    renderer.add_painter(Box::new(crate::GridPainter::default()));
     crate::glyph_fx::install(renderer);
 }
