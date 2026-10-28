@@ -409,6 +409,37 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
 }
 
 #[test]
+fn a_new_first_line_that_shifts_along_scrolls_with_the_block() {
+    // A look that puts "…" on the new first word moves that line along as the front drops.
+    // Its words still scroll with the block and slide along their row, drawn once: no copy
+    // fades out where the line was.
+    let mut s = scene();
+    s.apply(view(&words(&TEN), Some(200.0), false), 0.0);
+    let before = s.sample(1.0);
+    let y0 = first(&before, 1).1;
+    let mut kept: Vec<(u32, String)> =
+        TEN.iter().filter(|(id, _)| first(&before, *id).1 != y0).map(|&(id, w)| (id, w.to_string())).collect();
+    kept[0].1 = format!("…{}", kept[0].1);
+    let row: Vec<u32> =
+        kept.iter().map(|k| k.0).filter(|&id| first(&before, id).1 == first(&before, kept[0].0).1).collect();
+    assert!(row.len() >= 2, "a line of words to follow: {row:?}");
+    let list: Vec<(u32, &str)> = kept.iter().map(|(id, w)| (*id, w.as_str())).collect();
+    s.apply(view(&words(&list), Some(200.0), false), 1.0);
+    let settled = s.sample(5.0);
+    let line = first(&before, row[1]).1 - first(&settled, row[1]).1;
+    let count = |l: &DisplayList, id: u32| l.glyphs.iter().filter(|g| g.word == id).count();
+    let f = s.sample(1.08);
+    let dy = first(&f, kept.last().unwrap().0).1 - first(&settled, kept.last().unwrap().0).1;
+    assert!(dy > 0.0 && dy < line, "the block is part way: {dy}");
+    for &id in &row[1..] {
+        assert_eq!(count(&f, id), count(&settled, id), "word {id} is drawn once");
+        let oy = first(&f, id).1 - first(&settled, id).1;
+        assert!((oy - dy).abs() < 1e-2, "word {id} scrolls with the block: {oy}, block {dy}");
+        assert!(first(&settled, id).0 > first(&before, id).0, "word {id} moves along its line");
+    }
+}
+
+#[test]
 fn a_true_rewrap_still_glides_word_by_word() {
     // Words that leave from the front and also change the wrap of the rest: only the words
     // that kept their place relative to the block move with it.

@@ -581,8 +581,35 @@ fn front_scroll(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>])
 }
 
 /// Whether kept word `o` moved with the scrolling block: only `dy` down from its new place.
-fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32) -> bool {
-    (o.x.target() as f32 - p.x).abs() < 0.5 && (o.y.target() as f32 - p.y - dy).abs() < 1.0
+/// On a row in `whole` the line may also have shifted along (a "…" put on the new first word,
+/// a centred line), and the word then slides along its row while it scrolls, instead of
+/// fading out where it was.
+fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32, whole: &[u32]) -> bool {
+    ((o.x.target() as f32 - p.x).abs() < 0.5 || whole.contains(&p.line)) && (o.y.target() as f32 - p.y - dy).abs() < 1.0
+}
+
+/// The new lines that hold the same words as one old line, no more and no fewer: rows that
+/// moved as a whole, so their words cannot slide over a word that rewrapped onto them.
+fn whole_rows(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>]) -> Vec<u32> {
+    // (new line, the old line all its words came from, how many words)
+    let mut rows: Vec<(u32, Option<u32>, usize)> = Vec::new();
+    for (w, p) in words.iter().zip(placed) {
+        let Some(p) = p else { continue };
+        let was = old.iter().find(|o| o.id == w.id).map(|o| o.line);
+        match rows.iter_mut().find(|r| r.0 == p.line) {
+            Some(r) => {
+                if r.1 != was {
+                    r.1 = None;
+                }
+                r.2 += 1;
+            }
+            None => rows.push((p.line, was, 1)),
+        }
+    }
+    rows.into_iter()
+        .filter(|&(_, was, n)| was.is_some_and(|l| old.iter().filter(|o| o.line == l).count() == n))
+        .map(|r| r.0)
+        .collect()
 }
 
 /// The words as the layout placed them, aligned with `words`; `None` for a word with no
@@ -688,6 +715,7 @@ impl Flow {
         (self.magnet, self.magnet_still) = (motion.magnet, reduced || motion.magnet.is_some_and(|m| m.still));
         let mut old = std::mem::take(&mut self.words);
         let scroll = front_scroll(&old, words, &placed);
+        let whole = if scroll.is_some() { whole_rows(&old, words, &placed) } else { Vec::new() };
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
         // Words that left from the front, which scroll out with the rest.
         let front: Vec<WordId> = match scroll {
@@ -808,12 +836,13 @@ impl Flow {
             let shifted = line_shift;
             line_shift = (o.line == p.line).then(|| (p.line, p.x - o.x.target() as f32));
             let look = stage.look(p.line);
-            if let Some(dy) = scroll.filter(|&dy| in_block(&o, &p, dy)) {
+            if let Some(dy) = scroll.filter(|&dy| in_block(&o, &p, dy, &whole)) {
                 // Part of the block: every such word starts the same distance below its new
                 // place and takes the same spring, so the text scrolls as one piece.
                 let lag = |c: &Channel| if reduced { 0.0 } else { (c.value(t) - c.target()) as f32 };
                 let dy = if reduced { 0.0 } else { dy };
-                o.x = make.to(p.x + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
+                let dx = if reduced { 0.0 } else { o.x.target() as f32 - p.x };
+                o.x = make.to(p.x + dx + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
                 o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
             } else if o.line != p.line && (front_drop || motion.rewrap == Rewrap::Fade) {
