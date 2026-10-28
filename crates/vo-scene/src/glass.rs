@@ -539,4 +539,78 @@ mod tests {
         );
         assert_eq!(scene.next_wake(t + 0.1), None);
     }
+
+    fn inside_rect(pts: &[Point], rect: [f32; 4]) -> bool {
+        let [x, y, w, h] = rect;
+        pts.iter().all(|p| p.x >= x - 1e-3 && p.y >= y - 1e-3 && p.x <= x + w + 1e-3 && p.y <= y + h + 1e-3)
+    }
+
+    fn twice_area(pts: &[Point]) -> f32 {
+        let n = pts.len();
+        (0..n).map(|i| pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y).sum()
+    }
+
+    #[test]
+    fn shapes_give_clockwise_outlines_inside_the_box() {
+        let rect = [10.0, 20.0, 172.0, 110.0];
+        assert_eq!(GlassShape::Rounded.points(rect, 12.0), None);
+        let shapes = [
+            GlassShape::chamfer(12.0),
+            GlassShape::Corners([Corner::Chamfer(20.0), Corner::Round(10.0), Corner::Notch(8.0), Corner::Square]),
+            GlassShape::Ellipse,
+            GlassShape::Polygon { sides: 3, turn: 0.0 },
+            GlassShape::Wavy { amplitude: 4.0, wavelength: 30.0 },
+        ];
+        for s in shapes {
+            let pts = s.points(rect, 16.0).unwrap_or_else(|| panic!("{s:?} has no outline"));
+            assert!(pts.len() >= 3, "{s:?}");
+            assert!(inside_rect(&pts, rect), "{s:?} leaves its box");
+            assert!(twice_area(&pts) > 0.0, "{s:?} is not clockwise");
+        }
+        // The octagon: eight points, its cut corners 12 along each edge.
+        let oct = GlassShape::chamfer(12.0).points(rect, 0.0).unwrap();
+        assert_eq!(oct.len(), 8);
+        assert_eq!((oct[0], oct[1]), (Point::new(10.0, 32.0), Point::new(22.0, 20.0)));
+        // A triangle's first corner is at the top centre.
+        let tri = GlassShape::Polygon { sides: 3, turn: 0.0 }.points(rect, 0.0).unwrap();
+        assert!((tri[0].x - 96.0).abs() < 1e-3 && (tri[0].y - 20.0).abs() < 1e-3, "{:?}", tri[0]);
+    }
+
+    #[test]
+    fn a_path_outline_is_flattened_and_bounded() {
+        use crate::path::Outline;
+        let mut path = kurbo::BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+        path.quad_to((140.0, 50.0), (100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.close_path();
+        let outline = Outline::new(&path, 0.1);
+        let mut list = DisplayList::default();
+        let (range, rect) = push_outline(&mut list, &outline.contours[0]);
+        assert!(range[1] >= 4);
+        assert_eq!([rect[0], rect[1], rect[3]], [0.0, 0.0, 100.0]);
+        let g = GlassInstance {
+            rect,
+            radius: 0.0,
+            glass: Glass::dark(),
+            alpha: 1.0,
+            age: 0.0,
+            sheen: None,
+            orbit: None,
+            orbit_strength: 0.0,
+            to_surface: Affine::IDENTITY,
+            surface_alpha: 1.0,
+            outline: Some(range),
+        };
+        let pts = g.outline_points(&list.vector_segs).unwrap();
+        // The curve is cut into pieces, and none of them leaves the bounding rect.
+        assert!(pts.len() > 8, "{} points", pts.len());
+        assert!(inside_rect(&pts, rect));
+        assert!(pts.iter().any(|p| p.x > 115.0), "the bulge is kept");
+        // A shaped panel's blur region is its bounding box.
+        list.glass.push(g);
+        let region = list.blur_region();
+        assert_eq!(region.rects.len(), 1);
+    }
 }
