@@ -758,9 +758,7 @@ impl Flow {
                     // A word that arrives with a scroll comes up with the block, except on
                     // the newest line, which is read where it stands (reading-line envelope).
                     y: match scroll {
-                        Some(dy) if !reduced && p.line != stage.newest => {
-                            make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS)
-                        }
+                        Some(dy) if !reduced && p.line != stage.newest => make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS),
                         _ => make.ch(p.y, FLIP, Rest::PIXELS),
                     },
                     width: make.ch(p.width, FLIP, Rest::PIXELS),

@@ -30,8 +30,7 @@ pub struct Bell {
 
 impl Bell {
     /// Tightens from 80 % full to 4 % tighter when full, on a 260 ms spring; no carriage.
-    pub const DEFAULT: Bell =
-        Bell { from: 0.8, tight: 0.96, carriage: 0.0, travel: Spring::critical_to_98(0.26) };
+    pub const DEFAULT: Bell = Bell { from: 0.8, tight: 0.96, carriage: 0.0, travel: Spring::critical_to_98(0.26) };
 
     /// The same bell with a carriage return of `px` on each wrap.
     pub fn carriage(self, px: f32) -> Bell {
@@ -82,9 +81,8 @@ impl Flow {
         };
         let target = style.factor(fill) as f64;
         let chan = |v: f64, spring: Spring| Channel::new(t, v, spring).with_rest(Rest::UNIT);
-        let wrapped = self.bell.first.is_some_and(|old| {
-            old != first && self.words.iter().any(|w| w.id == old && w.line < line)
-        });
+        let wrapped =
+            self.bell.first.is_some_and(|old| old != first && self.words.iter().any(|w| w.id == old && w.line < line));
         if wrapped {
             // The full line relaxes; the new one starts at its own spacing.
             let old = self.bell.first.unwrap_or(first);
