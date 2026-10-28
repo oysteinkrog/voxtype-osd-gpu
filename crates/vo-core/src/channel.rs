@@ -179,6 +179,12 @@ impl Channel {
         t >= s.t0 + s.settle
     }
 
+    /// When the next segment after `t` starts, if one is recorded. A live channel has none;
+    /// a replayed or seeked one may.
+    pub fn next_start(&self, t: f64) -> Option<f64> {
+        self.segments.get(self.segments.partition_point(|s| s.t0 <= t)).map(|s| s.t0)
+    }
+
     pub fn is_settled(&self, t: f64) -> bool {
         t >= self.settled_at()
     }
@@ -366,6 +372,20 @@ mod tests {
         // The retarget at t = 0 replaced the resting segment that also started at 0.
         assert_eq!(ch.segments()[0].spring, Spring::SLOW);
         assert_eq!(ch.segments()[1].spring, Spring::SNAP);
+    }
+
+    #[test]
+    fn rest_and_next_start_answer_for_past_moments() {
+        let mut ch = Channel::new(0.0, 0.0, Spring::SNAP);
+        ch.retarget(0.0, 10.0);
+        ch.retarget(5.0, 20.0);
+        // Live view (the last segment) says it is still moving at 2 s; at 2 s it was at rest.
+        assert!(!ch.is_settled(2.0));
+        assert!(ch.resting_at(2.0));
+        assert_eq!(ch.next_start(2.0), Some(5.0));
+        assert!(!ch.resting_at(5.05));
+        assert_eq!(ch.next_start(5.0), None);
+        assert!(!ch.resting_at(0.05));
     }
 
     #[test]

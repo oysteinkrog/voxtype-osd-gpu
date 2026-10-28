@@ -1060,9 +1060,9 @@ impl<M> Scene<M> {
 
     pub fn next_wake(&self, t: f64) -> Option<f64> {
         let moving = self.nodes.values().any(|n| {
-            n.chans.iter().any(|(_, c)| c.settled_at() > t)
+            n.chans.iter().any(|(_, c)| !c.resting_at(t))
                 || (n.alive(t) && self.bound_moving(n, t))
-                || n.words.iter().flat_map(|w| w.channels()).any(|c| c.settled_at() > t)
+                || n.words.iter().flat_map(|w| w.channels()).any(|c| !c.resting_at(t))
                 || n.mark.iter().flat_map(|m| m.channels()).any(|c| c.settled_at() > t)
                 || n.words.iter().any(|w| w.passed.is_some_and(|p| t < p + final_pass::PULSE))
                 || n.live.settled_at() > t
@@ -1112,6 +1112,11 @@ impl<M> Scene<M> {
             .filter_map(|n| n.glass.as_ref().and_then(|g| g.next_frame(n.since, t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.rim_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.ambient_wake(t)))
+            // Asked about a moment before a recorded event (a replay or a seek): wake for it.
+            .chain(self.nodes.values().flat_map(|n| {
+                let words = n.words.iter().flat_map(|w| w.channels());
+                n.chans.iter().map(|(_, c)| c).chain(words).filter_map(move |c| c.next_start(t))
+            }))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
             .chain(self.nodes.values().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
             // Materials that flicker or scroll (FX15), at their own capped rate.
