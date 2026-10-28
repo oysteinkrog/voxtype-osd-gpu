@@ -217,7 +217,13 @@ impl Demo {
         let hoop = MeshDraw {
             mesh: self.hoop,
             model: Mat4::uniform_scale(1.0 + 0.04 * lv).then(&ring),
-            material: Material { color: Color::hex(0x9fc8ff, 1.0), emissive: 0.6 + lv, specular: 0.9, shininess: 64.0 },
+            material: Material {
+                color: Color::hex(0x9fc8ff, 1.0),
+                emissive: 0.6 + lv,
+                specular: 0.9,
+                shininess: 64.0,
+                ..Default::default()
+            },
         };
         let mut meshes = vec![hoop];
         let word_model = Mat4::translation(Vec3::new(0.0, 1.0, -0.6));

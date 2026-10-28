@@ -231,8 +231,13 @@ impl Sculpture {
     fn frame_at(&self, t: f64, size: Size) -> Frame3d {
         let s = self.state.lock().unwrap();
         let (sx, sy) = self.look.shear;
-        let material =
-            Material { color: self.look.color, emissive: self.look.emissive, specular: 0.5, shininess: 40.0 };
+        let material = Material {
+            color: self.look.color,
+            emissive: self.look.emissive,
+            specular: 0.5,
+            shininess: 40.0,
+            ..Default::default()
+        };
         let meshes = s
             .bodies
             .iter()

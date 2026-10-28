@@ -65,6 +65,10 @@ struct DrawBlock {
     normal_m: [[f32; 4]; 4],
     color: [f32; 4],
     params: [f32; 4],
+    /// Back-face colour, linear premultiplied.
+    back: [f32; 4],
+    /// Fibre lines across the width, their strength.
+    fibre: [f32; 4],
 }
 
 #[repr(C)]
@@ -106,6 +110,8 @@ struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     count: u32,
+    /// Vertex count.
+    len: usize,
 }
 
 /// Textures that follow the target size.
@@ -276,15 +282,24 @@ impl Renderer3d {
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vo3d-vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let indices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vo3d-indices"),
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        self.meshes.push(GpuMesh { vertices, indices, count: mesh.indices.len() as u32 });
+        self.meshes.push(GpuMesh { vertices, indices, count: mesh.indices.len() as u32, len: mesh.vertices.len() });
         MeshId(self.meshes.len() as u32 - 1)
+    }
+
+    /// Rewrites the vertices of mesh `id` for the next submit (a ribbon that bends each
+    /// frame). The count must match the mesh as added; the indices stay. Like the other
+    /// buffers, the write lands at submit, so one update per mesh per submit.
+    pub fn update_mesh(&mut self, id: MeshId, vertices: &[Vertex]) {
+        let mesh = &self.meshes[id.0 as usize];
+        assert_eq!(mesh.len, vertices.len(), "update_mesh: the vertex count must stay the same");
+        self.queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(vertices));
     }
 
     /// Compiles the pipelines for `format` now instead of on the first frame.
@@ -466,6 +481,8 @@ impl Renderer3d {
                     normal_m: model.normal_matrix().cols,
                     color: lin(m.color),
                     params: [m.emissive, m.specular, m.shininess, m4.is_some() as u32 as f32],
+                    back: linear_premul(m.back.map_or(m.color, |b| Color { a: m.color.a, ..b }), 1.0),
+                    fibre: [m.fibres, m.fibre, 0.0, 0.0],
                 };
                 push_slot(&mut self.staging, bytemuck::bytes_of(&block));
             }

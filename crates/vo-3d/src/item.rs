@@ -15,7 +15,7 @@ use vo_scene::geom::Size;
 
 use crate::camera::Camera;
 use crate::frame::Frame3d;
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, Vertex};
 use crate::render::Renderer3d;
 use crate::MeshId;
 
@@ -37,6 +37,11 @@ pub trait Source3d: Debug + Send + Sync {
 
     /// The frame at `t` for an item `size` logical pixels big.
     fn frame(&self, t: f64, size: Size) -> Frame3d;
+
+    /// Meshes that bend over time (a [`crate::Ribbon3d`]): push `(i, vertices at t)` for
+    /// each, `i` its index in [`Source3d::meshes`]. The count must stay what `meshes` gave.
+    /// Pure in `t`, like `frame`. Most sources have none.
+    fn vertices(&self, _t: f64, _out: &mut Vec<(u32, Vec<Vertex>)>) {}
 
     /// The scene keeps waking for this item until `until`. Ambient sources return infinity.
     fn until(&self) -> f64 {
@@ -156,6 +161,11 @@ impl ItemPainter {
         }
         let scale = if at.size.w > 0.0 { w / at.size.w } else { 1.0 };
         let base = self.mesh_base(source);
+        let mut moving = Vec::new();
+        source.vertices(t, &mut moving);
+        for (i, v) in &moving {
+            self.scene.update_mesh(MeshId(base + i), v);
+        }
         let mut frame = source.frame(t, at.size);
         for d in &mut frame.meshes {
             d.mesh = MeshId(base + d.mesh.0);

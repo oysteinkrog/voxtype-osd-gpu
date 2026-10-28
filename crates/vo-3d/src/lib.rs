@@ -15,6 +15,8 @@
 //! - `grid`: [`grid_floor`], a perspective grid floor (FX-152) with a horizon glow and a pool
 //!   of light.
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
+//! - `ribbon3d`: [`Ribbon3d`], silk ribbons and cloth strips that twist to show their back
+//!   and swell with the voice, in closed form, rewritten each frame (EG-13).
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
 //! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
 //!   loudness (MO-88).
@@ -38,6 +40,7 @@ pub mod painter;
 mod quad;
 pub mod readback;
 pub mod render;
+pub mod ribbon3d;
 pub mod sculpture;
 pub mod sdf;
 pub mod stack;
@@ -56,6 +59,7 @@ pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use painter::{install, item, Item3d, Painter3d};
 pub use render::{ExtraDraw, FieldBinding, Output, PassInfo, Renderer3d};
+pub use ribbon3d::{Ribbon3d, RibbonItem, RibbonLook};
 pub use sculpture::{Letter, SculptLook, Sculpture};
 pub use sdf::{hero, HeroFrame, HeroItem, HeroLook, HeroPainter, HeroShape, HeroSource};
 pub use stack::{Layers, Stack, TextPlane};

@@ -1,6 +1,8 @@
 //! Triangle meshes and the builders the layer ships with: torus, box and extruded 2D paths
 //! (glyph outlines, icons). Meshes are built once on the CPU and uploaded once
-//! ([`crate::Renderer3d::add_mesh`]); motion comes from the per-draw model matrix.
+//! ([`crate::Renderer3d::add_mesh`]); motion comes from the per-draw model matrix. A mesh
+//! that bends (a [`crate::Ribbon3d`]) keeps its vertex count and rewrites its vertices each
+//! frame with [`crate::Renderer3d::update_mesh`].
 
 use bytemuck::{Pod, Zeroable};
 use lyon_tessellation::path::iterator::PathIterator;
@@ -14,11 +16,15 @@ use crate::math::Vec3;
 pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
+    /// Surface coordinates: on a ribbon, x along its length and y across it, both 0 to 1.
+    /// Zero for the built-in solids. The mesh shader draws fibre lines along x from y.
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -35,7 +41,7 @@ pub struct Mesh {
 
 impl Mesh {
     fn push(&mut self, pos: Vec3, normal: Vec3) -> u32 {
-        self.vertices.push(Vertex { pos: pos.to_array(), normal: normal.to_array() });
+        self.vertices.push(Vertex { pos: pos.to_array(), normal: normal.to_array(), uv: [0.0; 2] });
         self.vertices.len() as u32 - 1
     }
 

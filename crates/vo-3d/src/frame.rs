@@ -148,11 +148,26 @@ pub struct Material {
     pub emissive: f32,
     pub specular: f32,
     pub shininess: f32,
+    /// The colour of back faces (two-sided surfaces such as a [`crate::Ribbon3d`]), with
+    /// `color`'s alpha. `None` shades both sides in `color`.
+    pub back: Option<Color>,
+    /// Fine fibre lines along a ribbon's length (from the vertices' `uv.y`): how many across
+    /// its width, and how strongly they show (0 to 1, 0 for none).
+    pub fibres: f32,
+    pub fibre: f32,
 }
 
 impl Default for Material {
     fn default() -> Material {
-        Material { color: Color::WHITE, emissive: 0.0, specular: 0.4, shininess: 48.0 }
+        Material {
+            color: Color::WHITE,
+            emissive: 0.0,
+            specular: 0.4,
+            shininess: 48.0,
+            back: None,
+            fibres: 0.0,
+            fibre: 0.0,
+        }
     }
 }
 
