@@ -58,7 +58,7 @@ impl State {
             s.size = Size::new(w as f32, h as f32);
         }
         s.configured = true;
-        s.resizing = false;
+        s.resizing = None;
         s.dirty_config = true;
         s.set_viewports();
         let (id, size, scale) = (s.id, s.size, s.px_scale() as f32);

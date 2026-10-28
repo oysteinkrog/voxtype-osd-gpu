@@ -178,8 +178,9 @@ pub(crate) struct Surf {
     /// The compositor's preferred fractional scale, once it sent one.
     pub(crate) frac: Option<f64>,
     pub(crate) configured: bool,
-    /// A new size was asked for and its configure has not come yet: no frame until then.
-    pub(crate) resizing: bool,
+    /// When a new size was asked for, on the host clock, while its configure has not come:
+    /// no frame until it comes or `RESIZE_WAIT` has passed.
+    pub(crate) resizing: Option<f64>,
     /// Anchors and margins waiting for the next frame's commit, so the last frame does not
     /// move before one at the new size replaces it.
     pending_place: Option<Placement>,
@@ -793,7 +794,7 @@ impl State {
     fn ready(&self, s: &Surf) -> bool {
         let gpu = s.wgpu.is_some() && !s.callback_pending;
         let cpu = s.wgpu.is_none() && !s.cpu_callback_pending && s.shm.as_ref().is_some_and(|m| !m.handed_over);
-        s.want_frame && s.configured && !s.resizing && (gpu || cpu)
+        s.want_frame && s.configured && s.resizing.is_none() && (gpu || cpu)
     }
 
     /// A CPU frame into a `wl_shm` buffer on the role surface.
@@ -968,7 +969,24 @@ impl State {
         if self.surfaces.iter().any(|s| self.ready(s)) || !self.events.is_empty() {
             return Some(Duration::ZERO);
         }
-        self.timer.map(|t| Duration::from_secs_f64((t - self.now()).max(0.0)))
+        let resize = self.surfaces.iter().filter_map(|s| s.resizing).map(|since| since + RESIZE_WAIT);
+        let wake = self.timer.into_iter().chain(resize).min_by(f64::total_cmp);
+        wake.map(|t| Duration::from_secs_f64((t - self.now()).max(0.0)))
+    }
+
+    /// Stops waiting for a configure that has not come `RESIZE_WAIT` after a new size was
+    /// asked for: the surface draws again at the size the compositor last configured.
+    fn expire_resizes(&mut self) {
+        let now = self.now();
+        for s in &mut self.surfaces {
+            if resize_expired(s.resizing, now) {
+                s.resizing = None;
+                let note =
+                    format!("surface {}: no configure {RESIZE_WAIT} s after a new size, drawing at the last one", s.id);
+                eprintln!("vo: {note}");
+                self.diag.notes.push(note);
+            }
+        }
     }
 }
 
@@ -1139,7 +1157,7 @@ impl HostCtl for State {
             scale: 1,
             frac: None,
             configured: false,
-            resizing: false,
+            resizing: None,
             pending_place: None,
             dirty_config: true,
             want_frame: false,
@@ -1180,6 +1198,7 @@ impl HostCtl for State {
                 }
             }
             SurfaceChange::Size(size) => {
+                let now = self.now();
                 let s = &mut self.surfaces[i];
                 if s.spec.placement == Placement::Fullscreen {
                     // The output decides its size.
@@ -1195,7 +1214,9 @@ impl HostCtl for State {
                         // change with the first frame at the new size.
                         s.pending_place.get_or_insert(s.spec.placement);
                         // A configured layer surface gets a configure for its new size.
-                        s.resizing |= s.configured && old != (w, h);
+                        if s.configured && old != (w, h) {
+                            s.resizing.get_or_insert(now);
+                        }
                     }
                     Role::Window(win) => {
                         win.set_min_size(Some((w, h)));
@@ -1213,7 +1234,7 @@ impl HostCtl for State {
                 s.spec.placement = placement;
                 s.pending_place = Some(placement);
                 // With no new size coming, move it now.
-                if !s.resizing && self.in_frame != Some(id) && self.apply_pending_place(i) {
+                if s.resizing.is_none() && self.in_frame != Some(id) && self.apply_pending_place(i) {
                     self.surfaces[i].role.wl().commit();
                     let _ = self.conn.flush();
                 }
@@ -1367,6 +1388,7 @@ impl WaylandHost {
             let timeout = state.timeout();
             state.diag.loop_wakeups += 1;
             event_loop.dispatch(timeout, state).map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
+            state.expire_resizes();
             if state.timer.is_some_and(|t| state.now() >= t) {
                 state.timer = None;
                 let t = state.now();
@@ -1411,6 +1433,15 @@ impl Host for WaylandHost {
         let _ = self.state.conn.flush();
         result
     }
+}
+
+/// Seconds a surface waits for the configure of a new size before it draws again at the old
+/// one. A compositor answers within a frame or two; one that never does must not freeze it.
+const RESIZE_WAIT: f64 = 0.25;
+
+/// Whether a wait for a configure that began at `since` is over at `now`.
+fn resize_expired(since: Option<f64>, now: f64) -> bool {
+    since.is_some_and(|t| now - t >= RESIZE_WAIT)
 }
 
 /// Anchors layer surface `l` and sets its margins for `placement`, for a surface `h` tall on
@@ -1460,7 +1491,15 @@ fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{from_top_margin, line_at_margin, next_present, to_px};
+    use super::{from_top_margin, line_at_margin, next_present, resize_expired, to_px, RESIZE_WAIT};
+
+    #[test]
+    fn a_resize_stops_waiting_for_its_configure_after_a_while() {
+        assert!(!resize_expired(None, 10.0));
+        assert!(!resize_expired(Some(10.0), 10.0));
+        assert!(!resize_expired(Some(10.0), 10.0 + RESIZE_WAIT * 0.9));
+        assert!(resize_expired(Some(10.0), 10.0 + RESIZE_WAIT));
+    }
 
     #[test]
     fn line_at_puts_the_line_at_the_fraction() {

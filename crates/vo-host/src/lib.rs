@@ -165,7 +165,8 @@ impl Default for OverlaySpec {
 pub enum SurfaceChange {
     /// New logical size. A `Configured` event follows. Until it comes, the host draws no
     /// frame on the surface, so the last frame stays on screen rather than a frame laid out
-    /// for the old size.
+    /// for the old size. A compositor that does not answer within a short wait (a quarter
+    /// second on Wayland) gets frames at the size it last configured.
     Size(Size),
     /// New place on the output, for an overlay. After a `Size` it lands on the commit of the
     /// first frame at the new size, so the last frame never moves; otherwise at once. Moving
