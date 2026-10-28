@@ -50,6 +50,19 @@ pub struct Anchor {
     pub line: usize,
 }
 
+/// The strip under one text line that strands may use.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineGutter {
+    /// Top of the strip, in the text box (just under the line's descenders).
+    pub top: f32,
+    /// Height of the strip. Under 6 px bundles thin to one strand.
+    pub height: f32,
+    /// The newest line: nodes sit at baseline + `descent` + `drop` and every strand bows down only.
+    pub newest: bool,
+    /// How far the line's glyphs reach under the baseline.
+    pub descent: f32,
+}
+
 /// How the lattice looks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LatticeLook {
@@ -75,6 +88,9 @@ pub struct LatticeLook {
     pub label_color: Color,
     /// Length of the dashed drop line from a node to its label.
     pub stem: f32,
+    /// Per text line (indexed by `Anchor::line`) the gutter its strands stay in. Empty, or a
+    /// line past the end, draws as before.
+    pub gutters: Vec<LineGutter>,
 }
 
 impl Default for LatticeLook {
@@ -93,6 +109,7 @@ impl Default for LatticeLook {
             label: None,
             label_color: Color::rgba(0.7, 0.74, 0.8, 0.7),
             stem: 10.0,
+            gutters: Vec::new(),
         }
     }
 }
@@ -150,6 +167,56 @@ impl LatticeLook {
         (pause.max(0.0) * self.bow_per_sec).clamp(self.bow.0, self.bow.1)
     }
 
+    fn gutter(&self, a: &Anchor) -> Option<LineGutter> {
+        self.gutters.get(a.line).copied()
+    }
+
+    /// Where the node of `a` sits vertically.
+    pub fn node_y(&self, a: &Anchor) -> f32 {
+        match self.gutter(a) {
+            None => a.baseline + self.drop,
+            Some(g) if g.newest => a.baseline + g.descent + self.drop,
+            Some(g) => g.top + g.height * 0.5,
+        }
+    }
+
+    /// The strands between nodes `a` and `b` (same line): `(curve, edge)` with edge 1 for the
+    /// middle strand and less for outer ones. `bow` is the unsigned bow before the gutter
+    /// clamp; `skip` draws a single arc.
+    pub fn strands(&self, a: &Anchor, b: &Anchor, bow: f32, skip: bool) -> Vec<(Contour, f32)> {
+        let (pa, pb) = (Point::new(a.x, self.node_y(a)), Point::new(b.x, self.node_y(b)));
+        let g = self.gutter(a);
+        let (lo, hi) = match g {
+            None => (-bow.abs(), bow.abs()),
+            Some(g) if g.newest => (0.0, bow.abs().min((g.top + g.height - pa.y.max(pb.y)).max(0.0))),
+            Some(g) => {
+                let room = (pa.y.min(pb.y) - g.top).min(g.top + g.height - pa.y.max(pb.y)).max(0.0);
+                (-bow.abs().min(room), bow.abs().min(room))
+            }
+        };
+        let s = if skip { 1 } else if g.is_some_and(|g| g.height < 6.0) { 1 } else { self.strands.max(1) };
+        let mut out = Vec::with_capacity(s);
+        for k in 0..s {
+            if skip {
+                // Arcs rise (negative) as before; in a gutter the newest line sends them down.
+                let off = if g.is_some_and(|g| g.newest) { hi } else if g.is_some() { -hi.abs() } else { -bow.abs() };
+                out.push((lens(pa, pb, off, 20), 1.0));
+                continue;
+            }
+            let f = if s == 1 { 0.0 } else { 2.0 * k as f32 / (s - 1) as f32 - 1.0 };
+            let (off, edge) = if g.is_some_and(|g| g.newest) {
+                let u = if s == 1 { 1.0 } else { k as f32 / (s - 1) as f32 };
+                (hi * u, 1.0 - 0.45 * (1.0 - u))
+            } else if g.is_some() {
+                (if f >= 0.0 { hi * f } else { lo * -f }, 1.0 - 0.45 * f.abs())
+            } else {
+                (bow * f, 1.0 - 0.45 * f.abs())
+            };
+            out.push((lens(pa, pb, off, 16), edge));
+        }
+        out
+    }
+
     /// When the drawing stops changing.
     pub fn until(&self, words: &[LatticeWord]) -> f64 {
         words.iter().map(|w| w.at).fold(f64::NEG_INFINITY, f64::max) + 1.2
@@ -162,7 +229,7 @@ impl LatticeLook {
         let Some(&newest) = shown.last() else { return };
         let last = (!reduced).then(|| words[newest].at);
         let tension = self.tension(last, t);
-        let node = |i: usize| Point::new(nodes[i].x, nodes[i].baseline + self.drop);
+        let node = |i: usize| Point::new(nodes[i].x, self.node_y(&nodes[i]));
 
         for w in shown.windows(2) {
             let (a, b) = (w[0], w[1]);
@@ -176,12 +243,7 @@ impl LatticeLook {
             let bow = self.rest_bow(words[b].pause) * tension;
             let width = self.width.0 + (self.width.1 - self.width.0) * words[b].loud.clamp(0.0, 1.0);
             let color = if b == newest { mix(self.color, self.accent, 0.8) } else { self.color };
-            let s = self.strands.max(1);
-            for k in 0..s {
-                // Spread from -1 to 1; outer strands are thinner and fainter.
-                let f = if s == 1 { 0.0 } else { 2.0 * k as f32 / (s - 1) as f32 - 1.0 };
-                let edge = 1.0 - 0.45 * f.abs();
-                let c = lens(node(a), node(b), bow * f, 16);
+            for (c, edge) in self.strands(&nodes[a], &nodes[b], bow, false) {
                 let c = c.trim(0.0, grow * c.length());
                 p.stroke(&c, &StrokeStyle::solid(width * edge, color.fade(edge)));
             }
@@ -193,8 +255,8 @@ impl LatticeLook {
                 continue;
             }
             let grow = if reduced { 1.0 } else { ease(((t - words[c].at) / (2.0 * self.draw_on)).clamp(0.0, 1.0)) };
-            let bow = -(self.rest_bow(words[c].pause) + self.rest_bow(words[w[1]].pause)) * tension;
-            let arc = lens(node(a), node(c), bow, 20);
+            let bow = (self.rest_bow(words[c].pause) + self.rest_bow(words[w[1]].pause)) * tension;
+            let arc = self.strands(&nodes[a], &nodes[c], bow, true).remove(0).0;
             let arc = arc.trim(0.0, grow * arc.length());
             p.stroke(&arc, &StrokeStyle::solid(0.6, self.color.fade(0.5)));
         }
@@ -235,7 +297,7 @@ impl LatticeLook {
             for (i, (w, a)) in words.iter().zip(nodes.iter()).enumerate() {
                 let ms = (w.pause * 1000.0).round() as i32;
                 let text = if i == 0 { "+0".to_string() } else { format!("+{ms}") };
-                let y = a.baseline + self.drop + self.stem + 1.0;
+                let y = self.node_y(a) + self.stem + 1.0;
                 root = root.child(
                     Element::label(format!("{}-t{i}", key.0), text)
                         .text_style(*style)
@@ -338,5 +400,47 @@ mod tests {
         };
         assert_eq!(count(1.5), count(1.5));
         assert!(count(0.5) < count(2.5), "a node per arrived word");
+    }
+
+    #[test]
+    fn newest_line_strands_stay_below_the_glyphs_and_in_the_gutter() {
+        let mut l = LatticeLook::default();
+        let (baseline, descent) = (20.0, 6.0);
+        l.gutters = vec![LineGutter { top: baseline + descent, height: 14.0, newest: true, descent }];
+        let a = Anchor { x: 0.0, width: 40.0, baseline, line: 0 };
+        let b = Anchor { x: 60.0, width: 40.0, baseline, line: 0 };
+        for ms in (0..=30).map(|i| i as f32 * 0.1) {
+            for tension in [0.4, 1.0, 1.6] {
+                let bow = l.rest_bow(ms) * tension;
+                for skip in [false, true] {
+                    for (c, _) in l.strands(&a, &b, bow * if skip { 2.0 } else { 1.0 }, skip) {
+                        for pt in c.resample(24) {
+                            assert!(pt.y >= baseline + descent - 1e-3, "{ms} {pt:?}");
+                            assert!(pt.y <= 20.0 + 6.0 + 14.0 + 1e-3, "{ms} {pt:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn older_line_bow_is_clamped_and_thin_gutters_use_one_strand() {
+        let mut l = LatticeLook::default();
+        l.gutters = vec![LineGutter { top: 26.0, height: 8.0, newest: false, descent: 6.0 }];
+        let a = Anchor { x: 0.0, width: 40.0, baseline: 20.0, line: 0 };
+        let b = Anchor { x: 60.0, width: 40.0, baseline: 20.0, line: 0 };
+        for bow in [0.0, 5.0, 40.0] {
+            for skip in [false, true] {
+                for (c, _) in l.strands(&a, &b, bow, skip) {
+                    for pt in c.resample(24) {
+                        assert!(pt.y >= 26.0 - 1e-3 && pt.y <= 34.0 + 1e-3, "{pt:?}");
+                    }
+                }
+            }
+        }
+        assert_eq!(l.strands(&a, &b, 5.0, false).len(), 4);
+        l.gutters[0].height = 5.0;
+        assert_eq!(l.strands(&a, &b, 5.0, false).len(), 1);
     }
 }

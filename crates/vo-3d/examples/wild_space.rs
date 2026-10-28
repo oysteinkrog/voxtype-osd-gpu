@@ -23,7 +23,7 @@ use vo_scene::depth_stack::{DepthStack, Place, Sheet};
 use vo_scene::element::{Element, Key, TextStyle};
 use vo_scene::font::FontRegistry;
 use vo_scene::geom::{Color, Point, Size};
-use vo_scene::lattice::{anchors, LatticeLook, LatticeWord};
+use vo_scene::lattice::{anchors, LatticeLook, LatticeWord, LineGutter};
 use vo_scene::text::{ShapedLayout, TextLayout};
 use vo_scene::{DisplayList, Scene};
 
@@ -128,7 +128,9 @@ fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool) -> Element<()> {
     let layout = ShapedLayout::new(fonts.clone());
     let nodes = anchors(&layout, &words, &style, None);
     let mono = TextStyle::new(fonts.asset("mono").unwrap_or(font), 10.0, 12.0);
-    let look = LatticeLook { label: Some(mono), ..LatticeLook::default() };
+    let base = nodes.first().map_or(28.0, |a| a.baseline);
+    let gutters = vec![LineGutter { top: base + 8.0, height: 34.0, newest: true, descent: 8.0 }];
+    let look = LatticeLook { label: Some(mono), gutters, ..LatticeLook::default() };
     let size = Size::new(560.0, 120.0);
     let text = Element::label("words", words.join(" ")).text_style(style).color(Color::hex(TEXT, 1.0));
     let lattice = look.view("lattice", size, timed.into(), nodes.into(), reduced);
