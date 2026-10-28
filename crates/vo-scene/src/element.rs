@@ -20,6 +20,7 @@ use vo_core::words::Word;
 use crate::ambient::{Loop, LoopProp, Ripples};
 use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
+use crate::displace::Displace;
 use crate::display::{BackdropRes, BlendMode, BloomShape, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
@@ -139,6 +140,8 @@ pub(crate) enum Slot {
     /// Text size morph (FX-048): the drawn size as a factor of the laid-out size, 1 at rest.
     /// Set by the scene when the font size changes, not by elements.
     TextZoom = 82,
+    /// Displacement strength (EG-03, `Element::displace_strength`), 0 for none.
+    DisplaceStrength = 83,
     /// Stage turns in radians and the push toward the viewer in logical units
     /// (`crate::stage`).
     RotateX = 100,
@@ -202,6 +205,7 @@ impl Slot {
             s if s <= Slot::TextHaloRadius as u8 => Prop::TextFx,
             s if (Slot::TextShadowX as u8..=Slot::TextOutline as u8).contains(&s) => Prop::TextFx,
             s if s == Slot::TextZoom as u8 => Prop::TextSize,
+            s if s == Slot::DisplaceStrength as u8 => Prop::Style,
             s if s <= Slot::StyleFlicker as u8 => Prop::Style,
             _ => Prop::Wave,
         }
@@ -518,6 +522,9 @@ pub(crate) enum Kind {
         mask: Option<Mask>,
         /// A backdrop (EG-01, `Element::backdrop`): its resolution and tint.
         backdrop: Option<(BackdropRes, Color)>,
+        /// A displacement of the backdrop (EG-03, `Element::displace`) and whether it keeps
+        /// the reading line still.
+        displace: Option<(Box<Displace>, bool)>,
     },
     /// Live dictation text: lays out the words like a label, tags each glyph with its word
     /// id, and moves each word by its own channels. A new id enters from `enter`; a kept id
@@ -1013,6 +1020,7 @@ impl<M> Element<M> {
             fade: [0.0; 4],
             mask: None,
             backdrop: None,
+            displace: None,
         };
         Element::new(key, kind, Element::<M>::flex(FlexDirection::Column))
     }
@@ -1032,6 +1040,7 @@ impl<M> Element<M> {
             fade: [0.0; 4],
             mask: Some(Mask::default()),
             backdrop: None,
+            displace: None,
         };
         let mut style = Element::<M>::flex(FlexDirection::Column);
         style.position = Position::Absolute;
@@ -1934,6 +1943,41 @@ impl<M> Element<M> {
             *backdrop = Some((res, tint));
         } else {
             debug_assert!(false, "backdrop on a node that is not a layer: {}", self.key);
+        }
+        self
+    }
+
+    /// A displacement (EG-03, `crate::displace`) on a layer: what is already drawn under its
+    /// rounded box is captured (a full-resolution backdrop) and drawn back with each pixel
+    /// moved by `d`, before the layer's own content. Replaces a backdrop's tint. Strength
+    /// starts at 1 (`displace_strength`). The newest line of live text stays sharp and still
+    /// unless `displace_reading_line(true)`. Reduced motion, a mask or a lower quality tier
+    /// draws the layer undisplaced.
+    pub fn displace(mut self, d: Displace) -> Element<M> {
+        if let Kind::Layer { displace, mask: None, .. } = &mut self.kind {
+            *displace = Some((Box::new(d), true));
+        } else {
+            debug_assert!(false, "displace on a node that is not a layer: {}", self.key);
+            return self;
+        }
+        if !self.targets.iter().any(|(k, _)| *k == Slot::DisplaceStrength as u8) {
+            self.set(Slot::DisplaceStrength as u8, 1.0);
+        }
+        self
+    }
+
+    /// How strongly the displacement moves pixels: 1 as described, 0 not at all (and no
+    /// pass at all). Animated like a style; bind it with `Param::DisplaceStrength`.
+    pub fn displace_strength(mut self, v: f32) -> Element<M> {
+        self.set(Slot::DisplaceStrength as u8, v.max(0.0));
+        self
+    }
+
+    /// Lets the displacement move the newest line of live text too. Only for text that is
+    /// not read: the reading-line envelope holds there by default.
+    pub fn displace_reading_line(mut self, moves: bool) -> Element<M> {
+        if let Kind::Layer { displace: Some((_, keep)), .. } = &mut self.kind {
+            *keep = !moves;
         }
         self
     }

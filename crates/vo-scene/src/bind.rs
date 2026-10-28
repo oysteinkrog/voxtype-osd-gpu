@@ -53,6 +53,8 @@ pub enum Param {
     WaveAmp,
     WaveLength,
     WavePhase,
+    /// Displacement strength (EG-03).
+    DisplaceStrength,
 }
 
 impl Param {
@@ -90,6 +92,7 @@ impl Param {
             Param::WaveAmp => Slot::WaveAmp,
             Param::WaveLength => Slot::WaveLength,
             Param::WavePhase => Slot::WavePhase,
+            Param::DisplaceStrength => Slot::DisplaceStrength,
         }) as u8
     }
 }

@@ -28,6 +28,8 @@
 //! - `meters`: a progress hairline that never moves backwards, and a dismiss countdown ring.
 //! - `reveal`: a frame that draws on from its corners, hairlines and brackets, then content.
 //! - `erase`: cancel erase, a strike through the text and the words leaving last first.
+//! - `displace`: a layer redraws what is under it with each pixel moved: ripples, noise,
+//!   curl, a page curl or a texture of offsets (EG-03).
 //! - `display`: the flat display list that `vo-render` consumes. No tree, no GPU types.
 //! - `timed`: elements drawn from the frame time: a scrolling waveform, a progress sweep.
 //! - `bind`: props driven by the signal bus (audio level, pitch, bands), composed on springs.
@@ -64,6 +66,7 @@ pub mod canvas;
 pub mod container;
 pub mod curve;
 pub mod depth_stack;
+pub mod displace;
 pub mod display;
 pub mod dots;
 pub mod element;

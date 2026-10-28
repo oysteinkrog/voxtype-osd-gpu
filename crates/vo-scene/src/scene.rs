@@ -19,7 +19,7 @@ use vo_core::spring::Spring;
 use crate::bind::Bound;
 use crate::display::MATERIAL_SHIFT;
 use crate::display::{
-    Backdrop, BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
+    Backdrop, BackdropRes, BlendMode, Displace, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::display::{BloomBand, BloomShape};
@@ -845,6 +845,24 @@ impl<M> Node<M> {
         })
     }
 
+    /// The displacement (EG-03) at `t`, or `None` when its strength is 0 or motion is reduced.
+    fn displace(&self, d: &crate::displace::Displace, keep_reading: bool, t: f64) -> Option<Displace> {
+        let strength = self.value(Slot::DisplaceStrength as u8, t) as f32;
+        if self.reduced || strength <= 0.0 {
+            return None;
+        }
+        Some(Displace { field: d.field(t, self.since, strength), strength, keep_reading, keep: None })
+    }
+
+    /// When the displacement next changes after `t`.
+    fn displace_wake(&self, t: f64) -> Option<f64> {
+        let Kind::Layer { displace: Some((d, _)), .. } = &self.kind else { return None };
+        if self.reduced || self.value(Slot::DisplaceStrength as u8, t) <= 0.0 {
+            return None;
+        }
+        d.wake(t)
+    }
+
     /// When a glitch or flicker next changes, after `t`.
     fn style_wake(&self, t: f64) -> Option<f64> {
         if self.reduced {
@@ -1168,6 +1186,7 @@ impl<M> Scene<M> {
                 n.chans.iter().map(|(_, c)| c).chain(words).filter_map(move |c| c.next_start(t))
             }))
             .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.displace_wake(t)))
             .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
             // Materials that flicker or scroll (FX15), at their own capped rate.
             .chain(
@@ -1199,6 +1218,7 @@ impl<M> Scene<M> {
             self.emit(root, t, Affine::IDENTITY, 1.0, 0, false, &mut items, out);
         }
         out.layers[0].items = close_items(&mut items, out);
+        keep_reading_line(out);
     }
 
     /// Live text: a word's box at `t` in the node's space, from its sprung position and
@@ -1720,10 +1740,21 @@ impl<M> Scene<M> {
             Kind::Layer { mask: None, .. } => n.style(t, Rect::from_size(size)),
             _ => None,
         };
+        let displace = match &n.kind {
+            Kind::Layer { displace: Some((d, keep_reading)), mask: None, .. } => n.displace(d, *keep_reading, t),
+            _ => None,
+        };
         let backdrop = match n.kind {
             Kind::Layer { backdrop: Some((res, tint)), mask: None, .. } => {
+                let res = if displace.is_some() { BackdropRes::Full } else { res };
                 Some(Backdrop { rect: RRect::new(Rect::from_size(size), radius(n, t)), res, tint })
             }
+            // A displacement reads a full-resolution backdrop it does not tint.
+            Kind::Layer { mask: None, .. } if displace.is_some() => Some(Backdrop {
+                rect: RRect::new(Rect::from_size(size), radius(n, t)),
+                res: BackdropRes::Full,
+                tint: Color::TRANSPARENT,
+            }),
             _ => None,
         };
         let (blend, clip, clip_fade, target, group, inside) = match n.kind {
@@ -1764,6 +1795,7 @@ impl<M> Scene<M> {
             style,
             warp,
             backdrop,
+            displace,
             items: 0..0,
         });
         let mut own = Vec::new();
@@ -2651,6 +2683,49 @@ pub(crate) fn push_item(items: &mut Vec<Item>, kind: ItemKind, index: u32) {
         }
     }
     items.push(Item { kind, start: index, len: 1 });
+}
+
+/// Fills `keep` on each displacement that keeps the reading line (EG-03): the row of the
+/// newest live-text word, found as the envelope check finds it (the newest word's median
+/// baseline, every glyph within half an em of it), boxed generously in surface space.
+fn keep_reading_line(out: &mut DisplayList) {
+    if !out.layers.iter().any(|l| l.displace.is_some_and(|d| d.keep_reading)) {
+        return;
+    }
+    // Each live-text glyph in surface space: word, pen x, baseline y, em.
+    let mut glyphs: Vec<(u32, f32, f32, f32)> = Vec::new();
+    for layer in &out.layers {
+        let m = layer.transform;
+        let k = (m.a * m.d - m.b * m.c).abs().sqrt();
+        for item in &out.items[layer.items.start as usize..layer.items.end as usize] {
+            if item.kind != ItemKind::Glyphs {
+                continue;
+            }
+            for g in &out.glyphs[item.start as usize..(item.start + item.len) as usize] {
+                if g.word != NO_WORD {
+                    let p = m.apply(g.pos);
+                    glyphs.push((g.word, p.x, p.y, g.size * k));
+                }
+            }
+        }
+    }
+    let Some(newest) = glyphs.iter().map(|g| g.0).max() else { return };
+    let mut ys: Vec<f32> = glyphs.iter().filter(|g| g.0 == newest).map(|g| g.2).collect();
+    ys.sort_by(f32::total_cmp);
+    let y = ys[ys.len() / 2];
+    let em = glyphs.iter().filter(|g| g.0 == newest).map(|g| g.3).fold(0.0, f32::max);
+    let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for g in glyphs.iter().filter(|g| (g.2 - y).abs() < 0.5 * em.max(g.3)) {
+        x0 = x0.min(g.1 - 0.25 * g.3);
+        // The pen position is the glyph's left; its advance is under an em for text.
+        x1 = x1.max(g.1 + 1.1 * g.3);
+    }
+    let keep = Rect::new(x0, y - 1.1 * em, x1 - x0, 1.5 * em);
+    for l in &mut out.layers {
+        if let Some(d) = l.displace.as_mut().filter(|d| d.keep_reading) {
+            d.keep = Some(keep);
+        }
+    }
 }
 
 /// Moves a layer's items into the list and returns their range.

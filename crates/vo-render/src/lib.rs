@@ -8,6 +8,7 @@
 //! - `particles`: GPU particles, free and word-forming; `glyph_points` samples glyphs for them.
 //! - `glass`: glass panels, their animated rim and the compositor blur region.
 //! - `material`: material blocks for shapes, glyphs and strokes, and app material WGSL (FX15).
+//! - `displace`: a layer's backdrop drawn back with each pixel moved (EG-03).
 //! - `gpu`: painters for GPU elements, app GPU code drawn between two passes.
 //! - `offscreen`: readback to CPU memory for goldens and export.
 //! - `hot`: WGSL read from disk when `VO_SHADER_DIR` is set, for live shader reload.
@@ -17,6 +18,7 @@
 pub mod color;
 #[cfg(feature = "cpu")]
 pub mod cpu;
+pub mod displace;
 pub mod dots;
 pub mod glass;
 pub mod glyph_points;

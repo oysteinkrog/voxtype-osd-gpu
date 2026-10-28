@@ -117,6 +117,8 @@ pub struct Layer {
     /// that bend, blur or refract what is under an element read that texture. Never the
     /// desktop: only this surface's own drawing. `None` costs nothing.
     pub backdrop: Option<Backdrop>,
+    /// A displacement of the backdrop (EG-03). Only with a full-resolution backdrop.
+    pub displace: Option<Displace>,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -136,6 +138,7 @@ impl Layer {
             style: None,
             warp: None,
             backdrop: None,
+            displace: None,
             items: 0..0,
         }
     }
@@ -169,6 +172,55 @@ pub struct Backdrop {
     /// content, with the layer's opacity and clips. Transparent draws nothing: the capture
     /// is then only for the layer's own effects.
     pub tint: Color,
+}
+
+/// Most ripple rings one displacement draws at once (EG-03). The scene keeps the youngest.
+pub const DISPLACE_RINGS: usize = 8;
+
+/// A displacement (EG-03, `crate::displace`): the layer's backdrop is drawn back with each
+/// pixel taken from somewhere else, moved by `field`. It replaces the backdrop's tinted draw.
+/// The scene emits one only when its strength is above 0 and motion is not reduced, so a
+/// list without one costs nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Displace {
+    pub field: DisplaceField,
+    /// Multiplies every offset. Above 0.
+    pub strength: f32,
+    /// Keep the newest line of live text sharp and still (the reading-line envelope).
+    pub keep_reading: bool,
+    /// The box drawn as captured, in surface space (logical units): the reading line, found
+    /// by the scene after the whole list is built. `None` when there is no live text or
+    /// `keep_reading` is off.
+    pub keep: Option<Rect>,
+}
+
+/// What moves each pixel, evaluated at the frame's time. Lengths are in layer units, places
+/// in layer space. A pixel at `p` shows what the backdrop holds at `p + offset`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub enum DisplaceField {
+    /// Rings that grow from where they started: `count` of `rings`, each a wave packet one
+    /// `wavelength` long, `width` wide, pushing outward by up to its amplitude.
+    Ripples { rings: [Ring; DISPLACE_RINGS], count: u32, wavelength: f32, width: f32 },
+    /// Simplex noise, one cell `scale` wide, offsets up to `amount`. `turn` (radians) turns
+    /// its lattice; a turn of 2 pi repeats.
+    Noise { scale: f32, amount: f32, seed: u32, turn: f32 },
+    /// The curl of simplex noise: a swirl with no sources or sinks.
+    Curl { scale: f32, amount: f32, seed: u32, turn: f32 },
+    /// A page lifting over a cylinder of `radius`: past the fold line through `line`, in the
+    /// direction `dir` (unit), the page rolls up and its back shows, dimmed.
+    PageCurl { line: Point, dir: Point, radius: f32 },
+    /// Offsets from image slot `slot` (`Renderer::set_material_image`), read with uv 0 to 1
+    /// over the layer's box: `(rg - bias) * amount`. Water heights or normals, flow maps.
+    Texture { slot: u32, amount: [f32; 2], bias: [f32; 2] },
+}
+
+/// One ripple ring at the frame's time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Ring {
+    pub centre: Point,
+    pub radius: f32,
+    /// How far the ring pushes at its crest, already faded by its age.
+    pub amp: f32,
 }
 
 /// Composite-pass looks for an offscreen layer (FX13). Zero turns each one off. Lengths are

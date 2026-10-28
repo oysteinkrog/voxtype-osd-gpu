@@ -64,6 +64,7 @@ use vo_scene::path::PATH_FONT;
 use vo_scene::stage::Warp;
 
 use crate::color::linear_premul;
+use crate::displace::{DisplaceBlock, DisplaceGpu};
 use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::gpu::{GpuPainter, PaintCx, StagePx};
@@ -82,6 +83,7 @@ const SHAPES_WGSL: &str = include_str!("wgsl/shapes.wgsl");
 const GLYPHS_WGSL: &str = include_str!("wgsl/glyphs.wgsl");
 const COMPOSITE_WGSL: &str = include_str!("wgsl/composite.wgsl");
 const COMPOSE_WGSL: &str = include_str!("wgsl/compose.wgsl");
+const DISPLACE_WGSL: &str = include_str!("wgsl/displace.wgsl");
 const DOTS_WGSL: &str = include_str!("wgsl/dots.wgsl");
 const BLOOM_WGSL: &str = include_str!("wgsl/bloom.wgsl");
 const NOISE_WGSL: &str = include_str!("wgsl/noise.wgsl");
@@ -183,6 +185,11 @@ pub fn composite_shader_source() -> String {
         wgsl("compose.wgsl", COMPOSE_WGSL),
     ]
     .join("\n")
+}
+
+/// The displacement shader (EG-03): `common.wgsl`, `noise.wgsl` and `displace.wgsl`.
+pub fn displace_shader_source() -> String {
+    [wgsl("common.wgsl", COMMON_WGSL), noise_shader_source(), wgsl("displace.wgsl", DISPLACE_WGSL)].join("\n")
 }
 
 /// The dot shader: `common.wgsl` and `dots.wgsl`.
@@ -360,6 +367,9 @@ enum Pipe {
     Capture,
     /// Draws a backdrop back, tinted, cut to its rounded box. The range is as for `Capture`.
     Backdrop,
+    /// Draws a backdrop back displaced (EG-03), replacing what is under its box. The range
+    /// is as for `Capture`.
+    Displace,
     /// Shapes, glyphs and vectors whose materials read textures (EG-02): the same draws with
     /// the textured group 2. `Cmd::backdrop` names the backdrop bound.
     ShapeTex,
@@ -470,6 +480,8 @@ struct BackdropPlan {
     step: u32,
     /// Pool index of the texture, taken in `place_surfaces`.
     tex: Option<usize>,
+    /// The dynamic offset of its displacement block (EG-03), when it is drawn back displaced.
+    displace: Option<u32>,
 }
 
 /// A GPU item placed for this frame.
@@ -639,7 +651,7 @@ pub struct Renderer {
     fx: Option<FxShared>,
     /// Module slots: see `Renderer::pipeline`; 9 to 11 are the textured shape, glyph and
     /// vector shaders (EG-02).
-    modules: [Option<wgpu::ShaderModule>; 12],
+    modules: [Option<wgpu::ShaderModule>; 13],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
@@ -691,6 +703,8 @@ pub struct Renderer {
     dither_motion: bool,
     /// This frame's backdrops (EG-01).
     backdrops: Vec<BackdropPlan>,
+    /// Displacement blocks and their bind group (EG-03), made on the first frame with one.
+    displace: Option<DisplaceGpu>,
     /// Material textures (EG-02), made on first use, and the image slots.
     mat_tex: Option<MatTextures>,
     material_images: [Option<wgpu::TextureView>; IMAGE_SLOTS],
@@ -775,6 +789,7 @@ impl Renderer {
             compose: None,
             dither_motion: false,
             backdrops: Vec::new(),
+            displace: None,
             mat_tex: None,
             material_images: Default::default(),
             warned_backdrop: false,
@@ -1069,6 +1084,9 @@ impl Renderer {
         self.surfaces.clear();
         self.gpu_items.clear();
         self.backdrops.clear();
+        if let Some(d) = &mut self.displace {
+            d.clear();
+        }
         self.frame += 1;
         for p in &mut self.pool {
             p.used = false;
@@ -1180,7 +1198,10 @@ impl Renderer {
         let wants = f.effects && !in_mask && opacity > 0.0 && !matches!(target, LayerTarget::Mask(_));
         let mut backdrop = parent.backdrop;
         if let Some(b) = layer.backdrop.filter(|_| wants) {
-            backdrop = self.place_backdrop(f, &b, surface, parent, &to_px, ppu, warp, opacity).map(|i| (i, surface));
+            let displace = layer.displace.as_ref().filter(|_| b.res == BackdropRes::Full);
+            backdrop = self
+                .place_backdrop(f, &b, displace, surface, parent, &to_px, ppu, warp, opacity)
+                .map(|i| (i, surface));
         }
         let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
@@ -1447,6 +1468,7 @@ impl Renderer {
         &mut self,
         f: &Frame,
         b: &vo_scene::display::Backdrop,
+        displace: Option<&vo_scene::display::Displace>,
         surface: usize,
         parent: &LayerState,
         to_px: &Affine,
@@ -1476,7 +1498,7 @@ impl Renderer {
             BackdropRes::Half => 2,
         };
         let index = self.backdrops.len() as u32;
-        self.backdrops.push(BackdropPlan { origin: [x0, y0], size: full.map(|v| v / step), step, tex: None });
+        self.backdrops.push(BackdropPlan { origin: [x0, y0], size: full.map(|v| v / step), step, tex: None, displace: None });
         let state = LayerState {
             to_px: *to_px,
             ppu,
@@ -1511,7 +1533,14 @@ impl Renderer {
             backdrop: NO_BACKDROP,
         };
         cmds.push(cmd(Pipe::Capture));
-        if b.tint.a > 0.0 && opacity > 0.0 {
+        if let Some(d) = displace {
+            // Drawn back moved (EG-03) in place of the tint, replacing the box.
+            cmds.push(cmd(Pipe::Displace));
+            grow(&mut self.surfaces[surface].bounds, area);
+            let block = DisplaceBlock::new(d, to_px, ppu, f.scale, laid, area);
+            let gpu = self.displace.get_or_insert_with(|| DisplaceGpu::new(&self.device));
+            self.backdrops[index as usize].displace = Some(gpu.push(&block));
+        } else if b.tint.a > 0.0 && opacity > 0.0 {
             cmds.push(cmd(Pipe::Backdrop));
             grow(&mut self.surfaces[surface].bounds, area);
         }
@@ -1777,7 +1806,7 @@ impl Renderer {
                         self.light as u32 as f32,
                     ];
                 }
-                if matches!(c.pipe, Pipe::Capture | Pipe::Backdrop) {
+                if matches!(c.pipe, Pipe::Capture | Pipe::Backdrop | Pipe::Displace) {
                     let b = &self.backdrops[c.range.start as usize];
                     u.origin[2] = b.origin[0] as f32;
                     u.origin[3] = b.origin[1] as f32;
@@ -2092,6 +2121,9 @@ impl Renderer {
         }
         self.upload_compose();
         self.bind_material_textures();
+        if let Some(d) = &mut self.displace {
+            d.upload(&self.device, &self.queue, &self.material_images);
+        }
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
@@ -2427,6 +2459,14 @@ impl Renderer {
                     pass.set_bind_group(0, &self.pool[tex].bind, &[]);
                     pass.draw(0..3, 0..1);
                 }
+                Pipe::Displace => {
+                    let plan = &self.backdrops[c.range.start as usize];
+                    let (Some(tex), Some(offset)) = (plan.tex, plan.displace) else { continue };
+                    let Some(bind) = self.displace.as_ref().and_then(|d| d.bind.as_ref()) else { continue };
+                    pass.set_bind_group(0, &self.pool[tex].bind, &[]);
+                    pass.set_bind_group(2, bind, &[offset]);
+                    pass.draw(0..3, 0..1);
+                }
                 Pipe::Down
                 | Pipe::Up
                 | Pipe::Final
@@ -2452,6 +2492,7 @@ impl Renderer {
             0 => ("vo-shapes", shape_shader_source_with(&self.material_fns)),
             1 => ("vo-glyphs", glyph_shader_source_with(&self.material_fns)),
             2 => ("vo-composite", composite_shader_source()),
+            12 => ("vo-displace", displace_shader_source()),
             4 => ("vo-dots", dot_shader_source()),
             5 => ("vo-vectors", vector_shader_source_with(&self.material_fns)),
             9 => ("vo-shapes-tex", with_textures(&shape_shader_source_with(&self.material_fns))),
@@ -2505,6 +2546,7 @@ impl Renderer {
             | Pipe::CompositeFxRest
             | Pipe::Capture
             | Pipe::Backdrop => 2,
+            Pipe::Displace => 12,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             Pipe::TrailMax => 8,
             // The particle layer and the painters have their own pipelines.
@@ -2528,7 +2570,7 @@ impl Renderer {
             Pipe::Dot => [None, Some(&self.layer_layout)],
             Pipe::Vector | Pipe::Glass => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
-            Pipe::Composite | Pipe::CompositeRest | Pipe::Capture | Pipe::Backdrop => {
+            Pipe::Composite | Pipe::CompositeRest | Pipe::Capture | Pipe::Backdrop | Pipe::Displace => {
                 [Some(&self.composite_layout), Some(&self.layer_layout)]
             }
             Pipe::CompositeFx | Pipe::CompositeFxRest => {
@@ -2549,11 +2591,14 @@ impl Renderer {
             _ => &self.material_layout,
         };
         let with_materials = [groups[0], groups[1], Some(group2), signals];
+        let with_displace = [groups[0], groups[1], self.displace.as_ref().map(|d| &d.layout), signals];
         let groups = [groups[0], groups[1], None, signals];
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: if matches!(pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) {
                 &with_materials
+            } else if pipe == Pipe::Displace {
+                &with_displace
             } else {
                 &groups
             },
@@ -2569,6 +2614,7 @@ impl Renderer {
             Pipe::CompositeRest => ("vs_composite", "fs_composite", vec![]),
             Pipe::Capture => ("vs_composite", "fs_capture", vec![]),
             Pipe::Backdrop => ("vs_composite", "fs_backdrop", vec![]),
+            Pipe::Displace => ("vs_displace", "fs_displace", vec![]),
             Pipe::CompositeFx | Pipe::CompositeFxRest => ("vs_composite", "fs_compose", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
@@ -2579,7 +2625,8 @@ impl Renderer {
             Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("taken as their base"),
         };
         let blend_state = match pipe {
-            Pipe::Down | Pipe::Up | Pipe::Capture => None,
+            // A displacement writes back what it does not move, so it replaces.
+            Pipe::Down | Pipe::Up | Pipe::Capture | Pipe::Displace => None,
             Pipe::CompositeRest | Pipe::CompositeFxRest => Some(compose::MULTIPLY_REST),
             // Over a cleared target this equals replacing; over a loaded one it composites.
             Pipe::Final => Some(PREMULTIPLIED_OVER),
