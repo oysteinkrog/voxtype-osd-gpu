@@ -260,7 +260,7 @@ fn frost_blurs_the_lines_behind() {
     let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
     let frosted = render(&mut off, "frosted", &stack(&fonts, 3.0, false).sample(3.0), STACK_SIZE, 1.0);
     let plain = render(&mut off, "plain", &stack(&fonts, 0.0, false).sample(3.0), STACK_SIZE, 1.0);
-    let differ = frosted.px.chunks_exact(4).zip(plain.px.chunks_exact(4)).filter(|(a, b)| a != b).count();
+    let differ = frosted.px.as_chunks::<4>().0.iter().zip(plain.px.as_chunks::<4>().0).filter(|(a, b)| a != b).count();
     assert!(differ > 1000, "only {differ} pixels changed under the frost");
 }
 
