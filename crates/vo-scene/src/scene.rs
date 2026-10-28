@@ -19,7 +19,7 @@ use vo_core::spring::Spring;
 use crate::bind::Bound;
 use crate::display::MATERIAL_SHIFT;
 use crate::display::{
-    BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
+    Backdrop, BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
 use crate::display::{BloomBand, BloomShape};
@@ -1693,8 +1693,14 @@ impl<M> Scene<M> {
             Kind::Layer { mask: None, .. } => n.style(t, Rect::from_size(size)),
             _ => None,
         };
+        let backdrop = match n.kind {
+            Kind::Layer { backdrop: Some((res, tint)), mask: None, .. } => {
+                Some(Backdrop { rect: RRect::new(Rect::from_size(size), radius(n, t)), res, tint })
+            }
+            _ => None,
+        };
         let (blend, clip, clip_fade, target, group, inside) = match n.kind {
-            Kind::Layer { blend, clip, offscreen, fade, mask } => {
+            Kind::Layer { blend, clip, offscreen, fade, mask, .. } => {
                 let clip = clip.then(|| RRect::new(Rect::from_size(size), radius(n, t)));
                 let bloom = n.has(Slot::BloomStrength as u8).then(|| Bloom {
                     strength: n.value(Slot::BloomStrength as u8, t).max(0.0) as f32,
@@ -1730,6 +1736,7 @@ impl<M> Scene<M> {
             }),
             style,
             warp,
+            backdrop,
             items: 0..0,
         });
         let mut own = Vec::new();

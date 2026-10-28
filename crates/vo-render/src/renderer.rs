@@ -37,13 +37,20 @@
 //! - **GPU elements** (`vo_scene::gpu`) break the surface's pass: the pass ends, the painters
 //!   draw, and a new pass resumes with `LoadOp::Load` (`crate::gpu`).
 //! - **Dots** have a pipeline of their own with 16-byte instances (`dots.rs`).
+//! - **Backdrops** (EG-01): a layer that asks for one puts the frame on the effect path. Where
+//!   the layer starts in its parent surface, that surface's pass breaks, the box under the layer
+//!   is copied into a pooled texture (full resolution, or half as 2 by 2 averages), and the
+//!   pass resumes. The copy is drawn back tinted before the layer's content. A frame without
+//!   a backdrop allocates and copies nothing for it.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use skrifa::GlyphId;
-use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget, Mask};
+use vo_scene::display::{
+    BackdropRes, BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget, Mask,
+};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 use vo_scene::path::PATH_FONT;
@@ -338,13 +345,29 @@ enum Pipe {
     /// GPU items drawn by painters (`crate::gpu`): the range is of `Renderer::gpu_items`. A
     /// pass break: the pass ends before it and resumes with `LoadOp::Load` after it.
     Gpu,
+    /// Copies what a surface has drawn so far into a backdrop texture (EG-01): a pass break.
+    /// The range is the backdrop's index in `Renderer::backdrops`.
+    Capture,
+    /// Draws a backdrop back, tinted, cut to its rounded box. The range is as for `Capture`.
+    Backdrop,
 }
 
 impl Pipe {
     /// Commands that run outside a render pass, between two passes on one surface.
     fn breaks_pass(self) -> bool {
-        matches!(self, Pipe::Gpu)
+        matches!(self, Pipe::Gpu | Pipe::Capture)
     }
+}
+
+/// One layer's backdrop for this frame (EG-01).
+struct BackdropPlan {
+    /// The texture's top left in target pixels, its size in texels, and target pixels per
+    /// texel along each axis (1, or 2 at half resolution).
+    origin: [i32; 2],
+    size: [u32; 2],
+    step: u32,
+    /// Pool index of the texture, taken in `place_surfaces`.
+    tex: Option<usize>,
 }
 
 /// A GPU item placed for this frame.
@@ -560,6 +583,8 @@ pub struct Renderer {
     compose: Option<compose::ComposeGpu>,
     /// Move the dither every frame (`set_dither_motion`).
     dither_motion: bool,
+    /// This frame's backdrops (EG-01).
+    backdrops: Vec<BackdropPlan>,
 }
 
 // `vo::Resident` builds a renderer on a warm-up thread and hands it to the host's thread.
@@ -638,6 +663,7 @@ impl Renderer {
             profiler: None,
             compose: None,
             dither_motion: false,
+            backdrops: Vec::new(),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -745,6 +771,7 @@ impl Renderer {
         self.pool.clear();
         self.scene = None;
         self.surfaces.clear();
+        self.backdrops.clear();
     }
 
     /// The quality tier. Starts from `VO_QUALITY`, else `Full`.
@@ -903,7 +930,7 @@ impl Renderer {
         self.queue.write_buffer(&self.signals_buf, 0, bytemuck::cast_slice(&list.signals.as_floats()));
         let (w, h) = (target.width(), target.height());
         let effects = self.quality == Quality::Full
-            && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some());
+            && list.layers.iter().any(|l| bloom_of(&l.target).is_some() || l.trail.is_some() || l.backdrop.is_some());
         let format = if effects { EFFECT_FORMAT } else { target.format() };
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
         self.shapes.clear();
@@ -918,6 +945,7 @@ impl Renderer {
         self.fx_uniforms.clear();
         self.surfaces.clear();
         self.gpu_items.clear();
+        self.backdrops.clear();
         self.frame += 1;
         for p in &mut self.pool {
             p.used = false;
@@ -1024,6 +1052,11 @@ impl Renderer {
             }
             t => t,
         };
+        let opacity = parent.opacity * layer.opacity;
+        let wants = f.effects && !in_mask && opacity > 0.0 && !matches!(target, LayerTarget::Mask(_));
+        if let Some(b) = layer.backdrop.filter(|_| wants) {
+            self.place_backdrop(f, &b, surface, parent, &to_px, ppu, warp, opacity);
+        }
         let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
             // Inside a mask everything draws straight into the mask.
@@ -1271,6 +1304,81 @@ impl Renderer {
         }
     }
 
+    /// Records a layer's backdrop (EG-01) in `surface`, the surface the layer sits in: a
+    /// capture of the box under it, then, with a tint, the draw of the capture back.
+    #[allow(clippy::too_many_arguments)]
+    fn place_backdrop(
+        &mut self,
+        f: &Frame,
+        b: &vo_scene::display::Backdrop,
+        surface: usize,
+        parent: &LayerState,
+        to_px: &Affine,
+        ppu: f32,
+        warp: Option<Warp>,
+        opacity: f32,
+    ) {
+        let Some(from_px) = to_px.invert() else { return };
+        let laid = bounds(&b.rect, to_px);
+        let seen = match warp {
+            Some(w) => w.bounds(laid),
+            None => laid,
+        };
+        let [w, h] = f.target.map(|v| v as f32);
+        let area = intersect(intersect(seen, parent.scissor), [0.0, 0.0, w, h]);
+        if area[2] <= area[0] || area[3] <= area[1] {
+            return;
+        }
+        // Whole-pixel origin, sizes rounded up so a moving or growing box keeps its texture.
+        let (x0, y0) = (area[0].floor() as i32, area[1].floor() as i32);
+        let full = [
+            ((area[2].ceil() as i32 - x0).max(1) as u32).next_multiple_of(ALIGN),
+            ((area[3].ceil() as i32 - y0).max(1) as u32).next_multiple_of(ALIGN),
+        ];
+        let step = match b.res {
+            BackdropRes::Full => 1,
+            BackdropRes::Half => 2,
+        };
+        let index = self.backdrops.len() as u32;
+        self.backdrops.push(BackdropPlan { origin: [x0, y0], size: full.map(|v| v / step), step, tex: None });
+        let state = LayerState {
+            to_px: *to_px,
+            ppu,
+            opacity,
+            clip: Some(ClipState {
+                rect: b.rect,
+                from_px,
+                ppu,
+                fade: [0.0; 4],
+                outer: parent.clip.map(|c| OuterClip { rect: c.rect, from_px: c.from_px, ppu: c.ppu }),
+            }),
+            scissor: parent.scissor,
+            smear: [0.0; 2],
+            mask_out: 0.0,
+            warp,
+        };
+        let uniform = self.push_uniform(f, &state, opacity);
+        let size = std::mem::size_of::<LayerUniform>();
+        let at = uniform as usize;
+        let mut u: LayerUniform = bytemuck::pod_read_unaligned(&self.uniforms[at..at + size]);
+        u.style_a = linear_premul(b.tint, 1.0);
+        self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
+        let cmds = &mut self.surfaces[surface].cmds;
+        let range = index..index + 1;
+        cmds.push(Cmd { pipe: Pipe::Capture, range: range.clone(), uniform, blend: BlendMode::Normal, scissor: area });
+        if b.tint.a > 0.0 && opacity > 0.0 {
+            cmds.push(Cmd { pipe: Pipe::Backdrop, range, uniform, blend: BlendMode::Normal, scissor: area });
+            grow(&mut self.surfaces[surface].bounds, area);
+        }
+    }
+
+    /// The textures of this frame's backdrops (EG-01), in texels, in the order the layers
+    /// that asked for them were drawn. Empty when no layer asked or the frame was not on the
+    /// effect path.
+    pub fn backdrop_sizes(&self) -> Vec<[u32; 2]> {
+        self.backdrops.iter().filter(|b| b.tex.is_some()).map(|b| b.size).collect()
+    }
+
     /// Sizes an offscreen layer's texture from what it drew, and adds the part its parent
     /// shows to the parent's bounds.
     fn close_surface(&mut self, child: usize, parent: usize, parent_scissor: [f32; 4], target: [u32; 2]) {
@@ -1476,6 +1584,12 @@ impl Renderer {
                         self.light as u32 as f32,
                     ];
                 }
+                if matches!(c.pipe, Pipe::Capture | Pipe::Backdrop) {
+                    let b = &self.backdrops[c.range.start as usize];
+                    u.origin[2] = b.origin[0] as f32;
+                    u.origin[3] = b.origin[1] as f32;
+                    u.src = [b.size[0] as f32, b.size[1] as f32, b.step as f32, 0.0];
+                }
                 self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
             }
         }
@@ -1537,6 +1651,20 @@ impl Renderer {
         for si in 1..self.surfaces.len() {
             if self.surfaces[si].size[0] != 0 && !self.surfaces[si].r8 {
                 self.surfaces[si].compose = self.plan_compose(si);
+            }
+        }
+        // A backdrop is only taken when its surface is drawn at all.
+        for si in 0..self.surfaces.len() {
+            if self.surfaces[si].size[0] == 0 {
+                continue;
+            }
+            for ci in 0..self.surfaces[si].cmds.len() {
+                let c = &self.surfaces[si].cmds[ci];
+                if c.pipe == Pipe::Capture {
+                    let bi = c.range.start as usize;
+                    let [w, h] = self.backdrops[bi].size;
+                    self.backdrops[bi].tex = Some(self.acquire(w, h, EFFECT_FORMAT));
+                }
             }
         }
     }
@@ -1974,6 +2102,20 @@ impl Renderer {
                     }
                 }
             }
+            Pipe::Capture => {
+                let Some(tex) = self.backdrops[c.range.start as usize].tex else { return };
+                let source = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("vo-backdrop-source"),
+                    layout: &self.composite_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
+                });
+                let mut pass = begin(enc, &self.pool[tex].view, "vo-backdrop");
+                pass.set_pipeline(self.cached_pipeline(EFFECT_FORMAT, Pipe::Capture, BlendMode::Normal));
+                pass.set_bind_group(0, &source, &[]);
+                pass.set_bind_group(1, &self.uniform_buf.as_ref().expect("uploaded").1, &[c.uniform]);
+                pass.set_bind_group(3, &self.signals_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
             _ => unreachable!("not a pass break"),
         }
     }
@@ -2037,6 +2179,11 @@ impl Renderer {
                     pass.draw(0..3, 0..1);
                     self.draw_rest(pass, format, c.pipe, c.blend);
                 }
+                Pipe::Backdrop => {
+                    let Some(tex) = self.backdrops[c.range.start as usize].tex else { continue };
+                    pass.set_bind_group(0, &self.pool[tex].bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
                 Pipe::Down
                 | Pipe::Up
                 | Pipe::Final
@@ -2045,7 +2192,7 @@ impl Renderer {
                 | Pipe::CompositeRest
                 | Pipe::CompositeFxRest => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
-                Pipe::Gpu => unreachable!("a pass break"),
+                Pipe::Gpu | Pipe::Capture => unreachable!("a pass break"),
             }
         }
     }
@@ -2105,7 +2252,12 @@ impl Renderer {
         let slot = match pipe {
             Pipe::Shape => 0,
             Pipe::Glyph => 1,
-            Pipe::Composite | Pipe::CompositeFx | Pipe::CompositeRest | Pipe::CompositeFxRest => 2,
+            Pipe::Composite
+            | Pipe::CompositeFx
+            | Pipe::CompositeRest
+            | Pipe::CompositeFxRest
+            | Pipe::Capture
+            | Pipe::Backdrop => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             Pipe::TrailMax => 8,
             // The particle layer and the painters have their own pipelines.
@@ -2124,7 +2276,9 @@ impl Renderer {
             Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
             Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
-            Pipe::Composite | Pipe::CompositeRest => [Some(&self.composite_layout), Some(&self.layer_layout)],
+            Pipe::Composite | Pipe::CompositeRest | Pipe::Capture | Pipe::Backdrop => {
+                [Some(&self.composite_layout), Some(&self.layer_layout)]
+            }
             Pipe::CompositeFx | Pipe::CompositeFxRest => {
                 [self.compose.as_ref().map(|c| &c.layout), Some(&self.layer_layout)]
             }
@@ -2155,6 +2309,8 @@ impl Renderer {
             Pipe::Glass => ("vs_glass", "fs_glass", vec![Some(GlassGpu::layout())]),
             Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
             Pipe::CompositeRest => ("vs_composite", "fs_composite", vec![]),
+            Pipe::Capture => ("vs_composite", "fs_capture", vec![]),
+            Pipe::Backdrop => ("vs_composite", "fs_backdrop", vec![]),
             Pipe::CompositeFx | Pipe::CompositeFxRest => ("vs_composite", "fs_compose", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
@@ -2164,7 +2320,7 @@ impl Renderer {
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
         };
         let blend_state = match pipe {
-            Pipe::Down | Pipe::Up => None,
+            Pipe::Down | Pipe::Up | Pipe::Capture => None,
             Pipe::CompositeRest | Pipe::CompositeFxRest => Some(compose::MULTIPLY_REST),
             // Over a cleared target this equals replacing; over a loaded one it composites.
             Pipe::Final => Some(PREMULTIPLIED_OVER),

@@ -20,7 +20,7 @@ use vo_core::words::Word;
 use crate::ambient::{Loop, LoopProp, Ripples};
 use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
-use crate::display::{BlendMode, BloomShape, Mask, ShapeKind};
+use crate::display::{BackdropRes, BlendMode, BloomShape, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::final_pass::FinalPass;
@@ -516,6 +516,8 @@ pub(crate) enum Kind {
         fade: [f32; 4],
         /// A mask for the parent layer element (`Element::mask`).
         mask: Option<Mask>,
+        /// A backdrop (EG-01, `Element::backdrop`): its resolution and tint.
+        backdrop: Option<(BackdropRes, Color)>,
     },
     /// Live dictation text: lays out the words like a label, tags each glyph with its word
     /// id, and moves each word by its own channels. A new id enters from `enter`; a kept id
@@ -1004,7 +1006,14 @@ impl<M> Element<M> {
     /// A container drawn as its own layer: group transform, blend mode, optional clip to
     /// its rounded box, optional offscreen target. Laid out as a flex column.
     pub fn layer(key: impl Into<Key>) -> Element<M> {
-        let kind = Kind::Layer { blend: BlendMode::Normal, clip: false, offscreen: false, fade: [0.0; 4], mask: None };
+        let kind = Kind::Layer {
+            blend: BlendMode::Normal,
+            clip: false,
+            offscreen: false,
+            fade: [0.0; 4],
+            mask: None,
+            backdrop: None,
+        };
         Element::new(key, kind, Element::<M>::flex(FlexDirection::Column))
     }
 
@@ -1022,6 +1031,7 @@ impl<M> Element<M> {
             offscreen: false,
             fade: [0.0; 4],
             mask: Some(Mask::default()),
+            backdrop: None,
         };
         let mut style = Element::<M>::flex(FlexDirection::Column);
         style.position = Position::Absolute;
@@ -1910,6 +1920,20 @@ impl<M> Element<M> {
             *offscreen = true;
         } else {
             debug_assert!(false, "offscreen on a node that is not a layer: {}", self.key);
+        }
+        self
+    }
+
+    /// A backdrop (EG-01) on a layer: before the layer draws, what is already drawn under its
+    /// rounded box is captured into a texture at `res`, and drawn back multiplied by `tint`
+    /// (premultiplied, so its alpha fades it). A transparent tint only captures, for effects
+    /// that read the backdrop. Only this surface's own drawing is captured, never the desktop.
+    /// The frame takes the effect path; a mask or a lower quality tier has no backdrop.
+    pub fn backdrop(mut self, res: BackdropRes, tint: Color) -> Element<M> {
+        if let Kind::Layer { backdrop, mask: None, .. } = &mut self.kind {
+            *backdrop = Some((res, tint));
+        } else {
+            debug_assert!(false, "backdrop on a node that is not a layer: {}", self.key);
         }
         self
     }

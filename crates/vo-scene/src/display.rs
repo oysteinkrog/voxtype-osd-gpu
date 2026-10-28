@@ -112,6 +112,11 @@ pub struct Layer {
     /// every parent's: content is laid out by `transform`, then seen through this. `None`
     /// for a flat layer under flat parents.
     pub warp: Option<Warp>,
+    /// A backdrop (EG-01): before the layer draws, what is already drawn under `rect` in the
+    /// surface the layer sits in is copied into a texture, and drawn back tinted. Effects
+    /// that bend, blur or refract what is under an element read that texture. Never the
+    /// desktop: only this surface's own drawing. `None` costs nothing.
+    pub backdrop: Option<Backdrop>,
     /// Range into `DisplayList::items`, in paint order.
     pub items: Range<u32>,
 }
@@ -130,9 +135,40 @@ impl Layer {
             trail: None,
             style: None,
             warp: None,
+            backdrop: None,
             items: 0..0,
         }
     }
+}
+
+/// How finely a backdrop is captured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub enum BackdropRes {
+    /// One texel per physical pixel.
+    #[default]
+    Full,
+    /// One texel per 2 by 2 physical pixels (their average): a quarter of the memory, for
+    /// blur and frost, which soften it anyway.
+    Half,
+}
+
+/// A layer's backdrop request (EG-01).
+///
+/// The capture covers the bounding box of `rect` in physical pixels, at a whole-pixel origin,
+/// so fractional scales (1.25, 1.5) sample without drift. It holds what the layer's surface
+/// drew before this layer: the target, or the offscreen layer around it. Inside a mask, and
+/// below the full quality tier, there is no backdrop. A frame with a backdrop takes the
+/// effect path.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Backdrop {
+    /// The area under the element, in layer space. The tinted draw is cut to its rounded
+    /// shape.
+    pub rect: RRect,
+    pub res: BackdropRes,
+    /// The backdrop is drawn back over itself multiplied by this colour, before the layer's
+    /// content, with the layer's opacity and clips. Transparent draws nothing: the capture
+    /// is then only for the layer's own effects.
+    pub tint: Color,
 }
 
 /// Composite-pass looks for an offscreen layer (FX13). Zero turns each one off. Lengths are

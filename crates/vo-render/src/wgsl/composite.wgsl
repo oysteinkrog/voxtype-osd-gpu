@@ -48,3 +48,44 @@ fn layer_bilinear (p: vec2f) -> vec4f {
   }
   return mix (mix (c[0], c[1], f.x), mix (c[2], c[3], f.x), f.y);
 }
+
+// Backdrops (EG-01). The layer block of a backdrop: `origin.xy` is where the surface it is
+// taken from (and drawn back into) sits in target pixels, `origin.zw` where the backdrop
+// texture's top left sits, `src.xy` that texture's size and `src.z` target pixels per texel
+// (1, or 2 at half resolution). `style_a` is the tint, linear and premultiplied.
+
+// Copies the surface, bound as `layer_tex`, into the backdrop texture: each texel is the
+// average of the `src.z` by `src.z` target pixels it covers, empty past the surface.
+@fragment fn fs_capture (@builtin(position) frag: vec4f) -> @location(0) vec4f {
+  let k = i32 (layer.src.z);
+  let base = vec2i (floor (frag.xy)) * k + vec2i (layer.origin.zw) - vec2i (layer.origin.xy);
+  let size = vec2i (textureDimensions (layer_tex));
+  var sum = vec4f (0.0);
+  for (var y = 0; y < k; y++) {
+    for (var x = 0; x < k; x++) {
+      let q = base + vec2i (x, y);
+      if (all (q >= vec2i (0)) && all (q < size)) {
+        sum += textureLoad (layer_tex, q, 0);
+      }
+    }
+  }
+  return sum / f32 (k * k);
+}
+
+// Draws the backdrop texture, bound as `layer_tex`, back into its surface: read bilinearly
+// (a 1:1 copy at full resolution), tinted, with the layer's opacity, cut to the backdrop's
+// rounded box and the clip around it.
+@fragment fn fs_backdrop (@builtin(position) frag: vec4f) -> @location(0) vec4f {
+  let k = layer.src.z;
+  let t = (frag.xy + layer.origin.xy - layer.origin.zw) / k - 0.5;
+  let i = vec2i (floor (t));
+  let f = t - floor (t);
+  let size = vec2i (textureDimensions (layer_tex));
+  var c = array<vec4f, 4> ();
+  for (var n = 0; n < 4; n++) {
+    let q = clamp (i + vec2i (n & 1, n >> 1), vec2i (0), size - 1);
+    c[n] = textureLoad (layer_tex, q, 0);
+  }
+  let b = mix (mix (c[0], c[1], f.x), mix (c[2], c[3], f.x), f.y);
+  return b * layer.style_a * (layer.t.w * clip_coverage (frag.xy));
+}

@@ -15,6 +15,7 @@
 
 use std::time::Instant;
 
+use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
 use vo::scene::path::StrokeStyle;
@@ -41,6 +42,8 @@ const CASES: &[&str] = &[
     "motion blur",
     "crt style",
     "glitch",
+    "backdrop",
+    "backdrop half",
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,9 +95,24 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "trail" => layer.trail(0.25),
         "crt style" => layer.chromatic(2.0 * k).scanlines(0.35, 3.0 * k).crt(0.12).vignette(0.4),
         "glitch" => layer.glitch(0.6),
+        // A layer the card's size that captures what is under it and draws it back tinted
+        // (EG-01), the base cost of glass, blur and ripples over a backdrop.
+        "backdrop" => layer.backdrop(BackdropRes::Full, Color::hex(0xff6b6b, 1.0)),
+        "backdrop half" => layer.backdrop(BackdropRes::Half, Color::hex(0xff6b6b, 1.0)),
         _ => layer,
     };
-    Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k).child(layer)
+    let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+    if !case.starts_with("backdrop") {
+        return root.child(layer);
+    }
+    // Stripes under the card, so the tinted backdrop shows in the preview and the sheets.
+    let stripes = Element::row("stripes")
+        .children((0..(size.w / (12.0 * k)) as u32).map(|i| {
+            let c = if i % 2 == 0 { Color::hex(0xe8ecf2, 1.0) } else { Color::hex(0x3a86ff, 1.0) };
+            Element::panel(i as u64).size(12.0 * k, size.h).fill(c)
+        }))
+        .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+    root.child(stripes).child(layer)
 }
 
 fn fonts() -> FontRegistry {
