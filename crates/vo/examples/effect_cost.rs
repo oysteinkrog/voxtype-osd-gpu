@@ -19,14 +19,16 @@ use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::displace::{Displace, Onset, Ripples};
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
-use vo::scene::geom::{Color, Point, Size};
+use vo::scene::geom::{Color, Point, Rect, Size};
 use vo::scene::glass::{Glass, GlassShape};
 use vo::scene::material::Material;
 use vo::scene::path::StrokeStyle;
+use vo::scene::water::{PoolDrop, WaterPool};
 use vo::scene::Scene;
 use vo::{App, Cx, FontRegistry, Options, Scenario, ShapedLayout};
 use vo_render::profile::timestamp_features;
 use vo_render::{Renderer, Target};
+use vo_sim::water::{Water, WaterConfig, WaterDrop};
 
 /// Seconds each case shows in the preview.
 const CASE_SECS: f64 = 2.0;
@@ -57,6 +59,7 @@ const CASES: &[&str] = &[
     "frost stack",
     "displace ripples",
     "displace noise",
+    "water pool",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -164,6 +167,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         _ => layer,
     };
     let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+    if case == "water pool" {
+        return root.child(layer).child(water_pool(size, t).view("water"));
+    }
     if !case.contains("backdrop") && !case.starts_with("frost") && !case.starts_with("displace") {
         return root.child(layer);
     }
@@ -208,6 +214,27 @@ fn frost_stack(size: Size, k: f32) -> Element<Msg> {
         .size(size.w, size.h)
         .fill(Color::hex(0x0b0f14, 1.0))
         .child(stack.view("stack", size, sheet, &lines, content, false))
+}
+
+/// A pool of water (EG-10) below the card that mirrors it, with a drop every 0.3 s and four
+/// rings alive at any time.
+fn water_pool(size: Size, t: f64) -> WaterPool {
+    let last = (t / 0.3).floor() * 0.3;
+    let drops = (0..4).rev().map(|n| PoolDrop::word(last - n as f64 * 0.3, 0.15 + 0.23 * n as f32, 0.8));
+    WaterPool::new(size, Rect::new(0.0, size.h * 0.7, size.w, size.h * 0.3))
+        .light(false)
+        .reduced_motion(false)
+        .drops(drops.filter(|d| d.t >= 0.0))
+}
+
+/// GPU ms of the water's own work per 60 fps frame at `size`: two ticks and one output pass.
+fn water_sim_ms(g: &Gpu, size: Size) -> f64 {
+    use vo_sim::Sim;
+    let pool = water_pool(size, 0.0);
+    let cfg = WaterConfig { reduced_motion: false, ..WaterConfig::for_size(pool.pool.w, pool.pool.h) };
+    let mut water = Water::new(&g.device, &g.queue, cfg);
+    water.apply(&WaterDrop { x: 0.3, y: 0.3, radius: 0.03, strength: -0.8 });
+    water.gpu_cost(2).map_or(0.0, |c| c.tick_ms * 2.0 + c.output_ms)
 }
 
 fn fonts() -> FontRegistry {
@@ -294,6 +321,13 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize) -> Vec<Row>
         let mut r = Renderer::with_fonts(&g.device, &g.queue, fonts.clone());
         assert!(r.set_profiling(true), "this device has no timestamp queries");
         add_frost(&mut r);
+        // The water's ticks run in their own submits, outside the frame's timestamps.
+        let water_ms = if *name == "water pool" {
+            vo_sim::water_render::install_pool(&mut r, &water_pool(size, 0.0), 1.0);
+            water_sim_ms(g, size)
+        } else {
+            0.0
+        };
         let mut scene: Scene<Msg> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
         scene.set_viewport(0.0, size, 1.0);
         let (mut gpu, mut cpu, mut sections) = (Vec::new(), Vec::new(), Vec::<(String, f64)>::new());
@@ -307,7 +341,7 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize) -> Vec<Row>
             let record = started.elapsed().as_secs_f64() * 1e3;
             let Some(tm) = r.last_timings() else { continue };
             if f >= 10 {
-                gpu.push(tm.total_ms);
+                gpu.push(tm.total_ms + water_ms);
                 cpu.push(record);
                 for p in tm.passes {
                     match sections.iter_mut().find(|s| s.0 == p.label) {
@@ -339,7 +373,10 @@ fn main() {
         let scenario = Scenario { size, scale: 1.0, duration: CASES.len() as f64 * CASE_SECS, inputs: Vec::new() };
         let options = move || Options::<Msg> {
             fonts: fonts.clone(),
-            renderer_setup: Some(std::sync::Arc::new(add_frost)),
+            renderer_setup: Some(std::sync::Arc::new(move |r: &mut Renderer| {
+                add_frost(r);
+                vo_sim::water_render::install_pool(r, &water_pool(size, 0.0), 1.0);
+            })),
             ..Options::default()
         };
         let mut p = vo::preview::Preview::new("effect_cost", move || Tour { size, case: 0 }, options, scenario);

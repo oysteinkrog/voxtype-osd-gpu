@@ -40,5 +40,6 @@ required-features = ["preview"]
 
 [dev-dependencies]
 vo-dots = { path = "../vo-dots" }
+vo-sim = { path = "../vo-sim" }
 # Tests and examples always see the export and preview code; the library only with the features.
 vo = { path = ".", default-features = false, features = ["export", "preview"] }
