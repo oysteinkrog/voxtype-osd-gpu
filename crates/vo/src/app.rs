@@ -312,6 +312,11 @@ impl<A: App> Driver<A> {
         self.exit_deadline().is_some_and(|d| t >= d)
     }
 
+    /// When the app asked to exit.
+    pub(crate) fn exit_at(&self) -> Option<f64> {
+        self.exit_at
+    }
+
     /// When the run ends even if something still moves.
     pub(crate) fn exit_deadline(&self) -> Option<f64> {
         self.exit_at.map(|e| e + EXIT_MOTION_MAX)

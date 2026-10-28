@@ -35,7 +35,10 @@ pub use diag::{smaps_kb, Diagnostics, HeapFn, LogDiagnostics};
 pub use export::{export, export_with, frame_hash, Export, ExportError, ExportReport, Video};
 #[cfg(feature = "wayland")]
 pub use live::{run_overlay_with, Resident, WarmFrames};
-pub use offline::{render_offline, render_offline_with, Input, OfflineError, Scenario};
+pub use offline::{
+    exit_check, render_offline, render_offline_report, render_offline_with, Ending, Input, OfflineError, OfflineReport,
+    Scenario,
+};
 pub use surfaces::SurfaceView;
 
 pub use vo_host::{Edges, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind};

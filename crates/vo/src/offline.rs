@@ -9,7 +9,7 @@ use vo_host::{Point, PointerEvent, PointerKind, Size};
 use vo_render::offscreen::{write_png, Frame};
 use vo_render::Offscreen;
 
-use crate::app::{App, Driver};
+use crate::app::{App, Driver, EXIT_MOTION_MAX};
 use crate::Options;
 
 /// One scripted input.
@@ -30,6 +30,68 @@ pub struct Scenario<M> {
     pub duration: f64,
     /// `(t, input)` in time order.
     pub inputs: Vec<(f64, Input<M>)>,
+}
+
+/// How an offline run ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ending {
+    /// The app asked to exit at `exit_at` and nothing moved any more at `at`, the first frame
+    /// time with no motion.
+    Settled { exit_at: f64, at: f64 },
+    /// The app asked to exit at `exit_at` and something still moved at `at`, when the exit
+    /// motion cap (`EXIT_MOTION_MAX` seconds) ended the run. Live, this is the
+    /// "vo: still moving ... closing anyway" case.
+    Capped { exit_at: f64, at: f64 },
+    /// The run stopped first: the scenario ran out or the frame count was reached. `exit_at`
+    /// is when the app asked to exit, if it did.
+    Unfinished { exit_at: Option<f64> },
+}
+
+impl Ending {
+    /// Seconds from the exit to the end of the run, for an app that exited and ended.
+    pub fn after_exit(&self) -> Option<f64> {
+        match *self {
+            Ending::Settled { exit_at, at } | Ending::Capped { exit_at, at } => Some(at - exit_at),
+            Ending::Unfinished { .. } => None,
+        }
+    }
+
+    /// The exit motion cap ended the run.
+    pub fn capped(&self) -> bool {
+        matches!(self, Ending::Capped { .. })
+    }
+
+    /// The seconds an exit motion may run before the cap ends it.
+    pub const CAP: f64 = EXIT_MOTION_MAX;
+}
+
+/// What an offline run did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OfflineReport {
+    /// Frames rendered (or stepped, for [`exit_check`]).
+    pub frames: u64,
+    pub ending: Ending,
+}
+
+/// How the run stands at `t`, the frame time it stopped at.
+fn ending_at<A: App>(driver: &Driver<A>, t: f64) -> Ending {
+    match driver.exit_at() {
+        Some(exit_at) if driver.done(t) => {
+            if driver.overdue(t) && (driver.moving(t) || driver.extras.moving(t)) {
+                Ending::Capped { exit_at, at: t }
+            } else {
+                Ending::Settled { exit_at, at: t }
+            }
+        }
+        exit_at => Ending::Unfinished { exit_at },
+    }
+}
+
+/// The live overlay's line for a run the cap ended, on stderr.
+fn warn_capped(ending: &Ending) {
+    if ending.capped() {
+        eprintln!("vo: still moving {EXIT_MOTION_MAX} s after the exit, closing anyway");
+    }
 }
 
 #[derive(Debug)]
@@ -97,7 +159,8 @@ pub fn render_offline<A: App>(
 
 /// [`render_offline`] with fonts, a text measurer and tokens. `Options::inbox` and
 /// `Options::diagnostics` are not used offline; `Options::frame_timings` gets each frame's GPU
-/// time.
+/// time. When the exit motion cap ends the run, prints the live overlay's
+/// "vo: still moving ..." line on stderr.
 pub fn render_offline_with<A: App>(
     app: A,
     scenario: &Scenario<A::Msg>,
@@ -105,11 +168,24 @@ pub fn render_offline_with<A: App>(
     out_dir: &Path,
     options: Options<A::Msg>,
 ) -> Result<u64, OfflineError> {
+    let report = render_offline_report(app, scenario, fps, out_dir, options)?;
+    warn_capped(&report.ending);
+    Ok(report.frames)
+}
+
+/// [`render_offline_with`], returning how the run ended as well, with no stderr line.
+pub fn render_offline_report<A: App>(
+    app: A,
+    scenario: &Scenario<A::Msg>,
+    fps: f64,
+    out_dir: &Path,
+    options: Options<A::Msg>,
+) -> Result<OfflineReport, OfflineError> {
     std::fs::create_dir_all(out_dir)?;
     let mut written = 0u64;
     let mut extra_written: std::collections::HashMap<String, u64> = Default::default();
     let frames = Frames::UntilDone(scenario.duration);
-    drive_surfaces(
+    let (frames, ending) = drive_surfaces(
         app,
         scenario,
         fps,
@@ -131,7 +207,33 @@ pub fn render_offline_with<A: App>(
             Ok(())
         },
     )?;
-    Ok(written)
+    Ok(OfflineReport { frames, ending })
+}
+
+/// Runs `app` through `scenario` at `fps` on the CPU, drawing nothing, and reports how its
+/// exit ended: settled, or cut by the exit motion cap. Unlike a render it does not stop at
+/// `scenario.duration` once the app has asked to exit, so a slow exit is never cut short; it
+/// stops there only when the app has not asked to exit by then.
+pub fn exit_check<A: App>(
+    app: A,
+    scenario: &Scenario<A::Msg>,
+    fps: f64,
+    mut options: Options<A::Msg>,
+) -> OfflineReport {
+    let mut driver = start(app, scenario, &mut options);
+    let mut next_input = 0;
+    for n in 0.. {
+        let ft = FrameTime::at_rate(n, fps);
+        if ft.t > scenario.duration && driver.exit_at().is_none() {
+            return OfflineReport { frames: n, ending: Ending::Unfinished { exit_at: None } };
+        }
+        advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
+        driver.extras.take_closed(ft.t);
+        if driver.done(ft.t) {
+            return OfflineReport { frames: n + 1, ending: ending_at(&driver, ft.t) };
+        }
+    }
+    unreachable!("an app that asked to exit is done by the exit motion cap")
 }
 
 /// The driver and scene a scenario starts with: the view applied at t = 0 on a viewport of
@@ -202,11 +304,12 @@ pub(crate) fn drive<A: App, E: From<OfflineError>>(
     options: Options<A::Msg>,
     sink: &mut dyn FnMut(Frame) -> Result<(), E>,
 ) -> Result<u64, E> {
-    drive_surfaces(app, scenario, fps, frames, options, sink, &mut |_, _| Ok(()))
+    drive_surfaces(app, scenario, fps, frames, options, sink, &mut |_, _| Ok(())).map(|(n, _)| n)
 }
 
 /// [`drive`], and each extra surface's frames to `extra` with the surface's key, drawn at the
-/// size its spec asks for at the scenario's scale.
+/// size its spec asks for at the scenario's scale. Returns the frame count and how the run
+/// ended.
 pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     app: A,
     scenario: &Scenario<A::Msg>,
@@ -215,7 +318,7 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     mut options: Options<A::Msg>,
     sink: &mut dyn FnMut(Frame) -> Result<(), E>,
     extra: &mut dyn FnMut(&str, Frame) -> Result<(), E>,
-) -> Result<u64, E> {
+) -> Result<(u64, Ending), E> {
     let timings = options.frame_timings.clone();
     let (device, queue) = headless_gpu_for(timings.is_some())?;
     let profile = |r: &mut vo_render::Renderer| {
@@ -244,11 +347,18 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     let mut rendered = 0u64;
     let mut next_input = 0;
     let mut list = Default::default();
+    let mut ending = Ending::Unfinished { exit_at: None };
     for n in 0.. {
         let ft = FrameTime::at_rate(n, fps);
         match frames {
-            Frames::UntilDone(end) if ft.t > end => break,
-            Frames::Count(c) if n >= c => break,
+            Frames::UntilDone(end) if ft.t > end => {
+                ending = Ending::Unfinished { exit_at: driver.exit_at() };
+                break;
+            }
+            Frames::Count(c) if n >= c => {
+                ending = Ending::Unfinished { exit_at: driver.exit_at() };
+                break;
+            }
             _ => {}
         }
         advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
@@ -290,6 +400,7 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
             }
         }
         if matches!(frames, Frames::UntilDone(_)) && driver.done(ft.t) {
+            ending = ending_at(&driver, ft.t);
             break;
         }
     }
@@ -301,5 +412,77 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
             extra(&key, frame)?;
         }
     }
-    Ok(rendered)
+    Ok((rendered, ending))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Cx, Tokens};
+    use vo_scene::Element;
+
+    /// An app that fades out when told to exit: its fade settles.
+    struct FadeOut {
+        leaving: bool,
+    }
+
+    impl App for FadeOut {
+        type Msg = ();
+
+        fn update(&mut self, _: (), cx: &mut Cx<()>) {
+            self.leaving = true;
+            cx.exit();
+        }
+
+        fn view(&self, _: &Tokens) -> Element<()> {
+            Element::panel("root").size(100.0, 40.0).opacity(if self.leaving { 0.0 } else { 1.0 })
+        }
+    }
+
+    /// An app with a dial that spins for ever, through its exit too.
+    struct Spinner;
+
+    impl App for Spinner {
+        type Msg = ();
+
+        fn update(&mut self, _: (), cx: &mut Cx<()>) {
+            cx.exit();
+        }
+
+        fn view(&self, _: &Tokens) -> Element<()> {
+            let dial = Element::shape("dial", vo_scene::display::ShapeKind::Circle)
+                .size(40.0, 40.0)
+                .ambient(vo_scene::LoopProp::Rotation, vo_scene::Loop::spin(1.0));
+            Element::column("root").size(100.0, 100.0).child(dial)
+        }
+    }
+
+    fn exit_at_one(duration: f64) -> Scenario<()> {
+        Scenario { size: Size::new(200.0, 100.0), scale: 1.0, duration, inputs: vec![(1.0, Input::Msg(()))] }
+    }
+
+    #[test]
+    fn an_exit_that_settles_reports_when() {
+        let r = exit_check(FadeOut { leaving: false }, &exit_at_one(10.0), 60.0, Options::default());
+        let Ending::Settled { exit_at, at } = r.ending else { panic!("settles: {r:?}") };
+        assert_eq!(exit_at, 1.0);
+        assert!(at > 1.0 && at < 1.0 + EXIT_MOTION_MAX, "the fade plays, then settles: {at}");
+        assert_eq!(r.ending.after_exit(), Some(at - 1.0));
+    }
+
+    #[test]
+    fn a_loop_that_never_stops_reports_the_cap() {
+        // The scenario ends before the cap: a check still runs to it.
+        let r = exit_check(Spinner, &exit_at_one(2.0), 60.0, Options::default());
+        assert!(r.ending.capped(), "{r:?}");
+        let after = r.ending.after_exit().unwrap();
+        assert!((after - EXIT_MOTION_MAX).abs() < 1.0 / 60.0 + 1e-9, "cut at the cap: {after}");
+    }
+
+    #[test]
+    fn an_app_that_never_exits_is_unfinished() {
+        let s = Scenario { inputs: Vec::new(), ..exit_at_one(2.0) };
+        let r = exit_check(Spinner, &s, 10.0, Options::default());
+        assert_eq!(r.ending, Ending::Unfinished { exit_at: None });
+    }
 }
