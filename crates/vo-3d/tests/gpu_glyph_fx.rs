@@ -11,13 +11,13 @@ mod support;
 use support::{Image, Tolerance};
 use vo_3d::glyph_fx::{Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
 use vo_render::{Renderer, Target};
-use vo_scene::Scene;
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::taffy;
 use vo_scene::taffy::prelude::{auto, length};
 use vo_scene::text::{ShapedLayout, TextLayout};
+use vo_scene::Scene;
 
 const W: u32 = 600;
 const H: u32 = 300;
