@@ -227,6 +227,23 @@ impl Atlas {
         entry
     }
 
+    /// Same as [`Self::glyph_in`] for a face at a variation location: `font` gives the font
+    /// and the location (`Face::location`). Each instance has its own `font_id`.
+    pub fn glyph_in_at<'a>(
+        &mut self,
+        font_id: u32,
+        font: impl FnOnce() -> (skrifa::FontRef<'a>, skrifa::instance::LocationRef<'a>),
+        gid: GlyphId,
+    ) -> Option<AtlasEntry> {
+        if let Some(e) = self.entries.get(&(font_id, gid)) {
+            return *e;
+        }
+        let (f, at) = font();
+        let entry = self.encoder.encode_glyph_at(&f, gid, at).and_then(|g| self.push(&g));
+        self.entries.insert((font_id, gid), entry);
+        entry
+    }
+
     /// The entry for a filled path, encoded on first use and keyed by `(font_id, id)`. The
     /// path is y down in path units; it is stored y up, times [`PATH_UNITS`], so the glyph
     /// matrix of a size `k / PATH_UNITS` draws it at `k` pixels per path unit.

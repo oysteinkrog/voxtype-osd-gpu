@@ -45,6 +45,9 @@ pub struct Magnet {
     pub width: f32,
     /// Share of the field's opacity drawn on the text side (left of the caret).
     pub text_side: f32,
+    /// The static form: words land in place and the field is still rings, as under reduced
+    /// motion. For a look that takes reduced motion from its own settings.
+    pub still: bool,
 }
 
 impl Default for Magnet {
@@ -57,6 +60,7 @@ impl Default for Magnet {
             snap_secs: 0.11,
             width: 1.0,
             text_side: 0.45,
+            still: false,
         }
     }
 }

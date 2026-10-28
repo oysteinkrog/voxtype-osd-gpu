@@ -264,6 +264,8 @@ pub struct LiveMotion {
     pub letters: Option<letter_physics::LetterPhysics>,
     /// The caret as a magnet that pulls new words in, with its field drawn (MO-89).
     pub magnet: Option<magnet::Magnet>,
+    /// Words set in a font of their own, such as a variable font instance (MO-81).
+    pub word_fonts: Vec<(WordId, FontId)>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
     /// Draws glyphs on the newest line that break the reading-line envelope in this colour
@@ -278,6 +280,23 @@ pub struct LiveMotion {
     /// Words whose glyphs something else draws for now, such as a GPU effect that morphs a
     /// revised word (`Element::words_drawn_elsewhere`). They keep their place in the line.
     pub elsewhere: Vec<WordId>,
+}
+
+/// The byte ranges of `words` joined by spaces that `fonts` sets in a font of their own, in
+/// order: what `TextLayout::layout_fonts` takes for live text.
+pub(crate) fn word_font_ranges(words: &[Word], fonts: &[(WordId, FontId)]) -> Vec<(std::ops::Range<usize>, FontId)> {
+    if fonts.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut at = 0;
+    for w in words {
+        if let Some(&(_, f)) = fonts.iter().find(|(id, _)| *id == w.id) {
+            out.push((at..at + w.text.len(), f));
+        }
+        at += w.text.len() + 1;
+    }
+    out
 }
 
 /// What `Flow::update` needs from the node.
@@ -659,7 +678,7 @@ impl Flow {
         self.line_height = line_height;
         self.accent = motion.settle.and_then(|s| s.accent);
         self.letters = if reduced { None } else { motion.letters };
-        (self.magnet, self.magnet_still) = (motion.magnet, reduced);
+        (self.magnet, self.magnet_still) = (motion.magnet, reduced || motion.magnet.is_some_and(|m| m.still));
         let mut old = std::mem::take(&mut self.words);
         let scroll = front_scroll(&old, words, &placed);
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);

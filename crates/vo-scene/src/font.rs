@@ -16,6 +16,9 @@ use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::{ReadError, TableProvider};
 use skrifa::{FontRef, MetadataProvider};
 
+#[path = "motion/var_axes.rs"]
+pub mod var_axes;
+
 /// Index of a font in a `FontRegistry`.
 pub type FontId = u32;
 
@@ -30,6 +33,9 @@ pub struct Face {
     index: u32,
     upem: u16,
     shaping: harfrust::Font,
+    /// The variation location of an instance (`FontRegistry::add_instance`); empty for the
+    /// font's default.
+    coords: Vec<skrifa::instance::NormalizedCoord>,
 }
 
 impl Face {
@@ -39,7 +45,30 @@ impl Face {
         // accepted but cannot shape with.
         let shaping =
             harfrust::Font::new(data.clone(), index).ok_or(ReadError::MalformedData("harfrust rejected the font"))?;
-        Ok(Face { data, index, upem, shaping })
+        Ok(Face { data, index, upem, shaping, coords: Vec::new() })
+    }
+
+    /// The same face at a variation location, from axis values in user units (`wght` 700,
+    /// `wdth` 90). Axes the font lacks are ignored; omitted axes keep their defaults.
+    fn instance(&self, axes: &[([u8; 4], f32)]) -> Face {
+        let tags = axes.iter().map(|&(tag, value)| (harfrust::Tag::new(&tag), value));
+        let shaping = self.shaping.instance_builder().variations(tags).build();
+        let coords = shaping.normalized_coords().to_vec();
+        Face { data: self.data.clone(), index: self.index, upem: self.upem, shaping, coords }
+    }
+
+    /// The variation location metrics and outlines are read at.
+    pub fn location(&self) -> LocationRef<'_> {
+        LocationRef::new(&self.coords)
+    }
+
+    /// The font's variation axes: tag, minimum, default and maximum in user units.
+    pub fn axes(&self) -> Vec<([u8; 4], f32, f32, f32)> {
+        self.skrifa()
+            .axes()
+            .iter()
+            .map(|a| (a.tag().to_be_bytes(), a.min_value(), a.default_value(), a.max_value()))
+            .collect()
     }
 
     /// The font file's bytes.
@@ -76,7 +105,7 @@ impl Face {
     /// text set with it takes the room it takes in GTK. skrifa reads the ascent and descent
     /// from `hhea`, or from `OS/2` when the font asks for its typo metrics, as HarfBuzz does.
     pub fn line_height(&self, size: f32) -> f32 {
-        let m = self.skrifa().metrics(Size::new(size), LocationRef::default());
+        let m = self.skrifa().metrics(Size::new(size), self.location());
         // The tolerance keeps a height that is whole up to float error from rounding up.
         (m.ascent - m.descent - 1e-3).ceil()
     }
@@ -95,6 +124,8 @@ pub struct FontRegistry {
     fallback: Arc<RwLock<Fallback>>,
     /// Font files already read, by path: the faces of one collection share its bytes.
     files: Arc<RwLock<HashMap<PathBuf, Bytes>>>,
+    /// Instances made by `add_instance`, by base font and axis values in hundredths.
+    instances: Arc<RwLock<HashMap<(FontId, Vec<([u8; 4], i32)>), FontId>>>,
 }
 
 #[derive(Default)]
@@ -164,6 +195,30 @@ impl FontRegistry {
         let id = self.add_face(Arc::new(asset.bytes), 0).map_err(|e| FontError::Parse(PathBuf::from(asset.name), e))?;
         fb.assets.insert(asset.name, id);
         Ok(id)
+    }
+
+    /// A variable font `base` at a variation location, from axis values in user units, for
+    /// example `[(*b"wght", 700.0), (*b"wdth", 90.0)]`. The instance shares the file's bytes
+    /// and the base font's fallback chain; asking again for the same values gives the same id,
+    /// so a caller can ask every frame. Values are kept to a hundredth. `None` when there is
+    /// no such font.
+    pub fn add_instance(&self, base: FontId, axes: &[([u8; 4], f32)]) -> Option<FontId> {
+        let key: Vec<([u8; 4], i32)> = axes.iter().map(|&(t, v)| (t, (v * 100.0).round() as i32)).collect();
+        if let Some(&id) = self.instances.read().expect("instance lock").get(&(base, key.clone())) {
+            return Some(id);
+        }
+        let face = self.get(base)?;
+        let axes: Vec<([u8; 4], f32)> = key.iter().map(|&(t, v)| (t, v as f32 / 100.0)).collect();
+        let instance = Arc::new(face.instance(&axes));
+        let id = {
+            let mut faces = self.faces.write().expect("font table lock");
+            faces.push(instance);
+            faces.len() as FontId - 1
+        };
+        let chain = self.fallbacks(base);
+        self.fallback.write().expect("fallback lock").chains.insert(id, chain);
+        self.instances.write().expect("instance lock").insert((base, key), id);
+        Some(id)
     }
 
     /// Sets the faces tried, in order, for characters font `primary` lacks.

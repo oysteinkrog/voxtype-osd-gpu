@@ -1368,7 +1368,7 @@ impl Renderer {
             self.faces.extend(more);
         }
         let face = self.faces.get(g.font as usize)?;
-        let entry = self.atlas.glyph_in(g.font, || face.skrifa(), GlyphId::new(g.glyph))?;
+        let entry = self.atlas.glyph_in_at(g.font, || (face.skrifa(), face.location()), GlyphId::new(g.glyph))?;
         let k = g.size / face.units_per_em() as f32;
         let m = &st.to_px;
         // Em space has y up; layer space has y down.

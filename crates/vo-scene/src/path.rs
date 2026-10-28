@@ -713,7 +713,7 @@ pub mod make {
 /// A glyph's outline as a path in layer units at `size`, pen origin at 0, y down. For glyph
 /// morphs (TY21) and text drawn as strokes.
 pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
-    use skrifa::instance::{LocationRef, Size};
+    use skrifa::instance::Size;
     use skrifa::outline::{DrawSettings, OutlinePen};
     use skrifa::MetadataProvider;
     struct Pen(BezPath);
@@ -737,7 +737,7 @@ pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
     let font = face.skrifa();
     let mut pen = Pen(BezPath::new());
     if let Some(g) = font.outline_glyphs().get(skrifa::GlyphId::new(glyph)) {
-        let _ = g.draw(DrawSettings::unhinted(Size::new(size), LocationRef::default()), &mut pen);
+        let _ = g.draw(DrawSettings::unhinted(Size::new(size), face.location()), &mut pen);
     }
     pen.0
 }

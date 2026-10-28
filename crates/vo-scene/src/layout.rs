@@ -61,12 +61,14 @@ impl<M> LayoutView<'_, M> {
     fn leaf(&mut self, node_id: taffy::NodeId, inputs: LayoutInput) -> LayoutOutput {
         let text_layout = self.text;
         let n = self.node(node_id);
-        let content: Option<(String, TextStyle, Vec<f32>)> = match &n.kind {
-            Kind::Label { text, style } => Some((text.clone(), *style, Vec::new())),
-            Kind::LiveText { words, style, inline, .. } => Some((
+        type Fonts = Vec<(std::ops::Range<usize>, crate::font::FontId)>;
+        let content: Option<(String, TextStyle, Vec<f32>, Fonts)> = match &n.kind {
+            Kind::Label { text, style } => Some((text.clone(), *style, Vec::new(), Vec::new())),
+            Kind::LiveText { words, style, inline, live, .. } => Some((
                 words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
                 *style,
                 crate::inline::widths(words, inline, style.size),
+                crate::flow::word_font_ranges(words, &live.word_fonts),
             )),
             _ => None,
         };
@@ -76,14 +78,14 @@ impl<M> LayoutView<'_, M> {
             &n.style,
             |_, _| 0.0,
             |known, available| {
-                let Some((text, style, objects)) = &content else { return taffy::Size::ZERO };
+                let Some((text, style, objects, fonts)) = &content else { return taffy::Size::ZERO };
                 let max = known.width.or(match available.width {
                     AvailableSpace::Definite(w) => Some(w),
                     AvailableSpace::MinContent => Some(0.0),
                     AvailableSpace::MaxContent => None,
                 });
                 let st = fitted(text_layout, text, style, max, known.height);
-                let s = text_layout.layout_objects(text, &st, max, objects);
+                let s = text_layout.layout_fonts(text, &st, max, objects, fonts);
                 let size =
                     taffy::Size { width: known.width.unwrap_or(s.size.w), height: known.height.unwrap_or(s.size.h) };
                 shaped = Some(s);
@@ -91,13 +93,13 @@ impl<M> LayoutView<'_, M> {
             },
         );
         if inputs.run_mode == RunMode::PerformLayout {
-            if let Some((text, style, objects)) = &content {
+            if let Some((text, style, objects, fonts)) = &content {
                 // The measure function did not run when the style fixes both sides.
                 // A label that fits itself is laid out again in its final box.
                 let st = fitted(text_layout, text, style, Some(out.size.width), Some(out.size.height));
                 let shaped = if style.fit.is_some() { None } else { shaped };
                 let mut s =
-                    shaped.unwrap_or_else(|| text_layout.layout_objects(text, &st, Some(out.size.width), objects));
+                    shaped.unwrap_or_else(|| text_layout.layout_fonts(text, &st, Some(out.size.width), objects, fonts));
                 // A box wider than its text (a fixed or stretched width) holds the lines by
                 // their alignment.
                 s.align_in(style.align, out.size.width);

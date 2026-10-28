@@ -16,7 +16,7 @@
 use std::ops::Range;
 
 use harfrust::{Direction, Feature, ShaperFont, Tag};
-use skrifa::instance::{LocationRef, Size as FontSize};
+use skrifa::instance::Size as FontSize;
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
@@ -132,6 +132,22 @@ pub trait TextLayout {
     fn layout_objects(&self, text: &str, style: &TextStyle, max_width: Option<f32>, objects: &[f32]) -> ShapedText {
         let _ = objects;
         self.layout(text, style, max_width)
+    }
+
+    /// As `layout_objects`, with the byte ranges in `fonts` set in their own font instead of
+    /// `style.font` (and that font's fallbacks): a word in a variable font instance of its
+    /// own (MO-81). Ranges are in order and do not overlap. Size and line height stay the
+    /// style's.
+    fn layout_fonts(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+    ) -> ShapedText {
+        let _ = fonts;
+        self.layout_objects(text, style, max_width, objects)
     }
 }
 
@@ -265,6 +281,17 @@ impl TextLayout for ShapedLayout {
     }
 
     fn layout_objects(&self, text: &str, style: &TextStyle, max_width: Option<f32>, objects: &[f32]) -> ShapedText {
+        self.layout_fonts(text, style, max_width, objects, &[])
+    }
+
+    fn layout_fonts(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+    ) -> ShapedText {
         let Some(face) = self.fonts.get(style.font) else {
             return EstimateText::default().layout_objects(text, style, max_width, objects);
         };
@@ -277,7 +304,8 @@ impl TextLayout for ShapedLayout {
         let upem = face.units_per_em();
         let k = style.size / upem as f32;
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
-        let mut glyphs = self.shape_runs(text, style, &shaper, k);
+        let runs = self.runs_in(text, style.font, fonts);
+        let mut glyphs = self.shape_these(text, style, &shaper, k, &[], runs);
         size_objects(text, &mut glyphs, objects, style.tracking);
         let mut segments = segments(text, &glyphs, style.tracking);
         if let Some(max) = max_width {
@@ -293,7 +321,7 @@ impl TextLayout for ShapedLayout {
             lines.truncate(max_lines);
         }
 
-        let m = face.skrifa().metrics(FontSize::new(style.size), LocationRef::default());
+        let m = face.skrifa().metrics(FontSize::new(style.size), face.location());
         let first_baseline = 0.5 * (style.line_height - (m.ascent - m.descent)) + m.ascent;
         let mut ellipsis: Option<Ellipsis> = None;
         let mut out = ShapedText::default();
@@ -371,10 +399,6 @@ impl ShapedLayout {
     /// Combining marks stay in the run they are in, so an accent stays with its letter, and
     /// so does whitespace the run's face has, so a space between two Japanese words does not
     /// split the run.
-    fn shape_runs(&self, text: &str, style: &TextStyle, primary: &ShaperFont<'_, '_>, k: f32) -> Vec<Shaped> {
-        self.shape_runs_with(text, style, primary, k, &[])
-    }
-
     fn shape_runs_with(
         &self,
         text: &str,
@@ -384,6 +408,19 @@ impl ShapedLayout {
         features: &[Feature],
     ) -> Vec<Shaped> {
         let runs = self.runs(text, style.font);
+        self.shape_these(text, style, primary, k, features, runs)
+    }
+
+    /// Shapes `text` in the given runs.
+    fn shape_these(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        primary: &ShaperFont<'_, '_>,
+        k: f32,
+        features: &[Feature],
+        runs: Vec<(Range<usize>, FontId)>,
+    ) -> Vec<Shaped> {
         let mut out = Vec::with_capacity(text.len());
         for (range, font) in runs {
             let face = if font == style.font { None } else { self.fonts.get(font) };
@@ -412,6 +449,43 @@ impl ShapedLayout {
     /// The text cut into runs by face. One run in the style's font when it has no fallbacks
     /// or has every character.
     fn runs(&self, text: &str, primary: FontId) -> Vec<(Range<usize>, FontId)> {
+        self.runs_in(text, primary, &[])
+    }
+
+    /// As `runs`, with the byte ranges in `fonts` in their own font and its fallbacks.
+    fn runs_in(&self, text: &str, primary: FontId, fonts: &[(Range<usize>, FontId)]) -> Vec<(Range<usize>, FontId)> {
+        if fonts.is_empty() {
+            return self.runs_one(text, primary);
+        }
+        let mut runs: Vec<(Range<usize>, FontId)> = Vec::new();
+        let mut at = 0;
+        let push = |runs: &mut Vec<(Range<usize>, FontId)>, range: Range<usize>, font: FontId| {
+            for (r, f) in self.runs_one(&text[range.clone()], font) {
+                let r = r.start + range.start..r.end + range.start;
+                match runs.last_mut() {
+                    Some((last, lf)) if *lf == f && last.end == r.start => last.end = r.end,
+                    _ => runs.push((r, f)),
+                }
+            }
+        };
+        for (range, font) in fonts {
+            let range = range.start.max(at).min(text.len())..range.end.min(text.len());
+            if range.start >= range.end {
+                continue;
+            }
+            if at < range.start {
+                push(&mut runs, at..range.start, primary);
+            }
+            push(&mut runs, range.clone(), *font);
+            at = range.end;
+        }
+        if at < text.len() {
+            push(&mut runs, at..text.len(), primary);
+        }
+        runs
+    }
+
+    fn runs_one(&self, text: &str, primary: FontId) -> Vec<(Range<usize>, FontId)> {
         let chain = self.fonts.fallbacks(primary);
         let face = self.fonts.get(primary);
         let whole = || vec![(0..text.len(), primary)];
@@ -466,7 +540,7 @@ impl ShapedLayout {
         }
         let max = style.max_lines as usize;
         let column = cells.iter().fold(style.size, |w, c| w.max(c.2));
-        let m = face.skrifa().metrics(FontSize::new(style.size), LocationRef::default());
+        let m = face.skrifa().metrics(FontSize::new(style.size), face.location());
         let pitch = style.line_height + style.tracking;
         let drop = 0.5 * (style.line_height - (m.ascent - m.descent)) + m.ascent;
         let (mut y, mut lines) = (0.0f32, 0usize);
@@ -736,9 +810,7 @@ mod tests {
     fn advance(t: &ShapedLayout, c: char, size: f32) -> f32 {
         let face = t.fonts().get(0).unwrap();
         let font = face.skrifa();
-        font.glyph_metrics(FontSize::new(size), LocationRef::default())
-            .advance_width(font.charmap().map(c).unwrap())
-            .unwrap()
+        font.glyph_metrics(FontSize::new(size), face.location()).advance_width(font.charmap().map(c).unwrap()).unwrap()
     }
 
     #[test]

@@ -15,6 +15,7 @@ fonts a machine has installed. Every subset keeps all layout features.
 | `condensed-bold` | `BarlowCondensed-Bold-Latin.ttf` | Barlow Condensed Bold 1.422 | 2017 The Barlow Project Authors |
 | `thin` | `Barlow-Thin-Latin.ttf` | Barlow Thin 1.422 | 2017 The Barlow Project Authors |
 | `extra-condensed-bold` | `SairaExtraCondensed-ExtraBold-Latin.otf` | Saira ExtraCondensed ExtraBold 1.101 | 2020 The Saira Project Authors |
+| `flex` | `RobotoFlex-Variable-Latin.ttf` | Roboto Flex 3.200, variable: `wght`, `wdth`, `opsz`, `slnt` | 2017 The Roboto Flex Project Authors |
 | `jp-labels` | `NotoSansJP-Regular-Labels.otf` | Noto Sans CJK JP Regular 2.004 | 2014-2021 Adobe |
 | `jp-labels-bold` | `NotoSansJP-Bold-Labels.otf` | Noto Sans CJK JP Bold 2.004 | 2014-2021 Adobe |
 

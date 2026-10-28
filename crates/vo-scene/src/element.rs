@@ -1386,6 +1386,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: words set in a font of their own, by word id, such as a variable font
+    /// instance from `FontRegistry::add_instance` (MO-81). The words keep the style's size
+    /// and line height; a changed font springs the words after it to their new places.
+    pub fn word_fonts(mut self, fonts: Vec<(vo_core::words::WordId, crate::font::FontId)>) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.word_fonts = fonts,
+            _ => debug_assert!(false, "word_fonts on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: the magnetic caret (MO-89). New words snap to the caret along their line,
     /// and the caret draws a field whose strength follows the voice level and which relaxes
     /// into concentric rings in silence. Needs a `caret`. See [`crate::flow::magnet`].

@@ -27,6 +27,10 @@ sub Barlow-Thin-Latin.ttf /usr/share/fonts/ttf-barlow/Barlow-Thin.ttf 0 "$latin"
 sub SairaExtraCondensed-ExtraBold-Latin.otf /usr/share/fonts/OTF/SairaExtraCondensed-ExtraBold.otf 0 "$latin"
 # Face 0 of Inter.ttc is Inter Regular.
 sub Inter-Regular-Latin.ttf /usr/share/fonts/inter/Inter.ttc 0 "$latin"
+# Roboto Flex (AUR ttf-roboto-flex) keeps four variation axes: wght 100 to 900, wdth 75 to
+# 125, opsz 8 to 72 and slnt -10 to 0. Its other axes are pinned to their defaults.
+sub RobotoFlex-Variable-Latin.ttf /usr/share/fonts/TTF/RobotoFlex-VF.ttf 0 "$latin" \
+    --instance="GRAD=drop,XOPQ=drop,YOPQ=drop,XTRA=drop,YTUC=drop,YTLC=drop,YTAS=drop,YTDE=drop,YTFI=drop,wdth=75:125,opsz=8:72,wght=100:900"
 
 # Japanese for theme labels, not for dictated text (for that, add a system face such as
 # `fonts.add_system(":lang=ja")` to the fallback chain). The space, kana, CJK punctuation,

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use skrifa::instance::{LocationRef, Size};
+use skrifa::instance::Size;
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
 use vo_core::hash::rand_f32;
@@ -171,7 +171,7 @@ pub fn sample_glyph(face: &Face, glyph: u32, size: f32, px_per_unit: f32) -> Opt
     let outline = font.outline_glyphs().get(GlyphId::new(glyph))?;
     let unit_px = 1.0 / px_per_unit.max(1e-3);
     let mut pen = Flatten { k: size / face.units_per_em() as f32, unit_px, ..Default::default() };
-    outline.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
+    outline.draw(DrawSettings::unhinted(Size::unscaled(), face.location()), &mut pen).ok()?;
     pen.end();
     let mut contours = pen.contours;
     // Drop a closing point that repeats the first.

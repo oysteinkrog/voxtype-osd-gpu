@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use skrifa::instance::{LocationRef, Size};
+use skrifa::instance::Size;
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
 use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance, ItemKind, LayerTarget, Paint, ShapeInstance};
@@ -750,7 +750,7 @@ fn glyph_path(face: &Face, glyph: u32) -> Option<tiny_skia::Path> {
     let font = face.skrifa();
     let outline = font.outline_glyphs().get(GlyphId::new(glyph))?;
     let mut pen = PathPen(tiny_skia::PathBuilder::new());
-    outline.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
+    outline.draw(DrawSettings::unhinted(Size::unscaled(), face.location()), &mut pen).ok()?;
     pen.0.finish()
 }
 
