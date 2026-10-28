@@ -18,6 +18,7 @@ use std::time::Instant;
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Size};
+use vo::scene::material::Material;
 use vo::scene::path::StrokeStyle;
 use vo::scene::Scene;
 use vo::{App, Cx, FontRegistry, Options, Scenario, ShapedLayout};
@@ -44,7 +45,27 @@ const CASES: &[&str] = &[
     "glitch",
     "backdrop",
     "backdrop half",
+    "material backdrop",
 ];
+
+/// The app material of the "material backdrop" case (EG-02): the card's panel reads its
+/// layer's backdrop through four taps 3 px apart, a light frost, under its own fill.
+const FROST: u32 = vo::scene::material::CUSTOM_FIRST;
+const FROST_WGSL: &str = "
+fn mat_frost (m: Material, i: MatIn) -> vec4f {
+  var b = vec4f (0.0);
+  for (var k = 0; k < 4; k++) {
+    let a = f32 (k) * 1.5707963 + 0.785;
+    b += tex_backdrop (i.px + 3.0 * vec2f (cos (a), sin (a)));
+  }
+  let under = 0.25 * b * 0.6;
+  return (i.color + under * (1.0 - i.color.a)) * i.cov;
+}
+";
+
+fn add_frost(r: &mut Renderer) {
+    r.add_material(FROST, "mat_frost", FROST_WGSL);
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Msg {
@@ -85,6 +106,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "glow" => card = card.glow(Color::hex(0x4cc9f0, 0.9), 14.0 * k, 1.2),
         "shadow" => card = card.shadow(Color::rgba(0.0, 0.0, 0.0, 0.6), 0.0, 8.0 * k, 18.0 * k),
         "motion blur" => card = card.motion_blur(1.0 / 30.0),
+        "material backdrop" => {
+            card = card.fill(Color::hex(0x10141c, 0.55)).material(Material::custom(FROST).reads_backdrop())
+        }
         _ => {}
     }
     let layer = Element::layer("fx").child(card);
@@ -99,10 +123,12 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         // (EG-01), the base cost of glass, blur and ripples over a backdrop.
         "backdrop" => layer.backdrop(BackdropRes::Full, Color::hex(0xff6b6b, 1.0)),
         "backdrop half" => layer.backdrop(BackdropRes::Half, Color::hex(0xff6b6b, 1.0)),
+        // A backdrop that only captures, read by the panel's material (EG-02).
+        "material backdrop" => layer.backdrop(BackdropRes::Full, Color::TRANSPARENT),
         _ => layer,
     };
     let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
-    if !case.starts_with("backdrop") {
+    if !case.contains("backdrop") {
         return root.child(layer);
     }
     // Stripes under the card, so the tinted backdrop shows in the preview and the sheets.
@@ -198,6 +224,7 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize) -> Vec<Row>
         // A renderer per case, so pooled textures belong to the case.
         let mut r = Renderer::with_fonts(&g.device, &g.queue, fonts.clone());
         assert!(r.set_profiling(true), "this device has no timestamp queries");
+        add_frost(&mut r);
         let mut scene: Scene<Msg> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
         scene.set_viewport(0.0, size, 1.0);
         let (mut gpu, mut cpu, mut sections) = (Vec::new(), Vec::new(), Vec::<(String, f64)>::new());
@@ -241,7 +268,11 @@ fn main() {
         let fonts = fonts();
         let size = Size::new(600.0, 300.0);
         let scenario = Scenario { size, scale: 1.0, duration: CASES.len() as f64 * CASE_SECS, inputs: Vec::new() };
-        let options = move || Options::<Msg> { fonts: fonts.clone(), ..Options::default() };
+        let options = move || Options::<Msg> {
+            fonts: fonts.clone(),
+            renderer_setup: Some(std::sync::Arc::new(add_frost)),
+            ..Options::default()
+        };
         let mut p = vo::preview::Preview::new("effect_cost", move || Tour { size, case: 0 }, options, scenario);
         for (i, name) in CASES.iter().enumerate() {
             p = p.marker(name.replace(' ', "-"), i as f64 * CASE_SECS + 0.5);
