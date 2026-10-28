@@ -30,7 +30,17 @@ These eight rules apply to every look. Section 6 turns the first two into automa
 5. **Show the consequence, not a ceremony.** Finishing sets the type, done sends the text, cancel takes it back. Labels and checks are secondary.
 6. **One material per look.** Each look has one physical idea for how words are born, corrected and leave: ink, dots, beam, light line, trace, hydraulics, particles. Same engine, different choreography.
 7. **Truthful outcomes.** Tell "recognised", "delivery attempted" and "delivery reported" apart. Never fake progress. A new dictation cuts any old ending short.
-8. **Settle to still, within budget.** Within 600 ms of the last event a look is near still. The whole popup stays near 1 ms of GPU per frame at 600x300, and reduced motion keeps every state cue as a static mark.
+8. **Event motion settles; idle motion stays small and paced (RD-02).** Motion caused by an event (a word, a revision, a state change) is near still within 600 ms of the event. While the popup is open, a look may also run small idle loops, under these rules:
+   - Idle loops run only through `Element::ambient(LoopProp, Loop)` (or a vo helper with the same pacing), stepped at `vo_core::ambient::AMBIENT_FPS` (30 steps a second) or slower. A loop with `fps(0.0)` (every frame) is not idle motion. Slow loops such as a breath or a drift should use `Loop::fps(15.0)` or lower: above 15 steps a second they look the same and cost more. The pace cap is per surface.
+   - Only while the popup is open. The app drops every idle loop from its view in the update that asks to exit, so the loop settles to its rest well inside `EXIT_MOTION_MAX` (3 s) and the run never ends on the cap.
+   - Never on the newest (reading) line's glyphs: they never move, scale, blur or lose ink from idle motion. A caret that blinks or breathes in its own box on that line is allowed (type, palette, phosphor).
+   - Off under reduced motion (`reduced-motion` or `VO_REDUCED_MOTION=1`): every loop holds its rest, and every state cue stays as a static mark.
+   - Not drawn by the CPU first frame: the first frame shows the rest pose.
+   - Inside the element's own box: idle motion never changes layout or moves the reading line.
+   - No flashing: no loop changes the brightness of a region by more than 10 % more than 3 times a second (the WCAG 2.3.1 threshold). Flicker, scan lines and glitches stay slow or faint.
+   - Silence is idle: a waveform or meter that redraws on every audio frame while the room is quiet counts as idle motion and falls under the same pace and CPU limits.
+
+   Budget per look, at 600x300, measured by `scripts/osd-vo-budget.sh` in the popup repo: idle-open (popup open, room tone, no new words) at most 2 % of one core and 30 frames per second; recording at most 10 % of one core (a fixed limit: a look over it has a bug to fix, not a budget to raise); GPU at most 1 ms p95 and 3 ms p99 per frame in both states. Env vars: `VOXTYPE_BUDGET_IDLE_CPU_PCT`, `VOXTYPE_BUDGET_IDLE_FPS`, `VOXTYPE_BUDGET_REC_CPU_PCT`, `VOXTYPE_BUDGET_GPU_MS`, `VOXTYPE_BUDGET_GPU_P99_MS`. In this repo, `just budget` keeps the toast at 0 idle frames and holds the `idle_loop` example (one ambient loop) to 30 frames per second. Later work, not built yet: pause idle loops while the surface gets no frame callbacks (hidden), and halve the pace on battery or in power-saver mode.
 
 ## 3. Foundations (needed by most concepts)
 
