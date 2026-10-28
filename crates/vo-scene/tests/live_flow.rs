@@ -362,7 +362,8 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
     let dropped: Vec<u32> = (1..=10).filter(|&w| first(&before, w).1 == y0).collect();
     let mut kept: Vec<(u32, &str)> = TEN.iter().copied().filter(|(id, _)| !dropped.contains(id)).collect();
     assert!(kept.len() >= 4 && dropped.len() >= 2, "dropped {dropped:?}");
-    // A new word arrives in the same update and comes up with the block.
+    // A new word arrives in the same update, on the newest line.
+    let block = kept.clone();
     kept.push((11, "next"));
     s.apply(view(&words(&kept), Some(200.0), true), 1.0);
     let settled = s.sample(5.0);
@@ -371,14 +372,22 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
 
     for t in [1.0, 1.03, 1.08, 1.15] {
         let f = s.sample(t);
-        // Every kept word, and the new one, is the same distance below its new place, with
-        // no sideways move.
-        let offsets: Vec<(f32, f32)> = kept
+        // The new word is on the reading line: it waits while the line before scrolls out of
+        // its row, then shows whole at its place, never sliding (MO-33, reading-line envelope).
+        let new: Vec<&GlyphInstance> = f.glyphs.iter().filter(|g| g.word == 11).collect();
+        if t < 1.0 + vo_scene::flow::overflow::DROP_HOLD {
+            assert!(new.is_empty(), "at {t} the new word waits");
+        } else {
+            assert!(!new.is_empty() && new.iter().all(|g| g.color.a > 0.7), "at {t} the new word shows whole");
+            assert!((first(&f, 11).1 - first(&settled, 11).1).abs() < 1e-3, "at {t} the new word is in place");
+        }
+        // Every kept word is the same distance below its new place, with no sideways move.
+        let offsets: Vec<(f32, f32)> = block
             .iter()
             .map(|(id, _)| (first(&f, *id).0 - first(&settled, *id).0, first(&f, *id).1 - first(&settled, *id).1))
             .collect();
         let (_, dy) = offsets[0];
-        for (id, (ox, oy)) in kept.iter().map(|k| k.0).zip(&offsets) {
+        for (id, (ox, oy)) in block.iter().map(|k| k.0).zip(&offsets) {
             assert!(ox.abs() < 1e-3 && (oy - dy).abs() < 1e-3, "at {t} word {id} is off by ({ox}, {oy}), block {dy}");
         }
         if t == 1.0 {
@@ -392,12 +401,11 @@ fn when_the_front_line_drops_the_rest_scroll_up_as_one_block() {
             }
         }
     }
-    // The caret rides with the block.
+    // The caret ends after the new word, on its line.
     let id = s.find(&["root", "live"]).unwrap();
-    let (c, cs) = (s.caret(id, 1.08).unwrap().0, s.caret(id, 5.0).unwrap().0);
-    let last = kept.last().unwrap().0;
-    let w = first(&s.sample(1.08), last).1 - first(&settled, last).1;
-    assert!((c.y - cs.y - w).abs() < 1e-2, "caret {c:?} settled {cs:?} block {w}");
+    let cs = s.caret(id, 5.0).unwrap().0;
+    let y = first(&settled, 11).1;
+    assert!(cs.y < y && cs.y + cs.h > y - 1.0, "caret {cs:?} beside the new word at {y}");
 }
 
 #[test]
