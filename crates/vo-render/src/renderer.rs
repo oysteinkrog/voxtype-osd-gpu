@@ -42,6 +42,12 @@
 //!   is copied into a pooled texture (full resolution, or half as 2 by 2 averages), and the
 //!   pass resumes. The copy is drawn back tinted before the layer's content. A frame without
 //!   a backdrop allocates and copies nothing for it.
+//! - **Material textures** (EG-02): a shape, glyph or vector draw whose materials read the
+//!   backdrop or the image slots takes a textured variant of its pipeline (`ShapeTex`,
+//!   `GlyphTex`, `VectorTex`), whose group 2 adds the backdrop of the layer it draws in, a
+//!   sampler and the image slots. Only a backdrop captured in the surface the draw goes to
+//!   is read: the capture runs earlier in that surface's passes. Other draws keep the plain
+//!   pipelines and bind group.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -53,6 +59,7 @@ use vo_scene::display::{
 };
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
+use vo_scene::material::IMAGE_SLOTS;
 use vo_scene::path::PATH_FONT;
 use vo_scene::stage::Warp;
 
@@ -61,7 +68,7 @@ use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
 use crate::gpu::{GpuPainter, PaintCx, StagePx};
 use crate::hot::wgsl;
-use crate::material::{materials_source, GpuMaterial, MaterialFn};
+use crate::material::{materials_source, with_textures, GpuMaterial, MaterialFn};
 use crate::particle_layer::ParticleLayer;
 use crate::profile::{BloomReport, FrameReport, FrameTimings, Profiler, Section, SurfaceKind, SurfaceReport};
 use crate::shapes::{pixels_per_unit, GpuShape};
@@ -317,6 +324,9 @@ struct LayerState {
     mask_out: f32,
     /// The stage warp in target pixels, composed with every parent's.
     warp: Option<Warp>,
+    /// The backdrop this layer's materials read (EG-02): its index in `Renderer::backdrops`
+    /// and the surface it was captured in. Only read by draws into that surface.
+    backdrop: Option<(u32, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,12 +360,104 @@ enum Pipe {
     Capture,
     /// Draws a backdrop back, tinted, cut to its rounded box. The range is as for `Capture`.
     Backdrop,
+    /// Shapes, glyphs and vectors whose materials read textures (EG-02): the same draws with
+    /// the textured group 2. `Cmd::backdrop` names the backdrop bound.
+    ShapeTex,
+    GlyphTex,
+    VectorTex,
 }
 
 impl Pipe {
     /// Commands that run outside a render pass, between two passes on one surface.
     fn breaks_pass(self) -> bool {
         matches!(self, Pipe::Gpu | Pipe::Capture)
+    }
+
+    /// The plain pipe a textured one draws like, else the pipe itself.
+    fn base(self) -> Pipe {
+        match self {
+            Pipe::ShapeTex => Pipe::Shape,
+            Pipe::GlyphTex => Pipe::Glyph,
+            Pipe::VectorTex => Pipe::Vector,
+            p => p,
+        }
+    }
+
+    fn is_textured(self) -> bool {
+        matches!(self, Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex)
+    }
+}
+
+/// `Cmd::backdrop` for a command that binds no backdrop.
+const NO_BACKDROP: u32 = u32::MAX;
+
+/// Material textures (EG-02): the textured group 2 and what fills it. Made on the first frame
+/// that draws a material reading a texture.
+struct MatTextures {
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// 1x1 transparent black, for an empty image slot or a missing backdrop.
+    empty: wgpu::TextureView,
+    /// This frame's bind groups, by backdrop index (`NO_BACKDROP` for none).
+    binds: Vec<(u32, wgpu::BindGroup)>,
+}
+
+impl MatTextures {
+    fn new(device: &wgpu::Device) -> MatTextures {
+        let tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let mut entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            tex(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ];
+        entries.extend((0..IMAGE_SLOTS as u32).map(|i| tex(3 + i)));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo-material-textures"),
+            entries: &entries,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vo-material-textures"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        // Textures start zeroed: transparent black.
+        let empty = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("vo-material-empty"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        MatTextures { layout, sampler, empty, binds: Vec::new() }
     }
 }
 
@@ -391,6 +493,8 @@ struct Cmd {
     blend: BlendMode,
     /// In target pixels.
     scissor: [f32; 4],
+    /// The backdrop a textured content draw binds (EG-02), else `NO_BACKDROP`.
+    backdrop: u32,
 }
 
 const EMPTY: [f32; 4] = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
@@ -533,7 +637,9 @@ pub struct Renderer {
     composite_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
-    modules: [Option<wgpu::ShaderModule>; 9],
+    /// Module slots: see `Renderer::pipeline`; 9 to 11 are the textured shape, glyph and
+    /// vector shaders (EG-02).
+    modules: [Option<wgpu::ShaderModule>; 12],
     pipelines: Vec<((wgpu::TextureFormat, Pipe, BlendMode), wgpu::RenderPipeline)>,
     uniform_stride: u32,
     // Per frame, cleared each time.
@@ -585,6 +691,11 @@ pub struct Renderer {
     dither_motion: bool,
     /// This frame's backdrops (EG-01).
     backdrops: Vec<BackdropPlan>,
+    /// Material textures (EG-02), made on first use, and the image slots.
+    mat_tex: Option<MatTextures>,
+    material_images: [Option<wgpu::TextureView>; IMAGE_SLOTS],
+    /// A material read a backdrop that was not there: warned once.
+    warned_backdrop: bool,
 }
 
 // `vo::Resident` builds a renderer on a warm-up thread and hands it to the host's thread.
@@ -664,6 +775,9 @@ impl Renderer {
             compose: None,
             dither_motion: false,
             backdrops: Vec::new(),
+            mat_tex: None,
+            material_images: Default::default(),
+            warned_backdrop: false,
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -674,7 +788,7 @@ impl Renderer {
             signals_bind,
             composite_layout,
             fx: None,
-            modules: [None, None, None, None, None, None, None, None, None],
+            modules: Default::default(),
             pipelines: Vec::new(),
             uniform_stride,
             shapes: Vec::new(),
@@ -889,10 +1003,19 @@ impl Renderer {
         );
         self.material_fns.retain(|f| f.func != func);
         self.material_fns.push(MaterialFn { func, name: name.into(), source: wgsl.into() });
-        for slot in [0, 1, 5] {
+        for slot in [0, 1, 5, 9, 10, 11] {
             self.modules[slot] = None;
         }
-        self.pipelines.retain(|((_, p, _), _)| !matches!(p, Pipe::Shape | Pipe::Glyph | Pipe::Vector));
+        self.pipelines.retain(|((_, p, _), _)| !matches!(p.base(), Pipe::Shape | Pipe::Glyph | Pipe::Vector));
+    }
+
+    /// Fills image slot `slot` (0 to `vo_scene::material::IMAGE_SLOTS` - 1) for materials that
+    /// read images (EG-02, `tex_image` in `materials.wgsl`), or empties it with `None`. The
+    /// view must be a filterable float 2D texture with `TEXTURE_BINDING` usage. It stays bound
+    /// until changed; an empty slot samples transparent black.
+    pub fn set_material_image(&mut self, slot: usize, view: Option<wgpu::TextureView>) {
+        assert!(slot < IMAGE_SLOTS, "image slots are 0 to {}", IMAGE_SLOTS - 1);
+        self.material_images[slot] = view;
     }
 
     /// Adds a painter for GPU elements (`vo_scene::gpu`). Painters are asked in the order they
@@ -976,6 +1099,7 @@ impl Renderer {
                 smear: [0.0; 2],
                 mask_out: 0.0,
                 warp: None,
+                backdrop: None,
             };
             let frame = Frame { list, scale, effects, encode_srgb: encode_srgb as u32 as f32, target: [w, h] };
             self.visit(&frame, 0, &top, 0);
@@ -1054,8 +1178,9 @@ impl Renderer {
         };
         let opacity = parent.opacity * layer.opacity;
         let wants = f.effects && !in_mask && opacity > 0.0 && !matches!(target, LayerTarget::Mask(_));
+        let mut backdrop = parent.backdrop;
         if let Some(b) = layer.backdrop.filter(|_| wants) {
-            self.place_backdrop(f, &b, surface, parent, &to_px, ppu, warp, opacity);
+            backdrop = self.place_backdrop(f, &b, surface, parent, &to_px, ppu, warp, opacity).map(|i| (i, surface));
         }
         let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
@@ -1110,6 +1235,7 @@ impl Renderer {
                     uniform,
                     blend: layer.blend,
                     scissor: parent.scissor,
+                    backdrop: NO_BACKDROP,
                 });
                 (child, 1.0, BlendMode::Normal)
             }
@@ -1121,18 +1247,25 @@ impl Renderer {
         let mb = layer.motion_blur;
         let smear =
             [parent.smear[0] + (to_px.a * mb.x + to_px.c * mb.y), parent.smear[1] + (to_px.b * mb.x + to_px.d * mb.y)];
-        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear, mask_out, warp };
+        // A backdrop is read only by draws into the surface it was captured in (EG-02).
+        let backdrop = backdrop.filter(|&(_, s)| s == draw_surface);
+        let state = LayerState { to_px, ppu, opacity, clip, scissor, smear, mask_out, warp, backdrop };
         // Content reaches half the smear further either way, and is seen through the warp.
         let reach = |b: [f32; 4]| {
             let (hx, hy) = (0.5 * smear[0].abs(), 0.5 * smear[1].abs());
             seen([b[0] - hx, b[1] - hy, b[2] + hx, b[3] + hy])
         };
         let uniform = self.push_uniform(f, &state, opacity);
+        if let Some((bi, _)) = backdrop {
+            self.set_backdrop_block(uniform, bi);
+        }
+        let bd = backdrop.map_or(NO_BACKDROP, |(bi, _)| bi);
         for item in f.list.layer_items(li) {
             let range = item.start as usize..(item.start + item.len) as usize;
             match item.kind {
                 ItemKind::Shapes => {
                     let start = self.shapes.len() as u32;
+                    let mut tex = false;
                     for s in &f.list.shapes[range] {
                         if self.quality == Quality::Minimal && s.fill.is_halo() {
                             continue;
@@ -1144,6 +1277,7 @@ impl Renderer {
                             if let Some(m) = f.list.material(s.material()).filter(|_| !s.fill.is_halo()) {
                                 g.material = s.material();
                                 g.reach = m.reach.max(0.0);
+                                tex |= self.reads_textures(f, m, bd);
                             }
                             let q = g.quad(ppu);
                             let b = bounds(
@@ -1154,10 +1288,12 @@ impl Renderer {
                             self.shapes.push(g);
                         }
                     }
-                    self.push_cmd(draw_surface, Pipe::Shape, start..self.shapes.len() as u32, uniform, blend, scissor);
+                    let (pipe, b) = if tex { (Pipe::ShapeTex, bd) } else { (Pipe::Shape, NO_BACKDROP) };
+                    self.push_cmd_with(draw_surface, pipe, start..self.shapes.len() as u32, uniform, blend, scissor, b);
                 }
                 ItemKind::Glyphs => {
                     let start = self.glyphs.len() as u32;
+                    let mut tex = false;
                     let fx = &f.list.glyph_fx;
                     let mut at = fx.partition_point(|(i, _)| (*i as usize) < range.start);
                     for (gi, g) in f.list.glyphs[range.clone()].iter().enumerate() {
@@ -1171,7 +1307,8 @@ impl Renderer {
                         if let Some(mut inst) = self.glyph(g, &state) {
                             if let Some(e) = effects {
                                 apply_glyph_fx(&mut inst, &e, &state);
-                                if f.list.material(e.material).is_some() {
+                                if let Some(m) = f.list.material(e.material) {
+                                    tex |= self.reads_textures(f, m, bd);
                                     // The id, a seed per glyph and em units per outline unit,
                                     // as floats: exact below 2^24.
                                     inst.fx2[1] = e.material as f32;
@@ -1186,7 +1323,8 @@ impl Renderer {
                             self.glyphs.push(inst);
                         }
                     }
-                    self.push_cmd(draw_surface, Pipe::Glyph, start..self.glyphs.len() as u32, uniform, blend, scissor);
+                    let (pipe, b) = if tex { (Pipe::GlyphTex, bd) } else { (Pipe::Glyph, NO_BACKDROP) };
+                    self.push_cmd_with(draw_surface, pipe, start..self.glyphs.len() as u32, uniform, blend, scissor, b);
                     let words = &f.list.glyphs[range];
                     let placed = if mask_out == 0.0 {
                         self.particles.place_words(words, &to_px, opacity, draw_surface)
@@ -1200,20 +1338,18 @@ impl Renderer {
                 }
                 ItemKind::Vectors => {
                     let start = self.vectors.len() as u32;
+                    let mut tex = false;
                     for v in &f.list.vectors[range] {
                         if let Some(g) = GpuVector::new(f.list, v, &to_px, ppu, opacity, &mut self.vector_segs) {
+                            if let Some(m) = f.list.material(g.material[0]) {
+                                tex |= self.reads_textures(f, m, bd);
+                            }
                             grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(g.bbox), scissor));
                             self.vectors.push(g);
                         }
                     }
-                    self.push_cmd(
-                        draw_surface,
-                        Pipe::Vector,
-                        start..self.vectors.len() as u32,
-                        uniform,
-                        blend,
-                        scissor,
-                    );
+                    let (pipe, b) = if tex { (Pipe::VectorTex, bd) } else { (Pipe::Vector, NO_BACKDROP) };
+                    self.push_cmd_with(draw_surface, pipe, start..self.vectors.len() as u32, uniform, blend, scissor, b);
                 }
                 // Particles, glass and GPU items have their own pipelines: not in a mask.
                 ItemKind::Emitters | ItemKind::Glass | ItemKind::Gpu if mask_out != 0.0 => {}
@@ -1317,8 +1453,8 @@ impl Renderer {
         ppu: f32,
         warp: Option<Warp>,
         opacity: f32,
-    ) {
-        let Some(from_px) = to_px.invert() else { return };
+    ) -> Option<u32> {
+        let from_px = to_px.invert()?;
         let laid = bounds(&b.rect, to_px);
         let seen = match warp {
             Some(w) => w.bounds(laid),
@@ -1327,7 +1463,7 @@ impl Renderer {
         let [w, h] = f.target.map(|v| v as f32);
         let area = intersect(intersect(seen, parent.scissor), [0.0, 0.0, w, h]);
         if area[2] <= area[0] || area[3] <= area[1] {
-            return;
+            return None;
         }
         // Whole-pixel origin, sizes rounded up so a moving or growing box keeps its texture.
         let (x0, y0) = (area[0].floor() as i32, area[1].floor() as i32);
@@ -1356,6 +1492,7 @@ impl Renderer {
             smear: [0.0; 2],
             mask_out: 0.0,
             warp,
+            backdrop: None,
         };
         let uniform = self.push_uniform(f, &state, opacity);
         let size = std::mem::size_of::<LayerUniform>();
@@ -1365,11 +1502,47 @@ impl Renderer {
         self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
         let cmds = &mut self.surfaces[surface].cmds;
         let range = index..index + 1;
-        cmds.push(Cmd { pipe: Pipe::Capture, range: range.clone(), uniform, blend: BlendMode::Normal, scissor: area });
+        let cmd = |pipe| Cmd {
+            pipe,
+            range: range.clone(),
+            uniform,
+            blend: BlendMode::Normal,
+            scissor: area,
+            backdrop: NO_BACKDROP,
+        };
+        cmds.push(cmd(Pipe::Capture));
         if b.tint.a > 0.0 && opacity > 0.0 {
-            cmds.push(Cmd { pipe: Pipe::Backdrop, range, uniform, blend: BlendMode::Normal, scissor: area });
+            cmds.push(cmd(Pipe::Backdrop));
             grow(&mut self.surfaces[surface].bounds, area);
         }
+        Some(index)
+    }
+
+    /// Writes where backdrop `bi` sits into a content layer block (EG-02): the fields
+    /// `material_tex.wgsl` reads, which content draws do not otherwise use.
+    fn set_backdrop_block(&mut self, uniform: u32, bi: u32) {
+        let b = &self.backdrops[bi as usize];
+        let size = std::mem::size_of::<LayerUniform>();
+        let at = uniform as usize;
+        let mut u: LayerUniform = bytemuck::pod_read_unaligned(&self.uniforms[at..at + size]);
+        u.style_box = [b.origin[0] as f32, b.origin[1] as f32, b.size[0] as f32, b.size[1] as f32];
+        u.style_a = [b.step as f32, 0.0, 0.0, 0.0];
+        self.uniforms[at..at + size].copy_from_slice(bytemuck::bytes_of(&u));
+    }
+
+    /// Whether material `m` takes the textured pipelines (EG-02). A material that reads a
+    /// backdrop its layer does not have warns once, on the full tier where backdrops exist.
+    fn reads_textures(&mut self, f: &Frame, m: &vo_scene::material::Material, backdrop: u32) -> bool {
+        use vo_scene::material::READS_BACKDROP;
+        if m.flags & READS_BACKDROP != 0 && backdrop == NO_BACKDROP && f.effects && !self.warned_backdrop {
+            self.warned_backdrop = true;
+            eprintln!(
+                "vo-render: material function {} reads a backdrop, but its layer has none in the surface it \
+                 draws into (Element::backdrop on it or a direct parent); it samples transparent black",
+                m.func
+            );
+        }
+        m.reads_textures()
     }
 
     /// The textures of this frame's backdrops (EG-01), in texels, in the order the layers
@@ -1452,17 +1625,37 @@ impl Renderer {
         blend: BlendMode,
         scissor: [f32; 4],
     ) {
+        self.push_cmd_with(surface, pipe, range, uniform, blend, scissor, NO_BACKDROP);
+    }
+
+    /// [`Renderer::push_cmd`] with the backdrop a textured content draw binds (EG-02).
+    #[allow(clippy::too_many_arguments)]
+    fn push_cmd_with(
+        &mut self,
+        surface: usize,
+        pipe: Pipe,
+        range: Range<u32>,
+        uniform: u32,
+        blend: BlendMode,
+        scissor: [f32; 4],
+        backdrop: u32,
+    ) {
         if range.is_empty() {
             return;
         }
         let cmds = &mut self.surfaces[surface].cmds;
         if let Some(last) = cmds.last_mut() {
-            if last.pipe == pipe && last.uniform == uniform && last.blend == blend && last.range.end == range.start {
+            if last.pipe == pipe
+                && last.uniform == uniform
+                && last.blend == blend
+                && last.backdrop == backdrop
+                && last.range.end == range.start
+            {
                 last.range.end = range.end;
                 return;
             }
         }
-        cmds.push(Cmd { pipe, range, uniform, blend, scissor });
+        cmds.push(Cmd { pipe, range, uniform, blend, scissor, backdrop });
     }
 
     /// Em units per glyph outline unit, for materials keyed to em height (FX15).
@@ -1898,6 +2091,7 @@ impl Renderer {
             }
         }
         self.upload_compose();
+        self.bind_material_textures();
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
@@ -2120,6 +2314,48 @@ impl Renderer {
         }
     }
 
+    /// The textured group 2 for each backdrop this frame's textured draws read (EG-02). A frame
+    /// without one makes nothing.
+    fn bind_material_textures(&mut self) {
+        let mut keys: Vec<u32> = Vec::new();
+        for c in self.surfaces.iter().flat_map(|s| &s.cmds).filter(|c| c.pipe.is_textured()) {
+            if !keys.contains(&c.backdrop) {
+                keys.push(c.backdrop);
+            }
+        }
+        if let Some(t) = &mut self.mat_tex {
+            t.binds.clear();
+        }
+        if keys.is_empty() {
+            return;
+        }
+        let t = self.mat_tex.get_or_insert_with(|| MatTextures::new(&self.device));
+        let materials = &self.material_buf.as_ref().expect("uploaded").0;
+        for k in keys {
+            let backdrop = self.backdrops.get(k as usize).and_then(|b| b.tex).map(|i| &self.pool[i].view);
+            let mut entries = vec![
+                wgpu::BindGroupEntry { binding: 0, resource: materials.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(backdrop.unwrap_or(&t.empty)),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&t.sampler) },
+            ];
+            for (i, view) in self.material_images.iter().enumerate() {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 3 + i as u32,
+                    resource: wgpu::BindingResource::TextureView(view.as_ref().unwrap_or(&t.empty)),
+                });
+            }
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-material-textures"),
+                layout: &t.layout,
+                entries: &entries,
+            });
+            t.binds.push((k, bind));
+        }
+    }
+
     fn run(&self, pass: &mut wgpu::RenderPass<'_>, surface: &Surface, cmds: &[Cmd], format: wgpu::TextureFormat) {
         let layers = &self.uniform_buf.as_ref().expect("uploaded").1;
         for c in cmds {
@@ -2144,7 +2380,12 @@ impl Renderer {
             if matches!(c.pipe, Pipe::Shape | Pipe::Glyph | Pipe::Vector) {
                 pass.set_bind_group(2, &self.material_buf.as_ref().expect("uploaded").1, &[]);
             }
-            match c.pipe {
+            if c.pipe.is_textured() {
+                let binds = self.mat_tex.as_ref().map_or(&[][..], |t| &t.binds[..]);
+                let Some((_, bind)) = binds.iter().find(|(k, _)| *k == c.backdrop) else { continue };
+                pass.set_bind_group(2, bind, &[]);
+            }
+            match c.pipe.base() {
                 Pipe::Shape => {
                     pass.set_vertex_buffer(0, self.shape_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
@@ -2193,6 +2434,7 @@ impl Renderer {
                 | Pipe::CompositeFxRest => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
                 Pipe::Gpu | Pipe::Capture => unreachable!("a pass break"),
+                Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("drawn as their base"),
             }
         }
     }
@@ -2210,6 +2452,9 @@ impl Renderer {
             2 => ("vo-composite", composite_shader_source()),
             4 => ("vo-dots", dot_shader_source()),
             5 => ("vo-vectors", vector_shader_source_with(&self.material_fns)),
+            9 => ("vo-shapes-tex", with_textures(&shape_shader_source_with(&self.material_fns))),
+            10 => ("vo-glyphs-tex", with_textures(&glyph_shader_source_with(&self.material_fns))),
+            11 => ("vo-vectors-tex", with_textures(&vector_shader_source_with(&self.material_fns))),
             7 => ("vo-glass", glass_layer_shader_source()),
             8 => ("vo-trail", TRAIL_WGSL.to_string()),
             _ => ("vo-bloom", bloom_shader_source()),
@@ -2265,12 +2510,17 @@ impl Renderer {
             Pipe::Dot => 4,
             Pipe::Vector => 5,
             Pipe::Glass => 7,
+            Pipe::ShapeTex => 9,
+            Pipe::GlyphTex => 10,
+            Pipe::VectorTex => 11,
         };
         if self.modules[slot].is_none() {
             self.modules[slot] = Some(self.shader_module(slot));
         }
         let module = self.modules[slot].as_ref().unwrap();
         let fx = self.fx.as_ref();
+        let textured = pipe.is_textured();
+        let pipe = pipe.base();
         let groups: [Option<&wgpu::BindGroupLayout>; 2] = match pipe {
             Pipe::Shape => [None, Some(&self.layer_layout)],
             Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
@@ -2286,11 +2536,17 @@ impl Renderer {
             Pipe::Fade => [None, None],
             Pipe::TrailMax => [Some(&self.composite_layout), None],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
+            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("taken as their base"),
         };
         // The signal block is group 3 of every pipeline that draws into a layer.
         let signals = groups[1].filter(|l| std::ptr::eq(*l, &self.layer_layout)).map(|_| &self.signals_layout);
         // Materials (FX15) are group 2 of the content pipelines.
-        let with_materials = [groups[0], groups[1], Some(&self.material_layout), signals];
+        let group2 = match (textured, &self.mat_tex) {
+            (true, Some(t)) => &t.layout,
+            (true, None) => unreachable!("made in upload before textured pipelines"),
+            _ => &self.material_layout,
+        };
+        let with_materials = [groups[0], groups[1], Some(group2), signals];
         let groups = [groups[0], groups[1], None, signals];
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -2318,6 +2574,7 @@ impl Renderer {
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
             Pipe::TrailMax => ("vs_trail", "fs_trail_max", vec![]),
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
+            Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex => unreachable!("taken as their base"),
         };
         let blend_state = match pipe {
             Pipe::Down | Pipe::Up | Pipe::Capture => None,
@@ -2642,6 +2899,9 @@ mod tests {
         validate(&composite_shader_source());
         validate(&dot_shader_source());
         validate(&bloom_shader_source());
+        validate(&with_textures(&shape_shader_source()));
+        validate(&with_textures(&glyph_shader_source()));
+        validate(&with_textures(&crate::vector::vector_shader_source()));
     }
 
     #[test]

@@ -27,6 +27,15 @@
 //! [`Material::custom`], and register a WGSL function with the renderer
 //! (`Renderer::add_material`). See `vo_render::material` for the function's inputs.
 //!
+//! Textures (EG-02): an app material can read two kinds of texture. [`Material::reads_backdrop`]
+//! gives it the backdrop (EG-01) of the layer it draws in: what that layer's surface drew under
+//! it, captured by `Element::backdrop` (a transparent tint captures without drawing anything
+//! back). [`Material::reads_images`] gives it the renderer's image slots
+//! ([`IMAGE_SLOTS`] of them, filled by `Renderer::set_material_image`). Both are bits in
+//! [`Material::flags`] ([`READS_BACKDROP`], [`READS_IMAGES`]), so the rule above holds: no
+//! instance field, and a material that reads no texture costs what it did before. The WGSL
+//! side is `tex_backdrop` and `tex_image` in `vo_render`'s `materials.wgsl`.
+//!
 //! Colours in a block are straight sRGB like every display colour; the renderer turns the
 //! slots marked as colours into OKLab before the shader sees them. A material's own colours
 //! take their opacity from the instance's colour, so a fading label fades its chrome too.
@@ -60,6 +69,20 @@ pub const GRADIENT_BOX: u32 = 2;
 /// `Material::flags` bit for an aurora: a glow that fades out between the blobs (a haze)
 /// instead of a mesh that fills the whole box.
 pub const AURORA_GLOW: u32 = 4;
+
+/// `Material::flags` bit for any material: it reads the backdrop of the layer it draws in
+/// (EG-02, `tex_backdrop` in WGSL). Reserved: app functions must not use it for their own.
+pub const READS_BACKDROP: u32 = 1 << 30;
+
+/// `Material::flags` bit for any material: it reads the renderer's image slots (EG-02,
+/// `tex_image` in WGSL). Reserved like [`READS_BACKDROP`].
+pub const READS_IMAGES: u32 = 1 << 31;
+
+/// Both texture bits.
+pub const READS_TEXTURES: u32 = READS_BACKDROP | READS_IMAGES;
+
+/// Image slots a material can read with `tex_image (slot, uv)`.
+pub const IMAGE_SLOTS: usize = 4;
 
 /// One material: a function and its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -111,6 +134,27 @@ impl Material {
     /// The same material at `time` seconds since its element appeared.
     pub fn at(self, time: f32) -> Material {
         Material { time, ..self }
+    }
+
+    /// The material reads the backdrop of the layer it draws in (EG-02). The layer, or one
+    /// above it that draws into the same surface, needs `Element::backdrop`; without one the
+    /// material samples transparent black and the renderer logs one warning.
+    pub fn reads_backdrop(mut self) -> Material {
+        self.flags |= READS_BACKDROP;
+        self
+    }
+
+    /// The material reads the renderer's image slots (EG-02). An empty slot samples
+    /// transparent black.
+    pub fn reads_images(mut self) -> Material {
+        self.flags |= READS_IMAGES;
+        self
+    }
+
+    /// Whether the material reads any texture: the renderer then draws it with the textured
+    /// pipelines.
+    pub fn reads_textures(&self) -> bool {
+        self.flags & READS_TEXTURES != 0
     }
 
     /// An app material that changes over time: frames come `fps` times a second while it is
@@ -458,6 +502,16 @@ impl From<Chrome> for Material {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn texture_bits_are_flags() {
+        let m = super::Material::custom(super::CUSTOM_FIRST);
+        assert!(!m.reads_textures());
+        let b = m.reads_backdrop();
+        assert_eq!(b.flags, super::READS_BACKDROP);
+        assert!(b.reads_textures() && m.reads_images().reads_textures());
+        assert_eq!(b.reads_images().flags, super::READS_TEXTURES);
+    }
+
     use super::*;
 
     #[test]

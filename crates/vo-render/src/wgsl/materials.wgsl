@@ -48,6 +48,36 @@ struct MatIn {
   seed: f32,
 };
 
+// Textures (EG-02). A material whose block says it reads textures (`Material::reads_backdrop`,
+// `Material::reads_images` in vo_scene) is drawn with textured pipelines that bind them at
+// group 2 next to the blocks. Two helpers read them, from any material function:
+//
+//   tex_backdrop (px: vec2f) -> vec4f
+//     The backdrop (EG-01) of the layer the material draws in, at `px` in target pixels (use
+//     `i.px`, plus an offset to shift it). Premultiplied linear light, bilinear. Transparent
+//     black outside the captured box, and when there is no backdrop: the layer (or one above
+//     it drawing into the same surface) needs `Element::backdrop`, and the frame must be on
+//     the full quality tier. A transparent tint captures without drawing the backdrop back.
+//
+//   tex_image (slot: u32, uv: vec2f) -> vec4f
+//     Image slot `slot` (0 to 3, `Renderer::set_material_image`) at `uv`, 0 to 1 across the
+//     image, bilinear, clamped at the edges. Colour as the texture holds it. Transparent black
+//     for an empty slot or a slot past 3.
+//
+// Pipelines for materials that read no texture define both as stubs that return transparent
+// black, so an app function that calls them compiles everywhere; their bind groups and cost
+// are unchanged.
+
+// vo: texture helpers begin
+fn tex_backdrop (px: vec2f) -> vec4f {
+  return vec4f (0.0);
+}
+
+fn tex_image (slot: u32, uv: vec2f) -> vec4f {
+  return vec4f (0.0);
+}
+// vo: texture helpers end
+
 fn mat_lab_to_linear (lab: vec3f) -> vec3f {
   let l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
   let m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;

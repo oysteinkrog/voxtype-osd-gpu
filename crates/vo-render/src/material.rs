@@ -7,6 +7,13 @@
 //! own with [`crate::Renderer::add_material`]: a WGSL function `fn name (m: Material, i: MatIn)
 //! -> vec4f` and an id from `vo_scene::material::CUSTOM_FIRST` up. The renderer appends the
 //! source, adds a case for the id and rebuilds the three shader modules once.
+//!
+//! Textures (EG-02): a material that reads the backdrop or the image slots
+//! (`vo_scene::material::READS_TEXTURES`) is drawn with textured variants of the three
+//! pipelines. Their shader is the same source with the stub `tex_backdrop` and `tex_image` in
+//! `materials.wgsl` swapped for `wgsl/material_tex.wgsl` ([`with_textures`]), and their group 2
+//! adds the backdrop, a sampler and the image slots. Draws whose materials read no texture
+//! keep the plain pipelines and bind group.
 
 use bytemuck::{Pod, Zeroable};
 use vo_scene::geom::Color;
@@ -15,6 +22,11 @@ use vo_scene::material::{Material, PARAM_SLOTS};
 use crate::color::oklab_alpha;
 
 pub const MATERIALS_WGSL: &str = include_str!("wgsl/materials.wgsl");
+pub const MATERIAL_TEX_WGSL: &str = include_str!("wgsl/material_tex.wgsl");
+
+/// The lines around the stub texture helpers in `materials.wgsl`.
+const TEX_BEGIN: &str = "// vo: texture helpers begin\n";
+const TEX_END: &str = "// vo: texture helpers end\n";
 
 /// The line in `materials.wgsl` where app cases go.
 const CASES_MARK: &str = "    // vo: custom material cases\n";
@@ -69,6 +81,15 @@ pub fn materials_source(custom: &[MaterialFn]) -> String {
     s
 }
 
+/// A shape, glyph or vector shader source with the stub texture helpers replaced by the
+/// textured ones (EG-02). A source without the stubs comes back unchanged.
+pub fn with_textures(source: &str) -> String {
+    let Some(a) = source.find(TEX_BEGIN) else { return source.to_string() };
+    let Some(b) = source[a..].find(TEX_END).map(|b| a + b + TEX_END.len()) else { return source.to_string() };
+    let tex = crate::hot::wgsl("material_tex.wgsl", MATERIAL_TEX_WGSL);
+    [&source[..a], &tex, "\n", &source[b..]].concat()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +115,14 @@ mod tests {
         assert!(s.contains("case 65u: { return mat_flat (m, i); }"));
         assert!(s.contains(&f.source));
         assert!(!materials_source(&[]).contains("mat_flat"));
+    }
+
+    #[test]
+    fn textures_replace_the_stubs() {
+        let plain = materials_source(&[]);
+        assert!(plain.contains("fn tex_backdrop") && !plain.contains("mat_backdrop"));
+        let tex = with_textures(&plain);
+        assert!(tex.contains("var mat_backdrop") && tex.contains("fn tex_image"));
+        assert_eq!(tex.matches("fn tex_backdrop").count(), 1);
     }
 }
