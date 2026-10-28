@@ -20,7 +20,7 @@ use vo_core::words::Word;
 use crate::ambient::{Loop, LoopProp, Ripples};
 use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
-use crate::display::{BlendMode, Mask, ShapeKind};
+use crate::display::{BlendMode, BloomShape, Mask, ShapeKind};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::final_pass::FinalPass;
@@ -88,6 +88,11 @@ pub(crate) enum Slot {
     ShadowBlur = 39,
     BloomStrength = 40,
     BloomRadius = 41,
+    /// Bloom shape (bloom v2, `Element::bloom_shape`): the emissive threshold, then per band
+    /// (core, mid, tail) its weight, reach, saturation and tint (four slots).
+    BloomThreshold = 120,
+    /// Band k starts at `BloomBand0 + k * BAND_SLOTS`, so slots 121 to 141 are taken.
+    BloomBand0 = 121,
     Shutter = 42,
     TrailHalfLife = 43,
     /// Rim (FX08): colour, stroke width, band width in turns, angle in turns, seconds a lap.
@@ -157,6 +162,9 @@ pub(crate) enum Slot {
     Radial = 209,
 }
 
+/// Slots per bloom band: weight, reach, saturation and a four-slot tint.
+pub(crate) const BAND_SLOTS: u8 = 7;
+
 impl Slot {
     /// Value of a slot no element has set.
     pub(crate) fn default_value(slot: u8) -> f64 {
@@ -183,6 +191,7 @@ impl Slot {
             s if s < Slot::Text as u8 => Prop::Stroke,
             s if s < Slot::GlowColor as u8 => Prop::TextColor,
             s if s < Slot::ShadowColor as u8 => Prop::Glow,
+            s if (Slot::BloomThreshold as u8..Slot::BloomBand0 as u8 + 3 * BAND_SLOTS).contains(&s) => Prop::Bloom,
             s if s < Slot::BloomStrength as u8 => Prop::Shadow,
             s if s < Slot::Shutter as u8 => Prop::Bloom,
             s if s < Slot::RimColor as u8 => Prop::MotionBlur,
@@ -1775,6 +1784,22 @@ impl<M> Element<M> {
         }
         self.set(Slot::BloomStrength as u8, strength);
         self.set(Slot::BloomRadius as u8, radius);
+        self
+    }
+
+    /// The shape of a layer's bloom (bloom v2): an emissive threshold and three bands, a tight
+    /// hot core, a saturated middle and a wide faint tail, instead of one blur. Use with
+    /// [`Element::bloom`], whose radius is the widest band's spread.
+    /// `BloomShape::NEON` is the concepts' neon. Every value animates, as `Prop::Bloom`.
+    pub fn bloom_shape(mut self, shape: BloomShape) -> Element<M> {
+        self.set(Slot::BloomThreshold as u8, shape.threshold.max(0.0));
+        for (i, b) in shape.bands.iter().enumerate() {
+            let s = Slot::BloomBand0 as u8 + i as u8 * BAND_SLOTS;
+            self.set(s, b.weight.max(0.0));
+            self.set(s + 1, b.reach.max(0.0));
+            self.set(s + 2, b.saturation.max(0.0));
+            self.set(s + 3, b.tint);
+        }
         self
     }
 

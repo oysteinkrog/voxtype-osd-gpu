@@ -101,8 +101,12 @@ pub struct Layer {
     /// what it draws now. Only on offscreen layers.
     pub trail: Option<Trail>,
     /// A look applied when the layer is composited (FX13): chromatic aberration, glitch
-    /// slices, scanlines, CRT curvature, vignette and flicker. Only on offscreen layers
-    /// without bloom or a mask.
+    /// slices, scanlines, CRT curvature, vignette and flicker. Only on offscreen layers.
+    ///
+    /// An offscreen layer composites in this order: its content (and trail), plus its bloom;
+    /// then the style, which bends and darkens content and glow alike; then its mask; then
+    /// its opacity and the clips above it; then its blend mode. The two nearest rounded
+    /// clips cut round; clips further out cut along their bounding box.
     pub style: Option<LayerStyle>,
     /// The layer's perspective map in surface space (`crate::stage`), already composed with
     /// every parent's: content is laid out by `transform`, then seen through this. `None`
@@ -202,8 +206,74 @@ pub struct Bloom {
     /// How much of the blurred copy is added: 0 is none, 1 adds it at full strength.
     /// Above 1 is allowed.
     pub strength: f32,
-    /// Spread in logical units, about the blur's standard deviation.
+    /// Spread in logical units, about the blur's standard deviation. With a `shape`, the
+    /// widest band's spread.
     pub radius: f32,
+    /// A shaped glow: an emissive threshold and three bands (core, mid, tail) of their own
+    /// spread, weight, tint and saturation. `None` is the plain one-radius bloom.
+    pub shape: Option<BloomShape>,
+}
+
+impl Bloom {
+    /// A plain bloom.
+    pub fn new(strength: f32, radius: f32) -> Bloom {
+        Bloom { strength, radius, shape: None }
+    }
+}
+
+/// The shape of a glow (bloom v2): what lights it and how its light falls off. The concepts'
+/// neon is a tight hot core, a saturated middle and a wide faint tail, each a blur of its own
+/// size, added together.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct BloomShape {
+    /// Only light brighter than this feeds the glow: linear luminance of the premultiplied
+    /// colour, with a soft knee half as wide. A dim panel under bright lines then does not
+    /// glow. 0 lets everything glow.
+    pub threshold: f32,
+    /// Core, mid and tail, from tight to wide.
+    pub bands: [BloomBand; 3],
+}
+
+/// One blur in a shaped glow.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct BloomBand {
+    /// How much of this band is added, times `Bloom::strength`.
+    pub weight: f32,
+    /// Spread as a fraction of `Bloom::radius`.
+    pub reach: f32,
+    /// Saturation of the band's light: 1 keeps it, above 1 is more vivid, 0 is grey.
+    pub saturation: f32,
+    /// The band's light moves toward this colour by its alpha, keeping its brightness. White
+    /// at 0.5 or more makes a hot, whitish core. Straight-alpha sRGB.
+    pub tint: Color,
+}
+
+impl BloomBand {
+    pub const fn new(weight: f32, reach: f32, saturation: f32, tint: Color) -> BloomBand {
+        BloomBand { weight, reach, saturation, tint }
+    }
+}
+
+impl BloomShape {
+    /// Neon: a tight core pushed toward white, a vivid middle band and a faint wide tail.
+    pub const NEON: BloomShape = BloomShape {
+        threshold: 0.04,
+        bands: [
+            BloomBand::new(1.0, 0.12, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.55)),
+            BloomBand::new(0.55, 0.4, 1.5, Color::TRANSPARENT),
+            BloomBand::new(0.22, 1.0, 1.1, Color::TRANSPARENT),
+        ],
+    };
+
+    /// A soft halo with no hot core: for text and panels that should glow without looking lit.
+    pub const SOFT: BloomShape = BloomShape {
+        threshold: 0.0,
+        bands: [
+            BloomBand::new(0.35, 0.2, 1.0, Color::TRANSPARENT),
+            BloomBand::new(0.35, 0.5, 1.0, Color::TRANSPARENT),
+            BloomBand::new(0.15, 1.0, 1.0, Color::TRANSPARENT),
+        ],
+    };
 }
 
 /// A feedback trail on an offscreen layer.

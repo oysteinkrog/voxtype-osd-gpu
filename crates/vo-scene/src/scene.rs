@@ -22,7 +22,9 @@ use crate::display::{
     BlendMode, Bloom, DisplayList, DotInstance, GlyphFx, GlyphInstance, HitShape, Item, ItemKind, Layer, LayerStyle,
     LayerTarget, Paint, ShapeInstance, ShapeKind, Trail, NO_WORD,
 };
+use crate::display::{BloomBand, BloomShape};
 use crate::dots::Dots;
+use crate::element::BAND_SLOTS;
 use crate::element::{Element, Handlers, Key, Kind, MarkShape, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
 use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
 use crate::final_pass::{self, FinalPass};
@@ -751,6 +753,20 @@ impl<M> Node<M> {
             outline: v(Slot::TextOutline).max(0.0),
             material: 0,
             weight: 0.0,
+        }
+    }
+
+    /// The bloom shape from its slots (`Element::bloom_shape`).
+    fn bloom_shape(&self, t: f64) -> BloomShape {
+        let band = |i: u8| {
+            let s = Slot::BloomBand0 as u8 + i * BAND_SLOTS;
+            let v = |k: u8| self.value(s + k, t).max(0.0) as f32;
+            let c = |k: u8| self.value(s + 3 + k, t).clamp(0.0, 1.0) as f32;
+            BloomBand { weight: v(0), reach: v(1), saturation: v(2), tint: Color::rgba(c(0), c(1), c(2), c(3)) }
+        };
+        BloomShape {
+            threshold: self.value(Slot::BloomThreshold as u8, t).max(0.0) as f32,
+            bands: [band(0), band(1), band(2)],
         }
     }
 
@@ -1647,6 +1663,7 @@ impl<M> Scene<M> {
                 let bloom = n.has(Slot::BloomStrength as u8).then(|| Bloom {
                     strength: n.value(Slot::BloomStrength as u8, t).max(0.0) as f32,
                     radius: n.value(Slot::BloomRadius as u8, t).max(0.0) as f32,
+                    shape: n.has(Slot::BloomThreshold as u8).then(|| n.bloom_shape(t)),
                 });
                 // A layer with a mask child is composited through the mask, so it is offscreen.
                 let masked =

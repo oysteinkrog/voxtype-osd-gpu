@@ -22,13 +22,15 @@
 //!   the tree. A direct layer folds it into each instance's alpha. An offscreen layer draws
 //!   its content at full opacity and applies the product once, when it is composited.
 //! - **Blend.** A direct layer's instances use its blend mode. An offscreen layer's own
-//!   instances use `Normal` inside its texture and the layer's mode when composited. `Multiply`
-//!   is exact only over an opaque destination (fixed-function blending cannot add the
-//!   `src * (1 - dst alpha)` term); `Normal`, `Add` and `Screen` are exact.
+//!   instances use `Normal` inside its texture and the layer's mode when composited. All four
+//!   modes are exact: `Multiply` is composited in two draws, and a direct `Multiply` layer is
+//!   drawn offscreen for it (`compose`).
+//! - **Compose order** on one offscreen layer: content, plus bloom, then the style, then the
+//!   mask, then opacity and clips, then the blend mode (`compose`).
 //! - **Clip.** A layer's rounded-rect clip is applied by SDF coverage in every fragment. A
-//!   layer without its own clip uses its nearest ancestor's. Where clips nest, the outer ones
-//!   only act through a scissor of their bounding boxes, so an inner layer is cut square, not
-//!   round, at an outer clip's corners. A bloom's halo reaches past its own layer's clip.
+//!   layer without its own clip uses its nearest ancestor's. The nearest clip and the one
+//!   around it both cut round; clips further out act through a scissor of their bounding
+//!   boxes. A bloom's halo reaches past its own layer's clip.
 //! - **Offscreen layers** get a texture that covers what they draw, plus the bloom's reach,
 //!   at a whole-pixel offset so compositing stays a 1:1 copy. Sizes round up to 64 pixels so
 //!   textures are reused from a pool while a layer moves or grows.
@@ -59,10 +61,13 @@ use crate::shapes::{pixels_per_unit, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
 use crate::vector::{vector_shader_source_with, GpuVector};
 
+mod compose;
+
 const COMMON_WGSL: &str = include_str!("wgsl/common.wgsl");
 const SHAPES_WGSL: &str = include_str!("wgsl/shapes.wgsl");
 const GLYPHS_WGSL: &str = include_str!("wgsl/glyphs.wgsl");
 const COMPOSITE_WGSL: &str = include_str!("wgsl/composite.wgsl");
+const COMPOSE_WGSL: &str = include_str!("wgsl/compose.wgsl");
 const DOTS_WGSL: &str = include_str!("wgsl/dots.wgsl");
 const BLOOM_WGSL: &str = include_str!("wgsl/bloom.wgsl");
 const NOISE_WGSL: &str = include_str!("wgsl/noise.wgsl");
@@ -157,7 +162,13 @@ pub fn noise_shader_source() -> std::borrow::Cow<'static, str> {
 
 /// The offscreen layer composite shader: `common.wgsl`, `noise.wgsl` and `composite.wgsl`.
 pub fn composite_shader_source() -> String {
-    [wgsl("common.wgsl", COMMON_WGSL), noise_shader_source(), wgsl("composite.wgsl", COMPOSITE_WGSL)].join("\n")
+    [
+        wgsl("common.wgsl", COMMON_WGSL),
+        noise_shader_source(),
+        wgsl("composite.wgsl", COMPOSITE_WGSL),
+        wgsl("compose.wgsl", COMPOSE_WGSL),
+    ]
+    .join("\n")
 }
 
 /// The dot shader: `common.wgsl` and `dots.wgsl`.
@@ -240,6 +251,11 @@ struct LayerUniform {
     style_box: [f32; 4],
     style_a: [f32; 4],
     style_b: [f32; 4],
+    /// The next clip out (`clip2_t[3]` 1 when there is one), laid out like the clip.
+    clip2_rect: [f32; 4],
+    clip2_radii: [f32; 4],
+    clip2_m: [f32; 4],
+    clip2_t: [f32; 4],
     /// The stage warp in target pixels (`vo_scene::stage`): rows of the 3x3, and of its
     /// inverse. `warp0[3]` is 1 when the layer is warped.
     warp0: [f32; 4],
@@ -267,6 +283,16 @@ struct ClipState {
     ppu: f32,
     /// Edge fades in clip units: left, top, right, bottom.
     fade: [f32; 4],
+    /// The nearest clip above this one, so two nested clips both cut round.
+    outer: Option<OuterClip>,
+}
+
+/// A clip further out than a layer's own, without edge fades.
+#[derive(Clone, Copy)]
+struct OuterClip {
+    rect: RRect,
+    from_px: Affine,
+    ppu: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -294,11 +320,12 @@ enum Pipe {
     Dot,
     Vector,
     Glass,
-    CompositeBloom,
-    /// Composites a masked layer through its mask's texture (FX04).
-    CompositeMask,
-    /// Composites a layer with a style (FX13).
-    CompositeStyle,
+    /// Composites a layer with bloom, a style or a mask (FX04, FX13), in the order
+    /// `compose.wgsl` gives.
+    CompositeFx,
+    /// The second draws of an exact `Multiply` composite (`compose`).
+    CompositeRest,
+    CompositeFxRest,
     Down,
     Up,
     Final,
@@ -365,6 +392,8 @@ struct Surface {
     layer: Option<u32>,
     /// Composited with a layer style (`frame_report`).
     style: bool,
+    /// Byte offset of the `Compose` block its `CompositeFx` draw reads (`compose`).
+    compose: u32,
 }
 
 impl Surface {
@@ -381,6 +410,7 @@ impl Surface {
             r8: false,
             layer: None,
             style: false,
+            compose: 0,
         }
     }
 
@@ -421,6 +451,10 @@ struct TrailPlan {
 /// One layer's bloom for this frame.
 struct BloomPlan {
     strength: f32,
+    /// Spread in physical pixels; with a shape, the widest band's.
+    radius_px: f32,
+    /// A shaped bloom (bloom v2): only downsamples run, and each band reads its own level.
+    shape: Option<vo_scene::display::BloomShape>,
     /// Levels used, 1 to `MAX_LEVELS`.
     levels: u32,
     /// How much the deepest level mixes in, 0 to 1, so the radius changes smoothly.
@@ -474,8 +508,6 @@ pub struct Renderer {
     signals_buf: wgpu::Buffer,
     signals_bind: wgpu::BindGroup,
     composite_layout: wgpu::BindGroupLayout,
-    /// A masked layer's composite: its texture and its mask's.
-    mask_layout: wgpu::BindGroupLayout,
     /// Made on the first effect frame: sampled textures and the Fx block.
     fx: Option<FxShared>,
     modules: [Option<wgpu::ShaderModule>; 9],
@@ -524,6 +556,10 @@ pub struct Renderer {
     gpu_items: Vec<GpuCmd>,
     /// GPU timestamps per section, when profiling is on.
     profiler: Option<Profiler>,
+    /// Bindings of `compose.wgsl` and the blue noise, made on the first frame.
+    compose: Option<compose::ComposeGpu>,
+    /// Move the dither every frame (`set_dither_motion`).
+    dither_motion: bool,
 }
 
 struct FxShared {
@@ -586,10 +622,6 @@ impl Renderer {
             label: Some("vo-composite"),
             entries: &[texture_entry(0, false)],
         });
-        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vo-composite-mask"),
-            entries: &[texture_entry(0, false), texture_entry(1, false)],
-        });
         Renderer {
             device: device.clone(),
             queue: queue.clone(),
@@ -598,6 +630,8 @@ impl Renderer {
             painters: Vec::new(),
             gpu_items: Vec::new(),
             profiler: None,
+            compose: None,
+            dither_motion: false,
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -607,7 +641,6 @@ impl Renderer {
             signals_buf,
             signals_bind,
             composite_layout,
-            mask_layout,
             fx: None,
             modules: [None, None, None, None, None, None, None, None, None],
             pipelines: Vec::new(),
@@ -950,7 +983,13 @@ impl Renderer {
             Some(rect) => {
                 let Some(from_px) = to_px.invert() else { return };
                 scissor = intersect(scissor, seen(bounds(&rect, &to_px)));
-                Some(ClipState { rect, from_px, ppu, fade: layer.clip_fade })
+                Some(ClipState {
+                    rect,
+                    from_px,
+                    ppu,
+                    fade: layer.clip_fade,
+                    outer: parent.clip.map(|c| OuterClip { rect: c.rect, from_px: c.from_px, ppu: c.ppu }),
+                })
             }
             None => parent.clip,
         };
@@ -961,7 +1000,15 @@ impl Renderer {
         let mut mask_out = parent.mask_out;
         // Where this layer's composite went, to send it through a mask found later.
         let mut composite_at = None;
-        let (draw_surface, opacity, blend) = match layer.target {
+        // A direct layer that multiplies is drawn offscreen: only a composite multiplies
+        // exactly (`compose`).
+        let target = match layer.target {
+            LayerTarget::Direct if layer.blend == BlendMode::Multiply && !in_mask => {
+                LayerTarget::Offscreen { bloom: None }
+            }
+            t => t,
+        };
+        let (draw_surface, opacity, blend) = match target {
             LayerTarget::Direct => (surface, parent.opacity * layer.opacity, layer.blend),
             // Inside a mask everything draws straight into the mask.
             LayerTarget::Offscreen { .. } if in_mask => (surface, parent.opacity * layer.opacity, BlendMode::Normal),
@@ -1002,14 +1049,11 @@ impl Renderer {
                     });
                 }
                 self.surfaces.push(s);
-                let pipe = match (&self.surfaces[child].bloom, layer.style) {
-                    (Some(_), _) => Pipe::CompositeBloom,
-                    (None, Some(s)) => {
-                        self.set_style(uniform, &s, &to_px, ppu);
-                        Pipe::CompositeStyle
-                    }
-                    (None, None) => Pipe::Composite,
-                };
+                if let Some(s) = layer.style {
+                    self.set_style(uniform, &s, &to_px, ppu);
+                }
+                let fx = self.surfaces[child].bloom.is_some() || layer.style.is_some();
+                let pipe = if fx { Pipe::CompositeFx } else { Pipe::Composite };
                 composite_at = Some(self.surfaces[surface].cmds.len());
                 self.surfaces[surface].cmds.push(Cmd {
                     pipe,
@@ -1200,12 +1244,11 @@ impl Renderer {
         }
         if draw_surface != surface {
             if let Some((mask, _)) = self.surfaces[draw_surface].mask {
-                // A masked layer draws no bloom: put the bloom on a layer around it. An empty
-                // inverted mask hides nothing, so the plain composite stays.
-                self.surfaces[draw_surface].bloom = None;
+                // An empty inverted mask hides nothing, so the composite reads no mask.
                 if let Some(ci) = composite_at {
-                    let drew = self.surfaces[mask].size[0] != 0;
-                    self.surfaces[surface].cmds[ci].pipe = if drew { Pipe::CompositeMask } else { Pipe::Composite };
+                    if self.surfaces[mask].size[0] != 0 {
+                        self.surfaces[surface].cmds[ci].pipe = Pipe::CompositeFx;
+                    }
                 }
             }
             self.close_surface(draw_surface, surface, parent.scissor, f.target);
@@ -1374,6 +1417,13 @@ impl Renderer {
             u.clip_m = [k.a, k.b, k.c, k.d];
             u.clip_t = [k.e, k.f, c.ppu, 1.0];
             u.clip_fade = c.fade;
+            if let Some(o) = &c.outer {
+                let (r, k) = (o.rect.rect, &o.from_px);
+                u.clip2_rect = [r.x, r.y, r.w, r.h];
+                u.clip2_radii = o.rect.radii;
+                u.clip2_m = [k.a, k.b, k.c, k.d];
+                u.clip2_t = [k.e, k.f, o.ppu, 1.0];
+            }
         }
         let offset = self.uniforms.len() as u32;
         self.uniforms.extend_from_slice(bytemuck::bytes_of(&u));
@@ -1384,6 +1434,7 @@ impl Renderer {
     /// Writes each surface's texture size and origin into the layer blocks of its draws,
     /// and takes its textures from the pool.
     fn place_surfaces(&mut self, format: wgpu::TextureFormat) {
+        self.ensure_compose();
         let size = std::mem::size_of::<LayerUniform>();
         for si in 0..self.surfaces.len() {
             let (origin, tex_size) = (self.surfaces[si].origin, self.surfaces[si].size);
@@ -1394,10 +1445,9 @@ impl Renderer {
                 u.viewport[0] = tex_size[0] as f32;
                 u.viewport[1] = tex_size[1] as f32;
                 u.origin = [origin[0] as f32, origin[1] as f32, 0.0, 0.0];
-                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle)
-                {
+                if matches!(c.pipe, Pipe::Composite | Pipe::CompositeFx) {
                     let child = &self.surfaces[c.range.start as usize];
-                    if let (Pipe::CompositeMask, Some((m, mask))) = (c.pipe, child.mask) {
+                    if let (Pipe::CompositeFx, Some((m, mask))) = (c.pipe, child.mask) {
                         let o = self.surfaces[m].origin;
                         u.mask = [o[0] as f32, o[1] as f32, mask.invert as u32 as f32, 0.0];
                     }
@@ -1433,12 +1483,16 @@ impl Renderer {
                 continue;
             }
             let levels = self.surfaces[si].bloom.as_ref().unwrap().levels;
+            // A shaped bloom reads its levels directly: no upsamples.
+            let shape = self.surfaces[si].bloom.as_ref().unwrap().shape;
+            let up_levels = if shape.is_some() { 1 } else { levels };
+            let threshold = shape.map_or(0.0, |s| s.threshold);
             let mut down = Vec::new();
             let mut up = Vec::new();
             for l in 1..=levels {
                 down.push(self.acquire(w >> l, h >> l, EFFECT_FORMAT));
             }
-            for l in 1..levels {
+            for l in 1..up_levels {
                 up.push(self.acquire(w >> l, h >> l, EFFECT_FORMAT));
             }
             let top = self.surfaces[si].bloom.as_ref().unwrap().top;
@@ -1447,11 +1501,11 @@ impl Renderer {
                 let src = [w >> (l - 1), h >> (l - 1)];
                 fx.push(self.push_fx(FxUniform {
                     texel: [1.0 / src[0] as f32, 1.0 / src[1] as f32],
-                    weight: 0.0,
+                    weight: if l == 1 { threshold } else { 0.0 },
                     mode: (l == 1) as u32 as f32,
                 }));
             }
-            for l in 1..levels {
+            for l in 1..up_levels {
                 // The lower level read by the tent.
                 let low = [w >> (l + 1), h >> (l + 1)];
                 let weight = if l == levels - 1 { BLOOM_MIX * top } else { BLOOM_MIX };
@@ -1463,6 +1517,11 @@ impl Renderer {
             }
             let plan = self.surfaces[si].bloom.as_mut().unwrap();
             (plan.down, plan.up, plan.fx) = (down, up, fx);
+        }
+        for si in 1..self.surfaces.len() {
+            if self.surfaces[si].size[0] != 0 && !self.surfaces[si].r8 {
+                self.surfaces[si].compose = self.plan_compose(si);
+            }
         }
     }
 
@@ -1676,7 +1735,11 @@ impl Renderer {
                     2.0
                 };
                 let offset = self.fx_uniforms.len();
-                self.fx_uniforms.extend_from_slice(bytemuck::bytes_of(&FxUniform { mode, ..Default::default() }));
+                self.fx_uniforms.extend_from_slice(bytemuck::bytes_of(&FxUniform {
+                    texel: self.dither_offset(),
+                    weight: 0.0,
+                    mode,
+                }));
                 self.fx_uniforms.resize(offset + self.uniform_stride as usize, 0);
                 write_uniforms(
                     device,
@@ -1690,6 +1753,7 @@ impl Renderer {
                 );
             }
         }
+        self.upload_compose();
         // Pipelines this frame needs.
         let mut needed: Vec<(wgpu::TextureFormat, Pipe, BlendMode)> = Vec::new();
         for s in &self.surfaces {
@@ -1710,6 +1774,13 @@ impl Renderer {
                 needed.push((EFFECT_FORMAT, Pipe::Up, BlendMode::Normal));
             }
         }
+        // An exact multiply composite takes a second pipeline.
+        let rest: Vec<_> = needed
+            .iter()
+            .filter(|k| k.2 == BlendMode::Multiply)
+            .filter_map(|&(f, p, b)| compose::rest_pipe(p).map(|r| (f, r, b)))
+            .collect();
+        needed.extend(rest);
         if self.scene.is_some() {
             needed.push((target_format, Pipe::Final, BlendMode::Normal));
         }
@@ -1787,8 +1858,8 @@ impl Renderer {
                 self.mark(enc, Section::Bloom { surface: i });
             }
         }
-        if let (Some(scene), Some(fx)) = (self.scene, &self.fx) {
-            let bind = self.sampled_bind(fx, scene, scene);
+        if let (Some(scene), Some(_)) = (self.scene, &self.fx) {
+            let bind = self.final_bind(scene);
             let mut pass = begin_with(enc, &target.view, "vo-final", self.load);
             pass.set_pipeline(self.cached_pipeline(target.format(), Pipe::Final, BlendMode::Normal));
             pass.set_bind_group(0, &bind, &[]);
@@ -1823,7 +1894,7 @@ impl Renderer {
             let src = if l == 0 { layer } else { b.down[l - 1] };
             pass(enc, b.down[l], src, src, Pipe::Down, b.fx[l]);
         }
-        for l in (0..n - 1).rev() {
+        for l in (0..if b.up.is_empty() { 0 } else { n - 1 }).rev() {
             let low = if l == n - 2 { b.down[n - 1] } else { b.up[l + 1] };
             pass(enc, b.up[l], b.down[l], low, Pipe::Up, b.fx[n + l]);
         }
@@ -1896,8 +1967,7 @@ impl Renderer {
         for c in cmds {
             let mut sc = c.scissor;
             let child =
-                matches!(c.pipe, Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle)
-                    .then(|| &self.surfaces[c.range.start as usize]);
+                matches!(c.pipe, Pipe::Composite | Pipe::CompositeFx).then(|| &self.surfaces[c.range.start as usize]);
             if let Some(child) = child {
                 if child.size[0] == 0 {
                     continue;
@@ -1940,37 +2010,24 @@ impl Renderer {
                     pass.set_vertex_buffer(0, self.glyph_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
-                Pipe::Composite | Pipe::CompositeStyle => {
+                Pipe::Composite => {
                     let child = child.unwrap();
                     pass.set_bind_group(0, &self.pool[child.tex.unwrap()].bind, &[]);
                     pass.draw(0..3, 0..1);
+                    self.draw_rest(pass, format, c.pipe, c.blend);
                 }
-                Pipe::CompositeBloom => {
-                    let child = child.unwrap();
-                    let fx = self.fx.as_ref().expect("effect frame");
-                    let bloom = child.bloom.as_ref().unwrap().result();
-                    let bind = self.sampled_bind(fx, child.tex.unwrap(), bloom);
-                    pass.set_bind_group(0, &bind, &[]);
+                Pipe::CompositeFx => {
+                    pass.set_bind_group(0, &self.compose_bind(c.range.start as usize), &[]);
                     pass.draw(0..3, 0..1);
+                    self.draw_rest(pass, format, c.pipe, c.blend);
                 }
-                Pipe::CompositeMask => {
-                    let child = child.unwrap();
-                    let mask = &self.surfaces[child.mask.expect("masked").0];
-                    let view = |s: &Surface| wgpu::BindingResource::TextureView(&self.pool[s.tex.unwrap()].view);
-                    let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("vo-composite-mask"),
-                        layout: &self.mask_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: view(child) },
-                            wgpu::BindGroupEntry { binding: 1, resource: view(mask) },
-                        ],
-                    });
-                    pass.set_bind_group(0, &bind, &[]);
-                    pass.draw(0..3, 0..1);
-                }
-                Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade | Pipe::TrailMax => {
-                    unreachable!("not a layer command")
-                }
+                Pipe::Down
+                | Pipe::Up
+                | Pipe::Final
+                | Pipe::Fade
+                | Pipe::TrailMax
+                | Pipe::CompositeRest
+                | Pipe::CompositeFxRest => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
                 Pipe::Gpu => unreachable!("a pass break"),
             }
@@ -2032,7 +2089,7 @@ impl Renderer {
         let slot = match pipe {
             Pipe::Shape => 0,
             Pipe::Glyph => 1,
-            Pipe::Composite | Pipe::CompositeBloom | Pipe::CompositeMask | Pipe::CompositeStyle => 2,
+            Pipe::Composite | Pipe::CompositeFx | Pipe::CompositeRest | Pipe::CompositeFxRest => 2,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
             Pipe::TrailMax => 8,
             // The particle layer and the painters have their own pipelines.
@@ -2051,9 +2108,10 @@ impl Renderer {
             Pipe::Dot | Pipe::Glass => [None, Some(&self.layer_layout)],
             Pipe::Vector => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],
-            Pipe::Composite | Pipe::CompositeStyle => [Some(&self.composite_layout), Some(&self.layer_layout)],
-            Pipe::CompositeBloom => [fx.map(|f| &f.sampled_layout), Some(&self.layer_layout)],
-            Pipe::CompositeMask => [Some(&self.mask_layout), Some(&self.layer_layout)],
+            Pipe::Composite | Pipe::CompositeRest => [Some(&self.composite_layout), Some(&self.layer_layout)],
+            Pipe::CompositeFx | Pipe::CompositeFxRest => {
+                [self.compose.as_ref().map(|c| &c.layout), Some(&self.layer_layout)]
+            }
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
             Pipe::TrailMax => [Some(&self.composite_layout), None],
@@ -2080,9 +2138,8 @@ impl Renderer {
             Pipe::Dot => ("vs_dot", "fs_dot", vec![Some(GpuDot::layout())]),
             Pipe::Glass => ("vs_glass", "fs_glass", vec![Some(GlassGpu::layout())]),
             Pipe::Vector => ("vs_vector", "fs_vector", vec![Some(GpuVector::layout())]),
-            Pipe::CompositeBloom => ("vs_composite", "fs_composite_bloom", vec![]),
-            Pipe::CompositeMask => ("vs_composite", "fs_composite_mask", vec![]),
-            Pipe::CompositeStyle => ("vs_composite", "fs_composite_style", vec![]),
+            Pipe::CompositeRest => ("vs_composite", "fs_composite", vec![]),
+            Pipe::CompositeFx | Pipe::CompositeFxRest => ("vs_composite", "fs_compose", vec![]),
             Pipe::Down => ("vs_full", "fs_down", vec![]),
             Pipe::Up => ("vs_full", "fs_up", vec![]),
             Pipe::Final => ("vs_full", "fs_final", vec![]),
@@ -2092,6 +2149,7 @@ impl Renderer {
         };
         let blend_state = match pipe {
             Pipe::Down | Pipe::Up => None,
+            Pipe::CompositeRest | Pipe::CompositeFxRest => Some(compose::MULTIPLY_REST),
             // Over a cleared target this equals replacing; over a loaded one it composites.
             Pipe::Final => Some(PREMULTIPLIED_OVER),
             // Keeps `constant` times what is there: the source is zero.
@@ -2137,7 +2195,7 @@ impl Renderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: blend_state,
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: compose::write_mask(pipe, blend),
                 })],
             }),
             primitive: wgpu::PrimitiveState {
@@ -2191,8 +2249,18 @@ fn bloom_of(target: &LayerTarget) -> Option<Bloom> {
 /// Levels from the radius in pixels: level `l` blurs about `2^(l-1)` times as wide as level 1,
 /// whose spread is about 2 pixels. The deepest level fades in, so the radius is continuous.
 fn bloom_plan(b: Bloom, ppu: f32) -> BloomPlan {
-    let (levels, top) = bloom_levels(b.radius * ppu);
-    BloomPlan { strength: b.strength, levels, top, down: Vec::new(), up: Vec::new(), fx: Vec::new() }
+    let radius_px = b.radius * ppu;
+    let (levels, top) = bloom_levels(radius_px * b.shape.as_ref().map_or(1.0, compose::shape_reach));
+    BloomPlan {
+        strength: b.strength,
+        radius_px,
+        shape: b.shape,
+        levels,
+        top,
+        down: Vec::new(),
+        up: Vec::new(),
+        fx: Vec::new(),
+    }
 }
 
 /// A bloom of `radius_px` physical pixels: its pyramid levels below the layer texture, and
@@ -2407,9 +2475,9 @@ mod tests {
     #[test]
     fn bloom_radius_is_continuous() {
         // The deepest level fades in as the radius grows, and the levels step up by one.
-        let mut last = bloom_plan(Bloom { strength: 1.0, radius: 1.0 }, 1.0);
+        let mut last = bloom_plan(Bloom::new(1.0, 1.0), 1.0);
         for i in 1..600 {
-            let p = bloom_plan(Bloom { strength: 1.0, radius: 1.01f32.powi(i) }, 1.0);
+            let p = bloom_plan(Bloom::new(1.0, 1.01f32.powi(i)), 1.0);
             assert!(p.levels == last.levels || (p.levels == last.levels + 1 && p.top < 0.05), "radius step {i}");
             last = p;
         }

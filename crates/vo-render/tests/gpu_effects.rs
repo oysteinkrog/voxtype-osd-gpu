@@ -163,11 +163,7 @@ fn bloom_scene(font: &FontRef) -> DisplayList {
     let word = run(font, "bloom", 110.0, 44.0, 30.0, hex(0xffd6ff));
     let dot = ShapeInstance::circle(Point::new(200.0, 92.0), 10.0, Paint::solid(hex(0xffffff)));
     let rule = ShapeInstance::rrect(rr(20.0, 100.0, 120.0, 2.0, 0.0), Paint::solid(hex(0x9aa3b8)));
-    Builder::new(240.0, 124.0).build(
-        vec![panel],
-        Some((Bloom { strength: 1.2, radius: 8.0 }, vec![capsule, dot], word)),
-        vec![rule],
-    )
+    Builder::new(240.0, 124.0).build(vec![panel], Some((Bloom::new(1.2, 8.0), vec![capsule, dot], word)), vec![rule])
 }
 
 fn load_font() -> Vec<u8> {
@@ -254,7 +250,7 @@ fn bloom_is_stable_under_subpixel_motion() {
         let dot = ShapeInstance::circle(Point::new(x, 40.0), 3.0, Paint::solid(hex(0xffffff)));
         let list = Builder::new(128.0, 80.0).build(
             Vec::new(),
-            Some((Bloom { strength: 1.0, radius: 10.0 }, vec![dot], Vec::new())),
+            Some((Bloom::new(1.0, 10.0), vec![dot], Vec::new())),
             Vec::new(),
         );
         let img = render(&mut off, "subpixel", &list, 1.0);
@@ -341,11 +337,8 @@ fn light_mode_bloom_golden() {
     let bg = ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 124.0, 0.0), Paint::solid(hex(0xf3f4f6)));
     let capsule = ShapeInstance::capsule(Rect::new(20.0, 22.0, 70.0, 20.0), Paint::solid(hex(0x2563eb)));
     let word = run(&font, "light", 110.0, 44.0, 30.0, hex(0x111827));
-    let list = Builder::new(240.0, 124.0).build(
-        vec![bg],
-        Some((Bloom { strength: 1.0, radius: 6.0 }, vec![capsule], word)),
-        Vec::new(),
-    );
+    let list =
+        Builder::new(240.0, 124.0).build(vec![bg], Some((Bloom::new(1.0, 6.0), vec![capsule], word)), Vec::new());
     let img = render(&mut off, "fx-bloom-light-1x", &list, 1.0);
     assert_premultiplied(&img);
     support::check(&img, Tolerance::default()).unwrap();
@@ -362,7 +355,7 @@ fn motion_blur_golden() {
     let mut list = Builder::new(240.0, 124.0).build(
         vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 124.0, 0.0), Paint::solid(hex(0x101420)))],
         Some((
-            Bloom { strength: 0.0, radius: 1.0 },
+            Bloom::new(0.0, 1.0),
             vec![ShapeInstance::capsule(Rect::new(20.0, 20.0, 60.0, 20.0), Paint::solid(hex(0x4cc9f0)))],
             run(&font, "swift", 110.0, 40.0, 26.0, hex(0xffffff)),
         )),
@@ -386,7 +379,7 @@ fn trail_frame(i: u32) -> DisplayList {
     let mut list = Builder::new(240.0, 60.0).build(
         vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 60.0, 0.0), Paint::solid(hex(0x101420)))],
         Some((
-            Bloom { strength: 0.0, radius: 1.0 },
+            Bloom::new(0.0, 1.0),
             vec![ShapeInstance::circle(Point::new(x, 30.0), 8.0, Paint::solid(hex(0x4cc9f0)))],
             Vec::new(),
         )),
@@ -498,7 +491,7 @@ fn fade_scene(font: &FontRef) -> DisplayList {
     let mut list = Builder::new(240.0, 80.0).build(
         vec![ShapeInstance::rrect(rr(0.0, 0.0, 240.0, 80.0, 0.0), Paint::solid(hex(0x101420)))],
         Some((
-            Bloom { strength: 0.0, radius: 1.0 },
+            Bloom::new(0.0, 1.0),
             vec![ShapeInstance::rrect(rr(0.0, 16.0, 240.0, 12.0, 6.0), Paint::solid(hex(0x4cc9f0)))],
             run(font, "ticker words", 6.0, 62.0, 26.0, hex(0xffffff)),
         )),

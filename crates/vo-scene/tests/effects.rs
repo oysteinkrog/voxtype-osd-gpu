@@ -1,6 +1,6 @@
 //! Glow, shadow and bloom from the element API into the display list.
 
-use vo_scene::display::{LayerTarget, PaintKind, ShapeKind};
+use vo_scene::display::{BloomShape, LayerTarget, PaintKind, ShapeKind};
 use vo_scene::element::Element;
 use vo_scene::geom::Color;
 use vo_scene::Scene;
@@ -56,6 +56,33 @@ fn bloom_makes_an_offscreen_layer_with_its_values() {
     });
     let b = bloom.expect("a bloom layer");
     assert!((b.strength - 1.5).abs() < 1e-3 && (b.radius - 12.0).abs() < 1e-3, "{b:?}");
+}
+
+#[test]
+fn a_bloom_shape_reaches_the_layer_and_plain_bloom_has_none() {
+    let shaped = |shape: Option<BloomShape>| {
+        let mut scene = Scene::new();
+        let mut layer = Element::layer("glow").size(100.0, 40.0).bloom(1.0, 10.0);
+        if let Some(s) = shape {
+            layer = layer.bloom_shape(s);
+        }
+        let layer = layer.child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE));
+        scene.apply(root(vec![layer]), 0.0);
+        let list = scene.sample(10.0);
+        let bloom = list.layers.iter().find_map(|l| match l.target {
+            LayerTarget::Offscreen { bloom } => bloom,
+            _ => None,
+        });
+        bloom.expect("a bloom layer").shape
+    };
+    assert_eq!(shaped(None), None);
+    let got = shaped(Some(BloomShape::NEON)).expect("a shape");
+    let want = BloomShape::NEON;
+    assert!((got.threshold - want.threshold).abs() < 1e-4, "{got:?}");
+    for (g, w) in got.bands.iter().zip(want.bands.iter()) {
+        let d = [g.weight - w.weight, g.reach - w.reach, g.saturation - w.saturation, g.tint.a - w.tint.a];
+        assert!(d.iter().all(|d| d.abs() < 1e-3), "{g:?} != {w:?}");
+    }
 }
 
 #[test]

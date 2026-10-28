@@ -7,7 +7,8 @@
 struct Fx {
   // One texel of the source texture in uv.
   texel: vec2f,
-  // Upsample: how much of the lower level goes into the mix.
+  // Upsample: how much of the lower level goes into the mix. First downsample: the emissive
+  // threshold (bloom v2), 0 for none. Final pass: the dither's offset in x and y is `texel`.
   weight: f32,
   // Downsample: 1 for the Karis average. Final pass: the output mode.
   mode: f32,
@@ -35,6 +36,19 @@ fn tap (uv: vec2f, dx: f32, dy: f32) -> vec4f {
   return textureSampleLevel (src, samp, uv + vec2f (dx, dy) * fx.texel, 0.0);
 }
 
+// Emissive threshold (bloom v2): keeps only light above `t`, with a soft knee half as wide,
+// scaling the colour so its hue stays.
+fn threshold (c: vec4f, t: f32) -> vec4f {
+  if (t <= 0.0) {
+    return c;
+  }
+  let l = dot (c.rgb, vec3f (0.2126, 0.7152, 0.0722));
+  let k = 0.5 * t;
+  let soft = clamp (l - t + k, 0.0, 2.0 * k);
+  let w = max (soft * soft / (4.0 * k + 1e-5), l - t) / max (l, 1e-5);
+  return c * w;
+}
+
 // Karis weight of a 4-tap box: 1 / (1 + luma), on premultiplied values.
 fn karis (c: vec4f) -> f32 {
   return 1.0 / (1.0 + dot (c.rgb, vec3f (0.2126, 0.7152, 0.0722)));
@@ -55,11 +69,12 @@ fn karis (c: vec4f) -> f32 {
   let l = tap (in.uv, 0.0, 2.0);
   let m = tap (in.uv, 2.0, 2.0);
   // Five overlapping 4-tap boxes: the centre one weighted 0.5, the corner ones 0.125.
-  let b0 = (d + e + i + j) * 0.25;
-  let b1 = (a + b + f + g) * 0.25;
-  let b2 = (b + c + g + h) * 0.25;
-  let b3 = (f + g + k + l) * 0.25;
-  let b4 = (g + h + l + m) * 0.25;
+  let th = select (0.0, fx.weight, fx.mode == 1.0);
+  let b0 = threshold ((d + e + i + j) * 0.25, th);
+  let b1 = threshold ((a + b + f + g) * 0.25, th);
+  let b2 = threshold ((b + c + g + h) * 0.25, th);
+  let b3 = threshold ((f + g + k + l) * 0.25, th);
+  let b4 = threshold ((g + h + l + m) * 0.25, th);
   if (fx.mode == 0.0) {
     return b0 * 0.5 + (b1 + b2 + b3 + b4) * 0.125;
   }
@@ -99,15 +114,20 @@ fn srgb_decode3 (c: vec3f) -> vec3f {
   return select (hi, lo, c <= vec3f (0.04045));
 }
 
-// Interleaved gradient noise in [0, 1), from the pixel position only, so it is the same in
-// every frame and every run.
-fn ign (p: vec2f) -> f32 {
-  return fract (52.9829189 * fract (dot (p, vec2f (0.06711056, 0.00583715))));
+// Blue noise in [0, 1) per channel: the 64 by 64 tile bound as `low` in the final pass,
+// moved by `fx.texel` whole pixels (0 in golden mode, a new offset each frame otherwise),
+// read at three offsets so the channels do not dither together.
+fn blue (p: vec2f) -> vec3f {
+  let q = vec2i (floor (p + fx.texel));
+  let r = textureLoad (low, (q + vec2i (0, 0)) & vec2i (63), 0).r;
+  let g = textureLoad (low, (q + vec2i (23, 41)) & vec2i (63), 0).r;
+  let b = textureLoad (low, (q + vec2i (47, 11)) & vec2i (63), 0).r;
+  return vec3f (r, g, b) + 0.5 / 256.0;
 }
 
 // The effect path's last pass: the linear scene to the target. A shoulder above 0.95 of the
 // brightest straight channel brings light above 1 back under 1 with its hue kept, then sRGB
-// encode and a dither of one code value. Modes: 0 float target (no encode, no dither),
+// encode and a blue-noise dither of one code value. Modes: 0 float target (no encode, no dither),
 // 1 sRGB target (the hardware encodes, so the dither is applied in encoded space and decoded
 // back), 2 plain UNORM target (the shader encodes).
 @fragment fn fs_final (in: FullOut) -> @location(0) vec4f {
@@ -125,7 +145,7 @@ fn ign (p: vec2f) -> f32 {
   if (fx.mode == 0.0) {
     return c;
   }
-  let n = (ign (in.pos.xy) - 0.5) / 255.0;
+  let n = (blue (in.pos.xy) - 0.5) / 255.0;
   if (fx.mode == 1.0) {
     let e = srgb_encode3 (c.rgb) + n;
     return vec4f (min (srgb_decode3 (clamp (e, vec3f (0.0), vec3f (1.0))), vec3f (c.a)), c.a);

@@ -95,8 +95,12 @@ Rules found while building the M1 time model in `vo-core` (`spring`, `channel`, 
 - **Generic over Msg.** Click and hover handlers make `Element` and `Scene` generic over the app's message
   type. Accepted as the one exception to "mostly non-generic".
 - **Layout triggers** are structural, text, style and viewport changes, not structure alone.
-- **Blend.** Normal, Add and Screen are exact. Multiply is exact only over an opaque destination.
-- **Clips.** Only the nearest clip is rounded; outer clips act through their bounding-box scissor.
+- **Blend.** Normal, Add, Screen and Multiply are exact. Multiply is composited in two draws, so a
+  direct Multiply layer is drawn offscreen.
+- **Compose order** on one offscreen layer: content, plus bloom, then the style, then the mask, then
+  opacity and clips, then the blend mode.
+- **Clips.** The nearest clip and the one around it are rounded; clips further out act through their
+  bounding-box scissor.
 - taffy is 0.15.1, not the 0.13 the lane reports cite.
 
 ## Host notes (M1, 2026-10-26)
@@ -192,7 +196,12 @@ after M3, the macOS host, which has since been dropped.
   so the halo shows over a transparent desktop. Nothing is unpremultiplied in the pyramid.
 - **Tone map.** A shoulder above 0.95 on the brightest straight channel brings light above 1 back under
   1 with the hue kept. A pure white becomes 0.982. Then sRGB encode and a dither of one code value from
-  the pixel position only, so frames do not change between runs.
+  a 64 by 64 blue-noise tile. The tile stays still by default, so goldens and exports do not change
+  between runs; `Renderer::set_dither_motion(true)` moves it each frame on a live surface.
+- **Bloom v2 (shaped).** `Bloom::shape` (`Element::bloom_shape`) adds an emissive threshold and three
+  bands (core, mid, tail). Each band reads the pyramid level that matches its reach, with a B-spline
+  upsample, its own weight, saturation and tint. `BloomShape::NEON` keeps a tight hot core and a faint
+  tail.
 - **Subpixel motion.** The pyramid's grid is fixed to the texture, so it is not exactly translation
   invariant: a dot moved across a pixel in eighths changes its halo's light by up to 2.3% and moves its
   centroid within 0.06 px of the dot.

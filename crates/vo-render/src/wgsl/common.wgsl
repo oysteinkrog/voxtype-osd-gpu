@@ -39,6 +39,11 @@ struct Layer {
   style_box: vec4f,
   style_a: vec4f,
   style_b: vec4f,
+  // The next rounded clip out, laid out like the clip; clip2_t.w is 1 when there is one.
+  clip2_rect: vec4f,
+  clip2_radii: vec4f,
+  clip2_m: vec4f,
+  clip2_t: vec4f,
   // The stage warp (vo_scene::stage) in target pixels: rows of the 3x3 map from pixels as laid
   // out to pixels as seen, then the rows of its inverse. warp0.w is 1 when the layer is warped.
   warp0: vec4f,
@@ -151,7 +156,14 @@ fn clip_coverage (frag_tex: vec2f) -> f32 {
   let e = vec4f (p.x - r.x, p.y - r.y, r.x + r.z - p.x, r.y + r.w - p.y);
   let ramp = smoothstep (vec4f (0.0), max (layer.clip_fade, vec4f (1e-6)), e);
   let f = select (vec4f (1.0), ramp, layer.clip_fade > vec4f (0.0));
-  return clamp (0.5 - d, 0.0, 1.0) * f.x * f.y * f.z * f.w;
+  var cov = clamp (0.5 - d, 0.0, 1.0) * f.x * f.y * f.z * f.w;
+  // The next clip out, so a layer inside two rounded clips is cut round by both.
+  if (layer.clip2_t.w != 0.0) {
+    let q = vec2f (layer.clip2_m.x * frag.x + layer.clip2_m.z * frag.y,
+                   layer.clip2_m.y * frag.x + layer.clip2_m.w * frag.y) + layer.clip2_t.xy;
+    cov *= clamp (0.5 - sd_rrect (q, layer.clip2_rect, layer.clip2_radii) * layer.clip2_t.z, 0.0, 1.0);
+  }
+  return cov;
 }
 
 fn srgb_encode (c: vec3f) -> vec3f {
