@@ -52,6 +52,11 @@ struct Live<A: App> {
     /// The host asked for the next frame (resize, GPU hand-over), so it may repeat the last.
     host_asked: bool,
     surface: SurfaceId,
+    /// The main surface's size and place as the app last asked for them, before the margin
+    /// (`App::main_surface`).
+    asked: (vo_scene::geom::Size, Placement),
+    /// The transparent margin round the view, from the first view (`Options::margin`).
+    insets: vo_scene::Insets,
     list: DisplayList,
     /// The last region sent to the host, for `InputMode::Regions` specs.
     region: Option<InputRegion>,
@@ -73,6 +78,7 @@ impl<A: App> Live<A> {
 
     /// After any change: ask for a frame if needed, arm the next timer, exit when done.
     fn after_change(&mut self, host: &mut dyn HostCtl) {
+        self.follow_main_surface(host);
         let now = host.now();
         let id = self.surface;
         let paced = self.paced;
@@ -90,6 +96,27 @@ impl<A: App> Live<A> {
         host.wake_at(wake);
         if self.driver().done(now) && !self.driver().dirty && !self.driver().extras.list.iter().any(|e| e.dirty) {
             self.finish(host);
+        }
+    }
+
+    /// Resizes and moves the main surface when the app asks for another size or place. The
+    /// host draws nothing until the compositor confirms the size, so the next frame is laid
+    /// out for it (the viewport follows `HostEvent::Configured`).
+    fn follow_main_surface(&mut self, host: &mut dyn HostCtl) {
+        let Some(asked) = self.driver().app.main_surface() else { return };
+        if asked == self.asked {
+            return;
+        }
+        self.asked = asked;
+        let fit = vo_scene::surface_for(asked.0, self.insets);
+        self.spec.size = fit.size;
+        self.spec.placement = inset_placement(asked.1, self.insets);
+        let id = self.surface;
+        let result = host
+            .update(id, SurfaceChange::Size(fit.size))
+            .and_then(|()| host.update(id, SurfaceChange::Placement(self.spec.placement)));
+        if let Err(e) = result {
+            eprintln!("vo: cannot resize the surface: {e}");
         }
     }
 
@@ -223,6 +250,7 @@ impl<A: App> Live<A> {
             let (right, bottom) = (fit.size.w - content.w - fit.origin.x, fit.size.h - content.h - fit.origin.y);
             let insets = vo_scene::Insets::new(fit.origin.x, fit.origin.y, right, bottom);
             self.spec.placement = inset_placement(self.spec.placement, insets);
+            self.insets = insets;
             driver.set_margin(insets, t);
         }
         if options.cpu_first_frame && host.gpu_in_background() {
@@ -462,6 +490,7 @@ impl<A: App> Live<A> {
 
     fn new(app: A, spec: OverlaySpec, options: Options<A::Msg>, warm: Option<Renderer>) -> Live<A> {
         let tokens = options.tokens.clone();
+        let asked = (spec.size, spec.placement);
         Live {
             pending: Some((app, options)),
             spec,
@@ -476,6 +505,8 @@ impl<A: App> Live<A> {
             settled_list: None,
             host_asked: false,
             surface: 0,
+            asked,
+            insets: vo_scene::Insets::ZERO,
             list: DisplayList::default(),
             region: None,
             blur: None,
@@ -717,5 +748,101 @@ mod inset_tests {
     fn anchored_margins_shrink_by_the_insets_on_anchored_edges() {
         let p = inset_placement(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [24, 24, 24, 24] }, INSETS);
         assert_eq!(p, Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [24, 17, 13, 24] });
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use std::cell::Cell;
+
+    use vo_host::{Gpu, HostCaps, HostDiag, Waker};
+    use vo_scene::geom::Size;
+    use vo_scene::Insets;
+
+    use super::*;
+    use crate::app::Cx;
+
+    /// An app whose main surface size and place the test sets.
+    struct Sized(Cell<Option<(Size, Placement)>>);
+
+    impl App for Sized {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            vo_scene::element::Element::column("root")
+        }
+        fn main_surface(&self) -> Option<(Size, Placement)> {
+            self.0.get()
+        }
+    }
+
+    /// A host that records the changes asked of it.
+    #[derive(Default)]
+    struct Changes {
+        caps: HostCaps,
+        diag: HostDiag,
+        log: Vec<SurfaceChange>,
+    }
+
+    impl HostCtl for Changes {
+        fn caps(&self) -> &HostCaps {
+            &self.caps
+        }
+        fn diag(&self) -> &HostDiag {
+            &self.diag
+        }
+        fn now(&self) -> f64 {
+            1.0
+        }
+        fn gpu(&mut self) -> Result<Gpu, HostError> {
+            Err(HostError::Gpu("none in tests".into()))
+        }
+        fn open(&mut self, _: &OverlaySpec) -> Result<SurfaceId, HostError> {
+            Ok(7)
+        }
+        fn update(&mut self, _: SurfaceId, change: SurfaceChange) -> Result<(), HostError> {
+            self.log.push(change);
+            Ok(())
+        }
+        fn close(&mut self, _: SurfaceId) {}
+        fn request_frame(&mut self, _: SurfaceId) {}
+        fn wake_at(&mut self, _: Option<f64>) {}
+        fn waker(&self) -> Waker {
+            Waker::new(|| {})
+        }
+        fn exit(&mut self) {}
+    }
+
+    #[test]
+    fn a_new_main_surface_size_resizes_and_moves_the_open_surface() {
+        let place = Placement::LineAt { fraction: 0.5, y: 40.0 };
+        let spec = OverlaySpec { size: Size::new(600.0, 180.0), placement: place, ..OverlaySpec::default() };
+        let app = Sized(Cell::new(None));
+        let mut live = Live::new(app, spec, crate::Options::default(), None);
+        let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
+        live.driver = Some(driver);
+        live.insets = Insets::new(10.0, 20.0, 10.0, 20.0);
+        let mut host = Changes::default();
+
+        // Nothing asked, or the same as at the start: no change.
+        live.follow_main_surface(&mut host);
+        live.driver().app.0.set(Some((Size::new(600.0, 180.0), place)));
+        live.follow_main_surface(&mut host);
+        assert!(host.log.is_empty());
+
+        // A taller look with its line lower: the size and the place, margin included.
+        let place2 = Placement::LineAt { fraction: 0.5, y: 90.0 };
+        live.driver().app.0.set(Some((Size::new(700.0, 320.0), place2)));
+        live.follow_main_surface(&mut host);
+        assert_eq!(
+            host.log,
+            [
+                SurfaceChange::Size(Size::new(720.0, 360.0)),
+                SurfaceChange::Placement(Placement::LineAt { fraction: 0.5, y: 110.0 }),
+            ]
+        );
+        // Asked once only.
+        live.follow_main_surface(&mut host);
+        assert_eq!(host.log.len(), 2);
     }
 }

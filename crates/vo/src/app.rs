@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use vo_host::{PointerEvent, Waker};
+use vo_host::{Placement, PointerEvent, Waker};
 use vo_scene::element::Element;
-use vo_scene::geom::Color;
+use vo_scene::geom::{Color, Size};
 use vo_scene::Scene;
 
 use crate::surfaces::{Extras, MakeScene, SurfaceView};
@@ -50,6 +50,14 @@ pub trait App {
     fn surfaces(&self, tokens: &Tokens) -> Vec<SurfaceView<Self::Msg>> {
         let _ = tokens;
         Vec::new()
+    }
+
+    /// The main surface's size and place, read after every update. `None` keeps what the
+    /// overlay opened with. Live, a change resizes and moves the open surface in the same
+    /// run, so the clock, the timers and the app's state carry on; the last frame stays on
+    /// screen until the first frame at the new size replaces it. Offline it is ignored.
+    fn main_surface(&self) -> Option<(Size, Placement)> {
+        None
     }
 }
 

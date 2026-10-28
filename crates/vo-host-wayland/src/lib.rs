@@ -178,6 +178,11 @@ pub(crate) struct Surf {
     /// The compositor's preferred fractional scale, once it sent one.
     pub(crate) frac: Option<f64>,
     pub(crate) configured: bool,
+    /// A new size was asked for and its configure has not come yet: no frame until then.
+    pub(crate) resizing: bool,
+    /// Anchors and margins waiting for the next frame's commit, so the last frame does not
+    /// move before one at the new size replaces it.
+    pending_place: Option<Placement>,
     pub(crate) dirty_config: bool,
     want_frame: bool,
     pub(crate) callback_pending: bool,
@@ -742,6 +747,17 @@ impl State {
         let _ = self.conn.flush();
     }
 
+    /// Sets the anchors and margins waiting in `pending_place` on a layer surface, for the
+    /// next commit. Returns whether there were any.
+    fn apply_pending_place(&mut self, i: usize) -> bool {
+        let output_h = self.output_height();
+        let s = &mut self.surfaces[i];
+        let Some(placement) = s.pending_place.take() else { return false };
+        let Role::Layer(l) = &s.role else { return false };
+        place_layer(l, placement, output_h, s.spec.size.h.round().max(1.0) as i32);
+        true
+    }
+
     /// Sets up the swapchain for the surface's current size and scale.
     fn configure_swapchain(&mut self, i: usize) {
         let gpu = match self.gpu() {
@@ -777,7 +793,7 @@ impl State {
     fn ready(&self, s: &Surf) -> bool {
         let gpu = s.wgpu.is_some() && !s.callback_pending;
         let cpu = s.wgpu.is_none() && !s.cpu_callback_pending && s.shm.as_ref().is_some_and(|m| !m.handed_over);
-        s.want_frame && s.configured && (gpu || cpu)
+        s.want_frame && s.configured && !s.resizing && (gpu || cpu)
     }
 
     /// A CPU frame into a `wl_shm` buffer on the role surface.
@@ -832,6 +848,7 @@ impl State {
             self.diag.notes.push(format!("surface {id}: shm buffer busy"));
         }
         role.damage_buffer(0, 0, w as i32, h as i32);
+        self.apply_pending_place(i);
         role.commit();
         stage.buffer = Some(buffer);
         let s = &mut self.surfaces[i];
@@ -927,9 +944,14 @@ impl State {
         if let Some(region) = self.surfaces[i].pending_blur.take() {
             self.apply_blur(i, region.as_ref());
         }
+        let placed = self.apply_pending_place(i);
         let queue = self.gpu.as_ref().unwrap().gpu.queue.clone();
         queue.present(tex);
         self.hand_over(i);
+        if placed && self.surfaces[i].child.is_some() {
+            // The present committed the sub-surface; the margins are on the role surface.
+            self.surfaces[i].role.wl().commit();
+        }
         let s = &mut self.surfaces[i];
         s.callback_pending = true;
         s.frames += 1;
@@ -1040,33 +1062,7 @@ impl HostCtl for State {
                     Placement::Fullscreen => l.set_size(0, 0),
                     _ => l.set_size(w, h),
                 }
-                match spec.placement {
-                    Placement::Fullscreen => {
-                        l.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-                        // Under panels and docks too, not only in the area they leave free.
-                        l.set_exclusive_zone(-1);
-                    }
-                    Placement::Anchored { edges, margin } => {
-                        let mut a = Anchor::empty();
-                        a.set(Anchor::TOP, edges.top);
-                        a.set(Anchor::BOTTOM, edges.bottom);
-                        a.set(Anchor::LEFT, edges.left);
-                        a.set(Anchor::RIGHT, edges.right);
-                        l.set_anchor(a);
-                        l.set_margin(margin[0], margin[1], margin[2], margin[3]);
-                    }
-                    Placement::FromTop { fraction } => {
-                        let top = from_top_margin(fraction, self.output_height(), h as i32);
-                        l.set_anchor(Anchor::TOP);
-                        l.set_margin(top, 0, 0, 0);
-                    }
-                    Placement::LineAt { fraction, y } => {
-                        let top = line_at_margin(fraction, y, self.output_height(), h as i32);
-                        l.set_anchor(Anchor::TOP);
-                        l.set_margin(top, 0, 0, 0);
-                    }
-                    Placement::Centered => {}
-                }
+                place_layer(&l, spec.placement, self.output_height(), h as i32);
                 l.set_keyboard_interactivity(KeyboardInteractivity::None);
                 Role::Layer(l)
             }
@@ -1143,6 +1139,8 @@ impl HostCtl for State {
             scale: 1,
             frac: None,
             configured: false,
+            resizing: false,
+            pending_place: None,
             dirty_config: true,
             want_frame: false,
             callback_pending: false,
@@ -1187,10 +1185,18 @@ impl HostCtl for State {
                     // The output decides its size.
                     return Ok(());
                 }
-                s.spec.size = size;
                 let (w, h) = (size.w.round().max(1.0) as u32, size.h.round().max(1.0) as u32);
+                let old = (s.spec.size.w.round().max(1.0) as u32, s.spec.size.h.round().max(1.0) as u32);
+                s.spec.size = size;
                 match &s.role {
-                    Role::Layer(l) => l.set_size(w, h),
+                    Role::Layer(l) => {
+                        l.set_size(w, h);
+                        // The margins of `FromTop` and `LineAt` depend on the height; they
+                        // change with the first frame at the new size.
+                        s.pending_place.get_or_insert(s.spec.placement);
+                        // A configured layer surface gets a configure for its new size.
+                        s.resizing |= s.configured && old != (w, h);
+                    }
                     Role::Window(win) => {
                         win.set_min_size(Some((w, h)));
                         win.set_max_size(Some((w, h)));
@@ -1198,6 +1204,19 @@ impl HostCtl for State {
                 }
                 s.role.wl().commit();
                 let _ = self.conn.flush();
+            }
+            SurfaceChange::Placement(placement) => {
+                let s = &mut self.surfaces[i];
+                if (s.spec.placement == Placement::Fullscreen) != (placement == Placement::Fullscreen) {
+                    return Err(HostError::Unsupported("moving to or from a fullscreen placement".into()));
+                }
+                s.spec.placement = placement;
+                s.pending_place = Some(placement);
+                // With no new size coming, move it now.
+                if !s.resizing && self.in_frame != Some(id) && self.apply_pending_place(i) {
+                    self.surfaces[i].role.wl().commit();
+                    let _ = self.conn.flush();
+                }
             }
         }
         Ok(())
@@ -1391,6 +1410,36 @@ impl Host for WaylandHost {
         self.state.instance = None;
         let _ = self.state.conn.flush();
         result
+    }
+}
+
+/// Anchors layer surface `l` and sets its margins for `placement`, for a surface `h` tall on
+/// an output `output_h` tall.
+fn place_layer(l: &LayerSurface, placement: Placement, output_h: i32, h: i32) {
+    match placement {
+        Placement::Fullscreen => {
+            l.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+            // Under panels and docks too, not only in the area they leave free.
+            l.set_exclusive_zone(-1);
+        }
+        Placement::Anchored { edges, margin } => {
+            let mut a = Anchor::empty();
+            a.set(Anchor::TOP, edges.top);
+            a.set(Anchor::BOTTOM, edges.bottom);
+            a.set(Anchor::LEFT, edges.left);
+            a.set(Anchor::RIGHT, edges.right);
+            l.set_anchor(a);
+            l.set_margin(margin[0], margin[1], margin[2], margin[3]);
+        }
+        Placement::FromTop { fraction } => {
+            l.set_anchor(Anchor::TOP);
+            l.set_margin(from_top_margin(fraction, output_h, h), 0, 0, 0);
+        }
+        Placement::LineAt { fraction, y } => {
+            l.set_anchor(Anchor::TOP);
+            l.set_margin(line_at_margin(fraction, y, output_h, h), 0, 0, 0);
+        }
+        Placement::Centered => {}
     }
 }
 

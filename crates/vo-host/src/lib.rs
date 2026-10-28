@@ -163,8 +163,14 @@ impl Default for OverlaySpec {
 /// A change to an open surface.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SurfaceChange {
-    /// New logical size. A `Configured` event follows.
+    /// New logical size. A `Configured` event follows. Until it comes, the host draws no
+    /// frame on the surface, so the last frame stays on screen rather than a frame laid out
+    /// for the old size.
     Size(Size),
+    /// New place on the output, for an overlay. After a `Size` it lands on the commit of the
+    /// first frame at the new size, so the last frame never moves; otherwise at once. Moving
+    /// to or from `Placement::Fullscreen` is not supported. Ignored by windows.
+    Placement(Placement),
     /// New input region. Asked for while drawing a frame, it rides on that frame's commit.
     Input(InputMode),
     /// New compositor blur region behind the surface, in logical pixels; `None` turns the
