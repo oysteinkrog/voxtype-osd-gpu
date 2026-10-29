@@ -24,12 +24,13 @@ fn a_vertical_label_stacks_its_characters_in_one_column() {
     let list = s.sample(0.0);
     assert_eq!(list.glyphs.len(), 3);
     for pair in list.glyphs.windows(2) {
-        assert!((pair[1].pos.y - pair[0].pos.y - 24.0).abs() < 1e-3, "{:?}", pair[1].pos);
+        // One em apart: the face's vertical advance, not the line height (EG-30).
+        assert!((pair[1].pos.y - pair[0].pos.y - 20.0).abs() < 1e-3, "{:?}", pair[1].pos);
         assert!((pair[1].pos.x - pair[0].pos.x).abs() < 2.0, "one column");
     }
-    // The box is one column wide and three lines tall.
+    // The box is one column wide and three ems tall.
     let r = s.sampled(s.find(&["root", "v"]).unwrap(), 0.0).unwrap().size;
-    assert!(r.w >= 20.0 && r.w < 24.0 && (r.h - 72.0).abs() < 1e-3, "{r:?}");
+    assert!(r.w > 19.99 && r.w < 24.0 && (r.h - 60.0).abs() < 1e-3, "{r:?}");
 }
 
 fn fit_view(text: &str, style: TextStyle) -> Element<()> {

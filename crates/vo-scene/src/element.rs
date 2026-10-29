@@ -439,9 +439,10 @@ pub struct TextStyle {
     /// Wrap to near-equal line lengths, as CSS `text-wrap: balance` (TY25): the narrowest
     /// width that keeps the greedy line count.
     pub balance: bool,
-    /// One character per line, top to bottom, every character upright (FX-005); see
-    /// [`ShapedLayout::vertical`](crate::text::ShapedLayout::vertical). Wrapping, alignment
-    /// and balance do not apply.
+    /// One column, top to bottom, every character upright (FX-005, EG-30): shaped top to
+    /// bottom with the font's vertical forms and metrics; see
+    /// [`ShapedLayout::vertical`](crate::text::ShapedLayout::vertical). For labels, not live
+    /// text. Wrapping, alignment, balance and line height do not apply.
     pub vertical: bool,
     /// Autofit (FX-049) as `(min size, step)`: a label is drawn at the largest of its size,
     /// size minus step, and so on down to the min size, that fits its box. See
@@ -480,7 +481,7 @@ impl TextStyle {
         TextStyle { balance: true, ..self }
     }
 
-    /// Set top to bottom, one upright character per line (FX-005).
+    /// Set top to bottom in one column, every character upright (FX-005, EG-30).
     pub fn vertical(self) -> TextStyle {
         TextStyle { vertical: true, ..self }
     }
