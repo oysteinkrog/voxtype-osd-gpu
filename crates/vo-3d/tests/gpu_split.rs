@@ -141,3 +141,48 @@ fn split_ring_goes_behind_and_in_front_but_never_over_the_reading_line() {
     }
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
+
+/// RV-02: a turning ring reuses the item's scratch texture (and with it the 3D pass's
+/// multisampled attachments) instead of making one each frame, whole and split.
+#[test]
+fn turning_ring_reuses_its_scratch() {
+    let gpu = support::gpu();
+    let (w, h) = (demo::W as u32, demo::H as u32);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let surface = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rv02-surface"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = surface.create_view(&Default::default());
+    let ring = Ring { still: false, light: false };
+    let place = |part| ItemPlace {
+        rect: [0.0, 0.0, demo::W, demo::H],
+        surface: [w, h],
+        opacity: 1.0,
+        size: vo_scene::geom::Size::new(demo::W, demo::H),
+        scissor: Some([0, 0, w, h]),
+        stage: Some(StageAt { origin: [0.5 * demo::W, 0.5 * demo::H], perspective: 800.0, centre: [300.0, 150.0] }),
+        part,
+        cut: Vec::new(),
+    };
+    let mut whole = ItemPainter::new(&gpu.device, &gpu.queue);
+    let mut split = ItemPainter::new(&gpu.device, &gpu.queue);
+    for i in 0..60 {
+        // A quarter second apart: more than one full rock of the ring and many bead turns.
+        let t = i as f64 * 0.25;
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        whole.paint(&mut enc, &view, format, &ring, t, &place(Part::Whole));
+        split.paint(&mut enc, &view, format, &ring, t, &place(Part::Behind));
+        assert!(split.has_front(&ring, t), "frame {i}: the back half drew its front half");
+        split.paint(&mut enc, &view, format, &ring, t, &place(Part::Front));
+        gpu.queue.submit([enc.finish()]);
+    }
+    let (a, b) = (whole.scratch_allocations(), split.scratch_allocations());
+    assert!(a <= 3 && b <= 3, "scratch made {a} times whole and {b} times split in 60 frames");
+}

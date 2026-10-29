@@ -207,7 +207,8 @@ pub(crate) fn place_front_halves(list: &mut DisplayList) {
     }
     let newest = newest.and_then(|(_, li)| runs(&list.layers[li]).next_back().map(|(ii, _)| (li, ii + 1)));
     let surface_boxes = reading_line_boxes(list, READING_PAD);
-    // Insert from the back so earlier positions stay valid.
+    // Insert from the back so earlier positions stay valid. Fronts at one position go in
+    // last first, so they keep their back halves' order (RV-02).
     let mut fronts: Vec<(usize, u32, GpuItem)> = Vec::new();
     for &(src, after, gi) in &backs {
         let (dst, mut pos) = match newest {
@@ -227,8 +228,9 @@ pub(crate) fn place_front_halves(list: &mut DisplayList) {
         let front = GpuItem { source: back.source.clone(), rect, t: back.t, opacity, part: GpuPart::Front, cut };
         fronts.push((dst, pos, front));
     }
-    fronts.sort_by_key(|f| std::cmp::Reverse(f.1));
-    for (dst, pos, front) in fronts {
+    let mut fronts: Vec<(usize, (usize, u32, GpuItem))> = fronts.into_iter().enumerate().collect();
+    fronts.sort_by_key(|(i, f)| std::cmp::Reverse((f.1, *i)));
+    for (_, (dst, pos, front)) in fronts {
         list.gpu.push(front);
         let item = Item { kind: ItemKind::Gpu, start: list.gpu.len() as u32 - 1, len: 1 };
         insert_item(list, dst, pos, item);
@@ -367,5 +369,38 @@ mod tests {
         let (gpu, _) = order(&list);
         assert_eq!(gpu.iter().map(|g| g.1).collect::<Vec<_>>(), vec![GpuPart::Behind, GpuPart::Front]);
         assert!(list.gpu.iter().all(|g| g.cut.is_empty()));
+    }
+
+    #[test]
+    fn front_halves_keep_their_back_halves_order() {
+        let a: Arc<dyn GpuSource> = Arc::new(Dummy);
+        let b: Arc<dyn GpuSource> = Arc::new(Dummy);
+        let view = Element::column("root")
+            .size(300.0, 200.0)
+            .child(Element::gpu_split("a", a.clone()).size(300.0, 40.0))
+            .child(Element::gpu_split("b", b.clone()).size(300.0, 40.0))
+            .child(Element::live_text("live", &words(5)).width(200.0));
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(300.0, 200.0), 1.0);
+        scene.apply(view, 0.0);
+        let list = scene.sample(5.0);
+        let (gpu, text) = order(&list);
+        let text = text.expect("live text");
+        // Every GPU item in paint order, by source.
+        let mut seq = Vec::new();
+        for ii in list.layers[0].items.clone() {
+            let it = list.items[ii as usize];
+            if it.kind == ItemKind::Gpu {
+                for g in &list.gpu[it.start as usize..(it.start + it.len) as usize] {
+                    let name = if Arc::ptr_eq(&g.source.0, &a) { "a" } else { "b" };
+                    seq.push((name, g.part));
+                }
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![("a", GpuPart::Behind), ("b", GpuPart::Behind), ("a", GpuPart::Front), ("b", GpuPart::Front)]
+        );
+        assert!(gpu[2].0 > text && gpu[3].0 > text, "both fronts after the text: {gpu:?}");
     }
 }

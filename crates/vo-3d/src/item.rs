@@ -31,6 +31,9 @@ pub use vo_scene::gpu::GpuPart as Part;
 /// Most boxes a front half leaves alone; more are merged into the last one.
 pub const MAX_CUTS: usize = 16;
 
+/// The scratch texture's sizes are multiples of this many pixels (RV-02).
+const SCRATCH_STEP: u32 = 64;
+
 const ITEM_WGSL: &str = include_str!("wgsl/item.wgsl");
 
 pub fn shader_source() -> &'static str {
@@ -92,6 +95,10 @@ pub struct ItemPainter {
     uniform_front: wgpu::Buffer,
     /// A front half already drawn beside its back half, waiting for its composite.
     front: Option<Front>,
+    /// The device's largest 2D texture side.
+    limit: u32,
+    /// How many scratch textures this painter has made.
+    scratch_allocs: u32,
 }
 
 /// A front half drawn in the back half's pass (EG-20): where it is in the scratch texture.
@@ -102,6 +109,42 @@ struct Front {
     rect: [f32; 4],
     /// Its top left in the scratch texture.
     src: [f32; 2],
+}
+
+/// The scratch size for a draw of `need` pixels when the scratch is `current` (RV-02):
+/// `None` keeps the current one. A new size has a quarter more room than asked for, rounded
+/// up to [`SCRATCH_STEP`], so a turning mesh whose box grows and shrinks a little reuses it;
+/// it shrinks only once the draw needs less than a quarter of its area. Never above `limit`.
+fn scratch_size(current: Option<[u32; 2]>, need: [u32; 2], limit: u32) -> Option<[u32; 2]> {
+    let need = need.map(|v| v.clamp(1, limit));
+    let round = |v: u32| v.div_ceil(SCRATCH_STEP) * SCRATCH_STEP;
+    let area = |s: [u32; 2]| s[0] as u64 * s[1] as u64;
+    let base = match current {
+        Some(c) => {
+            let fits = c[0] >= need[0] && c[1] >= need[1];
+            let roomy = area(c) > 4 * area(need.map(round));
+            match (fits, roomy) {
+                (true, false) => return None,
+                (false, false) => [need[0].max(c[0]), need[1].max(c[1])],
+                (_, true) => need,
+            }
+        }
+        None => need,
+    };
+    Some(base.map(|v| round(v + v / 4).min(limit)))
+}
+
+/// Where the two halves of a split item go in one scratch texture (RV-02): side by side, or
+/// stacked when side by side passes `limit`. Gives the size they use and the front half's
+/// top left; `None` when neither fits, and the halves then draw in passes of their own.
+/// A half `[0, 0]` big is empty.
+fn halves_layout(back: [u32; 2], front: [u32; 2], limit: u32) -> Option<([u32; 2], [u32; 2])> {
+    let side = [back[0] + front[0], back[1].max(front[1])];
+    if side[0] <= limit && side[1] <= limit {
+        return Some((side, [back[0], 0]));
+    }
+    let stacked = [back[0].max(front[0]), back[1] + front[1]];
+    (stacked[0] <= limit && stacked[1] <= limit).then_some((stacked, [0, back[1]]))
 }
 
 /// Where an item goes on the surface.
@@ -183,7 +226,14 @@ impl ItemPainter {
                 mapped_at_creation: false,
             }),
             front: None,
+            limit: device.limits().max_texture_dimension_2d,
+            scratch_allocs: 0,
         }
+    }
+
+    /// How many scratch textures this painter has made, for tests (RV-02).
+    pub fn scratch_allocations(&self) -> u32 {
+        self.scratch_allocs
     }
 
     /// Records `source` at `t` into `enc`, composited over `view` (which has `format`) at
@@ -241,6 +291,8 @@ impl ItemPainter {
                     let s = [sx as f32, sy as f32, (sx + sw) as f32, (sy + sh) as f32];
                     r = [r[0].max(s[0]), r[1].max(s[1]), r[2].min(s[2]), r[3].min(s[3])];
                 }
+                // Nothing off the surface shows, and the surface fits the device.
+                r = [r[0].max(0.0), r[1].max(0.0), r[2].min(at.surface[0] as f32), r[3].min(at.surface[1] as f32)];
                 r = [r[0].floor(), r[1].floor(), r[2].ceil(), r[3].ceil()];
                 if r[2] <= r[0] || r[3] <= r[1] {
                     return;
@@ -270,8 +322,11 @@ impl ItemPainter {
                     let front = tight(&mut self.scene, &frame, Part::Front);
                     self.scene.part = Part::Behind;
                     if let (Some(back), Some(front)) = (back, front) {
-                        self.paint_halves(enc, view, format, &frame, back, front, &camera, scale, at, key, t);
-                        return;
+                        let px = |r: [f32; 4]| [r[2] as u32, r[3] as u32];
+                        if let Some(layout) = halves_layout(px(back), px(front), self.limit) {
+                            self.paint_halves(enc, view, format, &frame, [back, front], layout, &camera, scale, at, key, t);
+                            return;
+                        }
                     }
                 }
                 match tight(&mut self.scene, &frame, at.part) {
@@ -286,12 +341,12 @@ impl ItemPainter {
             _ => at.rect,
         };
         let (x0, y0) = (x.floor(), y.floor());
-        let size = [(x + w).ceil() - x0, (y + h).ceil() - y0].map(|v| v.max(1.0) as u32);
-        self.ensure_scratch(size, format);
+        let used = [(x + w).ceil() - x0, (y + h).ceil() - y0].map(|v| (v.max(1.0) as u32).min(self.limit));
+        self.ensure_scratch(used, format);
         let scratch = self.scratch.as_ref().unwrap();
-        let out = crate::render::Output { view: &scratch.view, size, format, scale };
-        self.scene.encode_with(enc, out, &frame, None, None);
-        self.composite(enc, view, format, [x0, y0, size[0] as f32, size[1] as f32], [0.0; 2], at, false);
+        let out = crate::render::Output { view: &scratch.view, size: scratch.size, format, scale };
+        self.scene.encode_region(enc, out, &frame, used);
+        self.composite(enc, view, format, [x0, y0, used[0] as f32, used[1] as f32], [0.0; 2], at, false);
     }
 
     /// Whether a front half of `source` at `t` is drawn and waits for its composite.
@@ -299,9 +354,10 @@ impl ItemPainter {
         self.front.as_ref().is_some_and(|f| f.key == source_key(source) && f.t == t)
     }
 
-    /// Both halves in one pass, side by side in the scratch texture: composites the back
-    /// half now and keeps the front half for its own call. `back` and `front` are the halves'
-    /// boxes in surface pixels, whole pixels, `w` 0 when empty.
+    /// Both halves in one pass, placed in the scratch texture by `layout` (see
+    /// [`halves_layout`]): composites the back half now and keeps the front half for its own
+    /// call. `halves` are the back and front halves' boxes in surface pixels, whole pixels,
+    /// `w` and `h` 0 when empty.
     #[allow(clippy::too_many_arguments)]
     fn paint_halves(
         &mut self,
@@ -309,25 +365,26 @@ impl ItemPainter {
         view: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         frame: &Frame3d,
-        back: [f32; 4],
-        front: [f32; 4],
+        halves: [[f32; 4]; 2],
+        layout: ([u32; 2], [u32; 2]),
         camera: &dyn Fn([f32; 4]) -> Camera,
         scale: f32,
         at: &ItemPlace,
         key: usize,
         t: f64,
     ) {
+        let [back, front] = halves;
         let (wb, wf) = (back[2] as u32, front[2] as u32);
         let (hb, hf) = (back[3] as u32, front[3] as u32);
+        let (used, [fx, fy]) = layout;
         if wb + wf > 0 {
-            let size = [wb + wf, hb.max(hf)];
-            self.ensure_scratch(size, format);
+            self.ensure_scratch(used, format);
             let scratch = self.scratch.as_ref().unwrap();
-            let out = crate::render::Output { view: &scratch.view, size, format, scale };
+            let out = crate::render::Output { view: &scratch.view, size: scratch.size, format, scale };
             if wb > 0 && wf > 0 {
                 let halves = [
                     crate::render::Half { camera: camera(back), part: Part::Behind, viewport: [0, 0, wb, hb] },
-                    crate::render::Half { camera: camera(front), part: Part::Front, viewport: [wb, 0, wf, hf] },
+                    crate::render::Half { camera: camera(front), part: Part::Front, viewport: [fx, fy, wf, hf] },
                 ];
                 self.scene.encode_halves(enc, out, frame, halves);
             } else {
@@ -336,14 +393,14 @@ impl ItemPainter {
                 let mut f = frame.clone();
                 f.camera = camera(r);
                 self.scene.part = part;
-                self.scene.encode_with(enc, out, &f, None, None);
+                self.scene.encode_region(enc, out, &f, used);
                 self.scene.part = Part::Behind;
             }
         }
         if wb > 0 {
             self.composite(enc, view, format, back, [0.0; 2], at, false);
         }
-        let src = if wb > 0 { [wb as f32, 0.0] } else { [0.0; 2] };
+        let src = if wb > 0 { [fx as f32, fy as f32] } else { [0.0; 2] };
         self.front = Some(Front { key, t, rect: if wf > 0 { front } else { [0.0; 4] }, src });
     }
 
@@ -426,10 +483,11 @@ impl ItemPainter {
         base
     }
 
-    fn ensure_scratch(&mut self, size: [u32; 2], format: wgpu::TextureFormat) {
-        if self.scratch.as_ref().is_some_and(|s| s.size == size && s.format == format) {
-            return;
-        }
+    /// Makes sure the scratch texture holds at least `need` pixels (see [`scratch_size`]).
+    fn ensure_scratch(&mut self, need: [u32; 2], format: wgpu::TextureFormat) {
+        let current = self.scratch.as_ref().filter(|s| s.format == format).map(|s| s.size);
+        let Some(size) = scratch_size(current, need, self.limit) else { return };
+        self.scratch_allocs += 1;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vo3d-item-scratch"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
@@ -496,6 +554,40 @@ fn source_key(source: &dyn Source3d) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::{halves_layout, scratch_size};
+
+    #[test]
+    fn wide_halves_stack_within_the_device_limit() {
+        // Two halves 4500 px wide (9000 side by side) on a 5120 px output.
+        let (back, front, limit) = ([4500, 1200], [4500, 900], 8192);
+        let (used, origin) = halves_layout(back, front, limit).expect("stacked fits");
+        assert_eq!((used, origin), ([4500, 2100], [0, 1200]));
+        let size = scratch_size(None, used, limit).unwrap();
+        assert!(size[0] <= limit && size[1] <= limit && size[0] >= used[0] && size[1] >= used[1], "{size:?}");
+        // A need past the limit is clamped to it.
+        let full = scratch_size(None, [9000, 9000], limit).unwrap();
+        assert_eq!(full, [limit, limit]);
+        // Side by side while it fits; neither way: None, two passes.
+        assert_eq!(halves_layout([300, 200], [250, 220], limit), Some(([550, 220], [300, 0])));
+        assert_eq!(halves_layout([5000, 5000], [5000, 5000], limit), None);
+        // An empty back half puts the front half at the origin.
+        assert_eq!(halves_layout([0, 0], [400, 300], limit), Some(([400, 300], [0, 0])));
+    }
+
+    #[test]
+    fn scratch_size_reuses_grows_and_shrinks() {
+        let limit = 8192;
+        let first = scratch_size(None, [300, 200], limit).unwrap();
+        assert_eq!(first, [384, 256]);
+        // Small changes reuse it.
+        assert_eq!(scratch_size(Some(first), [340, 180], limit), None);
+        assert_eq!(scratch_size(Some(first), [200, 140], limit), None);
+        // Growing keeps the other side.
+        assert_eq!(scratch_size(Some(first), [420, 100], limit), Some([576, 320]));
+        // A draw needing under a quarter of the area shrinks it.
+        assert_eq!(scratch_size(Some([1024, 1024]), [100, 100], limit), Some([128, 128]));
+    }
+
     #[test]
     fn item_shader_validates_in_naga() {
         let src = super::shader_source();

@@ -802,7 +802,16 @@ impl Renderer3d {
         field: Option<FieldBinding<'_>>,
         extra: Option<ExtraDraw<'_>>,
     ) {
-        self.encode_inner(enc, out, frame, field, extra, None);
+        let used = out.size;
+        self.encode_inner(enc, out, frame, field, extra, None, used);
+    }
+
+    /// [`Renderer3d::encode_with`] into the top left `used` pixels of `out`, as if `out` were
+    /// that big; the rest of it is cleared. Lets a caller keep one target, and with it this
+    /// renderer's multisampled attachments, while the drawn size changes (RV-02).
+    pub fn encode_region(&mut self, enc: &mut wgpu::CommandEncoder, out: Output<'_>, frame: &Frame3d, used: [u32; 2]) {
+        let used = [used[0].clamp(1, out.size[0]), used[1].clamp(1, out.size[1])];
+        self.encode_inner(enc, out, frame, None, None, None, used);
     }
 
     /// Both halves of a split frame (EG-20) in one pass, side by side in `out`: each half
@@ -818,7 +827,8 @@ impl Renderer3d {
         halves: [Half; 2],
     ) {
         debug_assert!(self.draw_bounds_px(frame, [1.0, 1.0]).is_some(), "encode_halves: meshes only");
-        self.encode_inner(enc, out, frame, None, None, Some(halves));
+        let used = out.size;
+        self.encode_inner(enc, out, frame, None, None, Some(halves), used);
     }
 
     fn encode_inner(
@@ -829,10 +839,13 @@ impl Renderer3d {
         field: Option<FieldBinding<'_>>,
         extra: Option<ExtraDraw<'_>>,
         halves: Option<[Half; 2]>,
+        used: [u32; 2],
     ) {
-        let Output { view: target, size, format, scale } = out;
+        let Output { view: target, size: target_size, format, scale } = out;
         self.prepare(format);
-        self.attachments(size, format);
+        self.attachments(target_size, format);
+        // From here on the target is `used` big, at its top left.
+        let size = used;
         let [w, h] = size.map(|v| v as f32);
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
 
@@ -1127,6 +1140,10 @@ impl Renderer3d {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if size != target_size {
+            pass.set_viewport(0.0, 0.0, w, h, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, size[0], size[1]);
+        }
         let draws = &self.draws.as_ref().unwrap().1;
         pass.set_bind_group(0, &globals_bind, &[]);
         pass.set_bind_group(1, draws, &[0]);
