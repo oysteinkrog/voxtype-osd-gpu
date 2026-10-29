@@ -180,8 +180,8 @@ impl Refract {
 /// can instead carry any filled path ([`GlassInstance::outline`]).
 ///
 /// Any shape but [`GlassShape::Rounded`] is drawn from a polygon: curves are flattened to
-/// within about a tenth of a pixel at 1x. The compositor blur region of a shaped panel is its
-/// bounding box (EG-07 shapes it).
+/// within about a tenth of a pixel at 1x. The compositor blur region follows the outline
+/// (EG-07, [`outline_blur_rects`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub enum GlassShape {
     /// The panel's rounded rect, with its corner radius.
@@ -595,22 +595,214 @@ pub fn blur_rects(rect: [f32; 4], radius: f32, out: &mut Vec<IRect>) {
     out.push(IRect { x: x0, y: y0 + ri, w: x1 - x0, h: (y1 - y0 - 2 * ri).max(0) });
 }
 
+/// Most rectangles one outline's blur region may hold (EG-07). KWin keeps the region as a
+/// list of rectangles and walks it on every repaint of what is behind the surface, so a
+/// region costs more the more rectangles it has. An outline that needs more rows than this
+/// is cut in bands of 2, 4, 8 ... rows until it fits; each band takes only what lies inside
+/// the outline over its whole height, so a coarser band covers less but never spills.
+pub const MAX_BLUR_RECTS: usize = 256;
+
+/// A non-glass element that asks the compositor to blur the desktop behind its outline
+/// (EG-07, `Element::blur_behind`): a translucent fill or frame that wants frosted glass
+/// under it without the glass material.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct BlurBehind {
+    /// The element's box in its layer's space, logical units: x, y, w, h.
+    pub rect: [f32; 4],
+    /// The element's corner radius, for [`GlassShape::Rounded`].
+    pub radius: f32,
+    /// The outline in the box.
+    pub shape: GlassShape,
+    /// The element's layer, for its transform and perspective warp.
+    pub layer: u32,
+    /// The element's opacity on the surface, every enclosing layer's included.
+    pub surface_alpha: f32,
+}
+
+/// Rectangles covering the polygon `pts` (surface logical pixels, either winding, even-odd
+/// fill) for the compositor blur region, at `scale` physical pixels per logical pixel.
+///
+/// The region is one band per logical pixel row, the finest a `wl_region` can say: each row
+/// keeps the spans that lie inside the outline over the whole row, widened by less than one
+/// physical pixel diagonally and rounded to whole logical pixels. So no blur shows more than
+/// one physical pixel past a slanted, curved or rotated edge, and the rows step along it as
+/// [`blur_rects`] steps along a rounded corner. Rows with the same spans merge into one
+/// rectangle. At most [`MAX_BLUR_RECTS`] rectangles.
+pub fn outline_blur_rects(pts: &[Point], scale: f32, out: &mut Vec<IRect>) {
+    if pts.len() < 3 || pts.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return;
+    }
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    // A rect corner sits within `tol` across and `tol` down of an inside point: under one
+    // physical pixel away along the diagonal.
+    let tol = 0.7 / scale;
+    let (ymin, ymax) = pts.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
+    let mut band = 1;
+    loop {
+        let start = out.len();
+        rows(pts, ymin, ymax, band, tol, out);
+        if out.len() - start <= MAX_BLUR_RECTS || band >= 1 << 16 {
+            return;
+        }
+        out.truncate(start);
+        band *= 2;
+    }
+}
+
+/// One pass of [`outline_blur_rects`] with bands `band` rows tall.
+fn rows(pts: &[Point], ymin: f32, ymax: f32, band: i32, tol: f32, out: &mut Vec<IRect>) {
+    let (y0, y1) = (ymin.floor() as i32, ymax.ceil() as i32);
+    let ty = tol.min(0.45);
+    let mut open: Vec<usize> = Vec::new();
+    let mut spans: Vec<[f32; 2]> = Vec::new();
+    let mut at: Vec<[f32; 2]> = Vec::new();
+    let mut both: Vec<[f32; 2]> = Vec::new();
+    let mut y = y0;
+    while y < y1 {
+        let yb = (y + band).min(y1);
+        let (lo, hi) = (y as f32 + ty, yb as f32 - ty);
+        // The spans inside over the whole band: the crossings move linearly between vertex
+        // heights, so the band's ends and both sides of each vertex inside it are enough.
+        cross(pts, lo, &mut spans);
+        let mut probe = |s: f32, spans: &mut Vec<[f32; 2]>| {
+            cross(pts, s, &mut at);
+            intersect(spans, &at, &mut both);
+            std::mem::swap(spans, &mut both);
+        };
+        probe(hi, &mut spans);
+        for p in pts {
+            if p.y > lo && p.y < hi {
+                probe((p.y - 1e-3).max(lo), &mut spans);
+                probe((p.y + 1e-3).min(hi), &mut spans);
+            }
+        }
+        let mut next = Vec::with_capacity(spans.len());
+        for [a, b] in &spans {
+            let (l, r) = ((a - tol).ceil() as i32, (b + tol).floor() as i32);
+            if r <= l {
+                continue;
+            }
+            // A span the band above had too grows that rect down.
+            if let Some(&i) = open.iter().find(|&&i| out[i].x == l && out[i].w == r - l) {
+                out[i].h += yb - y;
+                next.push(i);
+            } else {
+                out.push(IRect { x: l, y, w: r - l, h: yb - y });
+                next.push(out.len() - 1);
+            }
+        }
+        // Every rect in `open` ends where the next band starts.
+        open = next;
+        y = yb;
+    }
+}
+
+/// The spans of `y` inside the polygon (even-odd), sorted, into `out`.
+fn cross(pts: &[Point], y: f32, out: &mut Vec<[f32; 2]>) {
+    let mut xs: Vec<f32> = Vec::with_capacity(8);
+    let n = pts.len();
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        if (a.y <= y) != (b.y <= y) {
+            xs.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+        }
+    }
+    xs.sort_by(f32::total_cmp);
+    out.clear();
+    out.extend(xs.chunks_exact(2).map(|c| [c[0], c[1]]));
+}
+
+/// The intersection of two sorted span lists.
+fn intersect(a: &[[f32; 2]], b: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
+    out.clear();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let (l, r) = (a[i][0].max(b[j][0]), a[i][1].min(b[j][1]));
+        if r > l {
+            out.push([l, r]);
+        }
+        if a[i][1] < b[j][1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+}
+
+/// The outline of `shape` in `rect` with corner `radius` as a polygon, the rounded rect too.
+fn shape_points(shape: GlassShape, rect: [f32; 4], radius: f32) -> Option<Vec<Point>> {
+    if shape != GlassShape::Rounded {
+        return shape.points(rect, radius);
+    }
+    let [x, y, w, h] = rect;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let r = radius.clamp(0.0, 0.5 * w.min(h));
+    let pts = Frame::new().corners([Corner::Round(r); 4]).outline(Size::new(w, h));
+    Some(pts.into_iter().map(|p| Point::new(x + p.x, y + p.y)).collect())
+}
+
 impl DisplayList {
     /// The compositor blur region in surface logical pixels: the union of the glass panels
-    /// that ask for blur behind and are at least [`BLUR_MIN_ALPHA`] opaque. Empty when there
-    /// are none. A rotated layer gets its bounding box, and so does a shaped panel (EG-06).
+    /// that ask for blur behind and the [`BlurBehind`] elements, each at least
+    /// [`BLUR_MIN_ALPHA`] opaque. Empty when there are none.
+    ///
+    /// An upright rounded panel gets [`blur_rects`]. Any other outline (a shape, a path, a
+    /// rotated or perspective-tilted layer) gets [`outline_blur_rects`], which follows it to
+    /// within one physical pixel.
     pub fn blur_region(&self) -> InputRegion {
         let mut rects = Vec::new();
-        for g in self.glass.iter().filter(|g| g.glass.blur_behind && g.surface_alpha >= BLUR_MIN_ALPHA) {
+        let mut warps = vec![None; self.glass.len()];
+        for layer in self.layers.iter().filter(|l| l.warp.is_some()) {
+            for it in &self.items[layer.items.start as usize..layer.items.end as usize] {
+                if it.kind == crate::display::ItemKind::Glass {
+                    for i in it.start..it.start + it.len {
+                        if let Some(w) = warps.get_mut(i as usize) {
+                            *w = layer.warp;
+                        }
+                    }
+                }
+            }
+        }
+        let seen = |p: Point, m: &Affine, w: &Option<crate::stage::Warp>| {
+            let p = m.apply(p);
+            w.map_or(p, |w| w.apply(p))
+        };
+        for (g, warp) in self.glass.iter().zip(&warps) {
+            if !g.glass.blur_behind || g.surface_alpha < BLUR_MIN_ALPHA {
+                continue;
+            }
             let m = g.to_surface;
-            let [x, y, w, h] = g.rect;
-            let p0 = m.apply(Point { x, y });
-            let p1 = m.apply(Point { x: x + w, y: y + h });
-            let k = (m.a * m.a + m.b * m.b).sqrt();
-            let (x0, y0) = (p0.x.min(p1.x), p0.y.min(p1.y));
-            let r = [x0, y0, (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            let rounded = m.is_axis_aligned() && !g.is_shaped();
-            blur_rects(r, if rounded { g.radius * k } else { 0.0 }, &mut rects);
+            if warp.is_none() && m.is_axis_aligned() && !g.is_shaped() {
+                let [x, y, w, h] = g.rect;
+                let p0 = m.apply(Point { x, y });
+                let p1 = m.apply(Point { x: x + w, y: y + h });
+                let k = (m.a * m.a + m.b * m.b).sqrt();
+                let r = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
+                blur_rects(r, g.radius * k, &mut rects);
+                continue;
+            }
+            let pts = g.outline_points(&self.vector_segs).or_else(|| shape_points(GlassShape::Rounded, g.rect, g.radius));
+            if let Some(pts) = pts {
+                let pts: Vec<Point> = pts.into_iter().map(|p| seen(p, &m, warp)).collect();
+                outline_blur_rects(&pts, self.scale, &mut rects);
+            }
+        }
+        for b in self.blur_behind.iter().filter(|b| b.surface_alpha >= BLUR_MIN_ALPHA) {
+            let Some(layer) = self.layers.get(b.layer as usize) else { continue };
+            let m = layer.transform;
+            if layer.warp.is_none() && m.is_axis_aligned() && b.shape == GlassShape::Rounded {
+                let [x, y, w, h] = b.rect;
+                let p0 = m.apply(Point { x, y });
+                let p1 = m.apply(Point { x: x + w, y: y + h });
+                let k = (m.a * m.a + m.b * m.b).sqrt();
+                let r = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
+                blur_rects(r, b.radius * k, &mut rects);
+            } else if let Some(pts) = shape_points(b.shape, b.rect, b.radius) {
+                let pts: Vec<Point> = pts.into_iter().map(|p| seen(p, &m, &layer.warp)).collect();
+                outline_blur_rects(&pts, self.scale, &mut rects);
+            }
         }
         InputRegion { rects }
     }
@@ -788,9 +980,216 @@ mod tests {
         assert!(pts.len() > 8, "{} points", pts.len());
         assert!(inside_rect(&pts, rect));
         assert!(pts.iter().any(|p| p.x > 115.0), "the bulge is kept");
-        // A shaped panel's blur region is its bounding box.
+        // A shaped panel's blur region follows the outline (EG-07), not its bounding box.
+        list.scale = 1.0;
         list.glass.push(g);
         let region = list.blur_region();
-        assert_eq!(region.rects.len(), 1);
+        assert!(region.rects.len() > 1);
+        check_region(&pts, &region.rects, 1.0, &format!("path outline, {} rects", region.rects.len()));
+    }
+
+    /// Whether `p` lies inside the polygon `pts` (even-odd).
+    fn inside(pts: &[Point], p: Point) -> bool {
+        let n = pts.len();
+        let mut odd = false;
+        for i in 0..n {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            if (a.y <= p.y) != (b.y <= p.y) && p.x < a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y) {
+                odd = !odd;
+            }
+        }
+        odd
+    }
+
+    /// Distance from `p` to the polygon's edge.
+    fn edge_dist(pts: &[Point], p: Point) -> f32 {
+        let n = pts.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % n]);
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy).max(1e-12)).clamp(0.0, 1.0);
+                (p.x - a.x - t * dx).hypot(p.y - a.y - t * dy)
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The EG-07 checks for a blur region of the outline `pts` (surface logical pixels) at
+    /// `scale`: no rect spills more than one physical pixel past the outline, the rects cover
+    /// at least 97 % of it, they do not overlap, and there are at most `MAX_BLUR_RECTS`.
+    /// Returns the coverage.
+    fn check_region(pts: &[Point], rects: &[IRect], scale: f32, what: &str) -> f32 {
+        assert!(!rects.is_empty() && rects.len() <= MAX_BLUR_RECTS, "{what}: {} rects", rects.len());
+        let step = 0.25;
+        let mut spill = 0.0f32;
+        for r in rects {
+            assert!(r.w > 0 && r.h > 0, "{what}: empty rect {r:?}");
+            let (x0, y0, x1, y1) = (r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32);
+            // A rect spills furthest at its boundary: walk it.
+            let mut edge = Vec::new();
+            let (nx, ny) = (((x1 - x0) / step) as i32, ((y1 - y0) / step) as i32);
+            for i in 0..=nx {
+                let x = x0 + i as f32 * step;
+                edge.extend([Point::new(x, y0), Point::new(x, y1)]);
+            }
+            for j in 0..=ny {
+                let y = y0 + j as f32 * step;
+                edge.extend([Point::new(x0, y), Point::new(x1, y)]);
+            }
+            for p in edge {
+                if !inside(pts, p) {
+                    spill = spill.max(edge_dist(pts, p));
+                }
+            }
+        }
+        assert!(spill * scale <= 1.0, "{what}: spills {:.2} physical px", spill * scale);
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+                assert!(apart, "{what}: {a:?} overlaps {b:?}");
+            }
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for p in pts {
+            (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+        }
+        let (mut total, mut covered) = (0u32, 0u32);
+        let mut y = y0 + 0.5 * step;
+        while y < y1 {
+            let mut x = x0 + 0.5 * step;
+            while x < x1 {
+                if inside(pts, Point::new(x, y)) {
+                    total += 1;
+                    let hit = rects.iter().any(|r| {
+                        x >= r.x as f32 && x < (r.x + r.w) as f32 && y >= r.y as f32 && y < (r.y + r.h) as f32
+                    });
+                    covered += hit as u32;
+                }
+                x += step;
+            }
+            y += step;
+        }
+        let cover = covered as f32 / total as f32;
+        assert!(cover >= 0.97, "{what}: covers {:.2} %", 100.0 * cover);
+        cover
+    }
+
+    /// A list holding one glass panel, laid out at `rect` in a root layer seen through
+    /// `to_surface`, at `scale`.
+    fn one_panel(rect: [f32; 4], radius: f32, glass: Glass, to_surface: Affine, scale: f32) -> DisplayList {
+        use crate::display::{Item, ItemKind, Layer};
+        let mut root = Layer::root();
+        root.transform = to_surface;
+        root.items = 0..1;
+        let g = GlassInstance {
+            rect,
+            radius,
+            glass,
+            alpha: 1.0,
+            age: 1.0,
+            sheen: None,
+            orbit: None,
+            orbit_strength: 0.0,
+            to_surface,
+            surface_alpha: 1.0,
+            outline: None,
+        };
+        DisplayList {
+            scale,
+            layers: vec![root],
+            items: vec![Item { kind: ItemKind::Glass, start: 0, len: 1 }],
+            glass: vec![g],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_octagon_blur_region_follows_its_chamfers() {
+        let rect = [20.3, 14.6, 320.0, 120.0];
+        let oct = GlassShape::chamfer(12.0).points(rect, 0.0).unwrap();
+        for scale in [1.0, 1.25] {
+            let region = one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), Affine::IDENTITY, scale)
+                .blur_region();
+            let cover = check_region(&oct, &region.rects, scale, &format!("octagon at {scale}x"));
+            // Two rows per chamfer pixel row, top and bottom, plus the middle.
+            assert!(region.rects.len() <= 2 * 14 + 1, "octagon at {scale}x: {} rects", region.rects.len());
+            eprintln!("octagon at {scale}x: {} rects, {:.2} % covered", region.rects.len(), 100.0 * cover);
+        }
+    }
+
+    #[test]
+    fn a_rotated_card_blur_region_follows_its_edges() {
+        let (rect, radius) = ([0.0, 0.0, 300.0, 120.0], 16.0);
+        let turn = Affine::translate(-150.0, -60.0).then(&Affine::rotate(15f32.to_radians())).then(&Affine::translate(210.0, 130.0));
+        let card = shape_points(GlassShape::Rounded, rect, radius).unwrap();
+        let seen: Vec<Point> = card.iter().map(|p| turn.apply(*p)).collect();
+        for scale in [1.0, 1.25] {
+            let region = one_panel(rect, radius, Glass::dark(), turn, scale).blur_region();
+            let cover = check_region(&seen, &region.rects, scale, &format!("15 degree card at {scale}x"));
+            eprintln!("15 degree card at {scale}x: {} rects, {:.2} % covered", region.rects.len(), 100.0 * cover);
+        }
+        // A chamfered card turned the same way.
+        let oct: Vec<Point> = GlassShape::chamfer(12.0).points(rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
+        let region = one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), turn, 1.25).blur_region();
+        check_region(&oct, &region.rects, 1.25, "15 degree octagon at 1.25x");
+    }
+
+    #[test]
+    fn an_upright_rounded_panel_keeps_todays_blur_rects() {
+        for (rect, radius, scale) in [([10.0, 8.0, 200.0, 80.0], 14.0, 1.0), ([3.5, 2.25, 151.0, 60.5], 9.5, 1.25)] {
+            let region = one_panel(rect, radius, Glass::dark(), Affine::IDENTITY, scale).blur_region();
+            let mut want = Vec::new();
+            blur_rects(rect, radius, &mut want);
+            assert_eq!(region.rects, want);
+        }
+    }
+
+    #[test]
+    fn a_tall_outline_is_capped_by_coarser_bands() {
+        // A 600-row turned card needs about 640 rows: the cap halves the bands until it fits.
+        let rect = [0.0, 0.0, 200.0, 600.0];
+        let turn = Affine::rotate(10f32.to_radians()).then(&Affine::translate(120.0, 10.0));
+        let seen: Vec<Point> = shape_points(GlassShape::Rounded, rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
+        let mut rects = Vec::new();
+        outline_blur_rects(&seen, 1.0, &mut rects);
+        assert!(rects.len() <= MAX_BLUR_RECTS && rects.len() > MAX_BLUR_RECTS / 2, "{} rects", rects.len());
+        assert!(rects.iter().any(|r| r.h >= 2), "the bands got coarser");
+        check_region(&seen, &rects, 1.0, "capped tall card");
+    }
+
+    #[test]
+    fn a_tilted_layer_blur_region_follows_the_warp() {
+        use crate::geom::Rect;
+        use crate::stage::Stage;
+        let rect = [40.0, 30.0, 240.0, 120.0];
+        let warp = Stage::default()
+            .tilt(Size::new(320.0, 180.0), Rect::new(40.0, 30.0, 240.0, 120.0), 0.0, 0.5, 0.0)
+            .expect("the layer turns");
+        let mut list = one_panel(rect, 12.0, Glass::dark(), Affine::IDENTITY, 1.0);
+        list.layers[0].warp = Some(warp);
+        let seen: Vec<Point> = shape_points(GlassShape::Rounded, rect, 12.0).unwrap().iter().map(|p| warp.apply(*p)).collect();
+        check_region(&seen, &list.blur_region().rects, 1.0, "tilted card");
+    }
+
+    #[test]
+    fn a_non_glass_element_can_ask_for_blur_behind_its_outline() {
+        use crate::element::Element;
+        use crate::scene::Scene;
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(240.0, 120.0), 1.0);
+        let frame = |o: f32| {
+            Element::column("root")
+                .child(Element::panel("frame").size(160.0, 80.0).opacity(o).blur_behind(GlassShape::chamfer(10.0)))
+        };
+        scene.apply(frame(1.0), 0.0);
+        let list = scene.sample(5.0);
+        assert_eq!(list.glass.len(), 0, "no glass is drawn");
+        let oct = GlassShape::chamfer(10.0).points([0.0, 0.0, 160.0, 80.0], 0.0).unwrap();
+        check_region(&oct, &list.blur_region().rects, 1.0, "blur-behind frame");
+        // A faint element holds no blur yet, as glass.
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(240.0, 120.0), 1.0);
+        scene.apply(frame(0.3), 0.0);
+        assert!(scene.sample(5.0).blur_region().rects.is_empty());
     }
 }

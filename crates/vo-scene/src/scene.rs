@@ -30,7 +30,7 @@ use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
 use crate::final_pass::{self, FinalPass};
 use crate::flow::{Flow, FlowInput};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
-use crate::glass::{Glass, GlassInstance};
+use crate::glass::{BlurBehind, Glass, GlassInstance, GlassShape};
 use crate::inline::OBJECT_GLYPH;
 use crate::input::PointerState;
 use crate::layout::LayoutView;
@@ -99,6 +99,7 @@ pub(crate) struct Node<M> {
     pub hairline: bool,
     pub inside: bool,
     pub glass: Option<Glass>,
+    pub blur_behind: Option<GlassShape>,
     pub material: Option<Material>,
     pub afterglow: Option<[f32; 3]>,
     pub trail_drift: Option<crate::display::TrailDrift>,
@@ -1313,6 +1314,7 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            blur_behind,
             material,
             afterglow,
             trail_drift,
@@ -1345,6 +1347,7 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            blur_behind,
             material,
             afterglow,
             trail_drift,
@@ -1402,6 +1405,7 @@ impl<M> Scene<M> {
             hairline,
             inside,
             glass,
+            blur_behind,
             material,
             afterglow,
             trail_drift,
@@ -1424,7 +1428,7 @@ impl<M> Scene<M> {
         let relayout = n.style != style || n.kind.layout_differs(&kind);
         let old_size = text_size(&n.kind);
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
-        changed |= n.glass != glass;
+        changed |= n.glass != glass || n.blur_behind != blur_behind;
         changed |= n.binds != binds;
         changed |= n.material != material || n.afterglow != afterglow || n.trail_drift != trail_drift;
         changed |= n.handlers.hit != handlers.hit;
@@ -1438,6 +1442,7 @@ impl<M> Scene<M> {
         n.hairline = hairline;
         n.inside = inside;
         n.glass = glass;
+        n.blur_behind = blur_behind;
         n.material = material;
         n.afterglow = afterglow;
         n.trail_drift = trail_drift;
@@ -1875,6 +1880,15 @@ impl<M> Scene<M> {
                 to_surface: out.layers[layer as usize].transform,
                 surface_alpha: alpha * layer_chain_opacity(&out.layers, layer),
                 outline: None,
+            });
+        }
+        if let Some(shape) = n.blur_behind {
+            out.blur_behind.push(BlurBehind {
+                rect: [m.e, m.f, size.w, size.h],
+                radius: radius(n, t),
+                shape,
+                layer,
+                surface_alpha: alpha * layer_chain_opacity(&out.layers, layer),
             });
         }
         let firsts = [out.shapes.len(), out.glyphs.len(), out.vectors.len()];

@@ -20,7 +20,7 @@ use std::ops::Range;
 use serde::Serialize;
 
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
-use crate::glass::GlassInstance;
+use crate::glass::{BlurBehind, GlassInstance};
 use crate::gpu::GpuItem;
 use crate::material::Material;
 use crate::path::{VectorInstance, VectorSeg, WidthKnot};
@@ -62,6 +62,9 @@ pub struct DisplayList {
     pub vector_segs: Vec<VectorSeg>,
     /// Glass panels (`crate::glass`), each drawn under its panel's content.
     pub glass: Vec<GlassInstance>,
+    /// Elements that are not glass but ask for compositor blur behind their outline
+    /// (EG-07, `Element::blur_behind`). Not drawn: only `blur_region` reads them.
+    pub blur_behind: Vec<BlurBehind>,
     /// Content drawn by app GPU code (`crate::gpu`).
     pub gpu: Vec<GpuItem>,
     /// The signal bus uniform for this frame (`vo_core::signals`), zero without a store. The
@@ -1023,6 +1026,7 @@ impl DisplayList {
         self.vectors.clear();
         self.vector_segs.clear();
         self.glass.clear();
+        self.blur_behind.clear();
         self.gpu.clear();
         self.signals = Default::default();
         self.materials.clear();
@@ -1062,6 +1066,7 @@ impl DisplayList {
             vectors,
             vector_segs,
             glass,
+            blur_behind: _,
             gpu: _,
             signals: _,
             materials,

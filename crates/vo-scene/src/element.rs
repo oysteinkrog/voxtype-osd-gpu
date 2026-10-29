@@ -27,7 +27,7 @@ use crate::emitter::{Emitter, WordParticles};
 use crate::final_pass::FinalPass;
 use crate::flow::{Caret, CaseChange, LiveMotion, Revise, Rewrap, SettleInk};
 use crate::geom::{Color, Rect};
-use crate::glass::Glass;
+use crate::glass::{Glass, GlassShape};
 use crate::material::Material;
 use crate::path::{Morph, Outline, StrokeStyle};
 use crate::timed::{Progress, Wave};
@@ -774,6 +774,8 @@ pub struct Element<M = ()> {
     pub(crate) inside: bool,
     /// Drawn as a glass panel under the content (FX06).
     pub(crate) glass: Option<Glass>,
+    /// Asks the compositor to blur the desktop behind this outline in the box (EG-07).
+    pub(crate) blur_behind: Option<GlassShape>,
     /// The material (FX15) of this element's content and of its children's, unless they set
     /// their own.
     pub(crate) material: Option<Material>,
@@ -807,6 +809,7 @@ impl<M> Element<M> {
             hairline: false,
             inside: false,
             glass: None,
+            blur_behind: None,
             material: None,
             afterglow: None,
             trail_drift: None,
@@ -1301,6 +1304,17 @@ impl<M> Element<M> {
     /// panel (FX07) where it can. Only panels draw glass.
     pub fn glass(mut self, g: Glass) -> Element<M> {
         self.glass = Some(g);
+        self
+    }
+
+    /// Asks the live host to have the compositor blur the desktop behind this element's
+    /// `shape` in its box (EG-07), for a translucent fill or frame that is not glass.
+    /// [`GlassShape::Rounded`] follows the element's corner radius. The region follows
+    /// rotated and tilted layers to within one physical pixel, and holds the element only
+    /// from [`crate::glass::BLUR_MIN_ALPHA`] opacity up. Where the compositor has no blur the
+    /// element draws as it is and the host logs "no compositor blur" once.
+    pub fn blur_behind(mut self, shape: GlassShape) -> Element<M> {
+        self.blur_behind = Some(shape);
         self
     }
 

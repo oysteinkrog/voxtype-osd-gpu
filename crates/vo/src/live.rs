@@ -67,6 +67,9 @@ struct Live<A: App> {
     region: Option<InputRegion>,
     /// The last compositor blur region sent, from the glass panels in the list (FX07).
     blur: Option<InputRegion>,
+    /// Whether "no compositor blur" was logged: once, the first time the list asks for blur
+    /// behind on a host without it (EG-07). The glass then draws its plain tint.
+    no_blur_logged: bool,
     /// When a capped-rate animation (glass at 30 fps, FX08) wants its next frame.
     paced: Option<f64>,
     /// The time of the last main frame, for the app's frame pace (`App::frame_pace`).
@@ -324,6 +327,12 @@ impl<A: App> Live<A> {
                 let _ = host.update(id, SurfaceChange::Blur(change));
                 self.blur = Some(blur);
             }
+        } else if !self.no_blur_logged
+            && (list.glass.iter().any(|g| g.glass.blur_behind) || !list.blur_behind.is_empty())
+            && !list.blur_region().rects.is_empty()
+        {
+            eprintln!("vo: no compositor blur; glass draws its plain tint");
+            self.no_blur_logged = true;
         }
         self.list = list;
     }
@@ -594,6 +603,7 @@ impl<A: App> Live<A> {
             prepared: None,
             region: None,
             blur: None,
+            no_blur_logged: false,
             paced: None,
             last_frame: None,
             frames: 0,
