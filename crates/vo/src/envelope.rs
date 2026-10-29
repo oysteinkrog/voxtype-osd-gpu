@@ -580,9 +580,10 @@ fn collect(list: &DisplayList, out: &mut Vec<(Key, Sample)>) {
                 }
                 // The glyph's own move counts; its turn and lean are kept apart (`tilt`,
                 // `skew`), so the axes below are the layers' only.
-                let p = map(Point::new(g.pos.x + g.xform.offset.x, g.pos.y + g.xform.offset.y));
-                let px = map(Point::new(g.pos.x + g.size, g.pos.y));
-                let py = map(Point::new(g.pos.x, g.pos.y + g.size));
+                let at = Point::new(g.pos.x + g.xform.offset.x, g.pos.y + g.xform.offset.y);
+                let p = map(at);
+                let px = map(Point::new(at.x + g.size, at.y));
+                let py = map(Point::new(at.x, at.y + g.size));
                 let (ax, ay) = (px.x - p.x, px.y - p.y);
                 let em = ((ax.hypot(ay)) * ((py.x - p.x).hypot(py.y - p.y))).sqrt();
                 let s = Sample {
