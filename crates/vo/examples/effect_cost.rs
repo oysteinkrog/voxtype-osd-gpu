@@ -119,7 +119,8 @@ enum Msg {
 fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     let k = size.h / 300.0;
     let case = CASES[i];
-    let drift = (t * 1.7).sin() as f32 * 24.0 * k;
+    // The grid-words card holds still, so its text field is rebuilt only when a word comes.
+    let drift = if case == "grid-words" { 0.0 } else { (t * 1.7).sin() as f32 * 24.0 * k };
     let text = |key: &str, s: &str, px: f32, c: u32| {
         let e = Element::label(key.to_string(), s)
             .text_style(TextStyle::new(0, px * k, px * 1.25 * k))
