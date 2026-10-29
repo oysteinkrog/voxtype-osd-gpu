@@ -95,3 +95,28 @@ fn condensed_header_falls_back_to_japanese() {
     let img = Image { name: "fonts-fallback".into(), ..img };
     support::check(&img, Tolerance::default()).unwrap();
 }
+
+#[test]
+fn specimen_of_the_eg28_faces() {
+    let fonts = FontRegistry::new();
+    fonts.set_default_fallbacks(&[fonts.asset("sans").unwrap()]);
+    let lines = [
+        ("typewriter", "typewriter: Hamburgefonstiv 0123 ÆØÅ"),
+        ("display-wide-italic", "WIDE ITALIC: Hamburgefonstiv 0123"),
+        ("ultra-condensed-heavy", "ULTRA CONDENSED HEAVY 0123 ÆØÅ"),
+        ("script", "Script: Hamburgefonstiv 0123 ÆØÅ"),
+        // Staff lines, G clef, flat, sharp, natural, whole, half and black note heads, quarter rest.
+        ("music", "\u{E014}\u{E050}\u{E260}\u{E262}\u{E261}\u{E0A2}\u{E0A3}\u{E0A4}\u{E4E5}\u{E4E3}"),
+    ];
+    let mut col = Element::column("col").pad(12.0).gap(4.0);
+    for (name, line) in lines {
+        let id = fonts.asset(name).unwrap_or_else(|e| panic!("{e}"));
+        col = col.child(Element::label(name, line).text_style(TextStyle::new(id, 24.0, 32.0)).color(ink()));
+    }
+    let size = Size::new(640.0, 250.0);
+    let view = Element::panel("bg").size(size.w, size.h).fill(Color::hex(0x101216, 1.0)).child(col);
+    let (img, list) = render(&fonts, view, size);
+    assert!(list.glyphs.iter().all(|g| g.glyph != 0), "a missing-glyph box");
+    let img = Image { name: "fonts-specimen-eg28".into(), ..img };
+    support::check(&img, Tolerance::default()).unwrap();
+}

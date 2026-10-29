@@ -52,3 +52,37 @@ cjk="U+0020,U+00A0,U+3000-303F,U+3040-309F,U+30A0-30FF,U+FF01-FF5E"
 for c in $(echo "$kanji" | grep -o .); do cjk+=",U+$(printf '%04X' "'$c")"; done
 sub NotoSansJP-Regular-Labels.otf /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc 0 "$cjk"
 sub NotoSansJP-Bold-Labels.otf /usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc 0 "$cjk"
+
+# EG-28: five faces that no system package provides here, so they are downloaded from the
+# project's official source and checked before use. Google Fonts files are checked against
+# their git blob hash at the google/fonts commit below; Bravura against the sha256 that
+# GitHub shows for the steinbergmedia/bravura release. Each family keeps its own OFL-<name>.txt.
+# Set VO_FONT_CACHE to reuse a download folder.
+gf_commit=9862abc066c9b83bf84c3e8ed1fc2d8d48f9bbf0
+cache=${VO_FONT_CACHE:-$(mktemp -d)}
+mkdir -p "$cache"
+fetch_gf() { # file url-path git-blob-sha
+    [ -f "$cache/$1" ] || curl -sfL "https://raw.githubusercontent.com/google/fonts/$gf_commit/ofl/$2" -o "$cache/$1"
+    [ "$(git hash-object "$cache/$1")" = "$3" ] || { echo "hash mismatch: $1" >&2; exit 1; }
+}
+fetch_gf CourierPrime-Regular.ttf courierprime/CourierPrime-Regular.ttf 2a0f8bde9778bb8c7b3a0ca5d4b4fb041737ef1a
+fetch_gf Kanit-BoldItalic.ttf kanit/Kanit-BoldItalic.ttf 9ce084eb75d072a005f39727bee85ad1c8278fcb
+fetch_gf LeagueGothic-wdth.ttf 'leaguegothic/LeagueGothic%5Bwdth%5D.ttf' 2543bb2aba1744199f3e59a3fd5b55bd219d6644
+fetch_gf GreatVibes-Regular.ttf greatvibes/GreatVibes-Regular.ttf a1327ff3b862246f1f253639040edcc473e5f3a9
+bravura_sha=cdf0f893ee1fdb64b7f6713d71ee0dcfc349c0ac01429a8e451b01a9e79f5f3b
+[ -f "$cache/Bravura.otf" ] || curl -sfL https://github.com/steinbergmedia/bravura/releases/download/bravura-1.482/Bravura.otf -o "$cache/Bravura.otf"
+[ "$(sha256sum "$cache/Bravura.otf" | cut -d' ' -f1)" = "$bravura_sha" ] || { echo "hash mismatch: Bravura.otf" >&2; exit 1; }
+
+sub CourierPrime-Regular-Latin.ttf "$cache/CourierPrime-Regular.ttf" 0 "$latin" --no-hinting
+sub Kanit-BoldItalic-Latin.ttf "$cache/Kanit-BoldItalic.ttf" 0 "$latin" --no-hinting
+sub GreatVibes-Regular-Latin.ttf "$cache/GreatVibes-Regular.ttf" 0 "$latin" --no-hinting
+# League Gothic is variable in width (75 to 100); pin the narrowest, the ultra condensed cut.
+lg_tmp=$(mktemp --suffix=.ttf -p "$PWD")
+fonttools varLib.instancer "$cache/LeagueGothic-wdth.ttf" wdth=75 -o "$lg_tmp" -q
+sub LeagueGothic-Condensed-Latin.ttf "$lg_tmp" 0 "$latin" --no-hinting
+rm -f "$lg_tmp"
+# Bravura (SMuFL) for the pitch staff: staff lines, barlines, time signature digits, the
+# augmentation dot, clefs (G, C, F), note heads, flags, accidentals and rests. Needs the
+# list in the README to stay in step with this one.
+music="U+E010-E014,U+E030-E031,U+E080-E089,U+E1E7,U+E050,U+E05C,U+E062,U+E0A0-E0A4,U+E240-E243,U+E260-E264,U+E4E0-E4E5"
+sub Bravura-Music.otf "$cache/Bravura.otf" 0 "$music" --no-hinting

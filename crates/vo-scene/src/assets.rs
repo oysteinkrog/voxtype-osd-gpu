@@ -62,6 +62,17 @@ pub static ASSETS: &[Asset] = &[
         "RobotoFlex-Variable-Latin.ttf",
         "Roboto Flex, Latin, variable: weight 300 to 900, width 75 to 125, optical size 8 to 72, slant -10 to 0"
     ),
+    // EG-28: five more faces, about 225 KB in all, downloaded from the projects' official
+    // sources and subset by assets/fonts/subset.sh (sources and licences in the README).
+    font!("typewriter", "CourierPrime-Regular-Latin.ttf", "Courier Prime Regular, Latin: a typewriter face"),
+    font!("display-wide-italic", "Kanit-BoldItalic-Latin.ttf", "Kanit Bold Italic, Latin: a wide, slanted display face"),
+    font!(
+        "ultra-condensed-heavy",
+        "LeagueGothic-Condensed-Latin.ttf",
+        "League Gothic at width 75, Latin: an ultra condensed heavy face"
+    ),
+    font!("script", "GreatVibes-Regular-Latin.ttf", "Great Vibes Regular, Latin: a formal connected script"),
+    font!("music", "Bravura-Music.otf", "Bravura (SMuFL): staff lines, clefs, note heads, flags, accidentals and rests"),
     font!("jp-labels", "NotoSansJP-Regular-Labels.otf", "Noto Sans CJK JP Regular: kana and label kanji"),
     font!("jp-labels-bold", "NotoSansJP-Bold-Labels.otf", "Noto Sans CJK JP Bold: kana and label kanji"),
 ];
@@ -101,6 +112,43 @@ mod tests {
             total += a.bytes.len();
         }
         // The table is meant to stay small: every binary that uses it carries it.
-        assert!(total < 1_500_000, "{total} bytes of fonts");
+        assert!(total < 1_800_000, "{total} bytes of fonts");
+    }
+
+    /// The SMuFL code points the `music` subset keeps (the same list as `subset.sh`).
+    pub const MUSIC_CODE_POINTS: &[(u32, u32)] = &[
+        (0xE010, 0xE014),
+        (0xE030, 0xE031),
+        (0xE080, 0xE089),
+        (0xE1E7, 0xE1E7),
+        (0xE050, 0xE050),
+        (0xE05C, 0xE05C),
+        (0xE062, 0xE062),
+        (0xE0A0, 0xE0A4),
+        (0xE240, 0xE243),
+        (0xE260, 0xE264),
+        (0xE4E0, 0xE4E5),
+    ];
+
+    #[test]
+    fn eg28_faces_load_and_cover_their_text() {
+        use skrifa::MetadataProvider;
+        let fonts = crate::font::FontRegistry::new();
+        for name in ["typewriter", "display-wide-italic", "ultra-condensed-heavy", "script", "music"] {
+            fonts.asset(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let font = skrifa::FontRef::new(get(name).unwrap().bytes).unwrap();
+            let map = font.charmap();
+            if name == "music" {
+                for &(lo, hi) in MUSIC_CODE_POINTS {
+                    for c in lo..=hi {
+                        assert!(map.map(c).is_some_and(|g| g.to_u32() != 0), "music: U+{c:04X}");
+                    }
+                }
+            } else {
+                for c in "Hamburgefonstiv 0123 \u{C6}\u{D8}\u{C5}".chars() {
+                    assert!(map.map(c).is_some_and(|g| g.to_u32() != 0), "{name}: {c:?}");
+                }
+            }
+        }
     }
 }
