@@ -1428,7 +1428,9 @@ mod margin_tests {
         assert_eq!(f.step(Insets::new(300.0, 0.0, 0.0, 0.0), 1.1, true), Some(Insets::new(300.0, 4.0, 4.0, 4.0)));
         // A ramp from 8 to 200 over the base resizes four times (32, 64, 128, 256), not 25.
         let mut g = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
-        let n = (1..=25).filter(|i| g.step(Insets::uniform(4.0 + 8.0 * *i as f32), *i as f64 * 0.02, true).is_some()).count();
+        let n = (1..=25)
+            .filter(|i| g.step(Insets::uniform(4.0 + 8.0 * *i as f32), *i as f64 * 0.02, true).is_some())
+            .count();
         assert_eq!(n, 4);
     }
 
