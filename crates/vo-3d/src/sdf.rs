@@ -34,6 +34,9 @@ pub fn hero_shader_source() -> &'static str {
     HERO_WGSL
 }
 
+// `Parts` is about 300 bytes against a few for the rest; a frame is built once per paint and
+// stays `Copy`, so it is held inline rather than boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeroShape {
     Orb,
