@@ -68,6 +68,7 @@ const CASES: &[&str] = &[
     "smoke",
     "watercolour",
     "tapered strokes",
+    "shape-group-8",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -145,6 +146,15 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     if case == "frost stack" {
         return frost_stack(size, k);
     }
+    if case == "shape-group-8" {
+        // EG-22: an 8-member shape group the card's width, drawn four times (shadow, glow,
+        // fill with a stroke), the capsule's edge rippling and seven bulges moving.
+        let blob = Element::canvas("group", f64::INFINITY, move |t, rect, p| shape_group_8(t, rect, k, p))
+            .size(size.w, size.h)
+            .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+        let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+        return root.child(blob).child(Element::layer("fx").child(card));
+    }
     if case == "tapered strokes" {
         // SW-04: 200 letter-sized strokes over the card, each tapering from 1 to 4 px.
         let strokes = Element::canvas("strokes", f64::INFINITY, move |t, rect, p| tapered_strokes(t, rect, k, p))
@@ -205,6 +215,29 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         }))
         .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
     root.child(stripes).child(layer)
+}
+
+/// A capsule across the surface with seven bulges travelling along it, melted into one shape
+/// group of eight members (EG-22), drawn as a shadow, a glow and a stroked fill.
+fn shape_group_8(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painter) {
+    use vo::scene::display::{GroupPrim, Paint, ShapeInstance};
+    let pill = Rect::new(rect.x + 30.0 * k, rect.y + rect.h * 0.5 - 40.0 * k, rect.w - 60.0 * k, 80.0 * k);
+    let mut prims = vec![GroupPrim::capsule(pill).with_ripple(1.0 * k, 40.0 * k, (t * 0.7) as f32)];
+    for i in 0..7 {
+        let u = ((i as f64 / 7.0 + t * 0.08) % 1.0) as f32;
+        let grow = 0.5 + 0.5 * (t * 2.0 + i as f64).sin() as f32;
+        prims.push(GroupPrim::bulge(pill, pill.x + u * pill.w, (50.0 + 30.0 * grow) * k, (90.0 + 50.0 * grow) * k));
+    }
+    let g = p.shape_group(&prims, 24.0 * k);
+    let accent = Color::hex(0x4cc9f0, 1.0);
+    p.shape(ShapeInstance {
+        fill: Paint::shadow(Color::rgba(0.0, 0.0, 0.0, 0.6), Point::new(0.0, 6.0 * k), 10.0 * k, 0.0),
+        ..g
+    });
+    p.shape(ShapeInstance { fill: Paint::glow(accent, 12.0 * k, 0.8), ..g });
+    p.shape(
+        ShapeInstance { fill: Paint::solid(Color::hex(0x16233a, 0.9)), ..g }.with_stroke(Paint::solid(accent), 1.5 * k),
+    );
 }
 
 /// 200 short pen strokes in a 20 x 10 grid, each a five-segment hook 1 px wide at its start
