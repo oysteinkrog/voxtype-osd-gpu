@@ -1567,7 +1567,34 @@ impl Renderer {
                 }
                 ItemKind::Gpu => {
                     let start = self.gpu_items.len() as u32;
+                    let liquid_painter = self.painters.iter().any(|p| p.paints_liquid());
                     for g in &f.list.gpu[range] {
+                        // No painter for a liquid revision: draw its plain glyphs, so the word
+                        // does not vanish while the scene hides it from the text (RV-06).
+                        if !liquid_painter {
+                            if let Some(rev) = g.source.0.as_any().downcast_ref::<vo_scene::flow::liquid::LiquidRevision>() {
+                                let gs = self.glyphs.len() as u32;
+                                for gi in rev.plain_glyphs(g.rect, g.t, g.opacity) {
+                                    if let Some(inst) = self.glyph(&gi, &state) {
+                                        grow(
+                                            &mut self.surfaces[draw_surface].bounds,
+                                            intersect(reach(glyph_bounds(&inst)), scissor),
+                                        );
+                                        self.glyphs.push(inst);
+                                    }
+                                }
+                                self.push_cmd_with(
+                                    draw_surface,
+                                    Pipe::Glyph,
+                                    gs..self.glyphs.len() as u32,
+                                    uniform,
+                                    blend,
+                                    scissor,
+                                    NO_BACKDROP,
+                                );
+                                continue;
+                            }
+                        }
                         let b = seen(bounds(&RRect::new(g.rect, 0.0), &to_px));
                         grow(&mut self.surfaces[draw_surface].bounds, intersect(b, scissor));
                         let o = f.list.stage.origin_in(f.list.size);

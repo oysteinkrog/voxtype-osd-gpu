@@ -182,3 +182,24 @@ fn liquid_revision_at_one_and_a_half() {
 fn liquid_revision_in_light_mode() {
     check("liquid-revision-light", true, LIGHT, 1.0);
 }
+
+/// A renderer with no `glyph_fx` painter, in a process where the flag is set, still shows the
+/// word's ink during the revision (RV-06). On an older line the text draws none of it.
+#[test]
+fn liquid_revision_without_a_painter_draws_the_word() {
+    let (fonts, font) = fonts();
+    vo_scene::flow::liquid::install_painter();
+    let gpu = gpu();
+    let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    scene.set_viewport(0.0, Size::new(W, H), 1.0);
+    scene.apply(view(font, false, true, FLAT), 0.0);
+    scene.sample(0.5);
+    scene.apply(view(font, true, true, FLAT), 1.0);
+    let mut target = Target::new(&gpu.device, W as u32, H as u32, FORMAT);
+    r.render_at(&scene.sample(1.0 + 0.5 * LIQUID_SECS), 1.0, &mut target);
+    let mid = vo_3d::readback::read_rgba(&gpu.device, &gpu.queue, target.texture());
+    // Background is 0x0d1117, so any bright pixel is ink.
+    let ink = mid.iter().skip(1).step_by(4).filter(|&&g| g > 0x51).count();
+    assert!(ink > 500, "the word has no ink during the revision: {ink} pixels");
+}

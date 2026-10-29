@@ -45,6 +45,11 @@ pub trait GpuPainter: Send {
     fn splits(&self) -> bool {
         false
     }
+    /// Whether this painter draws `vo_scene::flow::liquid::LiquidRevision` items. The renderer
+    /// draws such an item as plain glyphs when no painter does (RV-06).
+    fn paints_liquid(&self) -> bool {
+        false
+    }
 }
 
 /// One GPU item to draw, and where.

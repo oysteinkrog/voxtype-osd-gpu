@@ -793,6 +793,10 @@ impl GlyphFxPainter {
 }
 
 impl GpuPainter for GlyphFxPainter {
+    fn paints_liquid(&self) -> bool {
+        true
+    }
+
     fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
         let source = cx.source.as_any();
         let prepared = if let Some(src) = source.downcast_ref::<GlyphFx>() {
