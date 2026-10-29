@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use vo_scene::display::{DisplayList, ItemKind};
+use vo_scene::flow::liquid::LiquidRevision;
 use vo_scene::geom::Color;
 use vo_scene::material::READS_TEXT;
 
@@ -34,7 +35,8 @@ const FIELD_WGSL: &str = include_str!("wgsl/text_field.wgsl");
 
 /// The largest field size in texels: the row pass holds a row of up to 3584 texels and its
 /// block minimums in the 16 KiB of workgroup memory WebGPU guarantees, and the column pass a
-/// column of up to 32768 texels.
+/// column of up to 32768 texels. A wider or taller target gets a coarser field
+/// ([`field_scale`]), so the field always covers the whole target.
 const MAX_SIZE: [u32; 2] = [3584, 16384];
 
 /// Words a material can see in the word table, newest first.
@@ -86,8 +88,11 @@ pub struct TextField {
     /// Whether `params` says the field is empty now.
     empty: bool,
     sized: Option<Sized>,
-    /// Target pixels per field texel.
+    /// Target pixels per field texel asked for.
     downscale: f32,
+    /// Target pixels per field texel now: `downscale`, or more for a target too large for
+    /// [`MAX_SIZE`] at it.
+    k: f32,
     /// What the field shows now: the list, the target size and the scale.
     drawn: Option<(DisplayList, [u32; 2], f32)>,
     /// Times the field was built.
@@ -148,6 +153,7 @@ impl TextField {
             empty: false,
             sized: None,
             downscale,
+            k: downscale,
             drawn: None,
             builds: 0,
             scratch: DisplayList::default(),
@@ -156,7 +162,8 @@ impl TextField {
         }
     }
 
-    /// Records drawing `text` with `renderer` at `scale / downscale`, then the distance passes,
+    /// Records drawing `text` with `renderer` at `scale / downscale` (coarser for a target too
+    /// large for [`MAX_SIZE`]), then the distance passes,
     /// into `enc`, and returns true. `target_size` is the size in physical pixels of the target the
     /// field will be used with. The renderer's buffers are written now, so submit `enc` before
     /// the renderer encodes another list. Records nothing and returns false when the field
@@ -172,16 +179,17 @@ impl TextField {
         if self.drawn.as_ref().is_some_and(|(l, s, k)| l == text && *s == target_size && *k == scale) {
             return false;
         }
-        let size: [u32; 2] =
-            std::array::from_fn(|i| ((target_size[i] as f32 / self.downscale).ceil() as u32).clamp(1, MAX_SIZE[i]));
+        let (k, size) = field_scale(target_size, self.downscale);
+        let rescaled = k != self.k;
+        self.k = k;
         self.resize(size);
         let empty = draws_nothing(text);
-        if empty != self.empty {
+        if empty != self.empty || rescaled {
             self.empty = empty;
             self.write_params();
         }
         let s = self.sized.as_ref().unwrap();
-        renderer.encode(text, scale / self.downscale, &s.coverage, enc);
+        renderer.encode(text, scale / self.k, &s.coverage, enc);
         self.encode_field(enc);
         match &mut self.drawn {
             Some((l, s, k)) => {
@@ -222,7 +230,7 @@ impl TextField {
         renderer.collect_word_boxes(false);
         self.scratch = scratch;
         if built {
-            let k = self.downscale;
+            let k = self.k;
             let mut words: Vec<WordBox> = Vec::new();
             for &(id, b) in renderer.word_boxes() {
                 // Back to target pixels, without the pixel of dilation the quad carries.
@@ -258,7 +266,7 @@ impl TextField {
     /// field yet, materials read no text.
     pub fn bind(&self, renderer: &mut Renderer, words: &WordTable) {
         match &self.sized {
-            Some(s) => renderer.set_text_inputs(Some((s.field_view.clone(), s.size, self.downscale)), words),
+            Some(s) => renderer.set_text_inputs(Some((s.field_view.clone(), s.size, self.k)), words),
             None => renderer.set_text_inputs(None, words),
         }
     }
@@ -278,7 +286,7 @@ impl TextField {
 
     fn write_params(&self) {
         let size = self.sized.as_ref().map_or([0; 2], |s| s.size);
-        let params = Params { size, empty: self.empty as u32, scale: self.downscale };
+        let params = Params { size, empty: self.empty as u32, scale: self.k };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
     }
 
@@ -341,7 +349,7 @@ impl TextField {
     /// The field for a shader, once [`TextField::update`] has run.
     pub fn binding(&self) -> Option<FieldBinding<'_>> {
         let s = self.sized.as_ref()?;
-        Some(FieldBinding { view: &s.field_view, size: s.size, scale: self.downscale })
+        Some(FieldBinding { view: &s.field_view, size: s.size, scale: self.k })
     }
 
     /// The field texture, for readback and debugging.
@@ -369,6 +377,16 @@ impl TextField {
     }
 }
 
+/// Target pixels per field texel and the field's size for a target of `target` pixels: at
+/// least `downscale`, and coarser when the target at `downscale` is wider or taller than
+/// [`MAX_SIZE`], so the field covers the whole target. The same scale on both axes keeps
+/// distances round.
+pub fn field_scale(target: [u32; 2], downscale: f32) -> (f32, [u32; 2]) {
+    let k = (0..2).fold(downscale, |k, i| k.max(target[i] as f32 / MAX_SIZE[i] as f32));
+    let size = std::array::from_fn(|i| ((target[i] as f32 / k).ceil() as u32).clamp(1, MAX_SIZE[i]));
+    (k, size)
+}
+
 /// Whether `list` draws nothing at all: every item is a layer or empty.
 fn draws_nothing(list: &DisplayList) -> bool {
     list.items.iter().all(|it| it.kind == ItemKind::Layer || it.len == 0)
@@ -381,7 +399,8 @@ pub fn wants_text(list: &DisplayList) -> bool {
 
 /// `list` with only its glyphs into `out`: the layers and their transforms, clips and
 /// opacity stay; every other item is emptied, layer effects that draw something of their own
-/// go, and glyph effects keep only what changes the ink's shape.
+/// go, and glyph effects keep only what changes the ink's shape. A liquid revision (EG-32)
+/// becomes its plain glyphs, since the scene hid its word from the text while it flows.
 pub fn glyphs_only(list: &DisplayList, out: &mut DisplayList) {
     out.clear();
     out.size = list.size;
@@ -397,11 +416,25 @@ pub fn glyphs_only(list: &DisplayList, out: &mut DisplayList) {
         l.frost = 0.0;
         l
     }));
-    out.items.extend(list.items.iter().map(|it| match it.kind {
-        ItemKind::Glyphs | ItemKind::Layer => *it,
-        _ => vo_scene::display::Item { kind: it.kind, start: 0, len: 0 },
-    }));
     out.glyphs.extend_from_slice(&list.glyphs);
+    for it in &list.items {
+        let item = match it.kind {
+            ItemKind::Glyphs | ItemKind::Layer => *it,
+            ItemKind::Gpu => {
+                let start = out.glyphs.len() as u32;
+                for g in &list.gpu[it.start as usize..(it.start + it.len) as usize] {
+                    if let Some(rev) = g.source.0.as_any().downcast_ref::<LiquidRevision>() {
+                        out.glyphs.extend(rev.plain_glyphs(g.rect, g.t, g.opacity));
+                    }
+                }
+                let len = out.glyphs.len() as u32 - start;
+                let kind = if len > 0 { ItemKind::Glyphs } else { ItemKind::Gpu };
+                vo_scene::display::Item { kind, start: if len > 0 { start } else { 0 }, len }
+            }
+            _ => vo_scene::display::Item { kind: it.kind, start: 0, len: 0 },
+        };
+        out.items.push(item);
+    }
     out.glyph_fx.extend(list.glyph_fx.iter().map(|&(i, fx)| {
         (i, vo_scene::display::GlyphFx { material: 0, halo: Color::TRANSPARENT, halo_radius: 0.0, ..fx })
     }));
@@ -512,6 +545,16 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn a_wide_target_gets_a_coarser_field_that_covers_it() {
+        assert_eq!(field_scale([600, 300], 2.0), (2.0, [300, 150]));
+        assert_eq!(field_scale([7168, 100], 2.0), (2.0, [3584, 50]));
+        let (k, size) = field_scale([7680, 2160], 2.0);
+        assert!(k > 2.0 && size[0] <= MAX_SIZE[0] && size[0] as f32 * k >= 7680.0, "{k} {size:?}");
+        let (k, size) = field_scale([400, 40000], 1.0);
+        assert!(size[1] <= MAX_SIZE[1] && size[1] as f32 * k >= 40000.0, "{k} {size:?}");
     }
 
     #[test]

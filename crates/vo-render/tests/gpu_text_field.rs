@@ -350,3 +350,42 @@ fn the_field_is_exact_and_follows_moving_text() {
     let (_, _, f) = read_field(&gpu, &empty.field);
     assert!(f.iter().all(|t| t[0] >= 1e4 && t[3] == 0.0), "an empty field reads far outside");
 }
+
+/// A 7680 px wide target (RV-05): the field is clamped to 3584 texels a row, so it takes a
+/// coarser scale and still covers the whole width. Before, ink past 7168 px was missing.
+#[test]
+fn a_wide_target_keeps_ink_past_the_row_limit() {
+    let gpu = support::gpu();
+    let fonts = fonts();
+    let mut rig = Rig::new(&gpu, &fonts, false);
+    let (w, h) = (7680.0f32, 80.0f32);
+    let mut model = WordModel::new();
+    model.update("MWM MWM");
+    let root = Element::panel("root")
+        .size(w, h)
+        .pad_edges(10.0, 0.0, 0.0, 6990.0)
+        .fill(Color::WHITE)
+        .material(Material::custom(PROBE).reads_text().param(0, [0.0, 0.0, 0.0, 0.0]))
+        .child(Element::live_text("live", model.words()).text_style(TextStyle::new(0, 60.0, 70.0)));
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    scene.set_viewport(0.0, Size::new(w, h), 1.0);
+    scene.apply(root, 0.0);
+    let list = scene.sample(2.0);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    assert!(rig.field.update_words(&mut rig.off.renderer, &list, [7680, 80], 1.0, 2.0, &mut enc));
+    gpu.queue.submit([enc.finish()]);
+    let k = rig.field.binding().unwrap().scale;
+    let (fw, fh, f) = read_field(&gpu, &rig.field);
+    assert!(fw as f32 * k >= 7680.0 - 0.01, "the field covers the target: {fw} texels at {k}");
+    let ink_x: Vec<f32> = (0..fh)
+        .flat_map(|y| (0..fw).map(move |x| (x, y)))
+        .filter(|&(x, y)| f[(y * fw + x) as usize][3] >= 0.5)
+        .map(|(x, _)| (x as f32 + 0.5) * k)
+        .collect();
+    assert!(ink_x.iter().any(|&x| (6990.0..7020.0).contains(&x)), "ink at x = 7000");
+    let right = ink_x.iter().copied().fold(0.0, f32::max);
+    assert!(right > 7200.0, "ink past the old 7168 px edge, rightmost at {right}");
+    // The word table's boxes are in target pixels at the coarser scale too.
+    let words = rig.field.word_table(2.0, false);
+    assert!(words.words().iter().any(|wd| wd.rect[2] > 7200.0), "a word box past 7168 px");
+}

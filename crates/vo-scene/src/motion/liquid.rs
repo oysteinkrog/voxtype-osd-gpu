@@ -18,12 +18,19 @@
 //!
 //! Without a painter `Revise::Liquid` is `Revise::Palimpsest`, and says so once in a debug
 //! build. Under reduced motion the corrected word shows at once.
+//!
+//! Whether a painter is installed is one flag for the whole process, because the scene that
+//! builds the list does not know which renderer draws it. So a renderer that draws a list
+//! without the painter (the CPU first frame, the text field's coverage, a second GPU renderer
+//! with no `glyph_fx`) must not skip the item: it draws [`LiquidRevision::plain_glyphs`], a
+//! cross-fade of the word, so no word vanishes for the liquid's 360 ms (RV-05).
 
 use std::any::Any;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
+use crate::display::{GlyphInstance, GlyphXform};
 use crate::gpu::GpuSource;
 use crate::material::Material;
 
@@ -38,7 +45,8 @@ thread_local! {
 }
 
 /// Says a painter for [`LiquidRevision`] is installed, so `Revise::Liquid` stops falling
-/// back to the palimpsest. `vo_3d::glyph_fx::install` calls it.
+/// back to the palimpsest. `vo_3d::glyph_fx::install` calls it. It holds for the whole
+/// process: a renderer without the painter draws [`LiquidRevision::plain_glyphs`] instead.
 pub fn install_painter() {
     PAINTER.store(true, Ordering::Relaxed);
 }
@@ -108,6 +116,31 @@ impl LiquidRevision {
     /// How far the liquid is at `t`, 0 to 1.
     pub fn progress(&self, t: f64) -> f32 {
         ((t - self.start) / self.secs.max(1e-3) as f64).clamp(0.0, 1.0) as f32
+    }
+
+    /// The revision as plain glyphs in the item's layer space, for a renderer with no
+    /// painter: the old letters fade out over the liquid's time and, off the reading line,
+    /// the kept and new letters show at their own ink (on the reading line the text already
+    /// draws them). `rect` is the GPU item's box, `opacity` its inherited opacity.
+    pub fn plain_glyphs(&self, rect: Rect, t: f64, opacity: f32) -> impl Iterator<Item = GlyphInstance> + '_ {
+        let fade = 1.0 - self.progress(t);
+        self.glyphs.iter().filter_map(move |g| {
+            let ink = match g.part {
+                LiquidPart::Old => g.ink * fade,
+                _ if self.reading => 0.0,
+                _ => g.ink,
+            };
+            let ink = (ink * opacity).min(1.0);
+            (ink > 0.0).then(|| GlyphInstance {
+                pos: Point::new(rect.x + g.pos.x, rect.y + g.pos.y),
+                size: g.size,
+                font: g.font,
+                glyph: g.glyph,
+                word: self.word,
+                color: self.ink.fade(ink),
+                xform: GlyphXform::IDENTITY,
+            })
+        })
     }
 }
 

@@ -33,6 +33,7 @@ use skrifa::{GlyphId, MetadataProvider};
 use vo_scene::display::{
     BlendMode, Bloom, DisplayList, GlyphInstance, GroupPrim, ItemKind, LayerTarget, Paint, ShapeInstance, MAX_RIPPLE_PX,
 };
+use vo_scene::flow::liquid::LiquidRevision;
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 
@@ -211,11 +212,19 @@ impl CpuRenderer {
                     }
                 }
                 // The CPU first frame draws no emitters or app GPU content; images only when
-                // already decoded (EG-24).
+                // already decoded (EG-24), and a liquid revision (EG-32) as plain glyphs, since
+                // the scene hid the word from the text for the painter it does not have.
                 ItemKind::Emitters => {}
                 ItemKind::Gpu => {
                     for g in &list.gpu[range] {
-                        self.image(g, &st);
+                        match g.source.0.as_any().downcast_ref::<LiquidRevision>() {
+                            Some(rev) => {
+                                for gi in rev.plain_glyphs(g.rect, g.t, g.opacity) {
+                                    self.glyph(&gi, &st);
+                                }
+                            }
+                            None => self.image(g, &st),
+                        }
                     }
                 }
                 ItemKind::Dots => {
@@ -1188,6 +1197,69 @@ mod tests {
         cpu.draw_bgra(&list, 1.0, 4, 4, 16, &mut out);
         let want = (linear_to_srgb(0.5) * 255.0 + 0.5) as u8;
         assert_eq!(&out[20..24], &[want, want, want, 128]);
+    }
+
+    #[test]
+    fn the_first_frame_shows_a_word_in_liquid_revision_off_the_reading_line() {
+        // With the glyph fx painter installed, the scene hides a revised word on an older
+        // line from the text for 360 ms and hands it to the painter. The CPU first frame has
+        // no painter, so it must draw the word itself (RV-05).
+        use vo_scene::element::{Element, TextStyle};
+        use vo_scene::flow::liquid::painter_on_this_thread;
+        use vo_scene::flow::Revise;
+        use vo_scene::font::test_font_path;
+        use vo_scene::text::ShapedLayout;
+        let fonts = FontRegistry::new();
+        fonts.add_file(&test_font_path()).unwrap();
+        let view = |second: &str| {
+            let words: Vec<vo_core::words::Word> =
+                [(1, "my"), (2, second), (3, "team"), (4, "at"), (5, "noon"), (6, "today")]
+                    .iter()
+                    .map(|&(id, text)| vo_core::words::Word { id, text: text.into() })
+                    .collect();
+            Element::<()>::column("root").child(
+                Element::live_text("live", &words)
+                    .text_style(TextStyle::new(0, 20.0, 26.0))
+                    .word_revise(Revise::Liquid)
+                    .width(130.0)
+                    .margin_edges(0.0, 0.0, 0.0, 20.0),
+            )
+        };
+        painter_on_this_thread(Some(true));
+        let mut scene: vo_scene::Scene<()> =
+            vo_scene::Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+        scene.set_viewport(0.0, LSize::new(200.0, 160.0), 1.0);
+        scene.apply(view("scream"), 0.0);
+        scene.sample(0.5);
+        scene.apply(view("cream"), 1.0);
+        let list = scene.sample(1.1);
+        painter_on_this_thread(None);
+        assert!(list.glyphs.iter().all(|g| g.word != 2), "the text hides the word for the painter");
+        let item = list.gpu.iter().find(|g| g.source.0.as_any().is::<LiquidRevision>()).expect("a liquid item");
+        let rev = item.source.0.as_any().downcast_ref::<LiquidRevision>().unwrap();
+        assert!(!rev.reading);
+        // The word's box in pixels, from its kept and new letters.
+        let pens: Vec<Point> = rev
+            .glyphs
+            .iter()
+            .filter(|g| g.part != vo_scene::flow::liquid::LiquidPart::Old)
+            .map(|g| Point::new(item.rect.x + g.pos.x, item.rect.y + g.pos.y))
+            .collect();
+        let x0 = pens.iter().map(|p| p.x).fold(f32::MAX, f32::min) as usize;
+        let x1 = pens.iter().map(|p| p.x).fold(f32::MIN, f32::max) as usize + 10;
+        let y1 = pens.iter().map(|p| p.y).fold(f32::MIN, f32::max) as usize;
+        let y0 = y1 - 14;
+        let ink = |list: &DisplayList| {
+            let mut cpu = CpuRenderer::new(fonts.clone());
+            let mut out = vec![0u8; 200 * 160 * 4];
+            cpu.draw_bgra(list, 1.0, 200, 160, 200 * 4, &mut out);
+            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y, x))).filter(|&(y, x)| out[(y * 200 + x) * 4 + 3] > 128).count()
+        };
+        let mut without = list.clone();
+        without.items.iter_mut().filter(|it| it.kind == ItemKind::Gpu).for_each(|it| it.len = 0);
+        let (with, bare) = (ink(&list), ink(&without));
+        assert_eq!(bare, 0, "nothing else draws in the word's box");
+        assert!(with > 40, "the word shows on the first frame: {with} inked pixels");
     }
 
     #[test]
