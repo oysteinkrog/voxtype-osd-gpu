@@ -1,8 +1,8 @@
 //! Effects that leave the popup (EG-08): a margin that follows the show, and a fly-out.
 //!
-//! A small card shows. At 1 s it gets a glow of radius 40, so the surface grows to make room;
-//! at 2 s the glow goes and the surface shrinks back to the first view's size once the glow
-//! has faded. At 3.5 s the card is sent: it leaves the panel and flies 800 px up on a
+//! A small card shows. At 2.5 s it gets a glow of radius 40, so the surface grows to make room;
+//! at 4 s the glow goes and the surface shrinks back to the first view's size once the glow
+//! has faded. At 7 s the card is sent: it leaves the panel and flies 800 px up on a
 //! full-screen click-through fly-out surface, fading as it goes, and the app exits. Under
 //! `VO_REDUCED_MOTION=1` the card fades in place and no fly-out opens.
 //!
@@ -65,9 +65,10 @@ impl App for Demo {
     type Msg = Msg;
 
     fn init(&mut self, cx: &mut Cx<Msg>) {
-        cx.after(1.0, Msg::Glow(true));
-        cx.after(2.0, Msg::Glow(false));
-        cx.after(3.5, Msg::Send);
+        // Late enough that the first frame is on screen even when the GPU starts slowly.
+        cx.after(2.5, Msg::Glow(true));
+        cx.after(4.0, Msg::Glow(false));
+        cx.after(7.0, Msg::Send);
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
@@ -122,7 +123,7 @@ fn main() {
     let app = Demo { glow: false, sent: false, reduced: options.reduced_motion };
 
     if let Some(dir) = offline {
-        let scenario = Scenario { size: PANEL, scale: 1.0, duration: 7.0, inputs: Vec::new() };
+        let scenario = Scenario { size: PANEL, scale: 1.0, duration: 10.5, inputs: Vec::new() };
         let n = vo::render_offline_with(app, &scenario, fps, &dir, options).expect("offline render");
         eprintln!("fly_out_demo: wrote {n} frames to {}, the fly-out in its subfolder", dir.display());
         return;
