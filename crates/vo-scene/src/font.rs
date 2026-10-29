@@ -10,7 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::{ReadError, TableProvider};
@@ -36,6 +37,11 @@ pub struct Face {
     /// The variation location of an instance (`FontRegistry::add_instance`); empty for the
     /// font's default.
     coords: Vec<skrifa::instance::NormalizedCoord>,
+    /// Shape plans compiled for this face, one per script, direction, language and
+    /// feature set (`Face::plan`). A face sees few of these, so a list is enough.
+    plans: Mutex<Vec<Arc<harfrust::ShapePlan>>>,
+    /// How many plans `Face::plan` has compiled, for tests.
+    plans_compiled: AtomicUsize,
 }
 
 impl Face {
@@ -45,7 +51,15 @@ impl Face {
         // accepted but cannot shape with.
         let shaping =
             harfrust::Font::new(data.clone(), index).ok_or(ReadError::MalformedData("harfrust rejected the font"))?;
-        Ok(Face { data, index, upem, shaping, coords: Vec::new() })
+        Ok(Face {
+            data,
+            index,
+            upem,
+            shaping,
+            coords: Vec::new(),
+            plans: Mutex::default(),
+            plans_compiled: AtomicUsize::new(0),
+        })
     }
 
     /// The same face at a variation location, from axis values in user units (`wght` 700,
@@ -54,7 +68,15 @@ impl Face {
         let tags = axes.iter().map(|&(tag, value)| (harfrust::Tag::new(&tag), value));
         let shaping = self.shaping.instance_builder().variations(tags).build();
         let coords = shaping.normalized_coords().to_vec();
-        Face { data: self.data.clone(), index: self.index, upem: self.upem, shaping, coords }
+        Face {
+            data: self.data.clone(),
+            index: self.index,
+            upem: self.upem,
+            shaping,
+            coords,
+            plans: Mutex::default(),
+            plans_compiled: AtomicUsize::new(0),
+        }
     }
 
     /// The variation location metrics and outlines are read at.
@@ -98,6 +120,32 @@ impl Face {
     /// The harfrust font for shaping.
     pub fn shaping(&self) -> &harfrust::Font {
         &self.shaping
+    }
+
+    /// The shape plan for text with these segment properties and features, compiled on
+    /// first use and kept. Compiling a plan collects and sorts the font's lookups, which
+    /// costs more than shaping a short line, so text laid out again reuses it.
+    pub fn plan(
+        &self,
+        direction: harfrust::Direction,
+        script: Option<harfrust::Script>,
+        language: Option<&harfrust::Language>,
+        features: &[harfrust::Feature],
+    ) -> Arc<harfrust::ShapePlan> {
+        let key = harfrust::ShapePlanKey::new(&self.shaping, script, direction).language(language).features(features);
+        let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(plan) = plans.iter().find(|p| key.matches(p)) {
+            return plan.clone();
+        }
+        let plan = Arc::new(harfrust::ShapePlan::new(&self.shaping, direction, script, language, features));
+        self.plans_compiled.fetch_add(1, Ordering::Relaxed);
+        plans.push(plan.clone());
+        plan
+    }
+
+    /// How many shape plans this face has compiled.
+    pub fn plans_compiled(&self) -> usize {
+        self.plans_compiled.load(Ordering::Relaxed)
     }
 
     /// The font's own line height at `size`: ascent plus descent, without the line gap,

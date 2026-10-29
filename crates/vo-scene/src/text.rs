@@ -21,7 +21,7 @@ use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
 use crate::element::TextStyle;
-use crate::font::{FontId, FontRegistry};
+use crate::font::{Face, FontId, FontRegistry};
 use crate::geom::{Point, Size};
 use crate::inline::{OBJECT_CHAR, OBJECT_GLYPH, OBJECT_TEXT};
 
@@ -305,7 +305,7 @@ impl TextLayout for ShapedLayout {
         let k = style.size / upem as f32;
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let runs = self.runs_in(text, style.font, fonts);
-        let mut glyphs = self.shape_these(text, style, &shaper, k, &[], runs);
+        let mut glyphs = self.shape_these(text, style, (&face, &shaper), k, &[], runs);
         size_objects(text, &mut glyphs, objects, style.tracking);
         let mut segments = segments(text, &glyphs, style.tracking);
         if let Some(max) = max_width {
@@ -347,7 +347,7 @@ impl TextLayout for ShapedLayout {
             let last = i + 1 == lines.len();
             let overflows = max_width.is_some_and(|max| width > max + FIT_TOLERANCE);
             if style.ellipsis && ((last && dropped) || overflows) {
-                let (dots, dots_width) = ellipsis.get_or_insert_with(|| ellipsis_glyphs(&shaper, k));
+                let (dots, dots_width) = ellipsis.get_or_insert_with(|| ellipsis_glyphs(&face, &shaper, k));
                 let limit = max_width.map_or(f32::INFINITY, |max| max - *dots_width + FIT_TOLERANCE);
                 // Drop whole clusters from the end until the ellipsis fits after them.
                 while ends.last().is_some_and(|&end| end > limit) {
@@ -403,7 +403,7 @@ impl ShapedLayout {
         &self,
         text: &str,
         style: &TextStyle,
-        primary: &ShaperFont<'_, '_>,
+        primary: (&Face, &ShaperFont<'_, '_>),
         k: f32,
         features: &[Feature],
     ) -> Vec<Shaped> {
@@ -416,7 +416,7 @@ impl ShapedLayout {
         &self,
         text: &str,
         style: &TextStyle,
-        primary: &ShaperFont<'_, '_>,
+        primary: (&Face, &ShaperFont<'_, '_>),
         k: f32,
         features: &[Feature],
         runs: Vec<(Range<usize>, FontId)>,
@@ -425,11 +425,11 @@ impl ShapedLayout {
         for (range, font) in runs {
             let face = if font == style.font { None } else { self.fonts.get(font) };
             let (buf, k) = match &face {
-                None => (shape_with(primary, &text[range.clone()], features), k),
+                None => (shape_with(primary.0, primary.1, &text[range.clone()], features), k),
                 Some(face) => {
                     let upem = face.units_per_em();
                     let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
-                    (shape_with(&shaper, &text[range.clone()], features), style.size / upem as f32)
+                    (shape_with(face, &shaper, &text[range.clone()], features), style.size / upem as f32)
                 }
             };
             for (info, p) in buf.glyph_infos().iter().zip(buf.glyph_positions()) {
@@ -524,7 +524,7 @@ impl ShapedLayout {
         let k = style.size / upem as f32;
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let vert = [Feature::new(Tag::new(b"vert"), 1, ..), Feature::new(Tag::new(b"vrt2"), 1, ..)];
-        let glyphs = self.shape_runs_with(text, style, &shaper, k, &vert);
+        let glyphs = self.shape_runs_with(text, style, (&face, &shaper), k, &vert);
 
         // Characters as (cluster, glyphs, advance); joiners and marks stay with the one
         // before them, because they share its cluster after shaping.
@@ -602,16 +602,19 @@ fn joins(c: char) -> bool {
         | 0x200C..=0x200D | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0xE0100..=0xE01EF)
 }
 
-fn shape(shaper: &ShaperFont<'_, '_>, text: &str) -> harfrust::Buffer {
-    shape_with(shaper, text, &[])
+fn shape(face: &Face, shaper: &ShaperFont<'_, '_>, text: &str) -> harfrust::Buffer {
+    shape_with(face, shaper, text, &[])
 }
 
-fn shape_with(shaper: &ShaperFont<'_, '_>, text: &str, features: &[Feature]) -> harfrust::Buffer {
+/// Shapes `text` with the face's cached plan for its script and `features`
+/// (`Face::plan`), so laying out text again does not compile a plan again.
+fn shape_with(face: &Face, shaper: &ShaperFont<'_, '_>, text: &str, features: &[Feature]) -> harfrust::Buffer {
     let mut buf = harfrust::Buffer::new();
     buf.push_str(text);
     buf.guess_segment_properties();
     buf.set_direction(Direction::LeftToRight);
-    let options = harfrust::ShapeOptions::new().features(features);
+    let plan = face.plan(buf.direction(), buf.script(), buf.language(), features);
+    let options = harfrust::ShapeOptions::new().plan(Some(&plan)).features(features);
     harfrust::shape(shaper, &mut buf, options).expect("shaping a text buffer");
     buf
 }
@@ -620,10 +623,10 @@ fn shape_with(shaper: &ShaperFont<'_, '_>, text: &str, features: &[Feature]) -> 
 type Ellipsis = (Vec<(u32, f32, f32)>, f32);
 
 /// The ellipsis, or three full stops when the font has no ellipsis character.
-fn ellipsis_glyphs(shaper: &ShaperFont<'_, '_>, k: f32) -> Ellipsis {
-    let mut buf = shape(shaper, "\u{2026}");
+fn ellipsis_glyphs(face: &Face, shaper: &ShaperFont<'_, '_>, k: f32) -> Ellipsis {
+    let mut buf = shape(face, shaper, "\u{2026}");
     if buf.glyph_infos().iter().any(|g| g.glyph_id == 0) {
-        buf = shape(shaper, "...");
+        buf = shape(face, shaper, "...");
     }
     let mut x = 0.0;
     let mut glyphs = Vec::new();
@@ -811,6 +814,19 @@ mod tests {
         let face = t.fonts().get(0).unwrap();
         let font = face.skrifa();
         font.glyph_metrics(FontSize::new(size), face.location()).advance_width(font.charmap().map(c).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn laying_out_text_again_reuses_its_shape_plan() {
+        let t = shaped();
+        let first = t.layout("Hello there", &STYLE, Some(60.0));
+        let compiled = t.fonts().get(0).unwrap().plans_compiled();
+        assert_eq!(compiled, 1);
+        let again = t.layout("Hello there", &STYLE, Some(60.0));
+        assert_eq!(again, first);
+        // Other Latin text and another size share the plan too.
+        t.layout("Other words", &TextStyle::new(0, 14.0, 18.0), None);
+        assert_eq!(t.fonts().get(0).unwrap().plans_compiled(), 1);
     }
 
     #[test]
