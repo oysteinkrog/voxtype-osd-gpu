@@ -594,7 +594,7 @@ fn blur_rects_in(rect: [f32; 4], radius: f32, clip: Option<IRect>, out: &mut Vec
     let far = |v: f32| v.clamp(-FAR, FAR);
     let (x0, y0) = (far(rect[0]).floor() as i32, far(rect[1]).floor() as i32);
     let (x1, y1) = (far(rect[0] + rect[2]).ceil() as i32, far(rect[1] + rect[3]).ceil() as i32);
-    let r = radius.min(rect[2] / 2.0).min(rect[3] / 2.0).max(0.0).min(FAR);
+    let r = radius.min(rect[2] / 2.0).min(rect[3] / 2.0).clamp(0.0, FAR);
     let ri = r.ceil() as i32;
     let mut push = |rect: IRect| match clip {
         None => out.push(rect),
@@ -957,6 +957,9 @@ struct GlassKey {
     warp: Option<Warp>,
 }
 
+/// A layer's transform and warp, in [`BlurKey`].
+type LayerKey = (Affine, Option<Warp>);
+
 /// The inputs of a list's blur region (RV-01). A NaN anywhere makes it unequal to itself,
 /// which only costs a rebuild.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -968,7 +971,7 @@ struct BlurKey {
     segs: Vec<VectorSeg>,
     /// Per [`BlurBehind`] that holds blur: its box, radius, shape and its layer's transform
     /// and warp.
-    behind: Vec<([f32; 4], f32, GlassShape, Option<(Affine, Option<Warp>)>)>,
+    behind: Vec<([f32; 4], f32, GlassShape, Option<LayerKey>)>,
 }
 
 /// [`DisplayList::blur_region`] kept across samples (RV-01). The live host samples the scene
@@ -1386,8 +1389,8 @@ mod tests {
             let mut out: Vec<IRect> = Vec::new();
             let (y0, y1) = (ymin.floor() as i32, ymax.ceil() as i32);
             let ty = tol.min(0.45);
-            let (mut open, mut spans, mut at, mut both): (Vec<usize>, Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[f32; 2]>) =
-                Default::default();
+            let mut open: Vec<usize> = Vec::new();
+            let (mut spans, mut at, mut both) = (Vec::new(), Vec::new(), Vec::new());
             let mut y = y0;
             while y < y1 {
                 let yb = (y + band).min(y1);
