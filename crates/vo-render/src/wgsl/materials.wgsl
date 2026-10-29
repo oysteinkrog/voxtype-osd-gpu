@@ -86,6 +86,9 @@ struct MatIn {
 // transparent black, no ink and no words, so an app function that calls them compiles
 // everywhere; their bind groups and cost are unchanged.
 
+// vo: texture helpers begin
+// The textured helpers (`material_tex.wgsl`) define these two again, so other shaders
+// that swap in the textured helpers have them too.
 const NO_WORD_ID: u32 = 0xffffffffu;
 
 struct WordHit {
@@ -95,7 +98,6 @@ struct WordHit {
   rect: vec4f,
 };
 
-// vo: texture helpers begin
 fn tex_backdrop (px: vec2f) -> vec4f {
   return vec4f (0.0);
 }

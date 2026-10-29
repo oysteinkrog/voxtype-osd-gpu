@@ -41,6 +41,15 @@ fn tex_image (slot: u32, uv: vec2f) -> vec4f {
 // is (word count, target pixels per field texel, field width, field height); a field
 // scale of 0 means no field.
 
+const NO_WORD_ID: u32 = 0xffffffffu;
+
+struct WordHit {
+  id: u32,
+  age: f32,
+  dist: f32,
+  rect: vec4f,
+};
+
 struct TextWord {
   rect: vec4f,
   id: u32,
