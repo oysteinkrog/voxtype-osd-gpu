@@ -205,3 +205,148 @@ fn settled_text_builds_the_field_once() {
     assert_eq!(big.size(), Some([300, 150]));
     println!("text field memory at 600x300: {} KiB", big.memory_bytes() / 1024);
 }
+
+fn f16_to_f32(h: u16) -> f32 {
+    let (s, e, m) = ((h >> 15) as u32, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f32);
+    let v = match e {
+        0 => m * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        e => (1.0 + m / 1024.0) * 2f32.powi(e - 15),
+    };
+    if s == 1 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// The field texture as `[distance, dir x, dir y, coverage]` per texel, rows top to bottom.
+fn read_field(gpu: &support::Gpu, field: &TextField) -> (u32, u32, Vec<[f32; 4]>) {
+    let tex = field.texture().expect("a field");
+    let (w, h) = (tex.width(), tex.height());
+    let row = (w * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: row as u64 * h as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([enc.finish()]);
+    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    let data = buf.slice(..).get_mapped_range().expect("mapped");
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in 0..h as usize {
+        for p in data[y * row as usize..][..(w * 8) as usize].as_chunks::<8>().0 {
+            out.push(std::array::from_fn(|c| f16_to_f32(u16::from_le_bytes([p[2 * c], p[2 * c + 1]]))));
+        }
+    }
+    (w, h, out)
+}
+
+/// A few live words on a probe panel, at `dx` target pixels to the right.
+fn words_list(fonts: &FontRegistry, scale: f32, text: &str, dx: f32) -> DisplayList {
+    let mut model = WordModel::new();
+    model.update(text);
+    let root = Element::panel("root")
+        .size(W, H)
+        .pad_edges(20.0, 0.0, 0.0, 10.0 + dx)
+        .fill(Color::WHITE)
+        .material(Material::custom(PROBE).reads_text().param(0, [0.0, 0.0, 0.0, 0.0]))
+        .child(Element::live_text("live", model.words()).text_style(TextStyle::new(0, 34.0, 40.0)));
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    scene.set_viewport(0.0, Size::new(W, H), scale);
+    scene.apply(root, 0.0);
+    scene.sample(2.0)
+}
+
+/// The field (EG-39) matches a brute-force search over its own coverage at every texel off
+/// the ink's edge: the distance between texel centres to the nearest texel of the other kind,
+/// less half a texel, in target pixels; the direction points away from that texel.
+fn check_exact(gpu: &support::Gpu, rig: &mut Rig, list: &DisplayList, scale: f32) {
+    let size = [(W * scale).ceil() as u32, (H * scale).ceil() as u32];
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    assert!(rig.field.update_words(&mut rig.off.renderer, list, size, scale, 2.0, &mut enc));
+    gpu.queue.submit([enc.finish()]);
+    let (w, h, f) = read_field(gpu, &rig.field);
+    let ink: Vec<bool> = f.iter().map(|t| t[3] >= 0.5).collect();
+    assert!(ink.iter().any(|&i| i), "no ink in the field");
+    // Target pixels per field texel.
+    let k = 2.0;
+    let mut checked = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let t = f[(y * w + x) as usize];
+            if t[3] > 0.0 && t[3] < 1.0 {
+                continue;
+            }
+            let me = ink[(y * w + x) as usize];
+            let mut best = (f32::INFINITY, [0.0f32; 2]);
+            for qy in 0..h {
+                for qx in 0..w {
+                    if ink[(qy * w + qx) as usize] != me {
+                        let v = [qx as f32 - x as f32, qy as f32 - y as f32];
+                        let d = v[0].hypot(v[1]);
+                        if d < best.0 {
+                            best = (d, v);
+                        }
+                    }
+                }
+            }
+            let want = (best.0 - 0.5) * k * if me { -1.0 } else { 1.0 };
+            let tol = 0.01 + want.abs() / 1000.0;
+            assert!(
+                (t[0] - want).abs() <= tol,
+                "scale {scale} texel ({x}, {y}) ink {me}: distance {} want {want}",
+                t[0]
+            );
+            // Away from the ink: from the nearest ink for a texel outside, toward the nearest
+            // outside texel for one inside. Ties may pick another texel at the same distance,
+            // so check that the direction leads to a texel of the other kind that near.
+            let dir = if me { [t[1], t[2]] } else { [-t[1], -t[2]] };
+            let at = [x as f32 + dir[0] * best.0, y as f32 + dir[1] * best.0];
+            let (qx, qy) = (at[0].round(), at[1].round());
+            let hit = qx >= 0.0 && qy >= 0.0 && (qx as u32) < w && (qy as u32) < h && {
+                ink[(qy as u32 * w + qx as u32) as usize] != me
+            };
+            assert!(hit, "scale {scale} texel ({x}, {y}): direction {dir:?} misses at distance {}", best.0);
+            checked += 1;
+        }
+    }
+    assert!(checked > (w * h / 2) as usize, "only {checked} texels off the edge");
+}
+
+#[test]
+fn the_field_is_exact_and_follows_moving_text() {
+    let gpu = support::gpu();
+    let fonts = fonts();
+    let mut rig = Rig::new(&gpu, &fonts, false);
+    for scale in [1.0f32, 1.5] {
+        for dx in [0.0f32, 13.3] {
+            check_exact(&gpu, &mut rig, &words_list(&fonts, scale, "so the window", dx), scale);
+        }
+    }
+    // A list that draws nothing: every texel far outside.
+    let mut empty = Rig::new(&gpu, &fonts, false);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    assert!(empty.field.update_words(
+        &mut empty.off.renderer,
+        &words_list(&fonts, 1.0, "", 0.0),
+        [240, 120],
+        1.0,
+        2.0,
+        &mut enc
+    ));
+    gpu.queue.submit([enc.finish()]);
+    let (_, _, f) = read_field(&gpu, &empty.field);
+    assert!(f.iter().all(|t| t[0] >= 1e4 && t[3] == 0.0), "an empty field reads far outside");
+}

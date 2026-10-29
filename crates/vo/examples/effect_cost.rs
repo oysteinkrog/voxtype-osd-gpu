@@ -73,6 +73,7 @@ const CASES: &[&str] = &[
     "tapered strokes",
     "shape-group-8",
     "grid-words",
+    "grid-words-moving",
     "glyphs-2000-rotating",
     "panes-20",
 ];
@@ -123,7 +124,9 @@ enum Msg {
 fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     let k = size.h / 300.0;
     let case = CASES[i];
-    // The grid-words card holds still, so its text field is rebuilt only when a word comes.
+    // The grid-words card holds still, so its text field is rebuilt only when a word comes;
+    // grid-words-moving drifts like the others, so the field is rebuilt every frame (EG-39).
+    let grid = case.starts_with("grid-words");
     let drift = if case == "grid-words" { 0.0 } else { (t * 1.7).sin() as f32 * 24.0 * k };
     let text = |key: &str, s: &str, px: f32, c: u32| {
         let e = Element::label(key.to_string(), s)
@@ -143,7 +146,7 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         .border(Color::hex(0x4cc9f0, 0.8), 1.5 * k)
         .child(text("title", case, 30.0, 0xffffff))
         .child(text("l1", "open the configuration file and set the theme", 17.0, 0xc8d3e0))
-        .child(if case == "grid-words" {
+        .child(if grid {
             Element::live_text("l2", grid_words(t).words())
                 .text_style(TextStyle::new(0, 17.0 * k, 17.0 * 1.25 * k))
                 .color(Color::hex(0xc8d3e0, 1.0))
@@ -160,7 +163,7 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "shadow" => card = card.shadow(Color::rgba(0.0, 0.0, 0.0, 0.6), 0.0, 8.0 * k, 18.0 * k),
         "motion blur" => card = card.motion_blur(1.0 / 30.0),
         // The grid is drawn behind the card (below); the card lets it show through.
-        "grid-words" => card = card.fill(Color::hex(0x10141c, 0.35)),
+        "grid-words" | "grid-words-moving" => card = card.fill(Color::hex(0x10141c, 0.35)),
         "material backdrop" => {
             card = card.fill(Color::hex(0x10141c, 0.55)).material(Material::custom(FROST).reads_backdrop())
         }
@@ -259,7 +262,7 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     if case == "water pool" {
         return root.child(layer).child(water_pool(size, t).view("water"));
     }
-    if case == "grid-words" {
+    if case.starts_with("grid-words") {
         // A material on a panel also paints its children, so the grid is a sibling under the
         // card, across the whole surface.
         let m =
@@ -604,7 +607,8 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         scene.set_viewport(0.0, size, 1.0);
         let (mut gpu, mut cpu, mut sections) = (Vec::new(), Vec::new(), Vec::<(String, f64)>::new());
         // The text field (EG-31), built in its own submit, timed and added to the frame.
-        let mut field = (*name == "grid-words")
+        let mut field = name
+            .starts_with("grid-words")
             .then(|| (vo_render::text_field::TextField::new(&g.device, &g.queue), FieldClock::new(g)));
         // Ten frames to warm up pipelines and the atlas.
         for f in 0..frames + 10 {
@@ -637,7 +641,7 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         }
         if let Some((f, _)) = &field {
             println!(
-                "effect_cost: grid-words at {w}x{h}: field {:?} texels, {} KiB, built {} times in {} frames",
+                "effect_cost: {name} at {w}x{h}: field {:?} texels, {} KiB, built {} times in {} frames",
                 f.size().unwrap_or_default(),
                 f.memory_bytes() / 1024,
                 f.builds(),

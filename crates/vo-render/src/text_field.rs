@@ -4,11 +4,12 @@
 //! re-exports it.
 //!
 //! The text display list is drawn by the normal 2D renderer (Slug coverage) at half
-//! resolution into an `Rgba8Unorm` target, then a jump flood over 16-bit texel indices finds,
-//! for every texel, the nearest inside and outside texel. The result is one `Rgba16Float`
-//! texture: signed distance in target pixels (negative inside the ink), the unit direction
-//! away from the nearest ink, and the coverage. Coverage is alpha, so text drawn at partial
-//! opacity counts as thinner ink.
+//! resolution into an `Rgba8Unorm` target, then two compute passes find, for every texel, the
+//! nearest texel of the other kind (ink or not) exactly: a column pass, then a row search
+//! (EG-39; a jump flood of twelve passes did it before at about twice the cost). The result is
+//! one `Rgba16Float` texture: signed distance in target pixels (negative inside the ink), the
+//! unit direction away from the nearest ink, and the coverage. Coverage is alpha, so text
+//! drawn at partial opacity counts as thinner ink.
 //!
 //! [`TextField::update`] skips all of it when the list, size and scale are the same as last
 //! time, so a field over settled text costs nothing.
@@ -30,7 +31,10 @@ use vo_scene::material::READS_TEXT;
 use crate::{Renderer, Target};
 
 const FIELD_WGSL: &str = include_str!("wgsl/text_field.wgsl");
-const SLOT: u64 = 256;
+
+/// The largest field side in texels: the column pass holds a column in 1024 words of
+/// workgroup memory, and squared distances must fit in a `u32`.
+const MAX_SIDE: u32 = 16384;
 
 /// Words a material can see in the word table, newest first.
 pub const MAX_WORDS: usize = 64;
@@ -47,7 +51,8 @@ pub fn shader_source() -> &'static str {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
     size: [u32; 2],
-    step: u32,
+    /// 1 when the list draws nothing.
+    empty: u32,
     scale: f32,
 }
 
@@ -63,22 +68,22 @@ pub struct FieldBinding<'a> {
 struct Sized {
     size: [u32; 2],
     coverage: Target,
-    /// Flood textures, held for the bind groups.
-    _ping: [wgpu::Texture; 2],
+    /// The column pass's output, held for the bind groups.
+    _columns: wgpu::Texture,
     field: wgpu::Texture,
     field_view: wgpu::TextureView,
-    /// Bind groups: seed, one per step, resolve.
-    binds: Vec<wgpu::BindGroup>,
-    steps: Vec<u32>,
+    /// Bind groups: the column pass, the row pass.
+    binds: [wgpu::BindGroup; 2],
 }
 
 pub struct TextField {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    seed: wgpu::ComputePipeline,
-    step: wgpu::ComputePipeline,
-    resolve: wgpu::ComputePipeline,
+    columns: wgpu::ComputePipeline,
+    rows: wgpu::ComputePipeline,
     params: wgpu::Buffer,
+    /// Whether `params` says the field is empty now.
+    empty: bool,
     sized: Option<Sized>,
     /// Target pixels per field texel.
     downscale: f32,
@@ -126,20 +131,20 @@ impl TextField {
                 cache: None,
             })
         };
-        let (seed, step, resolve) = (pipe("cs_seed"), pipe("cs_step"), pipe("cs_resolve"));
+        let (columns, rows) = (pipe("cs_columns"), pipe("cs_rows"));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vo-text-field-params"),
-            size: SLOT * 32,
+            size: std::mem::size_of::<Params>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         TextField {
             device: device.clone(),
             queue: queue.clone(),
-            seed,
-            step,
-            resolve,
+            columns,
+            rows,
             params,
+            empty: false,
             sized: None,
             downscale,
             drawn: None,
@@ -150,8 +155,8 @@ impl TextField {
         }
     }
 
-    /// Records drawing `text` with `renderer` at `scale / downscale`, then the flood, into
-    /// `enc`, and returns true. `target_size` is the size in physical pixels of the target the
+    /// Records drawing `text` with `renderer` at `scale / downscale`, then the distance passes,
+    /// into `enc`, and returns true. `target_size` is the size in physical pixels of the target the
     /// field will be used with. The renderer's buffers are written now, so submit `enc` before
     /// the renderer encodes another list. Records nothing and returns false when the field
     /// already shows this list at this size and scale.
@@ -166,11 +171,16 @@ impl TextField {
         if self.drawn.as_ref().is_some_and(|(l, s, k)| l == text && *s == target_size && *k == scale) {
             return false;
         }
-        let size = target_size.map(|v| ((v as f32 / self.downscale).ceil() as u32).max(1));
+        let size = target_size.map(|v| ((v as f32 / self.downscale).ceil() as u32).clamp(1, MAX_SIDE));
         self.resize(size);
+        let empty = draws_nothing(text);
+        if empty != self.empty {
+            self.empty = empty;
+            self.write_params();
+        }
         let s = self.sized.as_ref().unwrap();
         renderer.encode(text, scale / self.downscale, &s.coverage, enc);
-        self.encode_flood(enc);
+        self.encode_field(enc);
         match &mut self.drawn {
             Some((l, s, k)) => {
                 l.clone_from(text);
@@ -251,25 +261,23 @@ impl TextField {
         }
     }
 
-    /// Records the seed, flood and resolve passes. The coverage must already be drawn.
-    fn encode_flood(&self, enc: &mut wgpu::CommandEncoder) {
+    /// Records the column and row passes. The coverage must already be drawn.
+    fn encode_field(&self, enc: &mut wgpu::CommandEncoder) {
         let s = self.sized.as_ref().unwrap();
-        let groups = [s.size[0].div_ceil(8), s.size[1].div_ceil(8)];
         let mut pass = enc
             .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("vo-text-field"), timestamp_writes: None });
-        let n = s.binds.len();
-        for (i, bind) in s.binds.iter().enumerate() {
-            let pipe = if i == 0 {
-                &self.seed
-            } else if i == n - 1 {
-                &self.resolve
-            } else {
-                &self.step
-            };
-            pass.set_pipeline(pipe);
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(groups[0], groups[1], 1);
-        }
+        pass.set_pipeline(&self.columns);
+        pass.set_bind_group(0, &s.binds[0], &[]);
+        pass.dispatch_workgroups(s.size[0], 1, 1);
+        pass.set_pipeline(&self.rows);
+        pass.set_bind_group(0, &s.binds[1], &[]);
+        pass.dispatch_workgroups(s.size[0].div_ceil(64), s.size[1], 1);
+    }
+
+    fn write_params(&self) {
+        let size = self.sized.as_ref().map_or([0; 2], |s| s.size);
+        let params = Params { size, empty: self.empty as u32, scale: self.downscale };
+        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
     }
 
     fn resize(&mut self, size: [u32; 2]) {
@@ -291,79 +299,41 @@ impl TextField {
         };
         use wgpu::TextureUsages as U;
         let coverage = Target::new(d, size[0], size[1], wgpu::TextureFormat::Rgba8Unorm);
-        let ping = [0, 1]
-            .map(|_| tex("vo-text-jfa", wgpu::TextureFormat::Rgba16Uint, U::STORAGE_BINDING | U::TEXTURE_BINDING));
+        let columns =
+            tex("vo-text-field-columns", wgpu::TextureFormat::R32Uint, U::STORAGE_BINDING | U::TEXTURE_BINDING);
         let field = tex(
             "vo-text-field",
             wgpu::TextureFormat::Rgba16Float,
             U::STORAGE_BINDING | U::TEXTURE_BINDING | U::COPY_SRC,
         );
         let field_view = field.create_view(&Default::default());
-
-        // Step widths: half the larger side rounded up to a power of two, down to 1, then a
-        // final 1 (JFA+1), which fixes most of the flood's rare misses.
-        let mut steps = Vec::new();
-        let mut k = size[0].max(size[1]).next_power_of_two() / 2;
-        while k >= 1 {
-            steps.push(k);
-            k /= 2;
-        }
-        steps.push(1);
-
-        // Params: slot 0 for seed and resolve (step unused), then one per step.
-        let scale = self.downscale;
-        let mut bytes = Vec::new();
-        for step in std::iter::once(0).chain(steps.iter().copied()) {
-            let start = bytes.len();
-            bytes.extend_from_slice(bytemuck::bytes_of(&Params { size, step, scale }));
-            bytes.resize(start + SLOT as usize, 0);
-        }
-        assert!(bytes.len() as u64 <= self.params.size(), "field too large for the step table");
-        self.queue.write_buffer(&self.params, 0, &bytes);
-
-        let views = ping.each_ref().map(|t| t.create_view(&Default::default()));
+        let col_view = columns.create_view(&Default::default());
         let cov_view = coverage.texture().create_view(&Default::default());
-        let param = |slot: u64| {
-            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &self.params,
-                offset: slot * SLOT,
-                size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
-            })
-        };
         let view = |v| wgpu::BindingResource::TextureView(v);
-        let mut binds = Vec::new();
-        binds.push(d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-text-field-seed"),
-            layout: &self.seed.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: param(0) },
-                wgpu::BindGroupEntry { binding: 1, resource: view(&cov_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: view(&views[0]) },
-            ],
-        }));
-        // The seed writes ping 0; step i reads ping i % 2 and writes the other.
-        for i in 0..steps.len() {
-            binds.push(d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("vo-text-field-step"),
-                layout: &self.step.get_bind_group_layout(0),
+        let params = || self.params.as_entire_binding();
+        let binds = [
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-text-field-columns"),
+                layout: &self.columns.get_bind_group_layout(0),
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: param(1 + i as u64) },
-                    wgpu::BindGroupEntry { binding: 2, resource: view(&views[i % 2]) },
-                    wgpu::BindGroupEntry { binding: 3, resource: view(&views[(i + 1) % 2]) },
+                    wgpu::BindGroupEntry { binding: 0, resource: params() },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(&cov_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: view(&col_view) },
                 ],
-            }));
-        }
-        binds.push(d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-text-field-resolve"),
-            layout: &self.resolve.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: param(0) },
-                wgpu::BindGroupEntry { binding: 1, resource: view(&cov_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: view(&views[steps.len() % 2]) },
-                wgpu::BindGroupEntry { binding: 4, resource: view(&field_view) },
-            ],
-        }));
-        self.sized = Some(Sized { size, coverage, _ping: ping, field, field_view, binds, steps });
+            }),
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-text-field-rows"),
+                layout: &self.rows.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: params() },
+                    wgpu::BindGroupEntry { binding: 1, resource: view(&cov_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: view(&col_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: view(&field_view) },
+                ],
+            }),
+        ];
+        self.sized = Some(Sized { size, coverage, _columns: columns, field, field_view, binds });
+        self.write_params();
     }
 
     /// The field for a shader, once [`TextField::update`] has run.
@@ -377,22 +347,17 @@ impl TextField {
         self.sized.as_ref().map(|s| &s.field)
     }
 
-    /// Number of flood steps at the current size.
-    pub fn steps(&self) -> usize {
-        self.sized.as_ref().map_or(0, |s| s.steps.len())
-    }
-
     /// Times the field has been built (`update` returned true).
     pub fn builds(&self) -> u64 {
         self.builds
     }
 
-    /// GPU memory the field holds now, in bytes: the coverage, the two flood textures and the
-    /// field itself.
+    /// GPU memory the field holds now, in bytes: the coverage, the column pass's texture and
+    /// the field itself.
     pub fn memory_bytes(&self) -> u64 {
         self.sized.as_ref().map_or(0, |s| {
             let texels = s.size[0] as u64 * s.size[1] as u64;
-            texels * (4 + 2 * 8 + 8)
+            texels * (4 + 4 + 8)
         })
     }
 
@@ -400,6 +365,11 @@ impl TextField {
     pub fn size(&self) -> Option<[u32; 2]> {
         self.sized.as_ref().map(|s| s.size)
     }
+}
+
+/// Whether `list` draws nothing at all: every item is a layer or empty.
+fn draws_nothing(list: &DisplayList) -> bool {
+    list.items.iter().all(|it| it.kind == ItemKind::Layer || it.len == 0)
 }
 
 /// Whether a material in `list` reads the text field.
