@@ -324,26 +324,20 @@ impl Tracker {
         let n = self.frames.len();
         let mut now: Vec<(Key, Sample)> = Vec::new();
         collect(list, &mut now);
-        let shifts = self.word_steps(&now);
+        let steps = self.word_steps(&now);
+        let moves = self.word_moves(n, &now);
         let mut open: HashMap<Key, Vec<usize>> = HashMap::new();
         let mut drawn = Vec::with_capacity(now.len());
         for (key, s) in now {
             // The nearest glyph with the same key in the last frame, within an em and a half,
-            // after the step its whole word took.
-            let step = shifts.get(&key.0).copied().unwrap_or(Point::new(0.0, 0.0));
-            let best = self.open.get(&key).and_then(|cands| {
-                cands
-                    .iter()
-                    .copied()
-                    .filter(|&i| self.tracks[i].last_frame() + 1 == n)
-                    .map(|i| {
-                        let p = self.tracks[i].samples.last().unwrap();
-                        (i, (p.pos.x + step.x - s.pos.x).hypot(p.pos.y + step.y - s.pos.y), p.em)
-                    })
-                    .filter(|&(_, d, em)| d <= 1.5 * em.max(s.em))
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(i, _, _)| i)
-            });
+            // after the step its whole word took (`word_steps`) or, for a repeated letter, the
+            // move its word's single letters made (`word_moves`).
+            let best = match (steps.get(&key.0), moves.get(&key)) {
+                (Some(&d), _) => self.nearest(n, &key, &s, d),
+                (None, Some(None)) => None,
+                (None, Some(&Some(d))) => self.nearest(n, &key, &s, d),
+                (None, None) => self.nearest(n, &key, &s, Point::new(0.0, 0.0)),
+            };
             let i = match best {
                 Some(i) => {
                     self.tracks[i].samples.push(s);
@@ -404,6 +398,68 @@ impl Tracker {
             }
         }
         steps
+    }
+
+    /// The track in the last frame nearest to `s` with its key, within an em and a half of
+    /// where it would be after moving by `d`.
+    fn nearest(&self, n: usize, key: &Key, s: &Sample, d: Point) -> Option<usize> {
+        self.open.get(key).and_then(|cands| {
+            cands
+                .iter()
+                .copied()
+                .filter(|&i| self.tracks[i].last_frame() + 1 == n)
+                .map(|i| {
+                    let p = self.tracks[i].samples.last().unwrap();
+                    (i, (p.pos.x + d.x - s.pos.x).hypot(p.pos.y + d.y - s.pos.y), p.em)
+                })
+                .filter(|&(_, dist, em)| dist <= 1.5 * em.max(s.em))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _, _)| i)
+        })
+    }
+
+    /// How each repeated letter of a word is matched: after the move its word's single
+    /// letters made (the median of theirs), or not at all when none of them could be matched
+    /// (the word jumped further than an em and a half). Matched glyph by glyph, a repeated
+    /// letter ("u" and "t" in "punctuation") is taken for its twin when its word moves along
+    /// the row by about a letter or more, as a centred line does when it re-centres in one
+    /// jump under reduced motion, and the word reads 146 % wide. Keys the map leaves out
+    /// (single letters, words of only repeated letters) are matched as they are.
+    fn word_moves(&self, n: usize, now: &[(Key, Sample)]) -> HashMap<Key, Option<Point>> {
+        let mut count: HashMap<Key, u32> = HashMap::new();
+        for (key, _) in now {
+            *count.entry(*key).or_default() += 1;
+        }
+        // Per word: whether it has a single letter, and the moves of those that matched.
+        let mut words: HashMap<u32, (bool, Vec<Point>)> = HashMap::new();
+        for (key, s) in now {
+            if count[key] != 1 {
+                continue;
+            }
+            let w = words.entry(key.0).or_default();
+            w.0 = true;
+            if let Some(i) = self.nearest(n, key, s, Point::new(0.0, 0.0)) {
+                let p = self.tracks[i].samples.last().unwrap().pos;
+                w.1.push(Point::new(s.pos.x - p.x, s.pos.y - p.y));
+            }
+        }
+        let median = |mut v: Vec<f32>| {
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut out = HashMap::new();
+        for (key, &c) in &count {
+            if c < 2 {
+                continue;
+            }
+            let Some((true, d)) = words.get(&key.0) else {
+                continue;
+            };
+            let m = (!d.is_empty())
+                .then(|| Point::new(median(d.iter().map(|p| p.x).collect()), median(d.iter().map(|p| p.y).collect())));
+            out.insert(*key, m);
+        }
+        out
     }
 
     /// A removed letter's ghost (a correction's, MO-20): the glyph fades to under the
@@ -1262,6 +1318,36 @@ mod tests {
                 _ => 786.3,
             };
             tr.push(n as f64 / 30.0, &list(punctuation(x)));
+        }
+        tr.check(&Envelope::default()).assert_ok();
+    }
+
+    #[test]
+    fn a_word_that_jumps_far_and_then_respaces_starts_over_as_a_whole() {
+        // phosphor at 10 fps: "punctuation" jumps 252 px left, then 62 px more with its
+        // letters 1 % wider apart. No single letter can be matched across the first jump,
+        // so its repeated letters are not matched either, and the word reads as set.
+        const X: [f32; 11] = [0.0, 16.8, 33.7, 50.5, 67.3, 84.1, 101.0, 117.8, 134.6, 151.5, 168.3];
+        const G: [u32; 11] = [408, 439, 362, 272, 431, 439, 241, 431, 328, 373, 362];
+        let punctuation = |x0: f32, k: f32| -> Vec<GlyphInstance> {
+            X.iter()
+                .zip(G)
+                .map(|(&x, glyph)| GlyphInstance {
+                    pos: Point::new(x0 + x * k, 306.0),
+                    size: 18.0,
+                    glyph,
+                    ..word(1, 0.0, 0.0, 0.0, 1.0)[0]
+                })
+                .collect()
+        };
+        let mut tr = Tracker::new();
+        for n in 0..20usize {
+            let l = match n {
+                0..=6 => punctuation(366.0, 1.0),
+                7 => punctuation(114.2, 1.0),
+                _ => punctuation(51.8, 1.012),
+            };
+            tr.push(n as f64 / 10.0, &list(l));
         }
         tr.check(&Envelope::default()).assert_ok();
     }
