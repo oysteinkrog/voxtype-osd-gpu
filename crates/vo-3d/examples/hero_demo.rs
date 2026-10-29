@@ -1,14 +1,18 @@
 //! The raymarched hero (`vo_3d::hero`) over time: a liquid chrome blob (concept 05), an
-//! aurora orb (01) and a jellyfish bell (15), each driven by a made-up voice level so it
-//! swells and ripples while speech runs and settles in the pauses.
+//! aurora orb (01), a jellyfish bell (15), and two scenes of several parts with see-through
+//! skins: a jellyfish (bell, four membranes, six drip beads) and chrome with an aurora inside.
+//! Each is driven by a made-up voice level so it swells and ripples while speech runs and
+//! settles in the pauses.
 //!
 //!   cargo run --release -p vo-3d --example hero_demo -- [--out DIR]
 //!   cargo run --release -p vo-3d --example hero_demo -- --bench
 //!
-//! The default writes `DIR/hero_demo.png` (default DIR `/var/tmp/claude/fw-hero`): the three
-//! heroes at six moments, one row each. `--bench` prints GPU time per frame (timestamp
-//! queries) for each hero alone, in a box a third of the frame's height wide plus its halo,
-//! in a 600x300 and a 1920x1080 frame, at 48 and at 24 march steps.
+//! The default writes `DIR/hero_demo.png` (default DIR `/var/tmp/claude/fw-hero`): the five
+//! heroes at six moments, one row each, and a last row of the two scenes under reduced motion.
+//! `--bench` prints GPU time per frame (timestamp queries) for each hero alone, in a box 0.55
+//! of the frame's height wide plus its halo, in a 600x300 and a 1920x1080 frame, at 48 and at
+//! 24 march steps; then the two scenes in a 200 px box at 600x300 and 48 steps against their
+//! 0.5 ms p95 budget. Without timestamp queries it says so and exits 0.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,12 +45,15 @@ enum Kind {
     Chrome,
     Aurora,
     Bell,
+    Jellyfish,
+    AuroraChrome,
 }
 
 #[derive(Debug)]
 struct Hero {
     kind: Kind,
     steps: u32,
+    reduced: bool,
 }
 
 impl HeroSource for Hero {
@@ -102,14 +109,15 @@ impl HeroSource for Hero {
                 spin: 0.15 * phase,
                 ..Default::default()
             },
+            Kind::Jellyfish => HeroFrame::jellyfish(phase, v, self.reduced),
+            Kind::AuroraChrome => HeroFrame::aurora_chrome(phase, v, self.reduced),
         };
         HeroFrame { steps: self.steps, ..f }
     }
 }
 
-/// One hero centred in a frame of `size`, its box a third of the height wide.
-fn view(h: &Arc<dyn GpuSource>, size: Size) -> Element<()> {
-    let d = size.h * 0.55;
+/// One hero centred in a frame of `size` in a `d` px box.
+fn view(h: &Arc<dyn GpuSource>, size: Size, d: f32) -> Element<()> {
     Element::panel("root")
         .size(size.w, size.h)
         .fill(Color::hex(0x07090f, 1.0))
@@ -118,14 +126,15 @@ fn view(h: &Arc<dyn GpuSource>, size: Size) -> Element<()> {
         .child(Element::gpu("hero", h.clone()).size(d, d))
 }
 
-fn sample(h: &Arc<dyn GpuSource>, size: Size, t: f64) -> DisplayList {
+fn sample(h: &Arc<dyn GpuSource>, size: Size, d: f32, t: f64) -> DisplayList {
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, size, 1.0);
-    scene.apply(view(h, size), 0.0);
+    scene.apply(view(h, size, d), 0.0);
     scene.sample(t)
 }
 
-fn gpu() -> (wgpu::Device, wgpu::Queue) {
+/// A device, with timestamp queries when the adapter has them (the bool).
+fn gpu() -> (wgpu::Device, wgpu::Queue, bool) {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(desc);
@@ -136,18 +145,34 @@ fn gpu() -> (wgpu::Device, wgpu::Queue) {
         apply_limit_buckets: false,
     }))
     .expect("a Vulkan adapter");
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let ts = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let timed = adapter.features().contains(ts);
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("hero-demo"),
-        required_features: wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        required_features: if timed { ts } else { wgpu::Features::empty() },
         ..Default::default()
     }))
-    .expect("a GPU device")
+    .expect("a GPU device");
+    (device, queue, timed)
 }
 
-const KINDS: [(&str, Kind); 3] = [("chrome", Kind::Chrome), ("aurora", Kind::Aurora), ("bell", Kind::Bell)];
+const KINDS: [(&str, Kind); 5] = [
+    ("chrome", Kind::Chrome),
+    ("aurora", Kind::Aurora),
+    ("bell", Kind::Bell),
+    ("jellyfish", Kind::Jellyfish),
+    ("aurora-chrome", Kind::AuroraChrome),
+];
+
+/// The scenes' budget: p95 per frame at 600x300 in a 200 px box, 48 steps.
+const SCENE_BUDGET_MS: f64 = 0.5;
 
 fn bench() {
-    let (device, queue) = gpu();
+    let (device, queue, timed) = gpu();
+    if !timed {
+        println!("hero_demo bench: this GPU has no timestamp queries; nothing measured");
+        return;
+    }
     let period = queue.get_timestamp_period() as f64;
     let mut renderer = Renderer::new(&device, &queue);
     install(&mut renderer);
@@ -158,37 +183,48 @@ fn bench() {
     };
     let resolve = buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buf(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+    let mut measure = |h: &Arc<dyn GpuSource>, w: u32, ht: u32, d: Option<f32>| {
+        let size = Size::new(w as f32, ht as f32);
+        let target = Target::new(&device, w, ht, FORMAT);
+        let mut times = Vec::new();
+        for i in 0..140 {
+            let list = sample(h, size, d.unwrap_or(size.h * 0.55), 1.0 + i as f64 / 60.0);
+            let mut enc = device.create_command_encoder(&Default::default());
+            enc.write_timestamp(&qs, 0);
+            renderer.encode(&list, 1.0, &target, &mut enc);
+            enc.write_timestamp(&qs, 1);
+            enc.resolve_query_set(&qs, 0..2, &resolve, 0);
+            enc.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16);
+            queue.submit([enc.finish()]);
+            read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let ts: [u64; 2] = bytemuck::pod_read_unaligned(&read.slice(..).get_mapped_range().unwrap()[..16]);
+            read.unmap();
+            if i >= 20 {
+                times.push((ts[1] - ts[0]) as f64 * period / 1e6);
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        (times[times.len() / 2], times[times.len() * 95 / 100])
+    };
     for (name, kind) in KINDS {
         for steps in [48, 24] {
-            let h = hero(Hero { kind, steps });
-            let mut line = format!("hero_demo bench: {name:7} {steps:2} steps");
+            let h = hero(Hero { kind, steps, reduced: false });
+            let mut line = format!("hero_demo bench: {name:13} {steps:2} steps");
             for (w, ht) in [(600u32, 300u32), (1920, 1080)] {
-                let size = Size::new(w as f32, ht as f32);
-                let target = Target::new(&device, w, ht, FORMAT);
-                let mut times = Vec::new();
-                for i in 0..140 {
-                    let list = sample(&h, size, 1.0 + i as f64 / 60.0);
-                    let mut enc = device.create_command_encoder(&Default::default());
-                    enc.write_timestamp(&qs, 0);
-                    renderer.encode(&list, 1.0, &target, &mut enc);
-                    enc.write_timestamp(&qs, 1);
-                    enc.resolve_query_set(&qs, 0..2, &resolve, 0);
-                    enc.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16);
-                    queue.submit([enc.finish()]);
-                    read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                    let ts: [u64; 2] = bytemuck::pod_read_unaligned(&read.slice(..).get_mapped_range().unwrap()[..16]);
-                    read.unmap();
-                    if i >= 20 {
-                        times.push((ts[1] - ts[0]) as f64 * period / 1e6);
-                    }
-                }
-                times.sort_by(f64::total_cmp);
-                let (median, p95) = (times[times.len() / 2], times[times.len() * 95 / 100]);
+                let (median, p95) = measure(&h, w, ht, None);
                 line += &format!("  {w}x{ht}: {median:.3} ms median, {p95:.3} ms p95;");
             }
             println!("{line}");
         }
+    }
+    for (name, kind) in [("jellyfish", Kind::Jellyfish), ("aurora-chrome", Kind::AuroraChrome)] {
+        let (median, p95) = measure(&hero(Hero { kind, steps: 48, reduced: false }), 600, 300, Some(200.0));
+        let verdict = if p95 <= SCENE_BUDGET_MS { "within" } else { "OVER" };
+        println!(
+            "hero_demo bench: {name:13} 200 px box, 600x300, 48 steps: {median:.3} ms median, {p95:.3} ms p95, \
+             {verdict} the {SCENE_BUDGET_MS} ms budget"
+        );
     }
 }
 
@@ -204,24 +240,37 @@ fn main() {
     }
     let (w, h) = (300u32, 200u32);
     let size = Size::new(w as f32, h as f32);
-    let (device, queue) = gpu();
+    let (device, queue, _) = gpu();
     let mut off = Offscreen::new(&device, &queue);
     install(&mut off.renderer);
     let (cols, gap) = (6u32, 6u32);
-    let rows = KINDS.len() as u32;
+    // The five heroes, then a row of the two scenes under reduced motion, three moments each.
+    let rows = KINDS.len() as u32 + 1;
     let (sw, sh) = (cols * w + (cols + 1) * gap, rows * h + (rows + 1) * gap);
     let mut sheet = vec![0u8; (sw * sh * 4) as usize];
-    for (r, (_, kind)) in KINDS.iter().enumerate() {
-        let src = hero(Hero { kind: *kind, steps: 48 });
-        for c in 0..cols {
-            let t = 0.4 + 0.35 * c as f64;
-            let rgba = off.render_to_rgba(&sample(&src, size, t), [w, h], 1.0);
-            let (x0, y0) = (gap + c * (w + gap), gap + r as u32 * (h + gap));
-            for y in 0..h {
-                let s = (y * w * 4) as usize;
-                let d = (((y0 + y) * sw + x0) * 4) as usize;
-                sheet[d..d + (w * 4) as usize].copy_from_slice(&rgba[s..s + (w * 4) as usize]);
+    let rows_of = KINDS.iter().map(|(_, k)| (*k, false)).chain([(Kind::Jellyfish, true), (Kind::AuroraChrome, true)]);
+    let mut cells = Vec::new();
+    for (i, (kind, reduced)) in rows_of.enumerate() {
+        if reduced {
+            // Reduced motion: three columns each, the scene at three moments.
+            for c in 0..3u32 {
+                cells.push((KINDS.len(), (i - KINDS.len()) as u32 * 3 + c, kind, true, c));
             }
+        } else {
+            for c in 0..cols {
+                cells.push((i, c, kind, false, c));
+            }
+        }
+    }
+    for (r, c, kind, reduced, moment) in cells {
+        let src = hero(Hero { kind, steps: 48, reduced });
+        let t = 0.4 + 0.35 * moment as f64;
+        let rgba = off.render_to_rgba(&sample(&src, size, size.h * 0.55, t), [w, h], 1.0);
+        let (x0, y0) = (gap + c * (w + gap), gap + r as u32 * (h + gap));
+        for y in 0..h {
+            let s = (y * w * 4) as usize;
+            let d = (((y0 + y) * sw + x0) * 4) as usize;
+            sheet[d..d + (w * 4) as usize].copy_from_slice(&rgba[s..s + (w * 4) as usize]);
         }
     }
     std::fs::create_dir_all(&out).unwrap();
