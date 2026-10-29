@@ -225,3 +225,30 @@ fn an_app_built_on_the_final_words_sets_every_live_text_in_its_view() {
     s.apply(build(0.2), 1.0);
     assert_eq!(first(&s.sample(1.5)), Some('O'));
 }
+
+#[test]
+fn spoken_ink_never_tracks_a_word_past_the_envelope() {
+    // Ten times the default looseness would widen "three" (pens 0 to 44) by 8 px, 18 %; it
+    // is held to LOOSE_SPAN of the word's span.
+    let view = |at: f32| {
+        let words: Vec<Word> =
+            [(1, "one"), (2, "two"), (3, "three")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+        let live = Element::live_text("live", &words)
+            .text_style(TextStyle::new(0, 20.0, 26.0))
+            .width(80.0)
+            .color(INK)
+            .final_pass(FinalPass::new(at).spoken(0.72, 0.18));
+        Element::column("root").child(live)
+    };
+    let span = |list: &DisplayList| {
+        let xs: Vec<f32> = list.glyphs.iter().filter(|g| g.word == 3).map(|g| g.pos.x).collect();
+        xs.last().unwrap() - xs[0]
+    };
+    let mut s = Scene::<()>::new();
+    s.apply(view(0.0), 0.0);
+    let loose = span(&s.sample(1.0));
+    s.apply(view(1.0), 1.0);
+    let set = span(&s.sample(2.0));
+    let wide = loose / set - 1.0;
+    assert!(wide > 0.03 && wide <= vo_scene::final_pass::LOOSE_SPAN + 1e-4, "{loose} {set}");
+}

@@ -37,8 +37,9 @@ pub struct FinalPass {
     /// Opacity of spoken ink ahead of the front, 0 to 1. At least 0.7 keeps the reading-line
     /// envelope; 1 turns spoken ink off.
     pub ink: f32,
-    /// Extra tracking of spoken ink, in em per glyph. At most 0.018 keeps even narrow words
-    /// under the envelope's 5 % tracking change.
+    /// Extra tracking of spoken ink, in em per glyph. A word is never tracked wider than
+    /// [`LOOSE_SPAN`] of its own span, so it stays under the envelope's 5 % tracking change
+    /// whatever its letters.
     pub loose: f32,
     /// How far a changed word dips when the front reaches it, in layout units.
     pub nod: f32,
@@ -113,6 +114,10 @@ pub fn pulse(dt: f64) -> f32 {
     }
 }
 
+/// The most spoken ink widens a word, as a fraction of the span from its first pen to its
+/// last: under the reading-line envelope's 5 % tracking change. At 0.018 em a glyph, a short
+/// word of narrow letters ("into" in 22 px type) would read 5.7 % wide.
+pub const LOOSE_SPAN: f32 = 0.04;
 /// The nod lasts this long.
 pub const NOD: f64 = 0.220;
 /// Punctuation pops in over this long; a capital grows over `GROW`.

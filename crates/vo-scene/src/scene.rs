@@ -2107,15 +2107,15 @@ impl<M> Scene<M> {
                         };
                         (p, lines, pos, newest, w)
                     });
-                    // Each word's glyph count, and how many of its glyphs are drawn, for the
-                    // spoken ink's loose tracking.
-                    let mut counts: Vec<(u32, u32, u32)> = Vec::new();
+                    // Each word's glyph count, how many of its glyphs are drawn, and the span
+                    // of its pens, for the spoken ink's loose tracking.
+                    let mut counts: Vec<(u32, u32, u32, f32, f32)> = Vec::new();
                     if set.is_some() {
                         for g in &n.shaped.glyphs {
                             let word = word_of(g.cluster);
                             match counts.iter_mut().find(|c| c.0 == word) {
-                                Some(c) => c.1 += 1,
-                                None => counts.push((word, 1, 0)),
+                                Some(c) => (c.1, c.3, c.4) = (c.1 + 1, c.3.min(g.pos.x), c.4.max(g.pos.x)),
+                                None => counts.push((word, 1, 0, g.pos.x, g.pos.x)),
                             }
                         }
                     }
@@ -2157,7 +2157,11 @@ impl<M> Scene<M> {
                             let a = final_pass::ahead(r, *pos, p.front) * w;
                             k *= 1.0 - (1.0 - p.ink) * a;
                             if let Some(c) = counts.iter_mut().find(|c| c.0 == word) {
-                                dx += p.loose * style.size * (c.2 as f32 - 0.5 * (c.1 as f32 - 1.0)) * a;
+                                // At most LOOSE_SPAN of the word's own span, so a short word
+                                // of narrow letters stays inside the envelope's tracking too.
+                                let gaps = (c.1 as f32 - 1.0).max(1.0);
+                                let per = (p.loose * style.size).min(final_pass::LOOSE_SPAN * (c.4 - c.3) / gaps);
+                                dx += per * (c.2 as f32 - 0.5 * (c.1 as f32 - 1.0)) * a;
                                 c.2 += 1;
                             }
                             if let Some(c) = n.pass_changed.iter().find(|c| c.id == word) {
