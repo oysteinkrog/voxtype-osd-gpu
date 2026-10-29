@@ -6,9 +6,9 @@
 //! The text display list is drawn by the normal 2D renderer (Slug coverage) at half
 //! resolution into an `Rgba8Unorm` target, then two compute passes find, for every texel, the
 //! nearest texel of the other kind (ink or not) exactly: a column pass, then a row search
-//! (EG-39; a jump flood of twelve passes did it before at about twice the cost). The result is
-//! one `Rgba16Float` texture: signed distance in target pixels (negative inside the ink), the
-//! unit direction away from the nearest ink, and the coverage. Coverage is alpha, so text
+//! (EG-39; a twelve-pass jump flood did it before, at about twice the GPU time). The result
+//! is one `Rgba16Float` texture: signed distance in target pixels (negative inside the ink),
+//! the unit direction away from the nearest ink, and the coverage. Coverage is alpha, so text
 //! drawn at partial opacity counts as thinner ink.
 //!
 //! [`TextField::update`] skips all of it when the list, size and scale are the same as last
@@ -32,9 +32,10 @@ use crate::{Renderer, Target};
 
 const FIELD_WGSL: &str = include_str!("wgsl/text_field.wgsl");
 
-/// The largest field side in texels: the column pass holds a column in 1024 words of
-/// workgroup memory, and squared distances must fit in a `u32`.
-const MAX_SIDE: u32 = 16384;
+/// The largest field size in texels: the row pass holds a row of up to 3584 texels and its
+/// block minimums in the 16 KiB of workgroup memory WebGPU guarantees, and the column pass a
+/// column of up to 32768 texels.
+const MAX_SIZE: [u32; 2] = [3584, 16384];
 
 /// Words a material can see in the word table, newest first.
 pub const MAX_WORDS: usize = 64;
@@ -171,7 +172,8 @@ impl TextField {
         if self.drawn.as_ref().is_some_and(|(l, s, k)| l == text && *s == target_size && *k == scale) {
             return false;
         }
-        let size = target_size.map(|v| ((v as f32 / self.downscale).ceil() as u32).clamp(1, MAX_SIDE));
+        let size: [u32; 2] =
+            std::array::from_fn(|i| ((target_size[i] as f32 / self.downscale).ceil() as u32).clamp(1, MAX_SIZE[i]));
         self.resize(size);
         let empty = draws_nothing(text);
         if empty != self.empty {
@@ -271,7 +273,7 @@ impl TextField {
         pass.dispatch_workgroups(s.size[0], 1, 1);
         pass.set_pipeline(&self.rows);
         pass.set_bind_group(0, &s.binds[1], &[]);
-        pass.dispatch_workgroups(s.size[0].div_ceil(64), s.size[1], 1);
+        pass.dispatch_workgroups(1, s.size[1], 1);
     }
 
     fn write_params(&self) {
