@@ -573,3 +573,61 @@ fn words_pushed_to_another_line_by_a_revision_stay_on_the_rows() {
         }
     }
 }
+
+/// Per row, the span of each word's visible glyph pens, `(row, word, left, right)`.
+fn spans(list: &DisplayList, base: f32) -> Vec<(i32, u32, f32, f32)> {
+    let mut out: Vec<(i32, u32, f32, f32)> = Vec::new();
+    for g in list.glyphs.iter().filter(|g| g.color.a > 0.05) {
+        let row = ((g.pos.y - base) / 26.0).round() as i32;
+        match out.iter_mut().find(|s| s.0 == row && s.1 == g.word) {
+            Some(s) => (s.2, s.3) = (s.2.min(g.pos.x), s.3.max(g.pos.x)),
+            None => out.push((row, g.word, g.pos.x, g.pos.x)),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_rewrapped_word_waits_for_the_words_sliding_through_its_place() {
+    // "popup" is pushed to the front of the second line; the words there slide right from
+    // where it lands. It shows once they have left its place, never under or over them, and
+    // its ghost leaves the first line before "the" slides into it.
+    let mut s = scene();
+    let before = [(1, "and"), (2, "set"), (3, "the"), (4, "popup"), (5, "theme"), (6, "to")];
+    s.apply(view(&words(&before), Some(200.0), false), 0.0);
+    let base = first(&s.sample(1.0), 1).1;
+    assert_eq!(first(&s.sample(1.0), 4).1, base, "popup starts on the first line");
+    let mut after = before;
+    after[1] = (2, "settings");
+    s.apply(view(&words(&after), Some(200.0), false), 1.0);
+    let settled = s.sample(5.0);
+    assert!((first(&settled, 4).1 - (base + 26.0)).abs() < 1e-3, "popup ends on the second line");
+    assert!(settled.glyphs.iter().all(|g| g.pos.y < base + 39.0), "the second line is the newest");
+    let mut shown = None;
+    for k in 0..=40 {
+        let t = 1.0 + k as f64 / 120.0;
+        let list = s.sample(t);
+        let sp = spans(&list, base);
+        // Its ghost on the first line is gone before the words sliding along reach it.
+        if let Some(&(_, _, a, b)) = sp.iter().find(|w| w.0 == 0 && w.1 == 4) {
+            for w in sp.iter().filter(|w| w.0 == 0 && w.1 != 4) {
+                assert!(w.3 < a || w.2 > b, "word {} over popup's ghost at +{:.3}", w.1, t - 1.0);
+            }
+        }
+        let popup = sp.iter().find(|w| w.0 == 1 && w.1 == 4);
+        if let Some(&(_, _, a, b)) = popup {
+            // Pens of other words on its row stay out of its span.
+            for w in sp.iter().filter(|w| w.0 == 1 && w.1 != 4) {
+                assert!(w.3 < a || w.2 > b, "word {} overlaps popup at +{:.3}: {w:?} vs {a}..{b}", w.1, t - 1.0);
+            }
+            if shown.is_none() {
+                // The newest line: it shows whole, readable from its first frame.
+                let on_row = |g: &&GlyphInstance| g.word == 4 && (g.pos.y - base - 26.0).abs() < 13.0;
+                let ink = list.glyphs.iter().filter(on_row).map(|g| g.color.a).fold(1.0, f32::min);
+                assert!(ink >= 0.7, "popup arrives at {ink} ink");
+                shown = Some(t);
+            }
+        }
+    }
+    assert!(shown.is_some_and(|t| t > 1.0), "popup waits, then shows: {shown:?}");
+}
