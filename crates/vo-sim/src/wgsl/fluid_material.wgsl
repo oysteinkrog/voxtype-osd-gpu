@@ -51,7 +51,8 @@ fn mat_fluid (m: Material, i: MatIn) -> vec4f {
     return vec4f (0.0);
   }
   let col = clamp (max (dye.rgb, vec3f (0.0)) / a, vec3f (0.0), vec3f (1.0));
-  var d = 1.0 - exp (-m.p[2].w * a);
+  // On light paper the eye needs more ink to see it than glowing dye on dark.
+  var d = 1.0 - exp (-m.p[2].w * select (1.0, 3.0, light) * a);
 
   if (style == 1u) {
     // Smoke: light added (little alpha), so the colour glows and a bloom picks it up. On
@@ -68,10 +69,10 @@ fn mat_fluid (m: Material, i: MatIn) -> vec4f {
     let rim = smoothstep (0.02, 0.2, length (grad)) * m.p[2].y;
     let grain = 1.0 + m.p[2].z * (fluid_grain (i.p * 0.8) - 0.5) * 2.0;
     d = clamp (d * grain * (0.85 + 0.4 * rim), 0.0, 1.0);
-    let k = select (1.0, 0.5, light);
+    let k = select (1.0, 0.4, light);
     return vec4f (col * k * (1.0 - 0.45 * rim) * d, d) * 0.9 * op;
   }
   // Ink: dense colour painted over; dark ink on light paper.
-  let k = select (1.0, 0.35, light);
+  let k = select (1.0, 0.25, light);
   return vec4f (col * k * d, d) * 0.92 * op;
 }

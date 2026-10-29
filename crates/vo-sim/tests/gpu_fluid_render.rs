@@ -73,7 +73,7 @@ fn layer(fonts: &FontRegistry, style: InkStyle, light: bool, reduced: bool) -> F
         .style(style)
         .light(light)
         .reduced_motion(reduced)
-        .smear(0.12)
+        .smear(0.08)
         .keep_clear(top, bottom)
         .words(words);
     if style == InkStyle::Smoke {

@@ -20,6 +20,7 @@ use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::displace::{Displace, Onset, Ripples};
 use vo::scene::display::BackdropRes;
 use vo::scene::element::{Element, TextStyle};
+use vo::scene::fluid::{FluidLayer, InkStyle, InkWord};
 use vo::scene::geom::{Color, Point, Rect, Size};
 use vo::scene::glass::{Glass, GlassKind, GlassShape};
 use vo::scene::material::Material;
@@ -63,6 +64,9 @@ const CASES: &[&str] = &[
     "displace ripples",
     "displace noise",
     "water pool",
+    "ink",
+    "smoke",
+    "watercolour",
     "tapered strokes",
 ];
 
@@ -182,6 +186,10 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         _ => layer,
     };
     let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+    if let Some(style) = ink_style(case) {
+        let fluid = ink_layer(size, t, style);
+        return root.child(fluid.view("ink")).child(layer).child(fluid.smear_view("smear"));
+    }
     if case == "water pool" {
         return root.child(layer).child(water_pool(size, t).view("water"));
     }
@@ -260,6 +268,57 @@ fn water_pool(size: Size, t: f64) -> WaterPool {
         .light(false)
         .reduced_motion(false)
         .drops(drops.filter(|d| d.t >= 0.0))
+}
+
+/// The ink style of an `ink`, `smoke` or `watercolour` case.
+fn ink_style(case: &str) -> Option<InkStyle> {
+    match case {
+        "ink" => Some(InkStyle::Ink),
+        "smoke" => Some(InkStyle::Smoke),
+        "watercolour" => Some(InkStyle::Watercolour),
+        _ => None,
+    }
+}
+
+/// A fluid layer (EG-12) behind the card: a word every 0.3 s along the card's text rows, the
+/// newest word's row kept clear and the rows above it smeared. Smoke glows.
+fn ink_layer(size: Size, t: f64, style: InkStyle) -> FluidLayer {
+    let k = size.h / 300.0;
+    let n = (t / 0.3).floor().max(0.0) as usize + 1;
+    let rect = |i: usize| {
+        Rect::new((90.0 + (i % 5) as f32 * 90.0) * k, (80.0 + (i / 5 % 2) as f32 * 34.0) * k, 70.0 * k, 26.0 * k)
+    };
+    let words = (0..n).map(|i| InkWord { t: i as f64 * 0.3, rect: rect(i), level: 0.4 + 0.15 * (i % 4) as f32 });
+    let newest = rect(n - 1);
+    let l = FluidLayer::new(size, Point::ZERO)
+        .style(style)
+        .light(false)
+        .reduced_motion(false)
+        .smear(0.08)
+        .keep_clear(newest.y - 4.0 * k, newest.y + newest.h + 4.0 * k)
+        .words(words);
+    if style == InkStyle::Smoke {
+        l.glow(0.8)
+    } else {
+        l
+    }
+}
+
+/// GPU ms of the fluid's own work per 60 fps frame at `size`: two ticks and one output pass.
+fn ink_sim_ms(g: &Gpu, size: Size) -> f64 {
+    use vo_sim::fluid::{Fluid, FluidSplat};
+    use vo_sim::Sim;
+    let cfg = vo_sim::fluid_render::layer_config(&ink_layer(size, 0.0, InkStyle::Ink), 1.0);
+    let mut fluid = Fluid::new(&g.device, &g.queue, cfg);
+    fluid.apply(&FluidSplat {
+        x: 0.3,
+        y: 0.5,
+        radius: 0.04,
+        velocity: [0.2, -0.5],
+        color: [0.2, 0.4, 1.0],
+        amount: 1.0,
+    });
+    fluid.gpu_cost(2).map_or(0.0, |c| c.tick_ms * 2.0 + c.output_ms)
 }
 
 /// GPU ms of the water's own work per 60 fps frame at `size`: two ticks and one output pass.
@@ -363,6 +422,9 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         let water_ms = if *name == "water pool" {
             vo_sim::water_render::install_pool(&mut r, &water_pool(size, 0.0), 1.0);
             water_sim_ms(g, size)
+        } else if let Some(style) = ink_style(name) {
+            vo_sim::fluid_render::install_layer(&mut r, &ink_layer(size, 0.0, style), 1.0);
+            ink_sim_ms(g, size)
         } else {
             0.0
         };
@@ -414,6 +476,7 @@ fn main() {
             renderer_setup: Some(std::sync::Arc::new(move |r: &mut Renderer| {
                 add_frost(r);
                 vo_sim::water_render::install_pool(r, &water_pool(size, 0.0), 1.0);
+                vo_sim::fluid_render::install_layer(r, &ink_layer(size, 0.0, InkStyle::Ink), 1.0);
             })),
             ..Options::default()
         };

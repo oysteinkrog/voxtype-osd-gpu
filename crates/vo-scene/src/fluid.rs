@@ -20,8 +20,9 @@
 //!   (reading) line is kept as captured, so it never moves.
 //!
 //! The reading line: [`FluidLayer::keep_clear`] takes the band of the newest line (its top and
-//! bottom in the layer's space). No dye is drawn in that band, and it fades in over a few units
-//! outside it, so the line being read sits on the plain background and its pixels are what
+//! bottom in the layer's space). No dye is drawn in that band: the dye is drawn in two clipped
+//! layers, above and below it, so a glow does not spill in either. It fades in over a few units
+//! outside the band, so the line being read sits on the plain background and its pixels are what
 //! they would be without the layer. Dye seeded there blooms above and below it, and shows in
 //! full once the line moves up.
 //!
@@ -257,7 +258,7 @@ impl FluidLayer {
     /// The splats the words make, in word order, then the extra ones. Each word gives:
     ///
     /// - at its onset, dye at two points along its box (a quarter in from each end), as wide
-    ///   as about a third of the line height, and as much as `0.35 + 0.45 * level`;
+    ///   as about 0.6 of the line height, and as much as `0.6 + 0.6 * level`;
     /// - 0.12 s later, half as much again at the box's centre: the source lingering;
     /// - at its onset, a push from the box's centre, up and to one side (alternating by word),
     ///   faster with the level.
@@ -271,8 +272,8 @@ impl FluidLayer {
             let cx = (w.rect.x + 0.5 * w.rect.w) / aw;
             let cy = (w.rect.y + 0.5 * w.rect.h) / ah;
             let quarter = 0.25 * w.rect.w / aw;
-            let radius = (0.35 * w.rect.h / aw).max(0.012) * (0.8 + 0.4 * level);
-            let amount = 0.35 + 0.45 * level;
+            let radius = (0.6 * w.rect.h / aw).max(0.015) * (0.8 + 0.4 * level);
+            let amount = 0.6 + 0.6 * level;
             for dx in [-quarter, quarter] {
                 out.push(InkSplat { t: w.t, x: cx + dx, y: cy, radius, velocity: [0.0; 2], color, amount });
             }
@@ -283,7 +284,7 @@ impl FluidLayer {
                 x: cx,
                 y: cy,
                 radius: radius * 1.4,
-                velocity: [0.12 * side * speed, -0.3 * speed],
+                velocity: [0.3 * side * speed, -0.7 * speed],
                 color,
                 amount: 0.0,
             });
@@ -293,21 +294,30 @@ impl FluidLayer {
         out
     }
 
-    /// The dye's material.
+    /// The dye's material, for a panel in a layer at the box's top left.
     pub fn material(&self) -> Material {
+        self.material_at(0.0)
+    }
+
+    /// The dye's material for a panel in a layer `y` units below the box's top: its box and
+    /// band move up by `y` in that layer's space.
+    fn material_at(&self, y: f32) -> Material {
         let (soften, rim, grain, density) = match self.style {
             InkStyle::Ink => (1.5, 0.0, 0.0, 1.8),
             InkStyle::Smoke => (4.0, 0.0, 0.0, 1.2),
             InkStyle::Watercolour => (3.0, 0.55, 0.06, 1.4),
         };
         Material::custom(FLUID_MATERIAL)
-            .param(0, [0.0, 0.0, self.area.w, self.area.h])
+            .param(0, [0.0, -y, self.area.w, self.area.h])
             .param(1, [self.style.index(), self.dye_slot as f32, if self.light { 1.0 } else { 0.0 }, self.opacity])
             .param(2, [soften, rim, grain, density])
-            .param(3, match self.clear {
-                Some((top, bottom)) if bottom > top => [top, bottom, CLEAR_FADE, 0.0],
-                _ => [0.0, -1.0, CLEAR_FADE, 0.0],
-            })
+            .param(
+                3,
+                match self.clear {
+                    Some((top, bottom)) if bottom > top => [top - y, bottom - y, CLEAR_FADE, 0.0],
+                    _ => [0.0, -1.0, CLEAR_FADE, 0.0],
+                },
+            )
             .reads_images()
     }
 
@@ -329,16 +339,43 @@ impl FluidLayer {
     /// absolutely placed at [`FluidLayer::at`]. Put it before the text to draw it behind.
     pub fn view<M>(&self, key: impl Into<Key>) -> Element<M> {
         let key = key.into();
-        let drive = Element::gpu(format!("{key}-drive"), Arc::new(self.source())).size(self.area.w, self.area.h);
-        let dye = Element::panel(format!("{key}-dye"))
-            .size(self.area.w, self.area.h)
-            .fill(Color::WHITE)
-            .material(self.material());
-        let mut layer = Element::layer(format!("{key}-layer")).size(self.area.w, self.area.h).child(dye);
-        if self.glow > 0.0 && !self.light {
-            layer = layer.bloom(self.glow, 0.04 * self.area.w.min(self.area.h * 2.0));
+        let (w, h) = (self.area.w, self.area.h);
+        let drive = Element::gpu(format!("{key}-drive"), Arc::new(self.source())).size(w, h);
+        let mut out = self.place(Element::column(key.clone()).size(w, h)).child(absolute(drive));
+        // The parts drawn: the whole box, or the parts above and below the clear band, each in
+        // a clipped layer so a glow never spills into the reading line.
+        let parts = match self.clear {
+            Some((top, bottom)) if bottom > top => vec![(0.0, top.clamp(0.0, h)), (bottom.clamp(0.0, h), h)],
+            _ => vec![(0.0, h)],
+        };
+        let parts_n = parts.len();
+        for (i, (y0, y1)) in parts.into_iter().enumerate() {
+            if y1 - y0 < 0.5 {
+                continue;
+            }
+            let dye = Element::panel(format!("{key}-dye{i}"))
+                .size(w, y1 - y0)
+                .fill(Color::WHITE)
+                .material(self.material_at(y0));
+            let mut layer = Element::layer(format!("{key}-part{i}")).size(w, y1 - y0).clip();
+            if self.glow > 0.0 && !self.light {
+                // A layer's own clip does not cut its bloom; the clip of a layer around it does.
+                // Its edge at the band fades, so the glow thins out instead of stopping flat.
+                let glow = Element::layer("glow").size(w, y1 - y0).bloom(self.glow, 0.04 * w.min(h * 2.0));
+                let (top, bottom) = if i == 0 && parts_n > 1 {
+                    (0.0, 2.0 * CLEAR_FADE)
+                } else if i > 0 {
+                    (2.0 * CLEAR_FADE, 0.0)
+                } else {
+                    (0.0, 0.0)
+                };
+                layer = layer.fade_edges(0.0, top, 0.0, bottom).child(absolute(glow.child(dye)));
+            } else {
+                layer = layer.child(dye);
+            }
+            out = out.child(at(layer, 0.0, y0));
         }
-        self.place(Element::column(key).size(self.area.w, self.area.h)).child(absolute(drive)).child(absolute(layer))
+        out
     }
 
     /// The smear: a layer that draws what is under it moved along the flow. Put it after the
@@ -375,10 +412,14 @@ impl FluidLayer {
 }
 
 fn absolute<M>(e: Element<M>) -> Element<M> {
+    at(e, 0.0, 0.0)
+}
+
+fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     e.layout(|s| {
         s.position = taffy::style::Position::Absolute;
-        s.inset.left = taffy::style::LengthPercentageAuto::length(0.0);
-        s.inset.top = taffy::style::LengthPercentageAuto::length(0.0);
+        s.inset.left = taffy::style::LengthPercentageAuto::length(x);
+        s.inset.top = taffy::style::LengthPercentageAuto::length(y);
     })
 }
 
@@ -468,8 +509,8 @@ mod tests {
         let boxes = word_boxes(text, &shaped, 20.0);
         assert_eq!(boxes.len(), 5);
         assert!(boxes[1].x > boxes[0].x + boxes[0].w);
-        // "words" wraps to the next line.
-        assert!(boxes[3].y > boxes[0].y && boxes[3].x < boxes[2].x);
+        // "where" wraps to the next line.
+        assert!(boxes[2].y > boxes[0].y && boxes[2].x < boxes[1].x, "{boxes:?}");
         assert!((boxes[0].w - 3.0 * 0.55 * 20.0).abs() < 1e-3, "{:?}", boxes[0]);
     }
 
