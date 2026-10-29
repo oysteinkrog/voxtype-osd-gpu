@@ -385,7 +385,7 @@ fn trail_frame(i: u32) -> DisplayList {
         )),
         Vec::new(),
     );
-    list.layers[1].trail = Some(Trail { key: 7, half_life: 0.03, t: i as f64 / 60.0, decay: [1.0; 3] });
+    list.layers[1].trail = Some(Trail { key: 7, half_life: 0.03, t: i as f64 / 60.0, decay: [1.0; 3], drift: None });
     list
 }
 

@@ -101,6 +101,7 @@ pub(crate) struct Node<M> {
     pub glass: Option<Glass>,
     pub material: Option<Material>,
     pub afterglow: Option<[f32; 3]>,
+    pub trail_drift: Option<crate::display::TrailDrift>,
     pub handlers: Handlers<M>,
     pub born: f64,
     /// `(since, until)`.
@@ -1172,7 +1173,11 @@ impl<M> Scene<M> {
             .flat_map(|n| n.chans.iter().map(|(_, c)| c.settled_at()).chain([n.since]))
             .fold(f64::NEG_INFINITY, f64::max);
         let fading = nodes.iter().copied().any(|n| {
-            n.alive(t) && n.has(Slot::TrailHalfLife as u8) && t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
+            n.alive(t)
+                && n.has(Slot::TrailHalfLife as u8)
+                && (t < last + 12.0 * n.value(Slot::TrailHalfLife as u8, t)
+                    // A drifting trail (EG-34) moves its afterglow even over still content.
+                    || n.trail_drift.is_some_and(|d| !n.reduced && !d.is_still()))
         });
         if fading {
             return Some(t);
@@ -1304,6 +1309,7 @@ impl<M> Scene<M> {
             glass,
             material,
             afterglow,
+            trail_drift,
             motion,
             default_motion,
             binds,
@@ -1335,6 +1341,7 @@ impl<M> Scene<M> {
             glass,
             material,
             afterglow,
+            trail_drift,
             handlers,
             born: t,
             leaving: None,
@@ -1391,6 +1398,7 @@ impl<M> Scene<M> {
             glass,
             material,
             afterglow,
+            trail_drift,
             motion,
             default_motion,
             binds,
@@ -1412,7 +1420,7 @@ impl<M> Scene<M> {
         let mut changed = n.kind != kind || n.gradient != gradient || n.hairline != hairline || n.inside != inside;
         changed |= n.glass != glass;
         changed |= n.binds != binds;
-        changed |= n.material != material || n.afterglow != afterglow;
+        changed |= n.material != material || n.afterglow != afterglow || n.trail_drift != trail_drift;
         changed |= n.handlers.hit != handlers.hit;
         n.style = style;
         n.kind = kind;
@@ -1426,6 +1434,7 @@ impl<M> Scene<M> {
         n.glass = glass;
         n.material = material;
         n.afterglow = afterglow;
+        n.trail_drift = trail_drift;
         n.handlers = handlers;
         for &(slot, v) in &targets {
             changed |= n.set_target(slot, v, t, retention);
@@ -1803,6 +1812,11 @@ impl<M> Scene<M> {
                 half_life: n.value(Slot::TrailHalfLife as u8, t) as f32,
                 t,
                 decay: n.afterglow.unwrap_or([1.0; 3]),
+                // The pivot goes to surface space; reduced motion keeps the afterglow in place.
+                drift: n
+                    .trail_drift
+                    .filter(|d| !n.reduced && !d.is_still())
+                    .map(|d| crate::display::TrailDrift { pivot: transform.apply(d.pivot), ..d }),
             }),
             style,
             warp,

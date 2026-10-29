@@ -21,7 +21,7 @@ use crate::ambient::{Loop, LoopProp, Ripples};
 use crate::bars::Bars;
 use crate::canvas::{CanvasDraw, Painter};
 use crate::displace::Displace;
-use crate::display::{BackdropRes, BlendMode, BloomShape, Mask, ShapeKind};
+use crate::display::{BackdropRes, BlendMode, BloomShape, Mask, ShapeKind, TrailDrift};
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::final_pass::FinalPass;
@@ -779,6 +779,8 @@ pub struct Element<M = ()> {
     pub(crate) material: Option<Material>,
     /// Phosphor persistence (FX15): the trail's half-life multiplier per channel.
     pub(crate) afterglow: Option<[f32; 3]>,
+    /// How a trail's afterglow turns, grows and slides (EG-34).
+    pub(crate) trail_drift: Option<TrailDrift>,
     pub(crate) motion: Vec<(Prop, Motion)>,
     /// How this node and its descendants move when no `.motion()` names a property
     /// (`Element::default_motion`); `None` takes the parent's.
@@ -807,6 +809,7 @@ impl<M> Element<M> {
             glass: None,
             material: None,
             afterglow: None,
+            trail_drift: None,
             motion: Vec::new(),
             default_motion: None,
             binds: Vec::new(),
@@ -1923,6 +1926,22 @@ impl<M> Element<M> {
         }
         self.set(Slot::TrailHalfLife as u8, half_life.max(1e-3));
         self.motion.push((Prop::MotionBlur, Motion::Snap));
+        self
+    }
+
+    /// Trails that drift and turn (EG-34): the trail's afterglow turns, grows and slides about
+    /// `drift.pivot` (in this element's own space) while it fades, so a still dot off the
+    /// pivot leaves a curved streak and moving content leaves swirls. Frame rate independent.
+    /// A drifting trail takes a second texture the size of the surface, and keeps the scene
+    /// drawing every frame while its layer is alive. Under reduced motion, and with a drift
+    /// that moves nothing, the trail stays in place. Call after `trail`.
+    pub fn trail_drift(mut self, drift: TrailDrift) -> Element<M> {
+        debug_assert!(
+            self.targets.iter().any(|(k, _)| *k == Slot::TrailHalfLife as u8),
+            "trail_drift without trail: {}",
+            self.key
+        );
+        self.trail_drift = Some(drift);
         self
     }
 

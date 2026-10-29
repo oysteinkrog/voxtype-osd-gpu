@@ -404,6 +404,51 @@ pub struct Trail {
     /// Half-life multiplier per channel (red, green, blue), 1 for an even fade. Phosphor
     /// persistence (FX15) keeps its own colour longest, so a white trace cools to it.
     pub decay: [f32; 3],
+    /// How the afterglow moves while it fades (EG-34). `None` keeps it in place.
+    pub drift: Option<TrailDrift>,
+}
+
+/// A feedback trail whose afterglow turns, grows and slides while it fades (EG-34,
+/// `Element::trail_drift`). Each frame the faded pixels are resampled through the drift over
+/// the time since the last frame, so 60 and 144 fps show the same motion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct TrailDrift {
+    /// Turn about `pivot`, in degrees a second. Positive turns clockwise on screen.
+    pub turn_deg_per_s: f32,
+    /// Growth a second: 0.2 makes the afterglow 20% larger each second about `pivot`, -0.2
+    /// 20% smaller. 0 for none.
+    pub scale_per_s: f32,
+    /// Slide in logical units a second, x then y.
+    pub offset_px_per_s: [f32; 2],
+    /// The point the afterglow turns and grows about. On an element it is in the element's
+    /// own space; in the display list, in surface space (logical units).
+    pub pivot: Point,
+}
+
+impl TrailDrift {
+    /// Whether the drift moves nothing, so the trail takes the plain path.
+    pub fn is_still(&self) -> bool {
+        self.turn_deg_per_s == 0.0 && self.scale_per_s == 0.0 && self.offset_px_per_s == [0.0; 2]
+    }
+
+    /// The map from a pixel of this frame back to where its afterglow was `dt` seconds ago, in
+    /// physical pixels at `ppu` pixels per logical unit: `[a, c, bx, by]`, so the source of
+    /// `p` is `(a px - c py + bx, c px + a py + by)`. The drift turns by `turn * dt`, grows by
+    /// `(1 + scale)^dt` and slides by `offset * dt`, so a frame gap of `dt` equals two gaps of
+    /// `dt / 2` when nothing slides.
+    pub fn source_map(&self, dt: f64, ppu: f32) -> [f32; 4] {
+        let theta = (self.turn_deg_per_s as f64).to_radians() * dt;
+        let s = (1.0 + self.scale_per_s as f64).max(0.01).powf(dt);
+        // The inverse of p' = P + s R(theta) (p - P) + o.
+        let (a, c) = (theta.cos() / s, -theta.sin() / s);
+        let ppu = ppu as f64;
+        let (px, py) = (self.pivot.x as f64 * ppu, self.pivot.y as f64 * ppu);
+        let (ox, oy) = (self.offset_px_per_s[0] as f64 * ppu * dt, self.offset_px_per_s[1] as f64 * ppu * dt);
+        let (qx, qy) = (px + ox, py + oy);
+        let bx = px - (a * qx - c * qy);
+        let by = py - (c * qx + a * qy);
+        [a as f32, c as f32, bx as f32, by as f32]
+    }
 }
 
 /// A run of content in a layer.
@@ -1130,5 +1175,37 @@ mod tests {
         assert_eq!(prims[0].with_ripple(-1.0, 10.0, 0.0).ripple[0], 0.0);
         list.clear();
         assert!(list.shape_prims.is_empty());
+    }
+
+    /// Applies a `TrailDrift::source_map` result to `p`.
+    fn src(m: [f32; 4], p: [f32; 2]) -> [f32; 2] {
+        [m[0] * p[0] - m[1] * p[1] + m[2], m[1] * p[0] + m[0] * p[1] + m[3]]
+    }
+
+    #[test]
+    fn trail_drift_map_scales_with_the_frame_gap() {
+        use crate::geom::Point;
+        let d = TrailDrift { turn_deg_per_s: 90.0, pivot: Point::new(100.0, 50.0), ..TrailDrift::default() };
+        assert!(TrailDrift::default().is_still() && !d.is_still());
+        // After 1 s at 90 degrees a second, a point right of the pivot sits below it (y down),
+        // so this frame's pixel below the pivot reads the old pixel to its right.
+        let m = d.source_map(1.0, 1.0);
+        let [x, y] = src(m, [100.0, 70.0]);
+        assert!((x - 120.0).abs() < 1e-3 && (y - 50.0).abs() < 1e-3, "{x} {y}");
+        // At 1.5 pixels per unit the pivot scales with the pixels.
+        let [x, y] = src(d.source_map(1.0, 1.5), [150.0, 105.0]);
+        assert!((x - 180.0).abs() < 1e-3 && (y - 75.0).abs() < 1e-3, "{x} {y}");
+        // Two gaps of 1/120 s equal one of 1/60 s, with growth too.
+        let d = TrailDrift { scale_per_s: 0.3, ..d };
+        let p = [40.0, 10.0];
+        let one = src(d.source_map(1.0 / 60.0, 1.0), p);
+        let half = d.source_map(1.0 / 120.0, 1.0);
+        let two = src(half, src(half, p));
+        assert!((one[0] - two[0]).abs() < 1e-3 && (one[1] - two[1]).abs() < 1e-3, "{one:?} {two:?}");
+        // A gap of zero maps every pixel to itself; a slide reads from behind it.
+        assert_eq!(src(d.source_map(0.0, 1.0), p), p);
+        let slide = TrailDrift { offset_px_per_s: [60.0, 0.0], ..TrailDrift::default() };
+        let [x, _] = src(slide.source_map(0.5, 2.0), p);
+        assert!((x - (40.0 - 60.0)).abs() < 1e-3, "{x}");
     }
 }

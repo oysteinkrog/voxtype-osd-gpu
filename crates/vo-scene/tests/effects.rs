@@ -1,8 +1,8 @@
 //! Glow, shadow and bloom from the element API into the display list.
 
-use vo_scene::display::{BloomShape, LayerTarget, PaintKind, ShapeKind};
+use vo_scene::display::{BloomShape, LayerTarget, PaintKind, ShapeKind, TrailDrift};
 use vo_scene::element::Element;
-use vo_scene::geom::Color;
+use vo_scene::geom::{Color, Point};
 use vo_scene::Scene;
 
 type El = Element<()>;
@@ -150,6 +150,35 @@ fn trail_makes_an_offscreen_layer_with_a_steady_key() {
     let quiet = (100..2000).map(|i| i as f64 * 0.01).find(|&t| scene.next_wake(t).is_none()).expect("settles");
     assert!(quiet >= 1.0 + 12.0 * 0.25, "awake until {quiet}");
     assert!(quiet < 6.0, "awake until {quiet}");
+}
+
+#[test]
+fn trail_drift_reaches_the_list_in_surface_space_and_stops_under_reduced_motion() {
+    let drift = TrailDrift { turn_deg_per_s: 90.0, pivot: Point::new(50.0, 20.0), ..TrailDrift::default() };
+    let layer = |drift: TrailDrift| {
+        Element::layer("swirl")
+            .size(100.0, 40.0)
+            .offset(30.0, 10.0)
+            .trail(0.25)
+            .trail_drift(drift)
+            .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE))
+    };
+    let mut scene = Scene::new();
+    scene.apply(root(vec![layer(drift)]), 0.0);
+    let list = scene.sample(10.0);
+    let got = list.layers.iter().find_map(|l| l.trail).and_then(|t| t.drift).expect("a drifting trail");
+    assert_eq!(got.turn_deg_per_s, 90.0);
+    assert!((got.pivot.x - 80.0).abs() < 1e-3 && (got.pivot.y - 30.0).abs() < 1e-3, "{got:?}");
+    // The afterglow keeps turning over still content, so the scene stays awake.
+    assert_eq!(scene.next_wake(60.0), Some(60.0));
+    // A still drift and reduced motion both take the plain trail, which settles.
+    let mut still = Scene::new();
+    still.apply(root(vec![layer(TrailDrift::default())]), 0.0);
+    assert!(still.sample(1.0).layers.iter().find_map(|l| l.trail).is_some_and(|t| t.drift.is_none()));
+    let mut reduced: Scene<()> = Scene::new().with_reduced_motion(true);
+    reduced.apply(root(vec![layer(drift)]), 0.0);
+    assert!(reduced.sample(1.0).layers.iter().find_map(|l| l.trail).is_some_and(|t| t.drift.is_none()));
+    assert_eq!(reduced.next_wake(60.0), None);
 }
 
 #[test]

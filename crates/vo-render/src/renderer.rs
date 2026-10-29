@@ -60,7 +60,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use skrifa::GlyphId;
 use vo_scene::display::{
-    BackdropRes, BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget, Mask,
+    BackdropRes, BlendMode, Bloom, DisplayList, GlyphInstance as DlGlyph, ItemKind, LayerTarget, Mask, TrailDrift,
 };
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
@@ -363,6 +363,9 @@ enum Pipe {
     Fade,
     /// Merges a trail's new frame into its faded pixels by the larger value per channel.
     TrailMax,
+    /// Draws a drifting trail's last frame (EG-34) resampled through the drift and faded by
+    /// the blend constant, into a cleared texture.
+    TrailDrift,
     /// Particles (`crate::particle_layer`): the range is of its placements.
     Particles,
     /// GPU items drawn by painters (`crate::gpu`): the range is of `Renderer::gpu_items`. A
@@ -610,6 +613,13 @@ struct TrailPlan {
     /// merges into the trail. Drawing straight over the faded pixels would add the frame
     /// onto its own afterglow, so still content would brighten with every frame.
     fresh: Option<usize>,
+    /// How the afterglow moves (EG-34), never a still drift.
+    drift: Option<TrailDrift>,
+    /// Physical pixels per logical unit, for the drift.
+    ppu: f32,
+    /// A drifting trail that goes on: last frame's texture, which this frame resamples into
+    /// the trail's new texture, and the Fx block of the map.
+    prev: Option<(usize, u32)>,
 }
 
 /// One layer's bloom for this frame.
@@ -1283,6 +1293,9 @@ impl Renderer {
                         fade: None,
                         decay: t.decay,
                         fresh: None,
+                        drift: t.drift.filter(|d| !d.is_still()),
+                        ppu: f.scale,
+                        prev: None,
                     });
                 }
                 // A trail would blur its own afterglow again every frame: no blur on one.
@@ -1915,10 +1928,28 @@ impl Renderer {
             }
             let tex = match &self.surfaces[si].trail {
                 Some(t) => {
-                    let (tex, fade) = self.acquire_trail(t.key, t.half_life, t.t, w, h, format);
+                    let (key, t_now, drift, ppu) = (t.key, t.t, t.drift, t.ppu);
+                    let (mut tex, kept) = self.acquire_trail(key, t.half_life, t_now, w, h, format);
+                    let fade = kept.map(|(k, _)| k);
+                    // A drifting trail that goes on resamples last frame's texture into a
+                    // second one, which then holds the trail: the two take turns.
+                    let mut prev = None;
+                    if let (Some(d), Some((_, dt))) = (drift, kept) {
+                        let pooled = self.pool.len();
+                        let next = self.acquire(w, h, format);
+                        if self.pool.len() > pooled {
+                            eprintln!("vo-render: drifting trail takes a second {w}x{h} {format:?} texture");
+                        }
+                        (self.pool[next].key, self.pool[next].t) = (Some(key), t_now);
+                        self.pool[tex].key = None;
+                        let [a, c, bx, by] = d.source_map(dt, ppu);
+                        let fx = self.push_fx(FxUniform { texel: [a, c], weight: bx, mode: by });
+                        prev = Some((tex, fx));
+                        tex = next;
+                    }
                     let fresh = fade.map(|_| self.acquire(w, h, format));
                     let plan = self.surfaces[si].trail.as_mut().unwrap();
-                    (plan.fade, plan.fresh) = (fade, fresh);
+                    (plan.fade, plan.fresh, plan.prev) = (fade, fresh, prev);
                     tex
                 }
                 None => self.acquire(w, h, self.surfaces[si].format(format)),
@@ -2040,9 +2071,9 @@ impl Renderer {
         self.pool.len() - 1
     }
 
-    /// The texture of trail `key`, and how much of last frame's pixels it keeps: `None` when
-    /// the trail starts fresh. A trail whose size or format changed lets its old texture go
-    /// back to the pool.
+    /// The texture of trail `key`, how much of last frame's pixels it keeps and the seconds
+    /// since that frame: `None` when the trail starts fresh. A trail whose size or format
+    /// changed lets its old texture go back to the pool.
     fn acquire_trail(
         &mut self,
         key: u64,
@@ -2051,13 +2082,14 @@ impl Renderer {
         w: u32,
         h: u32,
         format: wgpu::TextureFormat,
-    ) -> (usize, Option<f32>) {
+    ) -> (usize, Option<(f32, f64)>) {
         let frame = self.frame;
         if let Some(i) = self.pool.iter().position(|p| p.key == Some(key)) {
             let p = &mut self.pool[i];
             if p.texture.width() == w && p.texture.height() == h && p.texture.format() == format {
                 let dt = t - p.t;
-                let fade = (0.0..=TRAIL_MAX_GAP).contains(&dt).then(|| 0.5f32.powf((dt / half_life as f64) as f32));
+                let fade =
+                    (0.0..=TRAIL_MAX_GAP).contains(&dt).then(|| (0.5f32.powf((dt / half_life as f64) as f32), dt));
                 (p.used, p.last_used, p.t) = (true, frame, t);
                 return (i, fade);
             }
@@ -2262,7 +2294,9 @@ impl Renderer {
                     needed.push(key);
                 }
             }
-            if s.trail.as_ref().is_some_and(|t| t.fade.is_some_and(|k| k < 1.0)) {
+            if s.trail.as_ref().is_some_and(|t| t.prev.is_some()) {
+                needed.push((format, Pipe::TrailDrift, BlendMode::Normal));
+            } else if s.trail.as_ref().is_some_and(|t| t.fade.is_some_and(|k| k < 1.0)) {
                 needed.push((format, Pipe::Fade, BlendMode::Normal));
             }
             if s.trail.as_ref().is_some_and(|t| t.fresh.is_some()) {
@@ -2335,14 +2369,25 @@ impl Renderer {
             }
             drop(pass);
             if let Some((k, fresh)) = merge {
-                let mut pass = begin_load(enc, trail_view, "vo-trail");
-                if k < 1.0 {
+                // Each channel fades by its own half life; alpha with the slowest.
+                let d = s.trail.as_ref().map_or([1.0; 3], |t| t.decay).map(|d| d.max(1e-3) as f64);
+                let c = |d: f64| (k as f64).powf(1.0 / d);
+                let fade = wgpu::Color { r: c(d[0]), g: c(d[1]), b: c(d[2]), a: c(d[0].max(d[1]).max(d[2])) };
+                let prev = s.trail.as_ref().and_then(|t| t.prev);
+                let mut pass = match prev {
+                    Some(_) => begin(enc, trail_view, "vo-trail-drift"),
+                    None => begin_load(enc, trail_view, "vo-trail"),
+                };
+                if let (Some((src, offset)), Some(fx)) = (prev, &self.fx) {
+                    // A drifting trail (EG-34): last frame's pixels, moved and faded.
+                    pass.set_pipeline(self.cached_pipeline(format, Pipe::TrailDrift, BlendMode::Normal));
+                    pass.set_bind_group(0, &self.sampled_bind(fx, src, src), &[]);
+                    pass.set_bind_group(1, &self.fx_buf.as_ref().expect("uploaded").1, &[offset]);
+                    pass.set_blend_constant(fade);
+                    pass.draw(0..3, 0..1);
+                } else if k < 1.0 {
                     pass.set_pipeline(self.cached_pipeline(format, Pipe::Fade, BlendMode::Normal));
-                    // Each channel fades by its own half life; alpha with the slowest.
-                    let d = s.trail.as_ref().map_or([1.0; 3], |t| t.decay).map(|d| d.max(1e-3) as f64);
-                    let c = |d: f64| (k as f64).powf(1.0 / d);
-                    let a = c(d[0].max(d[1]).max(d[2]));
-                    pass.set_blend_constant(wgpu::Color { r: c(d[0]), g: c(d[1]), b: c(d[2]), a });
+                    pass.set_blend_constant(fade);
                     pass.draw(0..3, 0..1);
                 }
                 // The larger of the afterglow and the new frame, per channel: content that holds
@@ -2636,6 +2681,7 @@ impl Renderer {
                 | Pipe::Final
                 | Pipe::Fade
                 | Pipe::TrailMax
+                | Pipe::TrailDrift
                 | Pipe::CompositeRest
                 | Pipe::CompositeFxRest => unreachable!("not a layer command"),
                 Pipe::Particles => unreachable!("drawn above"),
@@ -2715,7 +2761,7 @@ impl Renderer {
             | Pipe::Backdrop => 2,
             Pipe::Displace => 12,
             Pipe::Down | Pipe::Up | Pipe::Final | Pipe::Fade => 3,
-            Pipe::TrailMax => 8,
+            Pipe::TrailMax | Pipe::TrailDrift => 8,
             // The particle layer and the painters have their own pipelines.
             Pipe::Particles | Pipe::Gpu => return,
             Pipe::Dot => 4,
@@ -2748,6 +2794,7 @@ impl Renderer {
             Pipe::Down | Pipe::Up | Pipe::Final => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Fade => [None, None],
             Pipe::TrailMax => [Some(&self.composite_layout), None],
+            Pipe::TrailDrift => [fx.map(|f| &f.sampled_layout), fx.map(|f| &f.fx_layout)],
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
             Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex => unreachable!("taken as their base"),
         };
@@ -2790,6 +2837,7 @@ impl Renderer {
             Pipe::Final => ("vs_full", "fs_final", vec![]),
             Pipe::Fade => ("vs_full", "fs_fade", vec![]),
             Pipe::TrailMax => ("vs_trail", "fs_trail_max", vec![]),
+            Pipe::TrailDrift => ("vs_trail", "fs_trail_drift", vec![]),
             Pipe::Particles | Pipe::Gpu => unreachable!("returned above"),
             Pipe::ShapeTex | Pipe::GlyphTex | Pipe::VectorTex | Pipe::GlassTex => unreachable!("taken as their base"),
         };
@@ -2809,6 +2857,19 @@ impl Renderer {
                 alpha: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::Zero,
                     dst_factor: wgpu::BlendFactor::Constant,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            // `constant` times the resampled pixels, over a cleared target.
+            Pipe::TrailDrift => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Constant,
+                    dst_factor: wgpu::BlendFactor::Zero,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Constant,
+                    dst_factor: wgpu::BlendFactor::Zero,
                     operation: wgpu::BlendOperation::Add,
                 },
             }),

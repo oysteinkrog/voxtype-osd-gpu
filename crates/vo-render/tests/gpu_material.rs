@@ -260,7 +260,7 @@ fn scope_frame(i: u32) -> DisplayList {
     list.layers.push(Layer {
         parent: Some(0),
         target: LayerTarget::Offscreen { bloom: None },
-        trail: Some(Trail { key: 9, half_life: 0.12, t: t as f64, decay: [0.24, 1.0, 0.37] }),
+        trail: Some(Trail { key: 9, half_life: 0.12, t: t as f64, decay: [0.24, 1.0, 0.37], drift: None }),
         ..Layer::root()
     });
     let start = list.items.len() as u32;
@@ -354,7 +354,7 @@ fn still_frame(t: f64) -> DisplayList {
     list.layers.push(Layer {
         parent: Some(0),
         target: LayerTarget::Offscreen { bloom: None },
-        trail: Some(Trail { key: 11, half_life: 0.25, t, decay: [0.24, 1.0, 0.37] }),
+        trail: Some(Trail { key: 11, half_life: 0.25, t, decay: [0.24, 1.0, 0.37], drift: None }),
         ..Layer::root()
     });
     let start = list.items.len() as u32;
