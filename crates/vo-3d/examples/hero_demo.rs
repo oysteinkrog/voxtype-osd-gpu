@@ -2,17 +2,22 @@
 //! aurora orb (01), a jellyfish bell (15), and two scenes of several parts with see-through
 //! skins: a jellyfish (bell, four membranes, six drip beads) and chrome with an aurora inside.
 //! Each is driven by a made-up voice level so it swells and ripples while speech runs and
-//! settles in the pauses.
+//! settles in the pauses. Last, the chrome blob over a panel and a waveform that it reflects
+//! (EG-17, `vo_3d::env`): the layer under it captures a backdrop, and the chrome's environment
+//! is built from it.
 //!
 //!   cargo run --release -p vo-3d --example hero_demo -- [--out DIR]
 //!   cargo run --release -p vo-3d --example hero_demo -- --bench
 //!
 //! The default writes `DIR/hero_demo.png` (default DIR `/var/tmp/claude/fw-hero`): the five
-//! heroes at six moments, one row each, and a last row of the two scenes under reduced motion.
+//! heroes at six moments, one row each, a row of the two scenes under reduced motion, and a
+//! row of the reflecting chrome over its panel and waveform.
 //! `--bench` prints GPU time per frame (timestamp queries) for each hero alone, in a box 0.55
 //! of the frame's height wide plus its halo, in a 600x300 and a 1920x1080 frame, at 48 and at
 //! 24 march steps; then the two scenes in a 200 px box at 600x300 and 48 steps against their
-//! 0.5 ms p95 budget. Without timestamp queries it says so and exits 0.
+//! 0.5 ms p95 budget; then the chrome over the panel and waveform at 600x300 with and without
+//! its environment, against the 0.1 ms p95 the environment may add, and the environment's
+//! memory. Without timestamp queries it says so and exits 0.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,10 +25,11 @@ use std::sync::Arc;
 use vo_3d::*;
 use vo_render::offscreen::{write_png, FORMAT};
 use vo_render::{Offscreen, Renderer, Target};
+use vo_scene::display::BackdropRes;
 use vo_scene::element::Element;
 use vo_scene::geom::{Color, Size};
 use vo_scene::gpu::GpuSource;
-use vo_scene::taffy::{AlignItems, JustifyContent};
+use vo_scene::taffy::{self, AlignItems, JustifyContent};
 use vo_scene::{DisplayList, Scene};
 
 /// A speech-like level: syllables in bursts, with a pause every few seconds.
@@ -47,6 +53,8 @@ enum Kind {
     Bell,
     Jellyfish,
     AuroraChrome,
+    /// The chrome blob reflecting the layers under it.
+    ChromeEnv,
 }
 
 #[derive(Debug)]
@@ -61,13 +69,14 @@ impl HeroSource for Hero {
         let v = eased(t).min(1.0);
         let phase = t as f32;
         let f = match self.kind {
-            Kind::Chrome => HeroFrame {
+            Kind::Chrome | Kind::ChromeEnv => HeroFrame {
                 shape: HeroShape::Blob { lobes: 5 },
                 look: HeroLook::Chrome {
                     tint: Color::hex(0xdfe8ff, 1.0),
                     top: Color::hex(0x8ea4d8, 1.0),
                     bottom: Color::hex(0x06070c, 1.0),
                     light: Color::hex(0xffffff, 1.0),
+                    env: matches!(self.kind, Kind::ChromeEnv).then(Env::default),
                 },
                 stretch: [1.0, 0.5 + 0.12 * v, 0.8],
                 wobble: 0.25 + 0.75 * v,
@@ -133,6 +142,49 @@ fn sample(h: &Arc<dyn GpuSource>, size: Size, d: f32, t: f64) -> DisplayList {
     scene.sample(t)
 }
 
+fn at(e: Element<()>, x: f32, y: f32) -> Element<()> {
+    e.layout(|s| {
+        s.position = taffy::style::Position::Absolute;
+        s.inset.left = taffy::style::LengthPercentageAuto::length(x);
+        s.inset.top = taffy::style::LengthPercentageAuto::length(y);
+    })
+}
+
+/// The hero over a panel and a waveform (the level over the last half second) that it
+/// reflects: the hero's layer captures what is under it.
+fn reflecting_view(h: &Arc<dyn GpuSource>, size: Size, d: f32, t: f64) -> Element<()> {
+    let wave = Element::row("wave").gap(0.012 * size.w).align_items(AlignItems::CENTER).children((0..24).map(|i| {
+        let v = eased(t - (23 - i) as f64 * 0.02);
+        let hgt = size.h * (0.04 + 0.3 * v);
+        Element::panel(i as u64).size(0.012 * size.w, hgt).radius(0.006 * size.w).fill(Color::hex(0x35c2ff, 1.0))
+    }));
+    let panel = Element::panel("panel")
+        .size(0.86 * size.w, 0.36 * size.h)
+        .radius(0.04 * size.h)
+        .fill(Color::hex(0x1b2238, 1.0))
+        .border(Color::hex(0x3a4668, 1.0), 1.0);
+    let mut layer = Element::layer("hero-layer").size(size.w, size.h).backdrop(BackdropRes::Half, Color::TRANSPARENT);
+    layer = layer.child(at(Element::gpu("hero", h.clone()).size(d, d), 0.5 * (size.w - d), 0.32 * size.h - 0.5 * d));
+    Element::panel("root")
+        .size(size.w, size.h)
+        .fill(Color::hex(0x07090f, 1.0))
+        .child(at(panel, 0.07 * size.w, 0.56 * size.h))
+        .child(at(
+            Element::panel("accent").size(0.18 * size.w, 0.05 * size.h).fill(Color::hex(0xff5a3c, 1.0)),
+            0.12 * size.w,
+            0.62 * size.h,
+        ))
+        .child(at(wave, 0.38 * size.w, 0.6 * size.h))
+        .child(layer)
+}
+
+fn sample_reflecting(h: &Arc<dyn GpuSource>, size: Size, d: f32, t: f64) -> DisplayList {
+    let mut scene: Scene<()> = Scene::new();
+    scene.set_viewport(0.0, size, 1.0);
+    scene.apply(reflecting_view(h, size, d, t), 0.0);
+    scene.sample(t)
+}
+
 /// A device, with timestamp queries when the adapter has them (the bool).
 fn gpu() -> (wgpu::Device, wgpu::Queue, bool) {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -183,12 +235,13 @@ fn bench() {
     };
     let resolve = buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buf(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-    let mut measure = |h: &Arc<dyn GpuSource>, w: u32, ht: u32, d: Option<f32>| {
+    let mut measure_in = |h: &Arc<dyn GpuSource>, w: u32, ht: u32, d: Option<f32>, reflecting: bool| {
         let size = Size::new(w as f32, ht as f32);
         let target = Target::new(&device, w, ht, FORMAT);
         let mut times = Vec::new();
         for i in 0..140 {
-            let list = sample(h, size, d.unwrap_or(size.h * 0.55), 1.0 + i as f64 / 60.0);
+            let (d, t) = (d.unwrap_or(size.h * 0.55), 1.0 + i as f64 / 60.0);
+            let list = if reflecting { sample_reflecting(h, size, d, t) } else { sample(h, size, d, t) };
             let mut enc = device.create_command_encoder(&Default::default());
             enc.write_timestamp(&qs, 0);
             renderer.encode(&list, 1.0, &target, &mut enc);
@@ -207,6 +260,7 @@ fn bench() {
         times.sort_by(f64::total_cmp);
         (times[times.len() / 2], times[times.len() * 95 / 100])
     };
+    let mut measure = |h: &Arc<dyn GpuSource>, w: u32, ht: u32, d: Option<f32>| measure_in(h, w, ht, d, false);
     for (name, kind) in KINDS {
         for steps in [48, 24] {
             let h = hero(Hero { kind, steps, reduced: false });
@@ -226,7 +280,26 @@ fn bench() {
              {verdict} the {SCENE_BUDGET_MS} ms budget"
         );
     }
+    // The environment's cost: the same scene (panel, waveform, backdrop), chrome with and
+    // without it. The source key is None, so it is rebuilt on every 1/30 s tick.
+    let (m0, p0) = measure_in(&hero(Hero { kind: Kind::Chrome, steps: 48, reduced: false }), 600, 300, None, true);
+    let (m1, p1) = measure_in(&hero(Hero { kind: Kind::ChromeEnv, steps: 48, reduced: false }), 600, 300, None, true);
+    let added = p1 - p0;
+    let verdict = if added <= ENV_BUDGET_MS { "within" } else { "OVER" };
+    println!(
+        "hero_demo bench: chrome over panel and waveform, 600x300: without env {m0:.3} ms median, {p0:.3} ms p95; \
+         with env {m1:.3} ms median, {p1:.3} ms p95; adds {added:.3} ms p95, {verdict} the {ENV_BUDGET_MS} ms budget"
+    );
+    println!(
+        "hero_demo bench: env texture {}x{} Rgba16Float, {} KB",
+        env::ENV_SIZE[0],
+        env::ENV_SIZE[1],
+        env::ENV_BYTES / 1024
+    );
 }
+
+/// What the chrome's environment may add, p95 per frame at 600x300.
+const ENV_BUDGET_MS: f64 = 0.1;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -244,8 +317,9 @@ fn main() {
     let mut off = Offscreen::new(&device, &queue);
     install(&mut off.renderer);
     let (cols, gap) = (6u32, 6u32);
-    // The five heroes, then a row of the two scenes under reduced motion, three moments each.
-    let rows = KINDS.len() as u32 + 1;
+    // The five heroes, then a row of the two scenes under reduced motion, three moments each,
+    // then the chrome reflecting its panel and waveform.
+    let rows = KINDS.len() as u32 + 2;
     let (sw, sh) = (cols * w + (cols + 1) * gap, rows * h + (rows + 1) * gap);
     let mut sheet = vec![0u8; (sw * sh * 4) as usize];
     let rows_of = KINDS.iter().map(|(_, k)| (*k, false)).chain([(Kind::Jellyfish, true), (Kind::AuroraChrome, true)]);
@@ -262,10 +336,17 @@ fn main() {
             }
         }
     }
+    for c in 0..cols {
+        cells.push((KINDS.len() + 1, c, Kind::ChromeEnv, false, c));
+    }
     for (r, c, kind, reduced, moment) in cells {
         let src = hero(Hero { kind, steps: 48, reduced });
         let t = 0.4 + 0.35 * moment as f64;
-        let rgba = off.render_to_rgba(&sample(&src, size, size.h * 0.55, t), [w, h], 1.0);
+        let list = match kind {
+            Kind::ChromeEnv => sample_reflecting(&src, size, size.h * 0.4, t),
+            _ => sample(&src, size, size.h * 0.55, t),
+        };
+        let rgba = off.render_to_rgba(&list, [w, h], 1.0);
         let (x0, y0) = (gap + c * (w + gap), gap + r as u32 * (h + gap));
         for y in 0..h {
             let s = (y * w * 4) as usize;

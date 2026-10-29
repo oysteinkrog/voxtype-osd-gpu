@@ -15,6 +15,10 @@
 //! turns see-through: the core shows behind it, and an aurora of 3D noise can glow in the
 //! skin's interior (at most [`MAX_FOG_STEPS`] samples per pixel). Everything stays a pure
 //! function of the frame; a reduced-motion source passes phase 0, which also freezes the noise.
+//!
+//! A chrome look can reflect the popup itself instead of only its studio ([`HeroLook::Chrome`]
+//! with an [`Env`], EG-17): the layers under the hero, from its layer's backdrop, wrapped into
+//! an environment texture (`crate::env`).
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -26,6 +30,7 @@ use vo_render::{GpuPainter, PaintCx};
 use vo_scene::geom::{Color, Point, Size};
 use vo_scene::gpu::GpuSource;
 
+use crate::env::{Env, EnvCache, EnvFor};
 use crate::quad::{clip_to_scissor, QuadPass};
 
 const HERO_WGSL: &str = include_str!("wgsl/sdf_hero.wgsl");
@@ -248,8 +253,10 @@ impl Default for HeroInside {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeroLook {
     /// A mirror in a studio: `tint` multiplies the reflection; the studio is a gradient from
-    /// `bottom` to `top` with a bright horizon and two soft light strips in `light`.
-    Chrome { tint: Color, top: Color, bottom: Color, light: Color },
+    /// `bottom` to `top` with a bright horizon and two soft light strips in `light`. With
+    /// `env` it also reflects the popup's own layers under it (EG-17, `crate::env`); `None`
+    /// is the studio alone.
+    Chrome { tint: Color, top: Color, bottom: Color, light: Color, env: Option<Env> },
     /// Light from inside: colours `a`, `b` and `c` drift over the surface, `rim` lights the
     /// edges. `body` is the opacity of the middle (the rim is opaque). `halo` is the strength
     /// of the soft light around it, `halo_width` its reach in radii.
@@ -286,6 +293,7 @@ impl Default for HeroFrame {
                 top: Color::hex(0x9aa8c0, 1.0),
                 bottom: Color::hex(0x0a0c12, 1.0),
                 light: Color::hex(0xffffff, 1.0),
+                env: None,
             },
             stretch: [1.0; 3],
             wobble: 0.0,
@@ -386,6 +394,7 @@ impl HeroFrame {
                 top: Color::hex(0x8ea4d8, 1.0),
                 bottom: Color::hex(0x06070c, 1.0),
                 light: Color::hex(0xffffff, 1.0),
+                env: None,
             },
             stretch: [1.0, 0.62 + 0.1 * wave, 0.85],
             wobble: 0.25 + 0.5 * wave,
@@ -461,11 +470,12 @@ struct HeroUniform {
 /// Draws [`HeroItem`] elements.
 pub struct HeroPainter {
     pass: QuadPass,
+    env: EnvCache,
 }
 
 impl Default for HeroPainter {
     fn default() -> HeroPainter {
-        HeroPainter { pass: QuadPass::new("vo3d-hero", HERO_WGSL, "vs_hero", "fs_hero") }
+        HeroPainter { pass: QuadPass::textured("vo3d-hero", HERO_WGSL, "vs_hero", "fs_hero"), env: EnvCache::new() }
     }
 }
 
@@ -488,6 +498,10 @@ fn quad(eye: [f32; 3], centre: [f32; 2], radius: f32) -> Option<[f32; 4]> {
 }
 
 impl GpuPainter for HeroPainter {
+    fn begin_frame(&mut self) {
+        self.env.begin_frame();
+    }
+
     fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
         let Some(item) = cx.source.as_any().downcast_ref::<HeroItem>() else { return false };
         let f = item.0.frame(cx.t, Size::new(cx.rect.w, cx.rect.h));
@@ -507,7 +521,9 @@ impl GpuPainter for HeroPainter {
             [p[0], p[1], p[2], c.a]
         };
         let (material, c, halo_width) = match f.look {
-            HeroLook::Chrome { tint, top, bottom, light } => (0.0, [lin(tint), lin(top), lin(bottom), lin(light)], 0.0),
+            HeroLook::Chrome { tint, top, bottom, light, .. } => {
+                (0.0, [lin(tint), lin(top), lin(bottom), lin(light)], 0.0)
+            }
             HeroLook::Glow { a, b, c, rim, body, halo, halo_width } => {
                 let mut a = lin(a);
                 let mut b = lin(b);
@@ -536,10 +552,23 @@ impl GpuPainter for HeroPainter {
             ),
             None => (parts, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
         };
+        // The chrome's environment, when it has one and its layer a backdrop (EG-17).
+        let env = match f.look {
+            HeroLook::Chrome { env: Some(env), .. } => {
+                let at = EnvFor {
+                    owner: cx.source as *const dyn GpuSource as *const () as usize,
+                    centre: [centre.x, centre.y],
+                    radius,
+                    sky: [c[1], c[2], c[3]],
+                };
+                self.env.get(cx, &at, &env).cloned()
+            }
+            _ => None,
+        };
         let u = HeroUniform {
             rect: [q[0], q[1], q[2] - q[0], q[3] - q[1]],
             viewport: [cx.size[0] as f32, cx.size[1] as f32, cx.opacity, cx.encode_srgb as u32 as f32],
-            eye: [eye[0], eye[1], eye[2], 0.0],
+            eye: [eye[0], eye[1], eye[2], env.is_some() as u32 as f32],
             centre: [centre.x, centre.y, 0.0, radius],
             shape: [shape, f.wobble.clamp(0.0, 1.0), f.phase, f.spin],
             march: [lobes as f32, f.steps.clamp(4, 256) as f32, bound, halo_width],
@@ -552,7 +581,7 @@ impl GpuPainter for HeroPainter {
             fog_b,
             part,
         };
-        self.pass.draw(cx, q, bytemuck::bytes_of(&u));
+        self.pass.draw_with(cx, q, bytemuck::bytes_of(&u), env.as_ref());
         true
     }
 }

@@ -12,6 +12,8 @@
 //! - `painter`: [`Painter3d`] and [`install`], 3D elements (`Element::gpu`) in a vo scene.
 //! - `sdf`: [`hero`], one raymarched hero object (chrome blob, aurora orb, jellyfish bell)
 //!   on the stage camera.
+//! - `env`: [`Env`], the chrome hero reflecting the popup's own layers through an environment
+//!   texture built from its layer's backdrop (EG-17).
 //! - `grid`: [`grid_floor`], a perspective grid floor (FX-152) with a horizon glow and a pool
 //!   of light.
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
@@ -33,6 +35,7 @@
 //! in the vertex shader from the point index, so there is no simulation state to replay.
 
 pub mod camera;
+pub mod env;
 pub mod field;
 pub mod frame;
 pub mod glyph_fx;
@@ -55,6 +58,7 @@ pub mod text3d;
 pub mod timer;
 
 pub use camera::{Camera, Projection};
+pub use env::Env;
 pub use field::TextField;
 pub use frame::{
     Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, OnStage, Orb,

@@ -73,7 +73,7 @@ use crate::color::linear_premul;
 use crate::displace::{DisplaceBlock, DisplaceGpu};
 use crate::dots::GpuDot;
 use crate::glass::{glass_layer_shader_source, GlassGpu};
-use crate::gpu::{GpuPainter, PaintCx, StagePx};
+use crate::gpu::{BackdropView, GpuPainter, PaintCx, StagePx};
 use crate::hot::wgsl;
 use crate::material::{materials_source, with_textures, GpuMaterial, MaterialFn};
 use crate::particle_layer::ParticleLayer;
@@ -1498,7 +1498,8 @@ impl Renderer {
                         });
                     }
                     let end = self.gpu_items.len() as u32;
-                    self.push_cmd(draw_surface, Pipe::Gpu, start..end, uniform, BlendMode::Normal, scissor);
+                    // A painter may read the layer's backdrop (EG-17).
+                    self.push_cmd_with(draw_surface, Pipe::Gpu, start..end, uniform, BlendMode::Normal, scissor, bd);
                 }
                 ItemKind::Layer => self.visit(f, item.start, &state, draw_surface),
             }
@@ -2403,6 +2404,17 @@ impl Renderer {
                 let Some(scissor) = surface_scissor(c.scissor, surface) else { return };
                 let [ox, oy] = surface.origin.map(|v| v as f32);
                 let encode_srgb = !format.is_srgb() && format != wgpu::TextureFormat::Rgba16Float;
+                let backdrop =
+                    (c.backdrop != NO_BACKDROP).then(|| &self.backdrops[c.backdrop as usize]).and_then(|b| {
+                        Some(BackdropView {
+                            view: &self.pool[b.tex?].view,
+                            origin: [
+                                (b.origin[0] - surface.origin[0]) as f32,
+                                (b.origin[1] - surface.origin[1]) as f32,
+                            ],
+                            step: b.step as f32,
+                        })
+                    });
                 for g in &self.gpu_items[c.range.start as usize..c.range.end as usize] {
                     let mut cx = PaintCx {
                         device: &self.device,
@@ -2426,6 +2438,7 @@ impl Renderer {
                         opacity: g.opacity,
                         scissor,
                         encode_srgb,
+                        backdrop,
                     };
                     for p in painters.iter_mut() {
                         if p.paint(&mut cx) {

@@ -68,6 +68,20 @@ pub struct PaintCx<'a> {
     pub scissor: [u32; 4],
     /// The painter must encode sRGB itself (a plain UNORM surface).
     pub encode_srgb: bool,
+    /// The backdrop (EG-01) of the item's layer, when it has one captured in this surface:
+    /// what was drawn under the layer's box before it, never the desktop.
+    pub backdrop: Option<BackdropView<'a>>,
+}
+
+/// A layer's backdrop as a GPU painter reads it: an `Rgba16Float` texture of linear,
+/// premultiplied colour, transparent past what was captured.
+#[derive(Clone, Copy, Debug)]
+pub struct BackdropView<'a> {
+    pub view: &'a wgpu::TextureView,
+    /// The texture's top left in surface pixels.
+    pub origin: [f32; 2],
+    /// Surface pixels per texel along each axis: 1, or 2 at half resolution.
+    pub step: f32,
 }
 
 /// The stage camera (`vo_scene::stage`) in a surface's pixels: the eye is `perspective`

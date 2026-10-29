@@ -4,13 +4,17 @@
 // marches only between the entry and exit of a bounding sphere, at most `march.y` times.
 // Shape 3 is a scene of up to 8 parts in two layers (skin and core); with the inside flag the
 // skin is see-through, the core shows behind it and an aurora of 3D noise glows within it.
+// A chrome look with an environment (EG-17, `env.rs`) reflects the equirectangular texture at
+// binding 1 instead of the analytic studio: the studio sky with the popup's own layers in its
+// front half.
 
 struct Hero {
   // Quad x, y, w, h in surface pixels.
   rect: vec4f,
   // Surface width and height in pixels, opacity, 1 to encode sRGB here.
   viewport: vec4f,
-  // Eye position (stage origin, eye distance in front), surface pixels.
+  // Eye position (stage origin, eye distance in front), surface pixels; 1 when the chrome
+  // reflects the environment texture.
   eye: vec4f,
   // Object centre in surface pixels (z 0); radius in surface pixels.
   centre: vec4f,
@@ -42,6 +46,23 @@ struct Hero {
 };
 
 @group(0) @binding(0) var<uniform> hero: Hero;
+@group(0) @binding(1) var env_tex: texture_2d<f32>;
+@group(0) @binding(2) var env_sampler: sampler;
+
+// Where direction `r` lands in the environment texture: longitude about the vertical axis
+// (0.5 facing the viewer), angle from up. `env_uv` in env.rs is the same.
+fn env_uv (r: vec3f) -> vec2f {
+  let d = normalize (r);
+  return vec2f (0.5 + atan2 (d.x, d.z) / 6.2831853, acos (clamp (-d.y, -1.0, 1.0)) / 3.14159265);
+}
+
+// What the chrome reflects along `r`: the environment when it has one, else the studio.
+fn surroundings (r: vec3f) -> vec3f {
+  if (hero.eye.w > 0.5) {
+    return textureSampleLevel (env_tex, env_sampler, env_uv (r), 0.0).rgb;
+  }
+  return studio (r);
+}
 
 @vertex fn vs_hero (@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   let c = vec2f (f32 (vi & 1u), f32 (vi >> 1u));
@@ -324,7 +345,7 @@ fn finish (pm: vec3f, a: f32) -> vec4f {
   } else if (!glow) {
     let r = reflect (dir, n);
     let fresnel = 0.55 + 0.45 * pow (1.0 - facing, 4.0);
-    col = studio (r) * hero.c0.rgb * fresnel + hero.c3.rgb * 0.35 * pow (1.0 - facing, 6.0);
+    col = surroundings (r) * hero.c0.rgb * fresnel + hero.c3.rgb * 0.35 * pow (1.0 - facing, 6.0);
   } else {
     // Colours drifting over the surface, brighter toward the middle, and a bright rim.
     let ph = hero.shape.z;
