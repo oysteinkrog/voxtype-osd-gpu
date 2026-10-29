@@ -67,6 +67,9 @@ struct Live<A: App> {
     region: Option<InputRegion>,
     /// The last compositor blur region sent, from the glass panels in the list (FX07).
     blur: Option<InputRegion>,
+    /// The blur region of the last sampled list, built again only when its inputs change
+    /// (RV-01): an outline costs a rasterise, a sample does not need one.
+    blur_cache: vo_scene::glass::BlurCache,
     /// Whether "no compositor blur" was logged: once, the first time the list asks for blur
     /// behind on a host without it (EG-07). The glass then draws its plain tint.
     no_blur_logged: bool,
@@ -321,15 +324,15 @@ impl<A: App> Live<A> {
             }
         }
         if host.caps().backdrop_blur {
-            let blur = list.blur_region();
-            if self.blur.as_ref() != Some(&blur) {
+            let blur = self.blur_cache.region(&list);
+            if self.blur.as_ref() != Some(blur) {
                 let change = if blur.rects.is_empty() { None } else { Some(blur.clone()) };
                 let _ = host.update(id, SurfaceChange::Blur(change));
-                self.blur = Some(blur);
+                self.blur = Some(blur.clone());
             }
         } else if !self.no_blur_logged
             && (list.glass.iter().any(|g| g.glass.blur_behind) || !list.blur_behind.is_empty())
-            && !list.blur_region().rects.is_empty()
+            && !self.blur_cache.region(&list).rects.is_empty()
         {
             eprintln!("vo: no compositor blur; glass draws its plain tint");
             self.no_blur_logged = true;
@@ -603,6 +606,7 @@ impl<A: App> Live<A> {
             prepared: None,
             region: None,
             blur: None,
+            blur_cache: Default::default(),
             no_blur_logged: false,
             paced: None,
             last_frame: None,
