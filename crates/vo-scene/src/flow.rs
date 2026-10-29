@@ -609,24 +609,40 @@ fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32, whole: &[u32]) -> bool {
 
 /// A rewrapped word shows once the words still sliding along its new line have left its
 /// place, so text never draws over text: the words a reflow pushes along a line start
-/// where the newcomer lands. On the newest line it then shows whole (reading-line envelope,
-/// ink from the first frame); on older lines it fades in. A word whose place is clear at
-/// once keeps its fade.
-fn show_when_clear(next: &mut [FlowWord], rewrapped: &[usize], newest: u32, make: &Make) {
+/// where the newcomer lands. On the newest line it then shows whole, in the frame its old
+/// copy goes (reading-line envelope); on older lines it fades in. A word whose place is
+/// clear at once keeps its fade. A newest-line word lands at rest, so it also waits for
+/// the line scrolling up out of its row (within 0.9 `line_height`). Returns when each
+/// newest-line word shows.
+fn show_when_clear(
+    next: &mut [FlowWord],
+    rewrapped: &[usize],
+    newest: u32,
+    line_height: f32,
+    make: &Make,
+) -> Vec<(WordId, f64)> {
     const STEP: f64 = 1.0 / 240.0;
     let t = make.t;
+    let mut shown = Vec::new();
     for &s in rewrapped {
         let (line, a) = (next[s].line, next[s].x.target());
         let b = a + next[s].width.target();
+        let row = next[s].y.target() + next[s].roll.target();
+        let near = 0.9 * line_height as f64;
         let busy = |at: f64| {
             next.iter().enumerate().any(|(i, o)| {
                 let x = o.x.value(at);
-                i != s && o.line == line && !rewrapped.contains(&i) && x < b && x + o.width.value(at) > a
+                let in_row =
+                    o.line == line || (line == newest && (o.y.value(at) + o.roll.value(at) - row).abs() < near);
+                i != s && in_row && !rewrapped.contains(&i) && x < b && x + o.width.value(at) > a
             })
         };
         let mut at = t;
         while at < t + REWRAP_WAIT_MAX && busy(at) {
             at += STEP;
+        }
+        if line == newest {
+            shown.push((next[s].id, at));
         }
         if at == t {
             continue;
@@ -641,6 +657,7 @@ fn show_when_clear(next: &mut [FlowWord], rewrapped: &[usize], newest: u32, make
             }
         }
     }
+    shown
 }
 
 /// The new lines that hold the same words as one old line, no more and no fewer: rows that
@@ -789,6 +806,9 @@ impl Flow {
         let mut rewrapped: Vec<usize> = Vec::new();
         // The words that faded off a line, with that line and their span on it.
         let mut left: Vec<(WordId, u32, f64, f64)> = Vec::new();
+        // Words that rewrapped onto the newest line, with where their old copies start in
+        // `self.ghosts`: the old copy goes in the frame the new one shows.
+        let mut handed: Vec<(WordId, usize)> = Vec::new();
         // How far the last kept word's line moved, `(line, from old x to new x)`. A new word
         // on that line starts as far back and moves with it, so a line that shifts (a centred
         // line that grows, words after a revised one) slides as one piece instead of the old
@@ -921,7 +941,14 @@ impl Flow {
             } else if o.line != p.line && (front_drop || motion.rewrap == Rewrap::Fade) {
                 // A gliding word would cut across the lines it passes, so the word fades out
                 // where it is and in at its place,
-                // sliding there with the words before it on its new line.
+                // sliding there with the words before it on its new line. On the newest
+                // line the reader is on the word: it hands over in one frame instead, the
+                // old copy gone as the new one shows whole, so it is never drawn
+                // twice and never missing.
+                let newest = p.line == stage.newest;
+                if newest {
+                    handed.push((o.id, self.ghosts.len()));
+                }
                 self.ghost_word(&o, t, retention);
                 if !reduced && !front_drop && scroll.is_none() {
                     let a = o.x.value(t);
@@ -934,17 +961,15 @@ impl Flow {
                 o.x = make.to(p.x - back, p.x, FLIP, Rest::PIXELS);
                 line_shift = Some((p.line, back));
                 o.y = make.ch(p.y, REWRAP, Rest::PIXELS);
-                // Under reduced motion the word does not wait for its place to clear (no
-                // slide crosses it), so on the reading line it arrives readable, as a new
-                // word does.
-                let from = if reduced && p.line == stage.newest { crate::arrival::INK } else { 0.0 };
+                let from = if newest { 1.0 } else { 0.0 };
                 for g in &mut o.glyphs {
                     g.opacity = make.to(from, 1.0, CROSSFADE, Rest::UNIT);
                 }
                 if !reduced {
                     rewrapped.push(slot as usize);
                 }
-                move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
+                // On the newest line it lands at rest, where it is read, not riding the roll.
+                move_to(&mut o.roll, stage.roll, t, stage.travel, reduced || newest);
             } else if o.line != p.line {
                 let at = t + REWRAP_STAGGER * stagger as f64;
                 stagger += 1;
@@ -980,7 +1005,15 @@ impl Flow {
                 }
             }
         }
-        show_when_clear(&mut next, &rewrapped, stage.newest, &make);
+        let shown = show_when_clear(&mut next, &rewrapped, stage.newest, line_height, &make);
+        for &(id, from) in &handed {
+            let at = shown.iter().find(|s| s.0 == id).map_or(t, |s| s.1);
+            for g in self.ghosts[from..].iter_mut().filter(|g| g.word == id) {
+                let k = g.opacity.value(t);
+                g.opacity.snap(t, k);
+                g.opacity.snap(at, 0.0);
+            }
+        }
         self.clear_ghosts(&next, &rewrapped, &left, t);
         self.words = next;
         self.index = index;

@@ -74,9 +74,29 @@ fn a_rewrapped_word_does_not_jump() {
     scene.apply(view(&["w00", "w01wwww"]), 1.0);
     let at = first_glyph(&scene.sample(1.0), 2).unwrap();
     assert!((at.0 - before.0).abs() < 0.5 && (at.1 - before.1).abs() < 0.5, "{at:?} from {before:?}");
+    assert!(at.3 >= 0.7, "still readable where it was: {at:?}");
     // It ends at the start of the stage line, and the stage line is where it was.
     let end = first_glyph(&scene.sample(3.0), 2).unwrap();
     assert!(end.0 < 1.0, "{end:?}");
     assert!((end.1 - before.1).abs() < 0.5, "{end:?}");
     assert!((centre_y(&scene, 3.0) - LINE_Y).abs() < 0.01);
+    // The reader is on the word: it hands over in one frame. In no frame is it drawn twice,
+    // or missing (no copy at reading ink), and the new copy shows where it rests.
+    let mut handed = false;
+    for k in 0..=120 {
+        let t = 1.0 + k as f64 / 240.0;
+        let list = scene.sample(t);
+        let copies: Vec<(f32, f32)> =
+            list.glyphs.iter().filter(|g| g.word == 2 && g.color.a > 0.0).map(|g| (g.pos.x, g.pos.y)).collect();
+        let old = copies.iter().any(|p| (p.0 - before.0).abs() < 0.5);
+        let new = copies.iter().find(|p| p.0 < 1.0);
+        assert!(!(old && new.is_some()), "both copies at +{:.3}", t - 1.0);
+        let ink = list.glyphs.iter().filter(|g| g.word == 2).map(|g| g.color.a).fold(0.0, f32::max);
+        assert!(ink >= 0.7, "no copy at reading ink at +{:.3}: {ink}", t - 1.0);
+        if let Some(p) = new {
+            handed = true;
+            assert!((p.1 - end.1).abs() < 0.5, "the new copy shows at rest: {p:?} vs {end:?}");
+        }
+    }
+    assert!(handed, "the new copy shows within 0.5 s");
 }
