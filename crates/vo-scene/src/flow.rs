@@ -934,8 +934,12 @@ impl Flow {
                 o.x = make.to(p.x - back, p.x, FLIP, Rest::PIXELS);
                 line_shift = Some((p.line, back));
                 o.y = make.ch(p.y, REWRAP, Rest::PIXELS);
+                // Under reduced motion the word does not wait for its place to clear (no
+                // slide crosses it), so on the reading line it arrives readable, as a new
+                // word does.
+                let from = if reduced && p.line == stage.newest { crate::arrival::INK } else { 0.0 };
                 for g in &mut o.glyphs {
-                    g.opacity = make.to(0.0, 1.0, CROSSFADE, Rest::UNIT);
+                    g.opacity = make.to(from, 1.0, CROSSFADE, Rest::UNIT);
                 }
                 if !reduced {
                     rewrapped.push(slot as usize);

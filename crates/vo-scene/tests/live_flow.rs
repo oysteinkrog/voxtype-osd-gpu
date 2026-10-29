@@ -631,3 +631,21 @@ fn a_rewrapped_word_waits_for_the_words_sliding_through_its_place() {
     }
     assert!(shown.is_some_and(|t| t > 1.0), "popup waits, then shows: {shown:?}");
 }
+
+#[test]
+fn under_reduced_motion_a_word_rewrapped_onto_the_newest_line_arrives_readable() {
+    // As above with reduced motion: nothing slides, so "popup" does not wait; it fades in
+    // at its new place from reading ink, not from clear.
+    let mut s = scene().with_reduced_motion(true);
+    let before = [(1, "and"), (2, "set"), (3, "the"), (4, "popup"), (5, "theme"), (6, "to")];
+    s.apply(view(&words(&before), Some(200.0), false), 0.0);
+    let base = first(&s.sample(1.0), 1).1;
+    let mut after = before;
+    after[1] = (2, "settings");
+    s.apply(view(&words(&after), Some(200.0), false), 1.0);
+    let list = s.sample(1.0 + 1.0 / 120.0);
+    let on_row = |g: &&GlyphInstance| g.word == 4 && (g.pos.y - base - 26.0).abs() < 13.0;
+    let ink = list.glyphs.iter().filter(on_row).map(|g| g.color.a).fold(1.0, f32::min);
+    assert!(list.glyphs.iter().any(|g| on_row(&g)), "popup shows on the second line at once");
+    assert!(ink >= 0.7, "popup arrives at {ink} ink");
+}
