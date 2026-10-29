@@ -52,7 +52,7 @@ pub const RETRY: Duration = Duration::from_secs(2);
 /// `ppu` under 1 to a step of 0.25 times the power of two at or below it (1/8 from 0.5 to 1).
 /// Whole and quarter scales (1, 1.25, 1.5, 2) come out unchanged.
 pub fn decode_scale(ppu: f32) -> f32 {
-    if !(ppu > 0.0) || !ppu.is_finite() {
+    if !ppu.is_finite() || ppu <= 0.0 {
         return 0.0;
     }
     let step = 0.25 * 2f32.powi(ppu.log2().floor() as i32).min(1.0);
