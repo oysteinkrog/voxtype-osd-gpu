@@ -34,6 +34,14 @@ struct OrbOut {
   let corner = vec2f (f32 (vi & 1u), f32 (vi >> 1u)) * 2.0 - 1.0;
   let ext = (radius + soft) * corner;
   var out: OrbOut;
+  // A split half (EG-20) keeps or drops whole orbs.
+  if (split_out (o.pos.xyz)) {
+    out.clip = vec4f (2.0, 2.0, 2.0, 1.0);
+    out.offset = vec2f (0.0);
+    out.disc = vec3f (0.0, 1.0, 0.0);
+    out.color = vec4f (0.0);
+    return out;
+  }
   out.clip = clip_offset_px (clip, ext);
   out.offset = ext;
   out.disc = vec3f (radius, soft, defocus);

@@ -578,8 +578,9 @@ pub(crate) enum Kind {
     },
     /// App drawing code run from the frame time (`crate::canvas`).
     Canvas(CanvasDraw),
-    /// Content an app draws with its own GPU code (`crate::gpu`).
-    Gpu(crate::gpu::GpuRef),
+    /// Content an app draws with its own GPU code (`crate::gpu`); `true` when it is split at
+    /// the text plane (`Element::gpu_split`).
+    Gpu(crate::gpu::GpuRef, bool),
     /// A stroked outline fitted to the box, trimmed by the trim channels.
     StrokePath(StrokeArt),
     /// A stroked morph fitted to the box at the morph channel's progress.
@@ -918,7 +919,15 @@ impl<M> Element<M> {
     /// The renderer needs a painter for the source's type. Give it a size: it has no content
     /// size.
     pub fn gpu(key: impl Into<Key>, source: std::sync::Arc<dyn crate::gpu::GpuSource>) -> Element<M> {
-        Element::new(key, Kind::Gpu(crate::gpu::GpuRef(source)), taffy::Style::default())
+        Element::new(key, Kind::Gpu(crate::gpu::GpuRef(source), false), taffy::Style::default())
+    }
+
+    /// [`Element::gpu`] drawn in two halves cut at the text plane (EG-20, `crate::gpu`): what
+    /// lies behind it is drawn here, what lies in front of it after the live text, so a 3D
+    /// ring can pass behind the text and then in front of older lines. The front half never
+    /// covers the newest line of live text. The painter must know the parts (`vo_3d` does).
+    pub fn gpu_split(key: impl Into<Key>, source: std::sync::Arc<dyn crate::gpu::GpuSource>) -> Element<M> {
+        Element::new(key, Kind::Gpu(crate::gpu::GpuRef(source), true), taffy::Style::default())
     }
 
     /// A stroked outline fitted to the box (`view` is its own box). Its trim is two animated

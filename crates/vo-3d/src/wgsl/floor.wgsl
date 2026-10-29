@@ -58,6 +58,10 @@ struct FloorOut {
     }
   }
   c *= fog_at (length (p - g.eye.xyz));
+  // A split half (EG-20) still writes the floor's depth, but its pools only where it keeps.
+  if (split_out (p)) {
+    c = vec3f (0.0);
+  }
   out.color = finish (vec4f (c, clamp (max (c.r, max (c.g, c.b)), 0.0, 1.0)));
   return out;
 }
@@ -81,7 +85,7 @@ struct FloorOut {
     discard;
   }
   let a = (1.0 - shadow_at (p, vec3f (0.0), frag.xy)) * fog_at (length (p - g.eye.xyz));
-  if (a <= 0.0) {
+  if (a <= 0.0 || split_out (p)) {
     discard;
   }
   return vec4f (0.0, 0.0, 0.0, a);

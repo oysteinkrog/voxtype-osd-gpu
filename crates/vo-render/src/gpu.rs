@@ -28,15 +28,23 @@
 //! its own buffers.
 
 use vo_scene::geom::{Affine, Rect};
-use vo_scene::gpu::GpuSource;
+use vo_scene::gpu::{GpuPart, GpuSource};
 
 /// Draws GPU items whose source it knows. Add one with `Renderer::add_painter`.
+///
+/// A split element (`Element::gpu_split`, EG-20) arrives twice per frame: `PaintCx::part` is
+/// `Behind`, then later `Front` with the boxes to leave alone in `PaintCx::cut`.
 pub trait GpuPainter: Send {
     /// Called once per frame that has GPU items, before the first `paint`.
     fn begin_frame(&mut self) {}
     /// Draws the item if this painter knows `cx.source`, and returns whether it did. The
     /// renderer asks each painter in the order they were added and stops at the first yes.
     fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool;
+    /// Whether this painter draws the halves of split elements (EG-20). The renderer never
+    /// hands a `Front` item to a painter that does not, so it draws the whole at `Behind`.
+    fn splits(&self) -> bool {
+        false
+    }
 }
 
 /// One GPU item to draw, and where.
@@ -54,6 +62,12 @@ pub struct PaintCx<'a> {
     pub rect: Rect,
     /// The time the frame shows.
     pub t: f64,
+    /// Which part of a split element (EG-20) to draw; `Whole` for a plain element. A painter
+    /// that does not split (`GpuPainter::splits`) only ever sees `Whole` and `Behind`.
+    pub part: GpuPart,
+    /// For a front half: boxes in the layer's space where the painter must leave the surface
+    /// exactly as it found it (the reading line).
+    pub cut: &'a [vo_scene::geom::Rect],
     /// The layer's space to surface pixels, as laid out.
     pub to_px: Affine,
     /// The stage warp from surface pixels as laid out to surface pixels as seen

@@ -1151,7 +1151,7 @@ impl<M> Scene<M> {
                             t < n.words.iter().map(|w| w.since).fold(n.words_at, f64::max) + WORD_PARTICLES_BUSY
                         }
                         Kind::Canvas(c) => c.moving(t),
-                        Kind::Gpu(g) => t < g.0.until(),
+                        Kind::Gpu(g, _) => t < g.0.until(),
                         Kind::StrokePath(a) => a.head.is_some(),
                         Kind::Frame(f) => f.moving(),
                         Kind::Spectrum(s) => s.moving(self.signals.as_ref(), t),
@@ -1223,6 +1223,7 @@ impl<M> Scene<M> {
         }
         out.layers[0].items = close_items(&mut items, out);
         keep_reading_line(out);
+        crate::gpu::place_front_halves(out);
     }
 
     /// Live text: a word's box at `t` in the node's space, from its sprung position and
@@ -1864,12 +1865,14 @@ impl<M> Scene<M> {
             let centre = Point::new(m.e + 0.5 * size.w, m.f + 0.5 * size.h);
             let i = crate::emitter::push_instance(out, e, id.to_bits(), n.born, t, centre, alpha);
             push_item(items, ItemKind::Emitters, i);
-        } else if let Kind::Gpu(g) = &n.kind {
+        } else if let Kind::Gpu(g, split) = &n.kind {
             out.gpu.push(crate::gpu::GpuItem {
                 source: g.clone(),
                 rect: Rect::new(m.e, m.f, size.w, size.h),
                 t,
                 opacity: alpha,
+                part: if *split { crate::gpu::GpuPart::Behind } else { crate::gpu::GpuPart::Whole },
+                cut: Vec::new(),
             });
             push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
         } else {
@@ -2352,7 +2355,7 @@ impl<M> Scene<M> {
                 None
             }
             // Drawn by `emit_body`, which knows the layer.
-            Kind::Canvas(_) | Kind::Emitter(_) | Kind::Gpu(_) => None,
+            Kind::Canvas(_) | Kind::Emitter(_) | Kind::Gpu(..) => None,
             Kind::Path { id, view } => {
                 let paint = fill();
                 if paint.is_visible() && view.w > 0.0 && view.h > 0.0 {

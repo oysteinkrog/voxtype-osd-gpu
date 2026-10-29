@@ -83,6 +83,14 @@ fn srgb_decode (c: vec3f) -> vec3f {
 // Lights one fragment. `front_col` and `back_col` are linear premultiplied.
 fn shade (in: MeshOut, front: bool, fibre: f32, front_col: vec4f, back_col: vec4f) -> vec4f {
   let mirrored = d.params.w > 0.5;
+  // A split half (EG-20) by where the surface really is: a reflection by its original.
+  var real = in.world;
+  if (mirrored) {
+    real.y = 2.0 * g.floor.x - real.y;
+  }
+  if (split_out (real)) {
+    discard;
+  }
   var k = 1.0;
   var l = g.light_dir.xyz;
   var eye = g.eye.xyz;

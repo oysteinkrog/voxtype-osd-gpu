@@ -34,6 +34,8 @@ struct Globals {
   // perspective ones). Then the world size of a map texel, and the largest disc radius in
   // map uv (the free margin round the casters).
   shadow_k: vec4f,
+  // The half drawn (EG-20): keep world points where dot (xyz, p) + w >= 0. All zero keeps all.
+  clip: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -47,6 +49,11 @@ struct Globals {
 @group(0) @binding(4) var shadow_smp: sampler_comparison;
 
 const TAU: f32 = 6.283185307;
+
+// True when world point `p` lies in the half this pass leaves out (EG-20).
+fn split_out (p: vec3f) -> bool {
+  return dot (g.clip.xyz, p) + g.clip.w < 0.0;
+}
 
 // PCG hash, the same function as vo_core::hash::pcg, so CPU and GPU agree.
 fn pcg (v: u32) -> u32 {

@@ -6,6 +6,13 @@
 //! texture the item's size and composites it over the surface with premultiplied over, times
 //! the layer opacity. The item is placed by the bounds of its rect in surface pixels; a
 //! rotated layer is not followed.
+//!
+//! **Two halves** (EG-20). An item can be drawn as one of two halves split at the text plane
+//! ([`Part::Behind`], [`Part::Front`]): the plane through the camera's target that faces the
+//! camera, which is z = 0 in stage space for a frame drawn [`crate::OnStage`]. The 3D pass
+//! drops what lies on the other side ([`Renderer3d::part`]), so one [`Source3d`] drawn twice
+//! covers its whole drawing once. A front half is composited everywhere but inside
+//! [`ItemPlace::cut`], where the surface stays exactly as it was (the reading line).
 
 use std::fmt::Debug;
 
@@ -18,6 +25,11 @@ use crate::frame::Frame3d;
 use crate::mesh::{Mesh, Vertex};
 use crate::render::Renderer3d;
 use crate::MeshId;
+
+pub use vo_scene::gpu::GpuPart as Part;
+
+/// Most boxes a front half leaves alone; more are merged into the last one.
+pub const MAX_CUTS: usize = 16;
 
 const ITEM_WGSL: &str = include_str!("wgsl/item.wgsl");
 
@@ -54,6 +66,8 @@ pub trait Source3d: Debug + Send + Sync {
 struct ItemUniform {
     rect: [f32; 4],
     viewport: [f32; 4],
+    /// x0, y0, x1, y1 in surface pixels; the first `cut_count` are used.
+    cuts: [[f32; 4]; MAX_CUTS],
 }
 
 struct Scratch {
@@ -88,6 +102,11 @@ pub struct ItemPlace {
     /// The stage camera in surface pixels and the item's centre as seen on the surface, for
     /// frames drawn [`crate::OnStage`].
     pub stage: Option<StageAt>,
+    /// Which half to draw (EG-20), `Part::Whole` for all of it.
+    pub part: Part,
+    /// Boxes `x0, y0, x1, y1` in surface pixels where the item leaves the surface exactly as
+    /// it was: a pixel whose centre is inside one is not touched.
+    pub cut: Vec<[f32; 4]>,
 }
 
 /// Where the stage camera is, for an item: `origin` and `centre` in surface pixels, and the
@@ -166,6 +185,7 @@ impl ItemPainter {
         for (i, v) in &moving {
             self.scene.update_mesh(MeshId(base + i), v);
         }
+        self.scene.part = at.part;
         let mut frame = source.frame(t, at.size);
         for d in &mut frame.meshes {
             d.mesh = MeshId(base + d.mesh.0);
@@ -202,9 +222,20 @@ impl ItemPainter {
         let out = crate::render::Output { view: &scratch.view, size, format, scale };
         self.scene.encode_with(enc, out, &frame, None, None);
 
+        let mut cuts = [[0.0f32; 4]; MAX_CUTS];
+        for (i, c) in at.cut.iter().enumerate() {
+            let k = i.min(MAX_CUTS - 1);
+            cuts[k] = if i < MAX_CUTS {
+                *c
+            } else {
+                let m = cuts[k];
+                [m[0].min(c[0]), m[1].min(c[1]), m[2].max(c[2]), m[3].max(c[3])]
+            };
+        }
         let u = ItemUniform {
             rect: [x0, y0, size[0] as f32, size[1] as f32],
-            viewport: [at.surface[0] as f32, at.surface[1] as f32, at.opacity, 0.0],
+            viewport: [at.surface[0] as f32, at.surface[1] as f32, at.opacity, at.cut.len().min(MAX_CUTS) as f32],
+            cuts,
         };
         self.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {

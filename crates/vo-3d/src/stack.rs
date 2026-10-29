@@ -10,6 +10,10 @@
 //! 5. **Post**: a caller hook on the finished target (bloom and the like live in the effect
 //!    graph).
 //!
+//! The order is fixed: the whole 3D scene is under the text. Splitting 3D around the text
+//! plane (EG-20, [`crate::Part`]) is for 3D elements in a vo scene (`Element::gpu_split`);
+//! the stack always draws its scene with `Part::Whole`.
+//!
 //! Each stage is its own command buffer, because the 2D renderer reuses its buffers for
 //! every list it draws. With a [`GpuTimer`] each stage is timed.
 

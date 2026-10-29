@@ -2426,6 +2426,8 @@ impl Renderer {
                         source: &*g.item.source.0,
                         rect: g.item.rect,
                         t: g.item.t,
+                        part: g.item.part,
+                        cut: &g.item.cut,
                         to_px: g.to_px.then(&Affine::translate(-ox, -oy)),
                         warp: g.warp.map(|w| {
                             Warp([[1.0, 0.0, ox], [0.0, 1.0, oy], [0.0, 0.0, 1.0]]).then(&w).then(&Warp([
@@ -2440,7 +2442,11 @@ impl Renderer {
                         encode_srgb,
                         backdrop,
                     };
+                    let front = g.item.part == vo_scene::gpu::GpuPart::Front;
                     for p in painters.iter_mut() {
+                        if front && !p.splits() {
+                            continue;
+                        }
                         if p.paint(&mut cx) {
                             break;
                         }

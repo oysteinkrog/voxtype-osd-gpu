@@ -10,6 +10,12 @@
 //! With [`crate::Shadows`] (EG-18), a depth-only pass from the key light draws the meshes
 //! into a shadow map first; the meshes and the floor then read it (see [`crate::shadow`]).
 //!
+//! With [`Renderer3d::part`] set to `Behind` or `Front` (EG-20), every fragment, point and
+//! orb on the other side of the text plane is dropped: the plane through the camera's target
+//! that faces the camera (z = 0 on the stage camera), so a split element's two halves cover
+//! the whole drawing once. The front half draws no background; the shadow map still holds
+//! every mesh, so each half is shadowed by the other.
+//!
 //! The pass resolves into the caller's view, so it is a layer like any other for whatever
 //! comes after it (2D display lists, text, post effects).
 
@@ -65,6 +71,7 @@ struct Globals {
     light_view_proj: [[f32; 4]; 4],
     shadow: [f32; 4],
     shadow_k: [f32; 4],
+    clip: [f32; 4],
 }
 
 #[repr(C)]
@@ -229,6 +236,8 @@ pub struct Renderer3d {
     light_bind: wgpu::BindGroup,
     /// Wall time spent compiling shader modules and pipelines, for cold-start reports.
     pub pipeline_time: Duration,
+    /// Which half of the scene the next passes draw (EG-20); `Whole` by default.
+    pub part: crate::item::Part,
 }
 
 impl Renderer3d {
@@ -418,6 +427,7 @@ impl Renderer3d {
             light_buf,
             light_bind,
             pipeline_time: Duration::ZERO,
+            part: crate::item::Part::Whole,
         }
     }
 
@@ -761,6 +771,15 @@ impl Renderer3d {
             }
             None => ([0.0; 4], [0.0; 4], Mat4::IDENTITY.cols),
         };
+        // The text plane through the camera's target, facing the camera (EG-20): keep where
+        // dot(n, p) + d >= 0.
+        let fwd = (cam.target - eye).normalize();
+        let behind = [fwd.x, fwd.y, fwd.z, -fwd.dot(cam.target)];
+        let clip = match self.part {
+            crate::item::Part::Whole => [0.0; 4],
+            crate::item::Part::Behind => behind,
+            crate::item::Part::Front => behind.map(|v| -v),
+        };
         let globals = Globals {
             view_proj: cam.view_proj(w / h).cols,
             view: cam.view().cols,
@@ -778,6 +797,7 @@ impl Renderer3d {
             light_view_proj,
             shadow,
             shadow_k,
+            clip,
         };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -979,7 +999,7 @@ impl Renderer3d {
         let draws = &self.draws.as_ref().unwrap().1;
         pass.set_bind_group(0, &globals_bind, &[]);
         pass.set_bind_group(1, draws, &[0]);
-        if !matches!(frame.background, Background::Transparent) {
+        if !matches!(frame.background, Background::Transparent) && self.part != crate::item::Part::Front {
             pass.set_pipeline(&p.background);
             pass.draw(0..3, 0..1);
         }

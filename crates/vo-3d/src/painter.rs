@@ -74,8 +74,22 @@ impl GpuPainter for Painter3d {
                     [c.x, c.y]
                 },
             }),
+            part: cx.part,
+            cut: cx
+                .cut
+                .iter()
+                .map(|r| {
+                    let a = cx.to_px.apply(vo_scene::geom::Point::new(r.x, r.y));
+                    let b = cx.to_px.apply(vo_scene::geom::Point::new(r.x + r.w, r.y + r.h));
+                    [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)]
+                })
+                .collect(),
         };
         painter.paint(cx.enc, cx.view, cx.format, item.0.as_ref(), cx.t, &at);
+        true
+    }
+
+    fn splits(&self) -> bool {
         true
     }
 }

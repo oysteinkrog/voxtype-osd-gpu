@@ -47,6 +47,9 @@ struct ConeOut {
 }
 
 @fragment fn fs_cone (in: ConeOut) -> @location(0) vec4f {
+  if (split_out (in.world)) {
+    discard;
+  }
   let v = normalize (g.eye.xyz - in.world);
   let facing = abs (dot (normalize (in.normal), v));
   let fade = pow (1.0 - in.along, 1.5) * smoothstep (0.0, 0.08, in.along);

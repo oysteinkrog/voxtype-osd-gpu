@@ -78,6 +78,8 @@ fn item_composites_at_its_rect() {
         size: Size::new(200.0, 120.0),
         scissor: None,
         stage: None,
+        part: Part::Whole,
+        cut: Vec::new(),
     };
     painter.paint(&mut enc, &view, FORMAT, &Ring, 1.0, &at);
     gpu.queue.submit([enc.finish()]);

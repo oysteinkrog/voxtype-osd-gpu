@@ -95,6 +95,18 @@ fn cloud_point (i: u32) -> vec3f {
   let corner = vec2f (f32 (vi & 1u), f32 (vi >> 1u)) * 2.0 - 1.0;
   let ext = (radius + soft) * corner;
   var out: PointOut;
+  // A split half (EG-20) keeps or drops whole points, by where the point really is.
+  var real = w.xyz;
+  if (c.ids.w != 0u) {
+    real.y = 2.0 * g.floor.x - real.y;
+  }
+  if (split_out (real)) {
+    out.clip = vec4f (2.0, 2.0, 2.0, 1.0);
+    out.offset = vec2f (0.0);
+    out.disc = vec2f (0.0, 1.0);
+    out.color = vec4f (0.0);
+    return out;
+  }
   out.clip = clip_offset_px (clip, ext);
   out.offset = ext;
   out.disc = vec2f (radius, soft);

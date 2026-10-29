@@ -8,7 +8,8 @@
 //!   clouds (D302), bokeh orbs (FX16), a reflecting floor and light cones (D305).
 //! - `render`: [`Renderer3d`], one MSAA pass with a depth buffer that resolves into any
 //!   colour view (D301).
-//! - `item`: [`Source3d`] and [`ItemPainter`], 3D as an item at its place in a 2D scene.
+//! - `item`: [`Source3d`] and [`ItemPainter`], 3D as an item at its place in a 2D scene,
+//!   whole or as the half behind or in front of the text plane ([`Part`], EG-20).
 //! - `painter`: [`Painter3d`] and [`install`], 3D elements (`Element::gpu`) in a vo scene.
 //! - `sdf`: [`hero`], one raymarched hero object (chrome blob, aurora orb, jellyfish bell)
 //!   on the stage camera.
@@ -65,7 +66,7 @@ pub use frame::{
     PointCloud, Pool, TextureId, MAX_POOLS,
 };
 pub use grid::{grid_floor, GridFrame, GridItem, GridPainter, GridPool, GridSource};
-pub use item::{ItemPainter, ItemPlace, Source3d, StageAt};
+pub use item::{ItemPainter, ItemPlace, Part, Source3d, StageAt};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use painter::{install, item, Item3d, Painter3d};

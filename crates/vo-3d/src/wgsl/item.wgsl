@@ -4,8 +4,10 @@
 struct Item {
   // x, y, w, h in surface pixels; x and y are whole pixels.
   rect: vec4f,
-  // Surface width and height in pixels, opacity.
+  // Surface width and height in pixels, opacity, number of cut boxes.
   viewport: vec4f,
+  // Boxes x0, y0, x1, y1 in surface pixels where nothing is drawn (EG-20's reading line).
+  cuts: array<vec4f, 16>,
 };
 
 @group(0) @binding(0) var item_tex: texture_2d<f32>;
@@ -23,6 +25,12 @@ struct Item {
   let size = vec2i (textureDimensions (item_tex));
   if (any (p < vec2i (0)) || any (p >= size)) {
     return vec4f (0.0);
+  }
+  for (var i = 0u; i < u32 (item.viewport.w); i++) {
+    let c = item.cuts[i];
+    if (all (frag.xy >= c.xy) && all (frag.xy < c.zw)) {
+      discard;
+    }
   }
   return textureLoad (item_tex, p, 0) * item.viewport.z;
 }
