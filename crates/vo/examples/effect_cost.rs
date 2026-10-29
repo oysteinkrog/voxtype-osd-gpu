@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::displace::{Displace, Onset, Ripples};
-use vo::scene::display::BackdropRes;
+use vo::scene::display::{BackdropRes, TrailDrift};
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::fluid::{FluidLayer, InkStyle, InkWord};
 use vo::scene::geom::{Color, Point, Rect, Size};
@@ -47,6 +47,7 @@ const CASES: &[&str] = &[
     "bloom",
     "bloom wide",
     "trail",
+    "trail-drift",
     "motion blur",
     "crt style",
     "glitch",
@@ -169,6 +170,13 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "bloom" => layer.bloom(1.0, 18.0 * k),
         "bloom wide" => layer.bloom(1.0, 60.0 * k),
         "trail" => layer.trail(0.25),
+        // EG-34: the same trail with its afterglow turning and growing about the card's middle.
+        "trail-drift" => layer.trail(0.25).trail_drift(TrailDrift {
+            turn_deg_per_s: 90.0,
+            scale_per_s: 0.1,
+            offset_px_per_s: [0.0; 2],
+            pivot: Point::new(240.0 * k, 110.0 * k),
+        }),
         "crt style" => layer.chromatic(2.0 * k).scanlines(0.35, 3.0 * k).crt(0.12).vignette(0.4),
         "glitch" => layer.glitch(0.6),
         // A blur of the card (EG-04); radius 0 must add no pass at all.
