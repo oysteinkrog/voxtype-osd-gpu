@@ -1219,7 +1219,6 @@ impl<M> Scene<M> {
         out.clear();
         out.size = self.viewport;
         out.scale = self.scale;
-        out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
         out.stage = self.stage;
         out.layers.push(Layer::root());
         let mut items = Vec::new();
@@ -1229,6 +1228,13 @@ impl<M> Scene<M> {
         out.layers[0].items = close_items(&mut items, out);
         keep_reading_line(out);
         crate::gpu::place_front_halves(out);
+        // Only app GPU code and app materials read the signal block; built-in shaders do not.
+        // A list without them skips it: room tone would rebuild every band and the whole
+        // level history once a frame for nothing (RD-14).
+        if out.gpu.is_empty() && out.materials.iter().all(|m| m.func < crate::material::CUSTOM_FIRST) {
+            return;
+        }
+        out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
     }
 
     /// Live text: a word's box at `t` in the node's space, from its sprung position and

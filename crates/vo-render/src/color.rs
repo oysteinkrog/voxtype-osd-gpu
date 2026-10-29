@@ -59,8 +59,35 @@ pub fn oklab_to_linear([ll, a, b]: [f32; 3]) -> [f32; 3] {
 
 /// OKLab with straight alpha times `opacity`, the form gradient stops take on the GPU.
 pub fn oklab_alpha(c: Color, opacity: f32) -> [f32; 4] {
-    let [l, a, b] = linear_to_oklab([srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)]);
+    let [l, a, b] = srgb_to_oklab(c.r, c.g, c.b);
     [l, a, b, (c.a * opacity).clamp(0.0, 1.0)]
+}
+
+/// Encoded sRGB to OKLab, through a small cache: a frame converts the same few colours for
+/// hundreds of instances, and each conversion costs three `powf` and three `cbrt` (RD-14).
+/// The cache returns the same bits the conversion gives.
+fn srgb_to_oklab(r: f32, g: f32, b: f32) -> [f32; 3] {
+    use std::cell::RefCell;
+    const SLOTS: usize = 64;
+    type Slot = Option<([u32; 3], [f32; 3])>;
+    thread_local! {
+        static CACHE: RefCell<[Slot; SLOTS]> = const { RefCell::new([None; SLOTS]) };
+    }
+    let key = [r.to_bits(), g.to_bits(), b.to_bits()];
+    let slot = (key[0].wrapping_mul(0x9e37_79b1) ^ key[1].wrapping_mul(0x85eb_ca77) ^ key[2].wrapping_mul(0xc2b2_ae3d))
+        .wrapping_shr(26) as usize
+        % SLOTS;
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache[slot] {
+            Some((k, lab)) if k == key => lab,
+            _ => {
+                let lab = linear_to_oklab([srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]);
+                cache[slot] = Some((key, lab));
+                lab
+            }
+        }
+    })
 }
 
 /// Turns one premultiplied RGBA8 pixel, as read back from an sRGB render target (linear light
@@ -81,6 +108,16 @@ pub fn unpremultiply_srgb8(px: [u8; 4]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_oklab_gives_the_same_bits() {
+        for i in 0..2000u32 {
+            let c = Color::rgba((i % 17) as f32 / 16.0, (i % 13) as f32 / 12.0, (i % 7) as f32 / 6.0, 1.0);
+            let direct = linear_to_oklab([srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)]);
+            let [l, a, b, _] = oklab_alpha(c, 1.0);
+            assert_eq!([l.to_bits(), a.to_bits(), b.to_bits()], direct.map(f32::to_bits), "{i}");
+        }
+    }
 
     #[test]
     fn srgb_round_trips() {

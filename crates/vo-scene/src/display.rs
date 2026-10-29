@@ -64,7 +64,8 @@ pub struct DisplayList {
     pub glass: Vec<GlassInstance>,
     /// Content drawn by app GPU code (`crate::gpu`).
     pub gpu: Vec<GpuItem>,
-    /// The signal bus uniform for this frame (`vo_core::signals`), zero without a store.
+    /// The signal bus uniform for this frame (`vo_core::signals`), zero without a store. The
+    /// scene fills it only for a list with app GPU code or app materials, the only readers.
     #[serde(skip)]
     pub signals: vo_core::signals::SignalBlock,
     /// Materials (FX15, `crate::material`) that shapes, glyphs and vectors point at by a

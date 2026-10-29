@@ -246,10 +246,16 @@ mod tests {
 
     #[test]
     fn display_list_carries_the_block() {
+        // An app material may read the block, so its list carries it.
         let mut scene = Scene::new();
-        scene.apply(dot().signals(steady(-30.0)), 0.0);
+        let custom = crate::material::Material::custom(crate::material::CUSTOM_FIRST);
+        scene.apply(dot().material(custom).signals(steady(-30.0)), 0.0);
         let dl = scene.sample(0.5);
         assert_eq!(dl.signals.head[1], 1.0);
         assert!((dl.signals.head[4] - 0.5).abs() < 1e-4);
+        // Built-in shaders never read it: a list without a reader skips it (RD-14).
+        let mut scene = Scene::new();
+        scene.apply(dot().signals(steady(-30.0)), 0.0);
+        assert_eq!(scene.sample(0.5).signals, vo_core::signals::SignalBlock::default());
     }
 }
