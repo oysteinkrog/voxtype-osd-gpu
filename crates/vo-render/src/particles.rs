@@ -128,9 +128,11 @@ pub struct ParticleConfig {
     /// Slots of formed particles, and particles per slot (rounded up to [`WORKGROUP`]).
     pub word_slots: u32,
     pub slot_capacity: u32,
-    /// Particles a word may use in a slot, at most `slot_capacity`; 0 means all of it. Shapes
-    /// ([`Particles::set_points`]) use the whole slot.
-    pub word_capacity: u32,
+    /// Shape slots after the word slots (slots `word_slots..word_slots + shape_slots`), each
+    /// with `shape_capacity` particles (rounded up to [`WORKGROUP`]; 0 means `slot_capacity`):
+    /// shapes can take more particles than words without every word slot growing too.
+    pub shape_slots: u32,
+    pub shape_capacity: u32,
     /// Hero particles with ribbons, across all emitters.
     pub trail_capacity: u32,
     /// Fixed tick of the free particles.
@@ -144,11 +146,23 @@ impl Default for ParticleConfig {
             free_capacity: 20_480,
             word_slots: 32,
             slot_capacity: 1024,
-            word_capacity: 0,
+            shape_slots: 0,
+            shape_capacity: 0,
             trail_capacity: 256,
             tick_hz: 120.0,
             seed: 1,
         }
+    }
+}
+
+/// Slot `slot`'s first particle in the words buffer and its particle count, for a config as
+/// [`Particles::new`] rounds it.
+pub(crate) fn slot_span(c: &ParticleConfig, slot: u32) -> (u32, u32) {
+    assert!(slot < c.word_slots + c.shape_slots, "no slot {slot}");
+    if slot < c.word_slots {
+        (slot * c.slot_capacity, c.slot_capacity)
+    } else {
+        (c.word_slots * c.slot_capacity + (slot - c.word_slots) * c.shape_capacity, c.shape_capacity)
     }
 }
 
@@ -196,7 +210,8 @@ pub struct WordGlyph {
 /// Points for a slot to form, as [`Particles::set_points`] takes them (PA09 and any shape).
 #[derive(Clone, Copy, Debug)]
 pub struct PointForm<'a> {
-    /// Targets relative to the slot's origin. At most `slot_capacity` are used.
+    /// Targets relative to the slot's origin. At most the slot's capacity
+    /// ([`Particles::slot_capacity`]) are used.
     pub points: &'a [Point],
     /// Where each particle starts, when it should not start from where it is (or from a
     /// cloud): dots peeling off a grid, for example.
@@ -386,7 +401,9 @@ struct GpuWord {
     stroke: f32,
     reveal_t0: f32,
     reveal_delay: f32,
-    _pad: [f32; 2],
+    /// The slot this particle belongs to, for its look; the anchor pass writes it.
+    slot: u32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -419,7 +436,8 @@ struct GpuAnchor {
     t: f32,
     size: f32,
     w: f32,
-    _pad: f32,
+    /// The slot's first particle in the words buffer.
+    base: u32,
     x0: f32,
     width: f32,
     scatter: f32,
@@ -670,15 +688,17 @@ impl Particles {
             trail_capacity: cfg.trail_capacity.max(1),
             ..cfg
         };
-        let word_capacity = match cfg.word_capacity {
+        let shape_capacity = match cfg.shape_capacity {
             0 => cfg.slot_capacity,
-            w => w.min(cfg.slot_capacity),
+            c => c.next_multiple_of(WORKGROUP),
         };
-        let cfg = ParticleConfig { word_capacity, ..cfg };
+        let cfg = ParticleConfig { shape_capacity, ..cfg };
+        let all_slots = cfg.word_slots + cfg.shape_slots;
         use wgpu::BufferUsages as U;
         use wgpu::ShaderStages as S;
         let free_bytes = cfg.free_capacity as u64 * size_of::<GpuFree>() as u64;
-        let word_count = cfg.word_slots as u64 * cfg.slot_capacity as u64;
+        let word_count =
+            cfg.word_slots as u64 * cfg.slot_capacity as u64 + cfg.shape_slots as u64 * cfg.shape_capacity as u64;
         let trail_bytes = cfg.trail_capacity as u64 * TRAIL as u64 * 16;
         let free = buffer(device, "vo-particles-free", free_bytes, U::STORAGE | U::COPY_SRC);
         let emits = buffer(
@@ -700,7 +720,7 @@ impl Particles {
         let slot_draw = buffer(
             device,
             "vo-particles-slot-draw",
-            cfg.word_slots as u64 * size_of::<GpuSlotDraw>() as u64,
+            all_slots as u64 * size_of::<GpuSlotDraw>() as u64,
             U::STORAGE,
         );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -773,7 +793,6 @@ impl Particles {
                 entry(2, &targets, Some(word_count * size_of::<GpuTarget>() as u64)),
             ],
         });
-        // Exact sizes: the word shader finds the slot capacity from the two array lengths.
         let draw_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vo-particles-draw"),
             layout: &draw_layout,
@@ -782,7 +801,7 @@ impl Particles {
                 entry(1, &free, Some(free_bytes)),
                 entry(2, &emit_draw, None),
                 entry(3, &words, Some(word_count * size_of::<GpuWord>() as u64)),
-                entry(4, &slot_draw, Some(cfg.word_slots as u64 * size_of::<GpuSlotDraw>() as u64)),
+                entry(4, &slot_draw, Some(all_slots as u64 * size_of::<GpuSlotDraw>() as u64)),
                 entry(5, &trail, Some(trail_bytes)),
                 entry(6, &trail_owner, None),
                 entry(7, &paths, None),
@@ -840,7 +859,7 @@ impl Particles {
             tick: 0,
             initial: Vec::new(),
             snapshot: None,
-            slots: vec![Slot::default(); cfg.word_slots as usize],
+            slots: vec![Slot::default(); all_slots as usize],
             masks,
             mask_b: 1,
             mask_switch: 0,
@@ -1204,7 +1223,7 @@ impl Particles {
         dot_area: f32,
         held_from: usize,
     ) {
-        let cap = self.cfg.word_capacity;
+        let (base, cap) = self.slot_span(slot);
         let dot_area = dot_area.max(0.25);
         let old = std::mem::take(&mut self.slots[slot as usize]);
         let same = |a: &WordGlyph, b: &WordGlyph| a.font == b.font && a.glyph == b.glyph && a.size == b.size;
@@ -1277,7 +1296,7 @@ impl Particles {
             allocate(cap as usize, &counts, |gi| info[gi].3.map(|o| old.glyphs[o].range).filter(|r| r.1 == counts[gi]));
 
         self.target_data.clear();
-        self.target_data.resize(self.cfg.slot_capacity as usize, GpuTarget::default());
+        self.target_data.resize(cap as usize, GpuTarget::default());
         let mut slot_glyphs = Vec::with_capacity(n_glyphs);
         let mut points = Vec::new();
         for (gi, (g, p)) in glyphs.iter().zip(&pts).enumerate() {
@@ -1324,7 +1343,8 @@ impl Particles {
         }
         let anchor = GpuAnchor {
             slot,
-            capacity: self.cfg.slot_capacity,
+            capacity: cap,
+            base,
             gen: old.gen + 1,
             seed: self.cfg.seed,
             t: t as f32,
@@ -1347,7 +1367,8 @@ impl Particles {
     /// assemble into a check mark, a burst that settles into a logo, the dot grid peeling off
     /// on dismiss (empty points). Particles already formed move on from where they are.
     pub fn set_points(&mut self, slot: u32, t: f64, form: &PointForm) {
-        let cap = self.cfg.slot_capacity as usize;
+        let (base, cap) = self.slot_span(slot);
+        let cap = cap as usize;
         let old = std::mem::take(&mut self.slots[slot as usize]);
         let n = form.points.len().min(cap);
         let (x0, x1) = form.points[..n].iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
@@ -1378,6 +1399,7 @@ impl Particles {
         let anchor = GpuAnchor {
             slot,
             capacity: cap as u32,
+            base,
             gen: old.gen + 1,
             seed: self.cfg.seed,
             t: t as f32,
@@ -1407,10 +1429,27 @@ impl Particles {
         };
     }
 
+    /// Slot `slot`'s first particle in the words buffer and its particle count: word slots
+    /// hold `slot_capacity` each, the shape slots after them `shape_capacity`.
+    fn slot_span(&self, slot: u32) -> (u32, u32) {
+        slot_span(&self.cfg, slot)
+    }
+
+    /// The particles slot `slot` can form: `slot_capacity` for a word slot, `shape_capacity`
+    /// for a shape slot.
+    pub fn slot_capacity(&self, slot: u32) -> u32 {
+        self.slot_span(slot).1
+    }
+
+    /// Formed particles across all slots: the length of the words buffer.
+    pub fn formed_capacity(&self) -> u32 {
+        let (base, cap) = slot_span(&self.cfg, self.cfg.word_slots + self.cfg.shape_slots - 1);
+        base + cap
+    }
+
     /// Uploads `self.target_data` for `anchor.slot` and runs the re-anchor pass.
     fn form(&mut self, anchor: GpuAnchor) {
-        let cap = self.cfg.slot_capacity as u64;
-        let base = anchor.slot as u64 * cap * size_of::<GpuTarget>() as u64;
+        let base = anchor.base as u64 * size_of::<GpuTarget>() as u64;
         self.queue.write_buffer(&self.targets, base, bytemuck::cast_slice(&self.target_data));
         self.queue.write_buffer(&self.anchor, 0, bytemuck::bytes_of(&anchor));
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("vo-anchor") });
@@ -1524,7 +1563,7 @@ impl Particles {
         if !draws.is_empty() {
             self.queue.write_buffer(&self.emit_draw, 0, bytemuck::cast_slice(&draws));
         }
-        let sd: Vec<GpuSlotDraw> = (0..self.cfg.word_slots as usize)
+        let sd: Vec<GpuSlotDraw> = (0..self.slots.len())
             .map(|i| match slots.get(i) {
                 Some(s) => {
                     let mut look = style_code(s.style);
@@ -1606,7 +1645,7 @@ impl Particles {
             }
             Part::Slot(slot) => {
                 if let Some(s) = self.slots.get(slot as usize).filter(|s| s.gen > 0 && s.hi > 0) {
-                    let base = slot * self.cfg.slot_capacity;
+                    let (base, _) = self.slot_span(slot);
                     pass.set_pipeline(&pipes.word);
                     pass.draw(base * 6..(base + s.hi as u32) * 6, 0..1);
                 }
@@ -1626,11 +1665,20 @@ impl Particles {
 
     /// Clears every slot's formed particles, as before the first [`Particles::set_word`].
     pub fn reset_slots(&mut self) {
-        let words = self.cfg.word_slots as usize * self.cfg.slot_capacity as usize;
+        let words = self.formed_capacity() as usize;
         self.queue.write_buffer(&self.words, 0, bytemuck::cast_slice(&vec![GpuWord::default(); words]));
         for s in &mut self.slots {
             *s = Slot::default();
         }
+    }
+
+    /// Clears slot `slot`'s formed particles at once, so the next form in it starts fresh
+    /// rather than from the particles of whatever the slot held before.
+    pub fn clear_slot(&mut self, slot: u32) {
+        let (base, cap) = self.slot_span(slot);
+        let zero = vec![GpuWord::default(); cap as usize];
+        self.queue.write_buffer(&self.words, base as u64 * size_of::<GpuWord>() as u64, bytemuck::cast_slice(&zero));
+        self.slots[slot as usize] = Slot::default();
     }
 
     /// Makes the additive sprite pipelines for `format` without depth, so the first frame
@@ -1720,7 +1768,7 @@ impl Particles {
         }
         if self.slots.iter().any(|s| s.gen > 0) {
             pass.set_pipeline(&pipes.word);
-            pass.draw(0..self.cfg.word_slots * self.cfg.slot_capacity * 6, 0..1);
+            pass.draw(0..self.formed_capacity() * 6, 0..1);
         }
     }
 

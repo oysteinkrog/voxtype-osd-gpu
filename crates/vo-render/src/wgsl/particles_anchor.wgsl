@@ -12,7 +12,7 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
   if (k >= anchor.capacity) {
     return;
   }
-  let i = anchor.slot * anchor.capacity + k;
+  let i = anchor.base + k;
   var p = words_rw[i];
   let tg = targets[i];
   let t = anchor.t;
@@ -25,6 +25,7 @@ fn cs_anchor (@builtin(global_invocation_id) gid: vec3u) {
   let s = anchor.size;
   p.t0 = t;
   p.gen = anchor.gen;
+  p.slot = anchor.slot;
   p.w = anchor.w * (0.8 + 0.4 * h0);
   p.stroke = anchor.stroke;
   if ((tg.flags & T_ACTIVE) != 0u) {

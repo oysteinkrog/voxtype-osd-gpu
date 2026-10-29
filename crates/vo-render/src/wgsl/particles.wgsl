@@ -229,7 +229,9 @@ struct Word {
   // computes the solid glyph's opacity from the same two numbers.
   reveal_t0: f32,
   reveal_delay: f32,
-  _pad: vec2f,
+  // The slot this particle belongs to, for its look; the anchor pass writes it.
+  slot: u32,
+  _pad: f32,
 };
 
 struct Target {
@@ -251,7 +253,8 @@ struct Anchor {
   // Size of the shape (font size for words) and the spring rate.
   size: f32,
   w: f32,
-  _pad: f32,
+  // The slot's first particle in the words buffer.
+  base: u32,
   // Box in slot space: x0, width; the scatter speed in sizes per second; the stroke.
   x0: f32,
   width: f32,

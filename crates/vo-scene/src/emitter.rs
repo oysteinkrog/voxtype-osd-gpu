@@ -751,8 +751,14 @@ fn spans(lines: &[Vec<kurbo::Point>], y: f64, cross: &mut Vec<(f64, i32)>, out: 
     }
 }
 
+/// Most work [`interior`] does for one shape, in polyline segments crossed by its scanlines
+/// plus grid cells tried: a few milliseconds, whatever the shape.
+const INTERIOR_WORK: usize = 4_000_000;
+
 /// `n` points inside `lines` (nonzero winding) on a jittered grid, row by row; none when they
-/// have no inside.
+/// have no inside. Only cells under the shape's spans are tried, so a thin shape across a
+/// large box costs no more than a compact one; a shape that would still take more than
+/// [`INTERIOR_WORK`] gets fewer points (the rest go on its outline).
 fn interior(lines: &[Vec<kurbo::Point>], n: usize) -> Vec<Point> {
     let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
     for p in lines.iter().flatten() {
@@ -762,6 +768,7 @@ fn interior(lines: &[Vec<kurbo::Point>], n: usize) -> Vec<Point> {
     if n == 0 || y1 <= y0 {
         return Vec::new();
     }
+    let segs: usize = lines.iter().map(|l| l.len()).sum::<usize>().max(1);
     let (mut cross, mut row) = (Vec::new(), Vec::new());
     // The filled area, from 256 scanlines, sizes the grid.
     let dy = (y1 - y0) / 256.0;
@@ -773,37 +780,61 @@ fn interior(lines: &[Vec<kurbo::Point>], n: usize) -> Vec<Point> {
     if area <= 0.0 {
         return Vec::new();
     }
+    let mut work = 256 * segs;
+    let mut best: Vec<Point> = Vec::new();
     // About 1.25 cells per point; finer if that falls short.
     let mut cell = (area / (1.25 * n as f64)).sqrt();
+    let mut merged: Vec<(f64, f64)> = Vec::new();
     for _ in 0..4 {
-        let rows = ((y1 - y0) / cell).ceil() as u32;
+        let rows = ((y1 - y0) / cell).ceil() as usize;
+        if work + rows * 4 * segs > INTERIOR_WORK {
+            break;
+        }
         let mut cand = Vec::new();
-        for r in 0..rows {
+        for r in 0..rows as u32 {
             // Four scanlines per row; each cell takes one of them, and a jittered x.
             let mut subs: [Vec<(f64, f64)>; 4] = Default::default();
             for (k, sub) in subs.iter_mut().enumerate() {
                 spans(lines, y0 + (r as f64 + (k as f64 + 0.5) / 4.0) * cell, &mut cross, sub);
             }
-            let (x0, x1) = subs.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |a, s| (a.0.min(s.0), a.1.max(s.1)));
-            if x1 <= x0 {
-                continue;
-            }
-            let c0 = (x0 / cell).floor() as i64;
-            for c in c0..=(x1 / cell).ceil() as i64 {
-                let k = (vo_core::hash::rand_f32(0xe626, c as u32, r, 1) * 4.0) as usize % 4;
-                let x = (c as f64 + vo_core::hash::rand_f32(0xe626, c as u32, r, 0) as f64) * cell;
-                if subs[k].iter().any(|s| s.0 <= x && x < s.1) {
-                    let y = y0 + (r as f64 + (k as f64 + 0.5) / 4.0) * cell;
-                    cand.push(Point::new(x as f32, y as f32));
+            work += 4 * segs;
+            // The cells a point can fall in: those under the four scanlines' spans, merged.
+            merged.clear();
+            merged.extend(subs.iter().flatten().copied());
+            merged.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut next = i64::MIN;
+            for &(a, b) in merged.iter() {
+                let c0 = ((a / cell).floor() as i64).max(next);
+                let c1 = (b / cell).ceil() as i64;
+                for c in c0..=c1 {
+                    let k = (vo_core::hash::rand_f32(0xe626, c as u32, r, 1) * 4.0) as usize % 4;
+                    let x = (c as f64 + vo_core::hash::rand_f32(0xe626, c as u32, r, 0) as f64) * cell;
+                    if subs[k].iter().any(|s| s.0 <= x && x < s.1) {
+                        let y = y0 + (r as f64 + (k as f64 + 0.5) / 4.0) * cell;
+                        cand.push(Point::new(x as f32, y as f32));
+                    }
                 }
+                work += (c1 - c0 + 1).max(0) as usize;
+                next = next.max(c1 + 1);
+            }
+            if work > INTERIOR_WORK {
+                break;
             }
         }
         if cand.len() >= n {
             return (0..n).map(|i| cand[((i as f64 + 0.5) * cand.len() as f64 / n as f64) as usize]).collect();
         }
-        cell *= 0.95 * (cand.len().max(1) as f64 / n as f64).sqrt().min(0.95);
+        if cand.len() > best.len() {
+            best = cand.clone();
+        }
+        if work > INTERIOR_WORK {
+            break;
+        }
+        // Finer by what fell short, but at most halving the cell each time, so a shape the
+        // grid misses does not make the next pass's rows explode.
+        cell *= (0.95 * (cand.len().max(1) as f64 / n as f64).sqrt()).clamp(0.5, 0.9025);
     }
-    Vec::new()
+    best
 }
 
 /// A coverage field of text (or any shape) for the PA08 mask force, in emitter space.
@@ -1060,6 +1091,66 @@ mod tests {
         let mean = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.x, a.1 + p.y));
         assert!(mean.0.abs() < 1000.0 && mean.1.abs() < 1000.0, "centred: {mean:?}");
         assert!(ShapeTarget::new(0.0, Target::None, 10.0).points(10).is_empty());
+    }
+
+    /// A closed strip `len` long and `width` wide from the origin at `angle` radians.
+    fn strip(len: f64, width: f64, angle: f64) -> kurbo::BezPath {
+        let (c, s) = (angle.cos(), angle.sin());
+        let (dx, dy) = (len * c, len * s);
+        let (nx, ny) = (-s * width, c * width);
+        let mut p = kurbo::BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.line_to((dx, dy));
+        p.line_to((dx + nx, dy + ny));
+        p.line_to((nx, ny));
+        p.close_path();
+        p
+    }
+
+    /// The fastest of three runs of `f`, in milliseconds, and its result.
+    fn timed<T>(f: impl Fn() -> T) -> (f64, T) {
+        let mut best = f64::INFINITY;
+        let mut out = f();
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            out = f();
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        (best, out)
+    }
+
+    #[test]
+    fn a_long_thin_shape_samples_in_a_few_milliseconds() {
+        // A 1000 by 2 strip on the diagonal, and a V of two of them: before RV-04 the V took
+        // 7 ms, and 1.3 s at 0.01 wide, as the grid walked its whole box.
+        let diagonal = strip(1000.0, 2.0, 45f64.to_radians());
+        let (ms, pts) = timed(|| sample_path(&diagonal, MAX_SHAPE_POINTS, true));
+        assert_eq!(pts.len(), MAX_SHAPE_POINTS);
+        eprintln!("diagonal: {ms:.2} ms");
+        assert!(ms < 5.0, "the diagonal strip took {ms:.2} ms");
+        for w in [2.0, 0.01] {
+            let mut v = strip(1000.0, w, 45f64.to_radians());
+            let mut right = strip(1000.0, w, 135f64.to_radians());
+            right.apply_affine(kurbo::Affine::translate((1000.0 * 2f64.sqrt(), 0.0)));
+            v.extend(right);
+            let (ms, pts) = timed(|| sample_path(&v, MAX_SHAPE_POINTS, true));
+            assert_eq!(pts.len(), MAX_SHAPE_POINTS);
+            // A hair-thin V takes a few passes of a finer grid.
+            let limit = if w < 1.0 { 50.0 } else { 5.0 };
+            eprintln!("V {w} wide: {ms:.2} ms");
+            assert!(ms < limit, "the V {w} wide took {ms:.2} ms");
+            let (lines, _) = polylines(&v);
+            assert_eq!(interior(&lines, 1229).len(), 1229, "the V {w} wide is filled");
+        }
+        // However many segments, the work stays bounded: points come back, maybe fewer inside.
+        let mut many = kurbo::BezPath::new();
+        for k in 0..400 {
+            many.extend(strip(1000.0, 0.01, (k as f64 * 0.45).to_radians()));
+        }
+        let (ms, pts) = timed(|| sample_path(&many, MAX_SHAPE_POINTS, true));
+        assert_eq!(pts.len(), MAX_SHAPE_POINTS);
+        eprintln!("400 strips: {ms:.2} ms");
+        assert!(ms < 200.0, "400 thin strips took {ms:.2} ms");
     }
 
     #[test]

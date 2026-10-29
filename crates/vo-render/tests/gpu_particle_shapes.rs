@@ -191,6 +191,44 @@ fn particles_form_a_check_mark() {
 }
 
 #[test]
+fn eight_shape_emitters_in_turn_all_draw() {
+    // More shape emitters than shape slots (4), one after another: each frees its slot when it
+    // leaves, so the fifth to eighth draw too (RV-04).
+    let gpu = support::gpu();
+    let fonts = fonts();
+    let mut renderer = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    let target = RenderTarget::new(&gpu.device, W, H, FORMAT);
+    let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+    scene.set_viewport(0.0, Size::new(W as f32, H as f32), 1.0);
+    let fps = 30.0;
+    let mut shares = Vec::new();
+    for i in 0..8 {
+        let t0 = i as f64 * 0.6;
+        let src = Arc::new(shape_only(vec![ShapeTarget::new(t0 + 0.05, Target::CheckMark, CHECK)]));
+        let e = Element::emitter(format!("e{i}"), Emitter::new(src, 600, 5)).size(W as f32, H as f32);
+        scene.apply(Element::column("root").child(e), t0);
+        let frames = (0.55 * fps) as u64;
+        for f in 0..=frames {
+            let t = t0 + f as f64 / fps;
+            let list = scene.sample(t);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.encode(&list, 1.0, &target, &mut enc);
+            if f == frames {
+                let px = read(&gpu, &target, W, H, enc);
+                shares.push(light_share(&px, in_check));
+            } else {
+                gpu.queue.submit([enc.finish()]);
+            }
+        }
+    }
+    println!("eight shapes in turn, share of light in the check and light: {shares:?}");
+    for (i, (share, light)) in shares.iter().enumerate() {
+        assert!(*light > 0.0, "shape emitter {i} draws nothing");
+        assert!(*share >= 0.85, "shape emitter {i}: {:.1} % inside", share * 100.0);
+    }
+}
+
+#[test]
 fn reduced_motion_shows_the_shape_already_formed() {
     let gpu = support::gpu();
     let fonts = fonts();

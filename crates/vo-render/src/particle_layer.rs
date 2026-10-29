@@ -41,10 +41,11 @@ use crate::particles::{
 
 /// Word slots: live words that can form at once.
 const WORD_SLOTS: u32 = 16;
-/// Shape slots after the word slots: emitters whose particles form shapes (EG-26).
-const SHAPE_SLOTS: u32 = 4;
-/// Particles a word may use, as before shapes came; shapes use the whole slot.
+/// Particles per word slot.
 const WORD_CAPACITY: u32 = 1024;
+/// Shape slots after the word slots: emitters whose particles form shapes at once (EG-26).
+/// A slot is freed when its emitter leaves the scene.
+const SHAPE_SLOTS: u32 = 4;
 /// Free particles for all emitter elements together.
 const FREE_CAPACITY: u32 = 131_072;
 const TRAIL_CAPACITY: u32 = 1024;
@@ -177,17 +178,7 @@ impl ParticleLayer {
             self.shape_slots = [None; SHAPE_SLOTS as usize];
         }
         self.t = t;
-        let parts = self.parts.get_or_insert_with(|| {
-            let cfg = ParticleConfig {
-                free_capacity: FREE_CAPACITY,
-                word_slots: WORD_SLOTS + SHAPE_SLOTS,
-                slot_capacity: MAX_SHAPE_POINTS as u32,
-                word_capacity: WORD_CAPACITY,
-                trail_capacity: TRAIL_CAPACITY,
-                ..Default::default()
-            };
-            Particles::new(device, queue, self.fonts.clone(), cfg)
-        });
+        let parts = self.parts.get_or_insert_with(|| Particles::new(device, queue, self.fonts.clone(), layer_config()));
 
         // Pools: one per element and generation, added in birth order so a replay adds them
         // in the same order.
@@ -224,6 +215,15 @@ impl ParticleLayer {
             pool.reduced = e.reduced;
             self.pools.push(pool);
         }
+        // A pool that left the scene gives its shape slot back; if it comes back, its shapes
+        // replay into a slot from the start.
+        for p in self.pools.iter_mut().filter(|p| p.gone && p.slot.is_some()) {
+            if let Some(slot) = p.slot.take() {
+                self.shape_slots[(slot - WORD_SLOTS) as usize] = None;
+            }
+            p.target_at = f64::NEG_INFINITY;
+            p.shape_reach = 0.0;
+        }
         let mut masks: Vec<(f64, Arc<vo_scene::emitter::MaskField>)> = Vec::new();
         for p in &mut self.pools {
             if let Some(path) = p.source.path() {
@@ -240,7 +240,7 @@ impl ParticleLayer {
                     p.mask_at = m.at;
                 }
             }
-            if let Some(list) = p.source.targets() {
+            if let Some(list) = p.source.targets().filter(|_| !p.gone) {
                 if list.iter().any(|g| g.at > p.target_at && g.at <= t) {
                     apply_targets(parts, p, &list, t, &mut self.shape_slots, &mut self.warned);
                 }
@@ -540,6 +540,20 @@ fn extent(s: &EmitterSim) -> f32 {
     shape + flight + shock + 8.0
 }
 
+/// The particle pools: word slots of [`WORD_CAPACITY`], then shape slots that take up to
+/// [`MAX_SHAPE_POINTS`] each.
+fn layer_config() -> ParticleConfig {
+    ParticleConfig {
+        free_capacity: FREE_CAPACITY,
+        word_slots: WORD_SLOTS,
+        slot_capacity: WORD_CAPACITY,
+        shape_slots: SHAPE_SLOTS,
+        shape_capacity: MAX_SHAPE_POINTS as u32,
+        trail_capacity: TRAIL_CAPACITY,
+        ..Default::default()
+    }
+}
+
 /// An emitter's inputs at tick time `t`: a pool that left the scene spawns nothing more.
 fn pool_sim(pools: &[Pool], id: EmitterId, t: f64) -> EmitterSim {
     match pools.iter().find(|p| p.id == id) {
@@ -570,8 +584,11 @@ fn apply_targets(
                 return;
             };
             slots[i] = Some((p.node, p.generation));
-            p.slot = Some(WORD_SLOTS + i as u32);
-            WORD_SLOTS + i as u32
+            let slot = WORD_SLOTS + i as u32;
+            // The slot may still hold an earlier emitter's shape: start from nothing.
+            parts.clear_slot(slot);
+            p.slot = Some(slot);
+            slot
         }
     };
     let n = (p.capacity as usize).min(MAX_SHAPE_POINTS);
@@ -591,5 +608,28 @@ fn apply_targets(
         parts.set_points(slot, g.at, &form);
         p.target_at = g.at;
         p.shape_reach = points.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max) + g.size;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::particles::slot_span;
+
+    #[test]
+    fn word_slots_hold_1024_and_only_shape_slots_hold_more() {
+        let cfg = layer_config();
+        for slot in 0..WORD_SLOTS {
+            assert_eq!(slot_span(&cfg, slot), (slot * 1024, 1024), "word slot {slot}");
+        }
+        for i in 0..SHAPE_SLOTS {
+            let slot = WORD_SLOTS + i;
+            assert_eq!(slot_span(&cfg, slot), (16 * 1024 + i * 2048, 2048), "shape slot {slot}");
+        }
+        // Formed particles: 16 384 for words as before shapes came, plus 8 192 for shapes,
+        // rather than 20 slots of 2048 (40 960). A particle takes 64 bytes of state and 32 of
+        // target: 1.5 MiB for the word slots, 0.75 MiB for the shape slots.
+        let (base, cap) = slot_span(&cfg, WORD_SLOTS + SHAPE_SLOTS - 1);
+        assert_eq!(base + cap, 16 * 1024 + 4 * 2048);
     }
 }

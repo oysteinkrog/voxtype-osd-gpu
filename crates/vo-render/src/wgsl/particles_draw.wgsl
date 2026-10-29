@@ -359,8 +359,7 @@ fn vs_word (@builtin(vertex_index) vid: u32) -> VOut {
   if (p.flags == 0u) {
     return hidden ();
   }
-  let capacity = arrayLength (&words_ro) / arrayLength (&slot_draw);
-  let sd = slot_draw[i / capacity];
+  let sd = slot_draw[p.slot];
   if (sd.visible <= 0.0) {
     return hidden ();
   }
