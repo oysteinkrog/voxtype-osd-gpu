@@ -13,6 +13,9 @@
 //!   downsample with a Karis average, tent upsample, bilinear reads), at the GPU's levels.
 //!   On such a frame the effect path's tone map applies too, without its dither. Light
 //!   mode's dark bloom is not done.
+//! - Vector strokes run the vector shader's maths per pixel (nearest segment, tapered
+//!   widths, paint, glow), visiting each segment's own box only. Vector fills, blobs and
+//!   strokes with a material are left to the GPU.
 //! - Not exact: offscreen layers draw as direct layers (group opacity per instance), only the
 //!   nearest clip applies, and emitters are skipped. Masks are not applied: a layer under an
 //!   alpha mask is hidden, one under an inverted mask unmasked.
@@ -30,6 +33,9 @@ use vo_scene::geom::{Affine, Point, RRect};
 use crate::color::{linear_premul, linear_to_srgb, oklab_to_linear};
 use crate::renderer::{bloom_levels, ALIGN, BLOOM_MIX};
 use crate::shapes::{pixels_per_unit, GpuPaint, GpuShape};
+use crate::vector::{GpuVector, SEG_TEXELS};
+use vo_scene::display::MATERIAL_SHIFT;
+use vo_scene::path::{VectorInstance, VectorKind};
 
 const KIND_CIRCLE: u32 = vo_scene::display::ShapeKind::Circle as u32;
 const KIND_LINE: u32 = vo_scene::display::ShapeKind::Line as u32;
@@ -53,6 +59,10 @@ pub struct CpuRenderer {
     height: u32,
     /// The GPU draws this frame on its effect path, where glows may exceed 1.
     effects: bool,
+    /// Scratch for vector strokes: the segments in pixels, and the best margin and arc
+    /// length per pixel of one stroke's box.
+    vec_segs: Vec<[f32; 4]>,
+    vec_best: Vec<[f32; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +94,8 @@ impl CpuRenderer {
             width: 0,
             height: 0,
             effects: false,
+            vec_segs: Vec::new(),
+            vec_best: Vec::new(),
         }
     }
 
@@ -186,8 +198,13 @@ impl CpuRenderer {
                         self.glyph(g, &st);
                     }
                 }
-                // The CPU first frame draws no vectors or emitters.
-                ItemKind::Emitters | ItemKind::Vectors | ItemKind::Gpu => {}
+                ItemKind::Vectors => {
+                    for v in &list.vectors[range] {
+                        self.vector(list, v, &st);
+                    }
+                }
+                // The CPU first frame draws no emitters or app GPU content.
+                ItemKind::Emitters | ItemKind::Gpu => {}
                 ItemKind::Dots => {
                     for d in &list.dots[range] {
                         let centre = crate::dots::snap(d.centre, d.radius, d.snap, &to_px, ppu);
@@ -431,6 +448,90 @@ impl CpuRenderer {
             }
         }
         self.mask = Some(mask);
+    }
+
+    /// A vector stroke: `vectors.wgsl`'s stroke branch, pixel by pixel. Each segment updates
+    /// the best margin of the pixels in its own box, then the instance's box is painted.
+    fn vector(&mut self, list: &DisplayList, v: &VectorInstance, st: &State) {
+        if v.kind != VectorKind::Stroke || v.flags >> MATERIAL_SHIFT != 0 {
+            return;
+        }
+        let mut segs = std::mem::take(&mut self.vec_segs);
+        segs.clear();
+        let g = GpuVector::new(list, v, &st.to_px, st.ppu, st.opacity, &mut segs);
+        if let Some(g) = g {
+            self.stroke_px(&g, &segs, st);
+        }
+        self.vec_segs = segs;
+    }
+
+    fn stroke_px(&mut self, g: &GpuVector, segs: &[[f32; 4]], st: &State) {
+        let clamp_x = |v: f32| v.clamp(0.0, self.width as f32) as u32;
+        let clamp_y = |v: f32| v.clamp(0.0, self.height as f32) as u32;
+        let b = g.bbox;
+        let (x0, y0, x1, y1) = (clamp_x(b[0].floor()), clamp_y(b[1].floor()), clamp_x(b[2].ceil()), clamp_y(b[3].ceil()));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (bw, bh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let [hw, glow, r0, r1] = g.params;
+        let taper = g.material[1] != 0;
+        // Best margin and the arc length there, per pixel of the box.
+        let mut best = std::mem::take(&mut self.vec_best);
+        best.clear();
+        best.resize(bw * bh, [f32::NEG_INFINITY, 0.0]);
+        let reach = if glow > 0.0 { 2.5 * glow } else { 0.0 } + 1.0;
+        for seg in segs.chunks_exact(SEG_TEXELS) {
+            let (a, c) = ([seg[0][0], seg[0][1]], [seg[1][0], seg[1][1]]);
+            let bb = [seg[0][2], seg[0][3]];
+            let (s0, s1, w0, w1) = (seg[1][2], seg[1][3], seg[2][0], seg[2][1]);
+            let pad = hw * w0.max(w1) + reach;
+            let sx0 = clamp_x((a[0].min(bb[0]).min(c[0]) - pad).floor()).max(x0);
+            let sy0 = clamp_y((a[1].min(bb[1]).min(c[1]) - pad).floor()).max(y0);
+            let sx1 = clamp_x((a[0].max(bb[0]).max(c[0]) + pad).ceil()).min(x1);
+            let sy1 = clamp_y((a[1].max(bb[1]).max(c[1]) + pad).ceil()).min(y1);
+            for y in sy0..sy1 {
+                for x in sx0..sx1 {
+                    let p = [x as f32 + 0.5, y as f32 + 0.5];
+                    let (d, t) = quad_nearest(p, a, bb, c);
+                    let w = hw * (w0 + (w1 - w0) * t);
+                    let mut margin = w - d;
+                    if taper && w0 != w1 {
+                        margin = taper_margin(p, a, bb, c, hw * w0, hw * w1, margin);
+                    }
+                    let cell = &mut best[(y - y0) as usize * bw + (x - x0) as usize];
+                    if margin > cell[0] {
+                        *cell = [margin, s0 + (s1 - s0) * t];
+                    }
+                }
+            }
+        }
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let [margin, along] = best[(y - y0) as usize * bw + (x - x0) as usize];
+                if margin == f32::NEG_INFINITY {
+                    continue;
+                }
+                let p = [x as f32 + 0.5, y as f32 + 0.5];
+                let signed = -margin;
+                let cov = (0.5 - signed).clamp(0.0, 1.0);
+                let k = ramp(paint_pos(g.head[3], p, along, g.a, g.b), [r0, r1]);
+                let col = mix_color(g.c0, g.c1, k);
+                let mut out = scale4(col, cov);
+                if glow > 0.0 {
+                    let q = signed.max(0.0) / glow;
+                    let h = 0.6 * (-q * q).exp() * (1.0 - cov);
+                    out = [0, 1, 2, 3].map(|i| out[i] + col[i] * h);
+                }
+                if out[3] <= 0.0 && out[..3].iter().all(|v| *v <= 0.0) {
+                    continue;
+                }
+                let frag = Point::new(p[0], p[1]);
+                let kc = clip_coverage(st.clip.as_ref(), frag);
+                self.blend(x, y, scale4(out, kc), st.blend);
+            }
+        }
+        self.vec_best = best;
     }
 
     /// Premultiplied `src` onto the buffer at `(x, y)`, as the GPU's fixed-function blend does.
@@ -695,6 +796,159 @@ fn upsample(here: &Img, low: &Img, weight: f32) -> Img {
         }
     }
     dst
+}
+
+/// `vectors.wgsl`'s `quad_nearest`: the distance from `p` to the quadratic A, B, C and the
+/// curve parameter of the nearest point.
+fn quad_nearest(p: [f32; 2], a_: [f32; 2], b_: [f32; 2], c_: [f32; 2]) -> (f32, f32) {
+    let sub = |u: [f32; 2], v: [f32; 2]| [u[0] - v[0], u[1] - v[1]];
+    let dot = |u: [f32; 2], v: [f32; 2]| u[0] * v[0] + u[1] * v[1];
+    let len = |u: [f32; 2]| dot(u, u).sqrt();
+    let a = sub(b_, a_);
+    let b = [a_[0] - 2.0 * b_[0] + c_[0], a_[1] - 2.0 * b_[1] + c_[1]];
+    let chord = sub(c_, a_);
+    let cc = dot(chord, chord).max(1e-12);
+    if dot(b, b) < 1e-6 * cc {
+        let t = (dot(sub(p, a_), chord) / cc).clamp(0.0, 1.0);
+        return (len(sub(p, [a_[0] + chord[0] * t, a_[1] + chord[1] * t])), t);
+    }
+    let bez = |t: f32| [a_[0] + (2.0 * a[0] + b[0] * t) * t, a_[1] + (2.0 * a[1] + b[1] * t) * t];
+    let d = sub(a_, p);
+    let kk = 1.0 / dot(b, b);
+    let kx = kk * dot(a, b);
+    let ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+    let kz = kk * dot(d, a);
+    let pp = ky - kx * kx;
+    let q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+    let h = q * q + 4.0 * pp * pp * pp;
+    let mut cand = [0.0f32, 1.0, 0.0];
+    if h >= 0.0 {
+        let sh = h.sqrt();
+        let x = [(sh - q) * 0.5, (-sh - q) * 0.5];
+        let uv = x.map(|v| v.signum() * v.abs().powf(1.0 / 3.0));
+        cand[2] = uv[0] + uv[1] - kx;
+    } else {
+        let z = (-pp).sqrt();
+        let v = (q / (pp * z * 2.0)).clamp(-1.0, 1.0).acos() / 3.0;
+        let (m, n) = (v.cos(), v.sin() * 1.732_050_8);
+        cand[0] = (m + m) * z - kx;
+        cand[2] = (-n - m) * z - kx;
+    }
+    let mut best = (1e30f32, 0.0f32);
+    for c in cand {
+        let mut t = c.clamp(0.0, 1.0);
+        let r = sub(bez(t), p);
+        let d1 = [2.0 * (a[0] + b[0] * t), 2.0 * (a[1] + b[1] * t)];
+        let f = dot(r, d1);
+        let df = dot(d1, d1) + dot(r, [2.0 * b[0], 2.0 * b[1]]);
+        if df.abs() > 1e-12 {
+            t = (t - f / df).clamp(0.0, 1.0);
+        }
+        let dist = len(sub(bez(t), p));
+        if dist < best.0 {
+            best = (dist, t);
+        }
+    }
+    for t in [0.0, 1.0] {
+        let dist = len(sub(bez(t), p));
+        if dist < best.0 {
+            best = (dist, t);
+        }
+    }
+    best
+}
+
+/// `vectors.wgsl`'s `taper_margin`: the margin of a segment whose width changes along it.
+fn taper_margin(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2], r0: f32, r1: f32, near: f32) -> f32 {
+    let caps = (r0 - (p[0] - a[0]).hypot(p[1] - a[1])).max(r1 - (p[0] - c[0]).hypot(p[1] - c[1]));
+    let chord = [c[0] - a[0], c[1] - a[1]];
+    let cc = chord[0] * chord[0] + chord[1] * chord[1];
+    let bend = [a[0] - 2.0 * b[0] + c[0], a[1] - 2.0 * b[1] + c[1]];
+    if bend[0] * bend[0] + bend[1] * bend[1] >= 1e-6 * cc.max(1e-12) || cc <= 1e-12 {
+        return near.max(caps);
+    }
+    let h = cc.sqrt();
+    let dir = [chord[0] / h, chord[1] / h];
+    let q = [p[0] - a[0], p[1] - a[1]];
+    let u = q[0] * dir[0] + q[1] * dir[1];
+    let v = (dir[0] * q[1] - dir[1] * q[0]).abs();
+    let k = (r0 - r1) / h;
+    if k.abs() >= 1.0 {
+        return caps;
+    }
+    let s = (1.0 - k * k).sqrt();
+    let along = s * u - k * v;
+    if along < 0.0 || along > s * h {
+        return caps;
+    }
+    r0 - (s * v + k * u)
+}
+
+/// `vectors.wgsl`'s `ramp`.
+fn ramp(u: f32, r: [f32; 2]) -> f32 {
+    if r[1] <= r[0] {
+        return if u >= r[0] { 1.0 } else { 0.0 };
+    }
+    ((u - r[0]) / (r[1] - r[0])).clamp(0.0, 1.0)
+}
+
+/// `vectors.wgsl`'s `mix_color`: premultiplied linear colour at ramp position `k`, mixed as
+/// premultiplied OKLab.
+fn mix_color(c0: [f32; 4], c1: [f32; 4], k: f32) -> [f32; 4] {
+    let pre = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+    let (a, b) = (pre(c0), pre(c1));
+    let lab = [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * k);
+    if lab[3] <= 0.0 {
+        return [0.0; 4];
+    }
+    let rgb = oklab_to_linear([lab[0] / lab[3], lab[1] / lab[3], lab[2] / lab[3]]).map(|v| v.clamp(0.0, 1.0));
+    [rgb[0] * lab[3], rgb[1] * lab[3], rgb[2] * lab[3], lab[3]]
+}
+
+/// `vectors.wgsl`'s `grid_axis`.
+fn grid_axis(p: [f32; 2], n: [f32; 2], o: f32, duty: f32) -> [f32; 2] {
+    let period = 1.0 / n[0].hypot(n[1]).max(1e-6);
+    if duty < 0.0 {
+        return [1e9, 0.0];
+    }
+    let f = p[0] * n[0] + p[1] * n[1] - o + 0.5;
+    [(f - f.floor() - 0.5).abs() * period, 0.5 * duty * period]
+}
+
+/// `vectors.wgsl`'s `paint_pos`: where `p` sits along the paint.
+fn paint_pos(kind: u32, p: [f32; 2], s: f32, g: [f32; 4], h: [f32; 4]) -> f32 {
+    let fract = |v: f32| v - v.floor();
+    match kind {
+        5 | 6 => {
+            let x = grid_axis(p, [g[0], g[1]], h[0], h[2]);
+            let y = grid_axis(p, [g[2], g[3]], h[1], h[3]);
+            if kind == 5 {
+                return (0.5 + x[1] - x[0]).clamp(0.0, 1.0).max((0.5 + y[1] - y[0]).clamp(0.0, 1.0));
+            }
+            let dx = if h[2] < 0.0 { 0.0 } else { x[0] };
+            let dy = if h[3] < 0.0 { 0.0 } else { y[0] };
+            (0.5 + x[1].max(y[1]) - dx.hypot(dy)).clamp(0.0, 1.0)
+        }
+        4 => {
+            let f = fract(p[0] * g[0] + p[1] * g[1] - g[2]);
+            let period = 1.0 / g[0].hypot(g[1]).max(1e-6);
+            let d = if f < g[3] { f.min(g[3] - f) } else { -(f - g[3]).min(1.0 - f) };
+            (0.5 + d * period).clamp(0.0, 1.0)
+        }
+        1 => {
+            let d = [g[2] - g[0], g[3] - g[1]];
+            ((p[0] - g[0]) * d[0] + (p[1] - g[1]) * d[1]) / (d[0] * d[0] + d[1] * d[1]).max(1e-12)
+        }
+        2 | 3 => {
+            let turn = fract(((p[1] - g[1]).atan2(p[0] - g[0]) - g[2]) / std::f32::consts::TAU);
+            if kind == 3 {
+                1.0 - (2.0 * turn - 1.0).abs()
+            } else {
+                turn
+            }
+        }
+        _ => s,
+    }
 }
 
 fn sd_segment(p: Point, a: Point, b: Point) -> f32 {

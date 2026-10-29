@@ -4,7 +4,7 @@
 use bytemuck::{Pod, Zeroable};
 use vo_scene::display::{DisplayList, MATERIAL_SHIFT};
 use vo_scene::geom::{Affine, Point};
-use vo_scene::path::{VectorInstance, VectorKind, VectorPaint, VECTOR_HAIRLINE};
+use vo_scene::path::{VectorInstance, VectorKind, VectorPaint, VECTOR_HAIRLINE, VECTOR_TAPER};
 
 use crate::color::oklab_alpha;
 
@@ -47,7 +47,8 @@ pub struct GpuVector {
     /// in pixels (linear: `p0, p1`; conic: centre, start angle).
     pub a: [f32; 4],
     pub b: [f32; 4],
-    /// Material id (FX15), 0 for none; the rest is unused.
+    /// Material id (FX15), 0 for none; 1 when the stroke has a width table
+    /// (`VECTOR_TAPER`), else 0; the rest is unused.
     pub material: [u32; 4],
 }
 
@@ -87,7 +88,7 @@ impl GpuVector {
         let mut g = GpuVector {
             c0: oklab_alpha(v.c0, opacity),
             c1: oklab_alpha(v.c1, opacity),
-            material: [if mat.is_some() { material } else { 0 }, 0, 0, 0],
+            material: [if mat.is_some() { material } else { 0 }, (v.flags & VECTOR_TAPER != 0) as u32, 0, 0],
             ..Default::default()
         };
         let px = |p: Point| to_px.apply(p);

@@ -82,6 +82,10 @@ pub enum VectorPaint {
 
 /// `VectorInstance::flags` bit: the stroke is one physical pixel wide at any scale.
 pub const VECTOR_HAIRLINE: u32 = 1;
+/// `VectorInstance::flags` bit: the stroke has a width table (`StrokeStyle::widths`), so a
+/// segment whose width changes takes the exact edge of the circles along it. Without it
+/// (ribbons from per-segment factors) the edge stays at the nearest point's width.
+pub const VECTOR_TAPER: u32 = 2;
 
 /// One contour stroke or one blob. Colours are straight sRGB like every display colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
@@ -119,6 +123,10 @@ pub struct StrokeStyle {
     pub hairline: bool,
     /// Material id (FX15) from `DisplayList::add_material`, 0 for none.
     pub material: u32,
+    /// Width table id from `DisplayList::add_widths` (`Painter::widths` in a canvas), 0 for
+    /// none: the stroke's width along its arc length, as factors of `width`
+    /// ([`Contour::widen`]).
+    pub widths: u32,
 }
 
 impl StrokeStyle {
@@ -132,6 +140,7 @@ impl StrokeStyle {
             paint: VectorPaint::Along,
             hairline: false,
             material: 0,
+            widths: 0,
         }
     }
 
@@ -169,6 +178,67 @@ impl StrokeStyle {
         self.material = id;
         self
     }
+
+    /// Varies the width along the stroke by width table `id` from `DisplayList::add_widths`
+    /// (in a canvas, `Painter::widths`). The table belongs to one display list, so set it
+    /// on the style inside the draw function that uses it.
+    pub fn widths(mut self, id: u32) -> StrokeStyle {
+        self.widths = id;
+        self
+    }
+}
+
+/// One point of a width table: the stroke width at arc length `s` is `w` times the style's
+/// width (and the segment's own factor), linear between points and held past the ends. Two
+/// points at the same `s` make a step: the first holds before it, the second after.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct WidthKnot {
+    pub s: f32,
+    pub w: f32,
+}
+
+impl WidthKnot {
+    pub fn new(s: f32, w: f32) -> WidthKnot {
+        WidthKnot { s, w }
+    }
+}
+
+/// The width factor of `knots` at `s`, approached from below (`after` false) or from above.
+fn width_at(knots: &[WidthKnot], s: f32, after: bool) -> f32 {
+    let (Some(first), Some(last)) = (knots.first(), knots.last()) else { return 1.0 };
+    let i = if after { knots.partition_point(|k| k.s <= s) } else { knots.partition_point(|k| k.s < s) };
+    if i == 0 {
+        return first.w;
+    }
+    if i == knots.len() {
+        return last.w;
+    }
+    let (a, b) = (knots[i - 1], knots[i]);
+    let span = b.s - a.s;
+    if span <= 0.0 {
+        return if after { b.w } else { a.w };
+    }
+    a.w + (b.w - a.w) * ((s - a.s) / span)
+}
+
+/// `knots` without the points that sit on the line between their neighbours, so a table
+/// that is straight over a segment does not cut it.
+fn simplify_knots(knots: &[WidthKnot]) -> Vec<WidthKnot> {
+    let mut out: Vec<WidthKnot> = Vec::with_capacity(knots.len());
+    for (i, k) in knots.iter().enumerate() {
+        if let (Some(prev), Some(next)) = (out.last(), knots.get(i + 1)) {
+            let span = next.s - prev.s;
+            let step = k.s <= prev.s || k.s >= next.s;
+            if !step && span > 0.0 {
+                let line = prev.w + (next.w - prev.w) * ((k.s - prev.s) / span);
+                if (line - k.w).abs() <= 1e-6 {
+                    continue;
+                }
+            }
+        }
+        out.push(*k);
+    }
+    out
 }
 
 /// A contour flattened to segments.
@@ -206,6 +276,42 @@ impl Contour {
             let sub = q.subsegment(t0..t1);
             let w = |t: f64| s.w[0] + (s.w[1] - s.w[0]) * t as f32;
             out.segs.push(VectorSeg { w: [w(t0), w(t1)], ..seg(sub, s.s0.max(from), s.s1.min(to)) });
+        }
+        out
+    }
+
+    /// The contour with its width set along its arc length by `knots` (sorted by `s`): each
+    /// segment end's factor is multiplied by the table's value there. Segments are cut at
+    /// the table's inner points, so the width bends exactly where the table does. The arc
+    /// lengths are the contour's own, which a trim keeps, so a trimmed piece takes the same
+    /// widths as the whole. An empty table changes nothing.
+    pub fn widen(&self, knots: &[WidthKnot]) -> Contour {
+        if knots.is_empty() {
+            return self.clone();
+        }
+        let knots = simplify_knots(knots);
+        let mut out = Contour { segs: Vec::with_capacity(self.segs.len()), closed: self.closed };
+        for s in &self.segs {
+            // Cut points strictly inside the segment.
+            let lo = knots.partition_point(|k| k.s <= s.s0);
+            let hi = knots.partition_point(|k| k.s < s.s1);
+            let mut cuts: Vec<f32> = knots[lo..hi.max(lo)].iter().map(|k| k.s).collect();
+            cuts.dedup();
+            if cuts.is_empty() {
+                let w = [s.w[0] * width_at(&knots, s.s0, true), s.w[1] * width_at(&knots, s.s1, false)];
+                out.segs.push(VectorSeg { w, ..*s });
+                continue;
+            }
+            let q = quad(s);
+            let own = |t: f64| s.w[0] + (s.w[1] - s.w[0]) * t as f32;
+            let mut at = (s.s0, 0.0f64);
+            for end in cuts.into_iter().chain(std::iter::once(s.s1)) {
+                let t1 = if end >= s.s1 { 1.0 } else { param_at(s, (end - s.s0) as f64) };
+                let sub = q.subsegment(at.1..t1);
+                let w = [own(at.1) * width_at(&knots, at.0, true), own(t1) * width_at(&knots, end, false)];
+                out.segs.push(VectorSeg { w, ..seg(sub, at.0, end) });
+                at = (end, t1);
+            }
         }
         out
     }
@@ -488,18 +594,27 @@ pub fn push_stroke(list: &mut DisplayList, contour: &Contour, style: &StrokeStyl
         return None;
     }
     let start = list.vector_segs.len() as u32;
-    list.vector_segs.extend_from_slice(&contour.segs);
+    let mut flags = if style.hairline { VECTOR_HAIRLINE } else { 0 } | style.material << MATERIAL_SHIFT;
+    match list.widths(style.widths) {
+        Some(knots) if !knots.is_empty() => {
+            let wide = contour.widen(knots);
+            list.vector_segs.extend_from_slice(&wide.segs);
+            flags |= VECTOR_TAPER;
+        }
+        _ => list.vector_segs.extend_from_slice(&contour.segs),
+    }
+    let count = list.vector_segs.len() as u32 - start;
     let index = list.vectors.len() as u32;
     list.vectors.push(VectorInstance {
         kind: VectorKind::Stroke,
-        segs: [start, contour.segs.len() as u32],
+        segs: [start, count],
         width: style.width,
         glow: style.glow,
         c0: style.c0,
         c1: style.c1,
         ramp: style.ramp,
         paint: style.paint,
-        flags: if style.hairline { VECTOR_HAIRLINE } else { 0 } | style.material << MATERIAL_SHIFT,
+        flags,
         a: [0.0; 4],
         b: [0.0; 4],
     });
@@ -1117,6 +1232,45 @@ mod tests {
         let r = make::ribbon(&pts, &[0.0, 1.0, 0.5]);
         assert_eq!(r.segs[0].w, [0.0, 1.0]);
         assert_eq!(r.segs[1].w, [1.0, 0.5]);
+    }
+
+    #[test]
+    fn widen_cuts_at_knots_and_keeps_steps() {
+        let c = make::underline(0.0, 20.0, 0.0);
+        let knots = [WidthKnot::new(0.0, 1.0), WidthKnot::new(5.0, 3.0), WidthKnot::new(10.0, 3.0), WidthKnot::new(10.0, 0.5)];
+        let w = c.widen(&knots);
+        assert_eq!(w.segs.len(), 3);
+        assert_eq!(w.segs[0].w, [1.0, 3.0]);
+        assert_eq!(w.segs[1].w, [3.0, 3.0]);
+        assert_eq!(w.segs[2].w, [0.5, 0.5]);
+        assert!((w.segs[1].p0.x - 5.0).abs() < 1e-3 && (w.segs[2].p0.x - 10.0).abs() < 1e-3, "{:?}", w.segs);
+        // A trimmed piece takes the same widths as the whole.
+        let t = c.trim(2.5, 7.5).widen(&knots);
+        assert!((t.segs[0].w[0] - 2.0).abs() < 1e-6, "{:?}", t.segs[0].w);
+    }
+
+    #[test]
+    fn a_straight_table_does_not_cut() {
+        let c = make::underline(0.0, 20.0, 0.0);
+        let flat = [WidthKnot::new(0.0, 1.0), WidthKnot::new(7.0, 1.0), WidthKnot::new(20.0, 1.0)];
+        assert_eq!(c.widen(&flat), c);
+        let line = [WidthKnot::new(0.0, 1.0), WidthKnot::new(10.0, 2.0), WidthKnot::new(20.0, 3.0)];
+        let w = c.widen(&line);
+        assert_eq!(w.segs.len(), 1);
+        assert_eq!(w.segs[0].w, [1.0, 3.0]);
+    }
+
+    #[test]
+    fn push_stroke_applies_the_style_table() {
+        let mut list = DisplayList::default();
+        let id = list.add_widths(&[WidthKnot::new(0.0, 0.25), WidthKnot::new(20.0, 1.0)]);
+        let c = make::underline(0.0, 20.0, 0.0);
+        push_stroke(&mut list, &c, &StrokeStyle::solid(4.0, Color::WHITE).widths(id)).unwrap();
+        assert_eq!(list.vector_segs[0].w, [0.25, 1.0]);
+        push_stroke(&mut list, &c, &StrokeStyle::solid(4.0, Color::WHITE)).unwrap();
+        assert_eq!(list.vector_segs[1].w, [1.0, 1.0]);
+        list.clear();
+        assert!(list.widths(id).is_none());
     }
 
     #[test]

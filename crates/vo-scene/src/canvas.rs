@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::display::{DisplayList, GlyphInstance, Item, ItemKind, Layer, ShapeInstance};
 use crate::geom::{Affine, Color, Point, Rect};
-use crate::path::{push_blob, push_fill, push_stroke, Contour, Outline, StrokeStyle};
+use crate::path::{push_blob, push_fill, push_stroke, Contour, Outline, StrokeStyle, WidthKnot};
 
 /// The draw function of a canvas element.
 pub type DrawFn = dyn Fn(f64, Rect, &mut Painter) + Send + Sync;
@@ -94,6 +94,12 @@ impl Painter<'_> {
         if let Some(item) = push_stroke(self.list, c, &style) {
             self.push(item);
         }
+    }
+
+    /// Adds a width table for this frame and returns its id for `StrokeStyle::widths`: a
+    /// stroke drawn with it changes width along its arc length (`Contour::widen`).
+    pub fn widths(&mut self, knots: &[WidthKnot]) -> u32 {
+        self.list.add_widths(knots)
     }
 
     /// The inside of `contours` by the nonzero rule (`path::push_fill`).

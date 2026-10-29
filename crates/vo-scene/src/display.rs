@@ -23,7 +23,7 @@ use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::GlassInstance;
 use crate::gpu::GpuItem;
 use crate::material::Material;
-use crate::path::{VectorInstance, VectorSeg};
+use crate::path::{VectorInstance, VectorSeg, WidthKnot};
 use crate::stage::{Stage, Warp};
 
 /// Index of a layer in `DisplayList::layers`.
@@ -67,6 +67,10 @@ pub struct DisplayList {
     /// Materials (FX15, `crate::material`) that shapes, glyphs and vectors point at by a
     /// 1-based id; 0 is no material.
     pub materials: Vec<Material>,
+    /// Stroke width tables (`StrokeStyle::widths`), each a range into `width_knots`; the id
+    /// is 1-based, 0 is none.
+    pub width_tables: Vec<[u32; 2]>,
+    pub width_knots: Vec<WidthKnot>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
 }
@@ -795,6 +799,8 @@ impl DisplayList {
         self.gpu.clear();
         self.signals = Default::default();
         self.materials.clear();
+        self.width_tables.clear();
+        self.width_knots.clear();
         self.hits.clear();
     }
 
@@ -805,6 +811,21 @@ impl DisplayList {
             self.materials.push(m);
         }
         self.materials.len() as u32
+    }
+
+    /// Adds a stroke width table (`path::WidthKnot`s sorted by arc length) and returns its id
+    /// for `StrokeStyle::widths`.
+    pub fn add_widths(&mut self, knots: &[WidthKnot]) -> u32 {
+        let start = self.width_knots.len() as u32;
+        self.width_knots.extend_from_slice(knots);
+        self.width_tables.push([start, knots.len() as u32]);
+        self.width_tables.len() as u32
+    }
+
+    /// The width table `id` points at, if any.
+    pub fn widths(&self, id: u32) -> Option<&[WidthKnot]> {
+        let [start, len] = *id.checked_sub(1).and_then(|i| self.width_tables.get(i as usize))?;
+        self.width_knots.get(start as usize..(start + len) as usize)
     }
 
     /// The material an instance points at, if any.

@@ -8,6 +8,7 @@
 //!
 //!   cargo run --release -p vo --example effect_cost -- [--frames N] [--out TABLE.md]
 //!       [--max-ms MS]     exit 1 when a case costs more than MS at 600x300
+//!       [--case NAME]...  only these cases (and the plain card, the base); repeatable
 //!   cargo run --release -p vo --example effect_cost -- --preview   every case, 2 s each
 //!   cargo run --release -p vo --example effect_cost -- --sheet OUT.png --frames 11
 //!
@@ -22,7 +23,7 @@ use vo::scene::element::{Element, TextStyle};
 use vo::scene::geom::{Color, Point, Rect, Size};
 use vo::scene::glass::{Glass, GlassKind, GlassShape};
 use vo::scene::material::Material;
-use vo::scene::path::StrokeStyle;
+use vo::scene::path::{Contour, StrokeStyle, WidthKnot};
 use vo::scene::water::{PoolDrop, WaterPool};
 use vo::scene::Scene;
 use vo::{App, Cx, FontRegistry, Options, Scenario, ShapedLayout};
@@ -62,6 +63,7 @@ const CASES: &[&str] = &[
     "displace ripples",
     "displace noise",
     "water pool",
+    "tapered strokes",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -139,6 +141,14 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     if case == "frost stack" {
         return frost_stack(size, k);
     }
+    if case == "tapered strokes" {
+        // SW-04: 200 letter-sized strokes over the card, each tapering from 1 to 4 px.
+        let strokes = Element::canvas("strokes", f64::INFINITY, move |t, rect, p| tapered_strokes(t, rect, k, p))
+            .size(size.w, size.h)
+            .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+        let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+        return root.child(Element::layer("fx").child(card)).child(strokes);
+    }
     let layer = Element::layer("fx").child(card);
     let layer = match case {
         "offscreen" => layer.offscreen(),
@@ -187,6 +197,25 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         }))
         .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
     root.child(stripes).child(layer)
+}
+
+/// 200 short pen strokes in a 20 x 10 grid, each a five-segment hook 1 px wide at its start
+/// and 4 px at its end, through one width table each (SW-04).
+fn tapered_strokes(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painter) {
+    let (cw, ch) = (rect.w / 20.0, rect.h / 10.0);
+    let wobble = (t * 2.0).sin() as f32;
+    for i in 0..200 {
+        let (x, y) = (rect.x + cw * (i % 20) as f32 + 0.15 * cw, rect.y + ch * (i / 20) as f32 + 0.2 * ch);
+        let pts: Vec<Point> = (0..6)
+            .map(|j| {
+                let u = j as f32 / 5.0;
+                Point::new(x + 0.7 * cw * u, y + 0.6 * ch * (u * 3.0 + 0.4 * wobble).sin().abs())
+            })
+            .collect();
+        let c = Contour::polyline(&pts, false);
+        let id = p.widths(&[WidthKnot::new(0.0, 0.25), WidthKnot::new(c.length(), 1.0)]);
+        p.stroke(&c, &StrokeStyle::solid(4.0 * k, Color::hex(0xf2e6c8, 0.95)).widths(id));
+    }
 }
 
 /// Three depth-stack sheets that frost the two older lines behind them (EG-04): the whole
@@ -318,11 +347,14 @@ fn pct(v: &mut [f64], q: f64) -> f64 {
     v[((v.len() - 1) as f64 * q).round() as usize]
 }
 
-fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize) -> Vec<Row> {
+fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[String]) -> Vec<Row> {
     let (w, h) = (size.w as u32, size.h as u32);
     let mut target = Target::new(&g.device, w, h, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut out = Vec::new();
     for (i, name) in CASES.iter().enumerate() {
+        if i > 0 && !only.is_empty() && !only.iter().any(|o| o == name) {
+            continue;
+        }
         // A renderer per case, so pooled textures belong to the case.
         let mut r = Renderer::with_fonts(&g.device, &g.queue, fonts.clone());
         assert!(r.set_profiling(true), "this device has no timestamp queries");
@@ -392,12 +424,14 @@ fn main() {
         std::process::exit(vo::preview::main(p));
     }
     let (mut frames, mut out, mut max_ms) = (120usize, None::<String>, None::<f64>);
+    let mut only = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--frames" => frames = args.next().and_then(|v| v.parse().ok()).expect("--frames takes a number"),
             "--out" => out = args.next(),
             "--max-ms" => max_ms = args.next().and_then(|v| v.parse().ok()),
+            "--case" => only.push(args.next().expect("--case takes a case name")),
             "--real-display" => {}
             _ => panic!("unknown option {a}"),
         }
@@ -413,7 +447,7 @@ fn main() {
     let mut over = Vec::new();
     let mut slowest = Vec::new();
     for size in [Size::new(600.0, 300.0), Size::new(1920.0, 1080.0)] {
-        let rows = measure(&g, &fonts, size, frames);
+        let rows = measure(&g, &fonts, size, frames, &only);
         let base = rows[0].gpu_p50;
         md.push_str(&format!("### {}x{}\n\n", size.w, size.h));
         md.push_str("| effect | GPU ms p50 | p95 | +ms | CPU ms | slowest section (ms) | pool MB |\n");

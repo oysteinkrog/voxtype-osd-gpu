@@ -414,3 +414,170 @@ fn element_stroke_and_morph_goldens() {
         images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
     assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
 }
+
+/// One tapered stroke per row: straight, diagonal, curved, a zigzag whose width steps at
+/// its corners (a nib), and a thick-to-thin swash, each 1 to 4 px wide (SW-04).
+fn taper_scene(background: bool) -> DisplayList {
+    use vo_scene::path::{make, WidthKnot};
+    let mut b = Builder::new(240.0, 150.0);
+    if background {
+        dark(&mut b, 240.0, 150.0);
+    }
+    let ink = Color::hex(0xf2e6c8, 1.0);
+    let taper = |b: &mut Builder, c: &Contour, from: f32, to: f32| {
+        let id = b.list.add_widths(&[WidthKnot::new(0.0, from), WidthKnot::new(c.length(), to)]);
+        b.stroke(c, &StrokeStyle::solid(4.0, ink).widths(id));
+    };
+    taper(&mut b, &make::underline(20.0, 100.0, 20.0), 0.25, 1.0);
+    taper(&mut b, &Contour::polyline(&[Point::new(130.0, 10.0), Point::new(220.0, 40.0)], false), 0.25, 1.0);
+    let mut s = kurbo::BezPath::new();
+    s.move_to((20.0, 70.0));
+    s.curve_to((50.0, 40.0), (80.0, 100.0), (110.0, 60.0));
+    taper(&mut b, &Outline::new(&s, 0.01).contours[0], 0.25, 1.0);
+    // A nib held at 45 degrees: the width follows the angle of each straight piece.
+    let zig = Contour::polyline(
+        &[Point::new(130.0, 80.0), Point::new(155.0, 55.0), Point::new(180.0, 80.0), Point::new(220.0, 60.0)],
+        false,
+    );
+    let mut knots = Vec::new();
+    for seg in &zig.segs {
+        let (dx, dy) = (seg.p2.x - seg.p0.x, seg.p2.y - seg.p0.y);
+        let nib = 0.25 + 0.75 * ((dy.atan2(dx) - std::f32::consts::FRAC_PI_4).sin()).abs();
+        knots.push(WidthKnot::new(seg.s0, nib));
+        knots.push(WidthKnot::new(seg.s1, nib));
+    }
+    let id = b.list.add_widths(&knots);
+    b.stroke(&zig, &StrokeStyle::solid(4.0, Color::hex(ACCENT, 1.0)).widths(id));
+    let mut swash = kurbo::BezPath::new();
+    swash.move_to((20.0, 130.0));
+    swash.quad_to((120.0, 100.0), (220.0, 135.0));
+    taper(&mut b, &Outline::new(&swash, 0.01).contours[0], 1.0, 0.25);
+    b.finish()
+}
+
+#[test]
+fn tapered_stroke_goldens() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let list = taper_scene(true);
+    let images = [render(&mut off, "vec-taper", &list, 1.0), render(&mut off, "vec-taper-1.5x", &list, 1.5)];
+    let failures: Vec<String> =
+        images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
+    assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}
+
+/// The straight stroke from 1 to 4 px against the analytic shape, the union of the circles
+/// along it, supersampled: each column's coverage is the stroke's height there, round caps
+/// included, so half the difference is how far an edge is off. Within 0.5 px at scale 1 and
+/// 1.5.
+#[test]
+fn tapered_stroke_matches_the_analytic_edge() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let list = taper_scene(false);
+    let mut report = Vec::new();
+    for scale in [1.0f32, 1.5] {
+        let img = render(&mut off, "taper-measure", &list, scale);
+        let alpha = |x: u32, y: u32| img.px[((y * img.w + x) * 4 + 3) as usize] as f32 / 255.0;
+        let (x0, x1, yc) = (20.0 * scale, 100.0 * scale, 20.0 * scale);
+        let (r0, r1) = (0.5 * scale, 2.0 * scale);
+        // Inside when some circle along the stroke holds the point; the margin is concave
+        // along it, so a ternary search finds the best circle.
+        let inside = |px: f32, py: f32| {
+            let margin = |c: f32| r0 + (r1 - r0) * (c - x0) / (x1 - x0) - (px - c).hypot(py - yc);
+            let (mut lo, mut hi) = (x0, x1);
+            for _ in 0..60 {
+                let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+                if margin(m1) < margin(m2) {
+                    lo = m1;
+                } else {
+                    hi = m2;
+                }
+            }
+            margin(0.5 * (lo + hi)) >= 0.0
+        };
+        const N: u32 = 16;
+        let rows = ((yc - r1 - 3.0) as u32, (yc + r1 + 3.0) as u32);
+        let mut worst = (0.0f32, 0u32);
+        for x in (x0 - r0 - 3.0) as u32..(x1 + r1 + 3.0) as u32 {
+            let got: f32 = (0..(40.0 * scale) as u32).map(|y| alpha(x, y)).sum();
+            let mut hits = 0;
+            for y in rows.0..rows.1 {
+                for i in 0..N * N {
+                    let (sx, sy) = ((i % N) as f32 + 0.5, (i / N) as f32 + 0.5);
+                    hits += inside(x as f32 + sx / N as f32, y as f32 + sy / N as f32) as u32;
+                }
+            }
+            let want = hits as f32 / (N * N) as f32;
+            let off = 0.5 * (got - want).abs();
+            if off > worst.0 {
+                worst = (off, x);
+            }
+        }
+        report.push(format!("scale {scale}: an edge is off by {:.3} px at most (column {})", worst.0, worst.1));
+        assert!(worst.0 <= 0.5, "{}", report.join("; "));
+    }
+    eprintln!("taper vs analytic: {}", report.join("; "));
+}
+
+/// A width table that is 1 everywhere draws exactly what a plain solid stroke draws.
+#[test]
+fn a_uniform_width_table_is_byte_identical() {
+    use vo_scene::path::{make, WidthKnot};
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let build = |table: bool| {
+        let mut b = Builder::new(160.0, 100.0);
+        dark(&mut b, 160.0, 100.0);
+        let mut s = kurbo::BezPath::new();
+        s.move_to((10.0, 50.0));
+        s.curve_to((50.0, 0.0), (100.0, 100.0), (150.0, 40.0));
+        let contours = [Outline::new(&s, 0.01).contours[0].clone(), make::ring(Point::new(40.0, 70.0), 18.0)];
+        for c in &contours {
+            let mut style = StrokeStyle::solid(5.0, Color::hex(ACCENT, 0.8)).glow(3.0);
+            if table {
+                let id =
+                    b.list.add_widths(&[WidthKnot::new(0.0, 1.0), WidthKnot::new(30.0, 1.0), WidthKnot::new(c.length(), 1.0)]);
+                style = style.widths(id);
+            }
+            b.stroke(c, &style);
+        }
+        b.finish()
+    };
+    let (plain, table) = (build(false), build(true));
+    assert_eq!(plain.vector_segs, table.vector_segs);
+    for scale in [1.0, 1.5] {
+        let [a, b] = [&plain, &table].map(|l| render(&mut off, "taper-identity", l, scale).px);
+        assert!(a == b, "scale {scale}: a uniform table changed the pixels");
+    }
+}
+
+/// The CPU first frame draws vector strokes, tapered ones included, as the GPU does.
+#[cfg(feature = "cpu")]
+#[test]
+fn cpu_strokes_match_gpu() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let mut cpu = vo_render::cpu::CpuRenderer::new(FontRegistry::new());
+    let mut report = Vec::new();
+    for (name, list, scale) in [
+        ("taper", taper_scene(true), 1.0f32),
+        ("taper-1.5x", taper_scene(true), 1.5),
+        ("strokes", strokes_scene(), 1.0),
+    ] {
+        let want = render(&mut off, name, &list, scale);
+        let mut got = vec![0u8; (want.w * want.h * 4) as usize];
+        let started = std::time::Instant::now();
+        cpu.draw_bgra(&list, scale, want.w, want.h, want.w as usize * 4, &mut got);
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        for px in got.as_chunks_mut::<4>().0 {
+            px.swap(0, 2);
+        }
+        let diffs: Vec<u32> = want.px.iter().zip(&got).map(|(a, b)| a.abs_diff(*b) as u32).collect();
+        let max = *diffs.iter().max().unwrap();
+        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+        report.push(format!("{name}: max {max}, mean {mean:.3}, {ms:.1} ms"));
+        assert!(max <= 4 && mean <= 0.05, "{name}: CPU differs from GPU: {}", report.join("; "));
+    }
+    eprintln!("cpu vs gpu strokes: {}", report.join("; "));
+}

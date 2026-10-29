@@ -37,7 +37,7 @@ struct VecIn {
   // Blob circles in px (cx, cy, r, k), or the paint geometry in `a`.
   @location(5) a: vec4f,
   @location(6) b: vec4f,
-  // x: material id (FX15), 0 for none.
+  // x: material id (FX15), 0 for none; y: 1 for a stroke with a width table.
   @location(7) mat: vec4u,
 };
 
@@ -49,8 +49,8 @@ struct VecOut {
   @location(3) @interpolate(flat) c1: vec4f,
   @location(4) @interpolate(flat) a: vec4f,
   @location(5) @interpolate(flat) b: vec4f,
-  // Material id and a seed that differs per instance.
-  @location(6) @interpolate(flat) mat: vec2u,
+  // Material id, a seed that differs per instance, and 1 for a stroke with a width table.
+  @location(6) @interpolate(flat) mat: vec3u,
 };
 
 @vertex fn vs_vector (@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, v: VecIn) -> VecOut {
@@ -63,7 +63,7 @@ struct VecOut {
   o.c1 = v.c1;
   o.a = v.a;
   o.b = v.b;
-  o.mat = vec2u (v.mat.x, ii);
+  o.mat = vec3u (v.mat.x, ii, v.mat.y);
   return o;
 }
 
@@ -130,6 +130,35 @@ fn quad_nearest (p: vec2f, A: vec2f, B: vec2f, C: vec2f) -> vec2f {
     }
   }
   return best;
+}
+
+// Margin (half width minus distance) of a segment whose width changes along it: the union
+// of the circles along it, so the edge is exact for a tapered straight segment, end caps
+// included (a rounded cone). A curved one keeps `near` (the half width at the nearest point
+// minus the distance) and adds its round caps. `r0` and `r1` are the half widths at A and C.
+fn taper_margin (p: vec2f, A: vec2f, B: vec2f, C: vec2f, r0: f32, r1: f32, near: f32) -> f32 {
+  let caps = max (r0 - length (p - A), r1 - length (p - C));
+  let chord = C - A;
+  let cc = dot (chord, chord);
+  let bend = A - 2.0 * B + C;
+  if (dot (bend, bend) >= 1e-6 * max (cc, 1e-12) || cc <= 1e-12) {
+    return max (near, caps);
+  }
+  let h = sqrt (cc);
+  let dir = chord / h;
+  let q = p - A;
+  let u = dot (q, dir);
+  let v = abs (dir.x * q.y - dir.y * q.x);
+  let b = (r0 - r1) / h;
+  if (abs (b) >= 1.0) {
+    return caps;
+  }
+  let a = sqrt (1.0 - b * b);
+  let k = a * u - b * v;
+  if (k < 0.0 || k > a * h) {
+    return caps;
+  }
+  return r0 - (a * v + b * u);
 }
 
 // Crossing of the ray from `p` towards +x with one y-monotonic piece of the quadratic,
@@ -296,11 +325,17 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f, h: vec4f) -> f32 {
       let t1 = segs[3u * i + 1u];
       let n = quad_nearest (p, t0.xy, t0.zw, t1.xy);
       var w = hw;
-      if (!fill) {
+      var margin: f32;
+      if (fill) {
+        margin = w - n.x;
+      } else {
         let t2 = segs[3u * i + 2u];
         w = hw * mix (t2.x, t2.y, n.y);
+        margin = w - n.x;
+        if (in.mat.z != 0u && t2.x != t2.y) {
+          margin = taper_margin (p, t0.xy, t0.zw, t1.xy, hw * t2.x, hw * t2.y, margin);
+        }
       }
-      let margin = w - n.x;
       if (margin > best.x) {
         best = vec4f (margin, mix (t1.z, t1.w, n.y), n.x, w);
       }
