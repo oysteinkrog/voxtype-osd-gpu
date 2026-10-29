@@ -122,11 +122,7 @@ fn panes_view(fonts: &FontRegistry, size: Size, tilt: f32) -> Element<()> {
 
 type View = fn(&FontRegistry, Size, f32) -> Element<()>;
 
-/// The view applied flat at 0 and turned to `tilt` at 1 s, sampled at `t`.
-fn sample(fonts: &FontRegistry, size: Size, tilt: f32, t: f64) -> DisplayList {
-    sample_view(view, fonts, size, tilt, t)
-}
-
+/// `view` applied flat at 0 and turned to `tilt` at 1 s, sampled at `t`.
 fn sample_view(view: View, fonts: &FontRegistry, size: Size, tilt: f32, t: f64) -> DisplayList {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, size, 1.0);
