@@ -36,7 +36,7 @@ struct GlassIn {
   @location(6) shadow: vec4f,
   // Outline (EG-06): first point, point count (0: the rounded rect; negative: the ellipse
   // filling the rect, drawn exactly, EG-36), arc length of the top centre and the perimeter,
-  // in the units of the points.
+  // in the units of the points. Two header entries sit before the first point (EG-38).
   @location(7) outline: vec4f,
   // Refraction (EG-05): profile (-1 off, 0 flat, 1 dome, 2 slab, 3 prism, 4 bubble), bend
   // (logical pixels), magnification, dispersion.
@@ -222,13 +222,173 @@ fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, inner: f32, outer: f32
   return r;
 }
 
-// `outline_near` or, for the ellipse (a negative count), `ellipse_near` with its exact band;
-// `want_s` asks for the arc length.
-fn shape_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, inner: f32, outer: f32, want_s: bool) -> Near {
+// Point `j` (any integer, taken round the loop) of the outline `o`, scaled into the panel
+// frame, with its arc length.
+fn ring_point (o: vec4f, j: i32, k: f32) -> vec3f {
+  let n = i32 (o.y);
+  let i = u32 (((j % n) + n) % n);
+  let a = glass_point (u32 (o.x) + i);
+  return vec3f (a.xy * k + glass_origin (), a.z * k);
+}
+
+// The edges of `o` that end at points `lo` to `lo + len - 1` (an edge ends at point `j` and
+// starts at `j - 1`), folded into the nearest one so far: `best` (squared distance), `bj`
+// (its end point), `bh` (where along it), `bv` (from it to `p`), `be` (the edge), `bs` (arc
+// length).
+struct Window {
+  best: f32,
+  bj: i32,
+  bh: f32,
+  bv: vec2f,
+  be: vec2f,
+  bs: f32,
+};
+
+fn window_scan (p: vec2f, o: vec4f, k: f32, lo: i32, len: i32, w0: Window) -> Window {
+  var w = w0;
+  let n = u32 (o.y);
+  let first = u32 (o.x);
+  let origin = glass_origin ();
+  // Walk the points by index, wrapping without a division per point.
+  var i = u32 ((((lo - 1) % i32 (n)) + i32 (n)) % i32 (n));
+  var a4 = glass_point (first + i);
+  var a = a4.xy * k + origin;
+  for (var j = lo; j < lo + len; j++) {
+    i += 1u;
+    if (i == n) {
+      i = 0u;
+    }
+    let b4 = glass_point (first + i);
+    let b = b4.xy * k + origin;
+    let e = b - a;
+    let v0 = p - a;
+    let h = clamp (dot (v0, e) / max (dot (e, e), 1e-12), 0.0, 1.0);
+    let v = v0 - e * h;
+    let d2 = dot (v, v);
+    if (d2 < w.best) {
+      w.best = d2;
+      w.bj = j;
+      w.bh = h;
+      w.bv = v;
+      w.be = e;
+      w.bs = a4.z * k + h * length (e);
+    }
+    a4 = b4;
+    a = b;
+  }
+  return w;
+}
+
+// Outward unit normal of the edge `e` (clockwise on screen, y down: the edge turned left).
+fn edge_out (e: vec2f) -> vec2f {
+  return vec2f (e.y, -e.x) / max (length (e), 1e-12);
+}
+
+// `outline_near` for a long outline running once round the rounded box `S` (half size
+// `hs`, corner radius `rho`, `q` the pixel from its centre, `sd` its distance), testing only
+// the edges whose points can be nearest (EG-38). `h1` is the second header entry of
+// `outline_header` in glass.rs. The edges near the pixel's place on `S` give a first
+// distance; any nearer edge has an end point whose place on `S` is within `rw` of the pixel,
+// which bounds how far round `S` (and so how many points) to look. Inside or outside comes
+// from the nearest edge, or at a corner point from both its edges (the polygon is simple).
+fn window_near (p: vec2f, q: vec2f, hs: vec2f, rho: f32, sd: f32, o: vec4f, h1: vec4f, k: f32) -> Near {
+  let n = f32 (o.y);
+  let hl = hs - vec2f (rho);
+  let per = 4.0 * (hl.x + hl.y) + 6.2831853 * rho;
+  let i0 = i32 (floor (border_param (q, hs, rho) * n - h1.x));
+  var w: Window;
+  w.best = 1e30;
+  w = window_scan (p, o, k, i0 - 1, 3, w);
+  let rw = sqrt (w.best) + h1.z * k;
+  let delta = abs (sd);
+  let x = abs (q);
+  // How far round S the end points can sit: on a straight side whose ends and opposite side
+  // are all beyond `rw`, along that side only; else a chord bound (an arc of S is at most
+  // pi / 2 times its chord when the chord is shorter than the box).
+  var arc = -1.0;
+  if (!(x.x > hl.x && x.y > hl.y)) {
+    var along = hl.y - x.y;
+    var across = 2.0 * hs.x;
+    if (hs.y - x.y <= hs.x - x.x) {
+      along = hl.x - x.x;
+      across = 2.0 * hs.y;
+    }
+    if (along > rw && across - delta > rw) {
+      arc = sqrt (max (rw * rw - delta * delta, 0.0));
+    }
+  }
+  if (arc < 0.0 && delta + rw < 2.0 * min (hs.x, hs.y)) {
+    arc = 1.6 * (delta + rw);
+  }
+  let span = i32 (ceil (arc / per * n + h1.y)) + 1;
+  if (arc < 0.0 || 2 * span + 2 >= i32 (o.y)) {
+    return outline_near (p, o, k);
+  }
+  w = window_scan (p, o, k, i0 - span, 2 * span + 2, w);
+  var nrm = edge_out (w.be);
+  if (w.bh <= 0.0) {
+    // The edge's start point: add the edge before it.
+    nrm += edge_out (ring_point (o, w.bj - 1, k).xy - ring_point (o, w.bj - 2, k).xy);
+  } else if (w.bh >= 1.0) {
+    nrm += edge_out (ring_point (o, w.bj + 1, k).xy - ring_point (o, w.bj, k).xy);
+  }
+  let sgn = select (-1.0, 1.0, dot (w.bv, nrm) > 0.0);
+  let dist = sqrt (w.best);
+  var r: Near;
+  r.d = sgn * dist;
+  if (dist > 1e-3) {
+    r.n = sgn * w.bv / dist;
+  } else {
+    r.n = edge_out (w.be);
+  }
+  r.s = w.bs;
+  return r;
+}
+
+// `p` against a polygon outline (EG-38). Its header (two entries before its first point, see
+// `outline_header` in glass.rs) holds a rounded box `S` and `g`: the pixel is at least
+// `g - sd_S` inside. Past `deep` the exact distance no longer shows, so that bound stands in
+// for it with `S`'s normal and no edge is read. Otherwise a long outline tests the edges
+// near the pixel (`window_near`) and a short one all of them.
+fn poly_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, deep: f32, outside: f32) -> Near {
+  let first = u32 (o.x);
+  let h0 = glass_point (first - 2u);
+  let h1 = glass_point (first - 1u);
+  let half = 0.5 * rect.zw;
+  let hs = half - h0.xy * k;
+  let rho = h0.z * k;
+  let q = p - (rect.xy + half);
+  let sd = sd_box (q, hs, rho);
+  if (h0.w * k - sd > deep) {
+    var r: Near;
+    r.d = sd - h0.w * k;
+    r.n = grad_box (q, hs, rho);
+    r.s = 0.0;
+    return r;
+  }
+  // Likewise past `outside` out, where only the coverage reads it (zero either way); the
+  // outline keeps within `h1.w` of `S`.
+  if (sd - h1.w * k > outside) {
+    var r: Near;
+    r.d = sd - h1.w * k;
+    r.n = grad_box (q, hs, rho);
+    r.s = 0.0;
+    return r;
+  }
+  if (h1.y < 0.0) {
+    return outline_near (p, o, k);
+  }
+  return window_near (p, q, hs, rho, sd, o, h1, k);
+}
+
+// `poly_near` or, for the ellipse (a negative count), `ellipse_near` with its exact band
+// (`inner`, `outer`); `deep` and `outside` are how far in and out the polygon's exact
+// distance still shows, and `want_s` asks for the ellipse's arc length.
+fn shape_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, inner: f32, outer: f32, deep: f32, outside: f32, want_s: bool) -> Near {
   if (o.y < 0.0) {
     return ellipse_near (p, rect, o, k, inner, outer, want_s);
   }
-  return outline_near (p, o, k);
+  return poly_near (p, rect, o, k, deep, outside);
 }
 
 fn sd_box (q: vec2f, half: vec2f, r: f32) -> f32 {
@@ -370,8 +530,16 @@ fn film_colour (th: f32) -> vec3f {
   if (in.refract.x > 3.5) {
     exact_in = 1e30;
   }
+  // Deeper still a polygon's distance stands in as a bound (EG-38): past the tint's 12 px
+  // ramp too, and nowhere under the thin film, which shades the whole face.
+  var deep_in = max (exact_in, 12.0 * k + 2.0);
+  if (in.refract2.x > 0.0) {
+    deep_in = 1e30;
+  }
   if (shaped) {
-    near = shape_near (in.p, in.rect, in.outline, k, exact_in, 1.0, in.anim.x >= 0.0);
+    // Past this far out the pixel is uncovered and nothing but the shadow reads its distance.
+    let uncovered = 0.5 / max (glass_aa (in.clip.xy), 1e-3) + 1.0;
+    near = shape_near (in.p, in.rect, in.outline, k, exact_in, 1.0, deep_in, uncovered, in.anim.x >= 0.0);
     d = near.d;
     gn = near.n;
   } else {
@@ -392,7 +560,7 @@ fn film_colour (th: f32) -> vec3f {
     let drop = turn * vec2f (0.0, in.shadow.z * k);
     var ds: f32;
     if (shaped) {
-      ds = shape_near (in.p - drop, in.rect, in.outline, k, exact_in, 1.0, false).d;
+      ds = shape_near (in.p - drop, in.rect, in.outline, k, exact_in, 1.0, deep_in, 1e30, false).d;
     } else {
       ds = sd_box (q - drop, half, r);
     }

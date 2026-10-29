@@ -57,6 +57,7 @@ const CASES: &[&str] = &[
     "material backdrop",
     "glass",
     "glass octagon",
+    "glass wavy",
     "glass lens",
     "glass prism",
     "layer blur r0",
@@ -166,6 +167,12 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "glass" => card = card.fill(Color::TRANSPARENT).glass(Glass::dark().with_orbit(Color::hex(0x4cc9f0, 1.0))),
         "glass octagon" => {
             let g = Glass::dark().with_orbit(Color::hex(0x4cc9f0, 1.0)).with_shape(GlassShape::chamfer(12.0 * k));
+            card = card.fill(Color::TRANSPARENT).glass(g)
+        }
+        // Glass with wavy edges (EG-38): up to 512 outline points.
+        "glass wavy" => {
+            let shape = GlassShape::Wavy { amplitude: 3.0 * k, wavelength: 34.0 * k };
+            let g = Glass::dark().with_orbit(Color::hex(0x4cc9f0, 1.0)).with_shape(shape);
             card = card.fill(Color::TRANSPARENT).glass(g)
         }
         // Refracting glass (EG-05) over the stripes: a lens disc and a prism.
