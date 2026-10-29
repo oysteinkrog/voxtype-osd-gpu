@@ -30,16 +30,26 @@
 //! [`LatticeLook::live`] draws a strand from the newest node to the caret that slackens over
 //! [`LIVE_SLACK`] seconds of silence and trembles with the level.
 //!
-//! The drawing is a pure function of `t`, the words' arrival times, the plucks and the
-//! level: there is no simulation state, so any `t` can be drawn in any order. Under reduced
-//! motion strands are drawn whole and still, at their resting bow, and plucks and the level
-//! are ignored.
+//! Exhale and drift (LT-09): [`LatticeLook::quiet`] marks a stretch of silence. After
+//! [`EXHALE_AFTER`] seconds of it every bow eases out to [`EXHALE_BOW`] times its size over
+//! [`EXHALE_OVER`] seconds and holds there, and it snaps back the moment the silence ends, so
+//! a pause reads as slack while the idle tail still settles to a still frame.
+//! [`LatticeLook::drift`] is the optional idle drift: the whole lattice wanders a pixel or
+//! two through two `Element::ambient` noise loops at [`DRIFT_FPS`] steps a second. The caller
+//! leaves it out when the app asks to exit (the loops then settle to rest) and for the
+//! newest line; it is never added under reduced motion.
+//!
+//! The drawing is a pure function of `t`, the words' arrival times, the plucks, the level and
+//! the silence: there is no simulation state, so any `t` can be drawn in any order. Under
+//! reduced motion strands are drawn whole and still, at their resting bow, and plucks, the
+//! level, the exhale and the drift are ignored.
 
 use std::sync::Arc;
 
 use crate::canvas::Painter;
 use crate::display::{Paint, ShapeInstance};
 use crate::element::{Element, Key, TextStyle};
+use crate::ambient::{Loop, LoopProp};
 use crate::emitter::LevelTrack;
 use crate::geom::{Color, Point, Rect, Size};
 use crate::path::{Contour, StrokeStyle};
@@ -99,6 +109,60 @@ pub const REVISION_DASH: f64 = 0.5;
 pub const REVISION_FLASH: f64 = 0.4;
 /// Seconds of silence over which the live strand slackens to its full bow.
 pub const LIVE_SLACK: f64 = 3.0;
+
+/// Seconds of silence before the lattice exhales.
+pub const EXHALE_AFTER: f64 = 3.0;
+/// Seconds the exhale takes to ease out.
+pub const EXHALE_OVER: f64 = 1.2;
+/// How much bigger every bow is once the lattice has exhaled.
+pub const EXHALE_BOW: f32 = 1.3;
+/// Steps per second of the idle drift (RD-02: slow drifts at 15 or less).
+pub const DRIFT_FPS: f64 = 15.0;
+
+/// A stretch of silence: the voice was last heard at `from` and comes back at `until`
+/// (`f64::INFINITY` while it is still quiet).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quiet {
+    pub from: f64,
+    pub until: f64,
+}
+
+impl Quiet {
+    /// Quiet since `from`, with no onset yet.
+    pub fn since(from: f64) -> Quiet {
+        Quiet { from, until: f64::INFINITY }
+    }
+}
+
+/// The idle drift of a whole lattice: it wanders up to about `amp` logical pixels across
+/// and a little less up and down, one change of direction about every `period` seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatticeDrift {
+    pub amp: f32,
+    pub period: f64,
+    /// Seeds the noise, so lattices side by side wander apart.
+    pub seed: u32,
+}
+
+impl Default for LatticeDrift {
+    fn default() -> LatticeDrift {
+        LatticeDrift { amp: 1.5, period: 4.0, seed: 0 }
+    }
+}
+
+impl LatticeDrift {
+    /// The two ambient loops of the drift, at [`DRIFT_FPS`]: across, then up and down.
+    pub fn loops(&self) -> [(LoopProp, Loop); 2] {
+        let amp = self.amp.max(0.0) as f64;
+        [
+            (LoopProp::OffsetX, Loop::drift(amp, self.period, self.seed).fps(DRIFT_FPS)),
+            (
+                LoopProp::OffsetY,
+                Loop::drift(0.6 * amp, 1.3 * self.period, self.seed.wrapping_add(7919)).fps(DRIFT_FPS),
+            ),
+        ]
+    }
+}
 
 /// A pluck of one bundle. Bundle `i` is the bundle of strands that leads into word `i`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -196,6 +260,10 @@ pub struct LatticeLook {
     pub tick: f32,
     /// Strength (0 to 1) of a wide faint halo drawn under every strand, or 0 for none.
     pub glow: f32,
+    /// The current silence, for the exhale ([`LatticeLook::exhale`]). `None`: no exhale.
+    pub quiet: Option<Quiet>,
+    /// The optional idle drift of the whole lattice, or `None` to hold still.
+    pub drift: Option<LatticeDrift>,
 }
 
 /// A named look for the lattice (LT-06): [`LatticeStyle::look`] builds a [`LatticeLook`] from
@@ -291,6 +359,8 @@ impl Default for LatticeLook {
             live: None,
             tick: 0.0,
             glow: 0.0,
+            quiet: None,
+            drift: None,
         }
     }
 }
@@ -454,6 +524,27 @@ impl LatticeLook {
         out
     }
 
+    /// The exhale multiplier on every bow at `t`: 1 until [`EXHALE_AFTER`] seconds into the
+    /// silence, then easing out to [`EXHALE_BOW`] over [`EXHALE_OVER`] seconds and holding,
+    /// back to 1 at once when the silence ends. Always 1 under reduced motion.
+    pub fn exhale(&self, t: f64, reduced: bool) -> f32 {
+        let Some(q) = self.quiet.filter(|_| !reduced) else { return 1.0 };
+        if t >= q.until {
+            return 1.0;
+        }
+        let k = ((t - q.from - EXHALE_AFTER) / EXHALE_OVER).clamp(0.0, 1.0);
+        let k = (k * k * (3.0 - 2.0 * k)) as f32;
+        1.0 + (EXHALE_BOW - 1.0) * k
+    }
+
+    /// When the exhale stops changing: its end, or the snap back if that comes first. `None`
+    /// without a silence long enough to start one.
+    fn exhale_until(&self) -> Option<f64> {
+        let q = self.quiet?;
+        let start = q.from + EXHALE_AFTER;
+        (q.until > start).then(|| if q.until.is_finite() { q.until } else { start + EXHALE_OVER })
+    }
+
     /// The live strand's bow at `t`: from the least bow at its last word up to the most over
     /// [`LIVE_SLACK`] seconds of silence. Under reduced motion it stays at the most.
     pub fn live_bow(&self, live: &LiveStrand, t: f64, reduced: bool) -> f32 {
@@ -554,7 +645,8 @@ impl LatticeLook {
 
     /// When the drawing stops changing: 1.2 s after the newest arrival, once the last pluck
     /// (revisions included) settles, a revision's dash and flash end, the live strand is fully
-    /// slack, and the level has settled after its newest entry, whichever is latest. A level
+    /// slack, the level has settled after its newest entry, and the exhale has eased out (or
+    /// snapped back), whichever is latest. A level
     /// held up keeps the live strand trembling past that: a caller that pushes a live level
     /// rebuilds the view as it goes.
     pub fn until(&self, words: &[LatticeWord]) -> f64 {
@@ -569,6 +661,7 @@ impl LatticeLook {
             .chain(revised)
             .chain(live)
             .chain(level)
+            .chain(self.exhale_until())
             .fold(arrivals, f64::max)
     }
 
@@ -578,7 +671,8 @@ impl LatticeLook {
         let shown: Vec<usize> = (0..n).filter(|&i| reduced || words[i].at <= t).collect();
         let Some(&newest) = shown.last() else { return };
         let last = (!reduced).then(|| words[newest].at);
-        let tension = if reduced { 1.0 } else { self.live_tension(last, t) };
+        let exhale = self.exhale(t, reduced);
+        let tension = if reduced { 1.0 } else { self.live_tension(last, t) * exhale };
         let plucks = if reduced { Arc::from([]) } else { self.plucks_with_revisions(&words[..n]) };
         let swing = |bundle: usize| if reduced { 0.0 } else { self.offset_in(&plucks, bundle, t) };
         let node = |i: usize| Point::new(nodes[i].x, self.node_y(&nodes[i]));
@@ -634,7 +728,7 @@ impl LatticeLook {
             if live.caret_x > a.x + 1.0 {
                 let b = Anchor { x: live.caret_x, width: 0.0, ..a };
                 let tremble = if reduced { 0.0 } else { self.live_tremble_at(t) };
-                let bow = self.live_bow(&live, t, reduced) + tremble;
+                let bow = self.live_bow(&live, t, reduced) * exhale + tremble;
                 for (c, edge) in self.strands(&a, &b, bow, false) {
                     p.stroke(&c, &StrokeStyle::solid(self.width.0 * edge, self.accent.fade(0.6 * edge)));
                 }
@@ -678,7 +772,8 @@ impl LatticeLook {
     }
 
     /// The lattice as an element `size` big over text laid out from its top left: a canvas
-    /// for the strands and, with [`LatticeLook::label`], a label under each node.
+    /// for the strands and, with [`LatticeLook::label`], a label under each node. With
+    /// [`LatticeLook::drift`] (and not `reduced`) the whole layer wanders on two ambient loops.
     pub fn view<M>(
         &self,
         key: impl Into<Key>,
@@ -697,6 +792,11 @@ impl LatticeLook {
         .size(size.w, size.h)
         .layout(absolute(0.0, 0.0));
         let mut root = Element::layer(key.clone()).size(size.w, size.h).child(canvas);
+        if let Some(drift) = self.drift.filter(|_| !reduced) {
+            for (prop, l) in drift.loops() {
+                root = root.ambient(prop, l);
+            }
+        }
         if let Some(style) = &self.label {
             for (i, (w, a)) in words.iter().zip(nodes.iter()).enumerate() {
                 let ms = (w.pause * 1000.0).round() as i32;
@@ -1139,5 +1239,130 @@ mod tests {
         let words = vec![LatticeWord::new(0.0, 0.5, 0.0)];
         let l = LatticeLook { level: Some(level), ..LatticeLook::default() };
         assert!(l.until(&words) > 9.0);
+    }
+
+    #[test]
+    fn the_exhale_waits_three_seconds_eases_to_1_3_and_snaps_back() {
+        let l = LatticeLook { quiet: Some(Quiet { from: 2.0, until: 9.0 }), ..LatticeLook::default() };
+        assert_eq!(l.exhale(1.0, false), 1.0);
+        assert_eq!(l.exhale(2.0 + EXHALE_AFTER, false), 1.0, "nothing for the first 3 s");
+        let mut prev = 1.0;
+        for k in 0..=120 {
+            let e = l.exhale(2.0 + EXHALE_AFTER + k as f64 * 0.01, false);
+            assert!(e >= prev, "{k}: {e} < {prev}");
+            prev = e;
+        }
+        assert_eq!(prev, EXHALE_BOW, "full after 1.2 s");
+        assert_eq!(l.exhale(8.99, false), EXHALE_BOW, "holds");
+        assert_eq!(l.exhale(9.0, false), 1.0, "snaps back on the onset");
+        assert_eq!(l.exhale(7.0, true), 1.0, "none under reduced motion");
+        assert_eq!(LatticeLook::default().exhale(30.0, false), 1.0, "none without a silence");
+    }
+
+    #[test]
+    fn until_waits_for_the_exhale_or_its_snap() {
+        let words = vec![LatticeWord::new(0.0, 0.5, 0.0), LatticeWord::new(0.3, 0.5, 0.5)];
+        let held = LatticeLook { quiet: Some(Quiet::since(1.0)), ..LatticeLook::default() };
+        assert_eq!(held.until(&words), 1.0 + EXHALE_AFTER + EXHALE_OVER);
+        let cut = LatticeLook { quiet: Some(Quiet { from: 1.0, until: 4.5 }), ..LatticeLook::default() };
+        assert_eq!(cut.until(&words), 4.5);
+        let short = LatticeLook { quiet: Some(Quiet { from: 1.0, until: 2.0 }), ..LatticeLook::default() };
+        assert_eq!(short.until(&words), LatticeLook::default().until(&words), "too short to exhale");
+    }
+
+    #[test]
+    fn an_exhaled_lattice_is_slacker_then_still() {
+        let (words, nodes) = sentences_words();
+        let quiet = Quiet::since(words.last().unwrap().at);
+        let l = LatticeLook { quiet: Some(quiet), ..LatticeLook::default() };
+        let base = LatticeLook::default();
+        let before = quiet.from + EXHALE_AFTER - 0.5;
+        assert_eq!(draw_list(&l, &words, &nodes, before, false), draw_list(&base, &words, &nodes, before, false));
+        let tail = quiet.from + EXHALE_AFTER + EXHALE_OVER + 0.5;
+        assert_ne!(draw_list(&l, &words, &nodes, tail, false), draw_list(&base, &words, &nodes, tail, false));
+        // The idle tail holds still: frames a second apart are the same.
+        for k in 0..4 {
+            let t = tail + k as f64;
+            assert_eq!(draw_list(&l, &words, &nodes, t, false), draw_list(&l, &words, &nodes, t + 1.0, false), "{t}");
+        }
+        // Under reduced motion the exhale changes nothing.
+        assert_eq!(draw_list(&l, &words, &nodes, tail, true), draw_list(&base, &words, &nodes, tail, true));
+    }
+
+    #[test]
+    fn exhaled_newest_line_strands_stay_in_the_gutter() {
+        let (baseline, descent) = (20.0, 6.0);
+        let gutters = vec![LineGutter { top: baseline + descent, height: 14.0, newest: true, descent }];
+        let l = LatticeLook { gutters, quiet: Some(Quiet::since(0.0)), ..LatticeLook::default() };
+        let a = Anchor { x: 0.0, width: 40.0, baseline, line: 0 };
+        let b = Anchor { x: 60.0, width: 40.0, baseline, line: 0 };
+        let bow = l.rest_bow(10.0) * l.exhale(10.0, false);
+        assert!(bow > l.bow.1);
+        for (c, _) in l.strands(&a, &b, bow, false) {
+            for pt in c.resample(24) {
+                assert!(pt.y >= baseline + descent - 1e-3 && pt.y <= baseline + descent + 14.0 + 1e-3, "{pt:?}");
+            }
+        }
+    }
+
+    fn drift_scene(drift: Option<LatticeDrift>, reduced: bool) -> crate::Scene<()> {
+        let (words, nodes) = sentences_words();
+        let l = LatticeLook { drift, ..LatticeLook::default() };
+        let mut scene: crate::Scene<()> = crate::Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 80.0), 1.0);
+        let view = l.view("lat", Size::new(400.0, 80.0), words.into(), nodes.into(), reduced);
+        scene.apply(Element::column("root").child(view), 0.0);
+        scene
+    }
+
+    /// The wake times a host would follow from `t` up to `until`.
+    fn wakes(scene: &crate::Scene<()>, mut t: f64, until: f64) -> Vec<f64> {
+        let mut out = Vec::new();
+        while let Some(w) = scene.next_wake(t) {
+            let w = if w <= t { t + 1.0 / 240.0 } else { w };
+            if w > until {
+                break;
+            }
+            out.push(w);
+            t = w;
+        }
+        out
+    }
+
+    #[test]
+    fn the_drift_wanders_at_15_fps_and_only_when_asked() {
+        let still = drift_scene(None, false);
+        assert!(wakes(&still, 10.0, 12.0).is_empty(), "no drift: the idle tail sleeps");
+        assert_eq!(still.sample(10.0), still.sample(11.0));
+        let drifting = drift_scene(Some(LatticeDrift::default()), false);
+        let w = wakes(&drifting, 10.0, 12.0);
+        assert!(!w.is_empty() && w.len() as f64 <= 2.0 * DRIFT_FPS + 1.0, "{} wakes in 2 s", w.len());
+        assert!((10..40).any(|k| drifting.sample(10.0 + 0.1 * k as f64) != drifting.sample(10.0)), "it moves");
+        let reduced = drift_scene(Some(LatticeDrift::default()), true);
+        assert!(wakes(&reduced, 10.0, 12.0).is_empty(), "never under reduced motion");
+    }
+
+    #[test]
+    fn a_dropped_drift_settles_and_the_scene_sleeps() {
+        let (words, nodes) = sentences_words();
+        let view = |drift: Option<LatticeDrift>| {
+            let l = LatticeLook { drift, ..LatticeLook::default() };
+            Element::column("root").child(l.view(
+                "lat",
+                Size::new(400.0, 80.0),
+                words.clone().into(),
+                nodes.clone().into(),
+                false,
+            ))
+        };
+        let mut scene: crate::Scene<()> = crate::Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 80.0), 1.0);
+        scene.apply(view(Some(LatticeDrift::default())), 0.0);
+        // The app asks to exit at 6.3 s: the view leaves the drift out.
+        scene.apply(view(None), 6.3);
+        let settle = wakes(&scene, 6.3, 20.0);
+        let end = settle.last().copied().unwrap_or(6.3);
+        assert!(end < 6.3 + 3.0, "settles inside the exit cap: {end}");
+        assert_eq!(scene.next_wake(end + 0.01), None);
     }
 }
