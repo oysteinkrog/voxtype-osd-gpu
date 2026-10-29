@@ -262,15 +262,21 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
         rect = vec4f (in.geom.xy - in.geom.z, vec2f (2.0 * in.geom.z));
       }
       rect = vec4f (rect.xy - spread - hw, rect.zw + 2.0 * (spread + hw));
-      let q = p - (rect.xy + 0.5 * rect.zw);
-      var r: f32;
-      if (q.y < 0.0) {
-        r = select (in.radii.x, in.radii.y, q.x >= 0.0);
+      // A negative spread can shrink the box past zero: then nothing casts a shadow (the CPU
+      // path in cpu.rs skips it the same way).
+      if (rect.z <= 0.0 || rect.w <= 0.0) {
+        v = 0.0;
       } else {
-        r = select (in.radii.w, in.radii.z, q.x >= 0.0);
+        let q = p - (rect.xy + 0.5 * rect.zw);
+        var r: f32;
+        if (q.y < 0.0) {
+          r = select (in.radii.x, in.radii.y, q.x >= 0.0);
+        } else {
+          r = select (in.radii.w, in.radii.z, q.x >= 0.0);
+        }
+        let corner = clamp (r + spread + hw, 0.0, 0.5 * min (rect.z, rect.w));
+        v = box_shadow (rect, corner, p, sigma);
       }
-      let corner = clamp (r + spread + hw, 0.0, 0.5 * min (rect.z, rect.w));
-      v = box_shadow (rect, corner, p, sigma);
     }
   }
   let a = in.fill_c0.w * max (v, 0.0);

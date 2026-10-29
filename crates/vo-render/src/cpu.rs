@@ -384,6 +384,11 @@ impl CpuRenderer {
                         }
                         let grow = spread + hw;
                         let rect = [rect[0] - grow, rect[1] - grow, rect[2] + 2.0 * grow, rect[3] + 2.0 * grow];
+                        // A negative spread can shrink the box past zero: nothing casts a
+                        // shadow, and the corner clamp below would have inverted bounds.
+                        if rect[2] <= 0.0 || rect[3] <= 0.0 {
+                            continue;
+                        }
                         let (qx, qy) = (q.x - (rect[0] + 0.5 * rect[2]), q.y - (rect[1] + 0.5 * rect[3]));
                         let r = match (qy < 0.0, qx >= 0.0) {
                             (true, false) => s.radii[0],
@@ -1035,6 +1040,22 @@ mod tests {
         root.items = 0..1;
         list.layers.push(root);
         list
+    }
+
+    #[test]
+    fn a_negative_spread_wider_than_the_box_casts_no_shadow() {
+        // The captions backdrop eases in from a zero-size box with an 18 px shadow at
+        // spread -6: while the box is under 12 px tall the shrunk box has a negative
+        // height. That inverted the corner clamp and panicked on the first CPU frames.
+        let mut cpu = CpuRenderer::new(FontRegistry::new());
+        for (w, h) in [(300.0, 11.636_331), (300.0, 0.0), (5.0, 40.0), (0.0, 0.0)] {
+            let r = RRect::new(Rect::new(20.0, 20.0, w, h), h / 2.0);
+            let shadow = Paint::shadow(Color::rgba(0.0, 0.0, 0.0, 0.62), Point::ZERO, 18.0, -6.0);
+            let list = list_with(ShapeInstance::rrect(r, shadow), LSize::new(360.0, 80.0));
+            let mut out = vec![0u8; 360 * 80 * 4];
+            cpu.draw_bgra(&list, 1.0, 360, 80, 360 * 4, &mut out);
+            assert!(out.iter().all(|&b| b == 0), "{w}x{h}: a box shrunk past zero draws nothing");
+        }
     }
 
     #[test]
