@@ -70,6 +70,7 @@ const CASES: &[&str] = &[
     "watercolour",
     "tapered strokes",
     "shape-group-8",
+    "grid-words",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -87,8 +88,25 @@ fn mat_frost (m: Material, i: MatIn) -> vec4f {
 }
 ";
 
-fn add_frost(r: &mut Renderer) {
+/// Breathing Grid (EG-31) for the "grid-words" case: the card's panel reads the text field
+/// and the word table, and a new word comes every half second, so the field is rebuilt then.
+const GRID: u32 = vo::scene::material::CUSTOM_FIRST + 1;
+const GRID_WGSL: &str = include_str!("grid_words.wgsl");
+
+fn add_materials(r: &mut Renderer) {
     r.add_material(FROST, "mat_frost", FROST_WGSL);
+    r.add_material(GRID, "mat_grid_words", GRID_WGSL);
+}
+
+/// The live words of the "grid-words" case at `t`: one more every half second, round and
+/// round.
+fn grid_words(t: f64) -> vo_core::words::WordModel {
+    const SENTENCE: &str = "so the window shows the live words";
+    let all: Vec<&str> = SENTENCE.split(' ').collect();
+    let n = (t / 0.5) as usize % all.len() + 1;
+    let mut model = vo_core::words::WordModel::new();
+    model.update(&all[..n].join(" "));
+    model
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,7 +138,13 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         .border(Color::hex(0x4cc9f0, 0.8), 1.5 * k)
         .child(text("title", case, 30.0, 0xffffff))
         .child(text("l1", "open the configuration file and set the theme", 17.0, 0xc8d3e0))
-        .child(text("l2", "so the window shows the live words", 17.0, 0xc8d3e0))
+        .child(if case == "grid-words" {
+            Element::live_text("l2", grid_words(t).words())
+                .text_style(TextStyle::new(0, 17.0 * k, 17.0 * 1.25 * k))
+                .color(Color::hex(0xc8d3e0, 1.0))
+        } else {
+            text("l2", "so the window shows the live words", 17.0, 0xc8d3e0)
+        })
         .child(
             Element::wavy_line("wave", StrokeStyle::solid(2.0 * k, Color::hex(0x4cc9f0, 1.0)), 6.0 * k, 40.0 * k)
                 .size(380.0 * k, 20.0 * k),
@@ -130,6 +154,13 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "glow" => card = card.glow(Color::hex(0x4cc9f0, 0.9), 14.0 * k, 1.2),
         "shadow" => card = card.shadow(Color::rgba(0.0, 0.0, 0.0, 0.6), 0.0, 8.0 * k, 18.0 * k),
         "motion blur" => card = card.motion_blur(1.0 / 30.0),
+        "grid-words" => {
+            let m = Material::custom(GRID)
+                .reads_text()
+                .color(0, Color::hex(0x38e8ff, 1.0))
+                .param(1, [1.3, 22.0 * k, 0.0, 0.0]);
+            card = card.material(m)
+        }
         "material backdrop" => {
             card = card.fill(Color::hex(0x10141c, 0.55)).material(Material::custom(FROST).reads_backdrop())
         }
@@ -458,7 +489,7 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         // A renderer per case, so pooled textures belong to the case.
         let mut r = Renderer::with_fonts(&g.device, &g.queue, fonts.clone());
         assert!(r.set_profiling(true), "this device has no timestamp queries");
-        add_frost(&mut r);
+        add_materials(&mut r);
         // The water's ticks run in their own submits, outside the frame's timestamps.
         let water_ms = if *name == "water pool" {
             vo_sim::water_render::install_pool(&mut r, &water_pool(size, 0.0), 1.0);
@@ -472,17 +503,29 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         let mut scene: Scene<Msg> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
         scene.set_viewport(0.0, size, 1.0);
         let (mut gpu, mut cpu, mut sections) = (Vec::new(), Vec::new(), Vec::<(String, f64)>::new());
+        // The text field (EG-31), built in its own submit, timed and added to the frame.
+        let mut field = (*name == "grid-words")
+            .then(|| (vo_render::text_field::TextField::new(&g.device, &g.queue), FieldClock::new(g)));
         // Ten frames to warm up pipelines and the atlas.
         for f in 0..frames + 10 {
             let t = f as f64 / 60.0;
             scene.apply(view(size, i, t), t);
             let list = scene.sample(t);
+            let field_ms = match &mut field {
+                Some((f, clock)) => clock.time(g, |enc| {
+                    f.update_words(&mut r, &list, [w, h], 1.0, t, enc);
+                }),
+                None => 0.0,
+            };
+            if let Some((f, _)) = &field {
+                f.bind(&mut r, &f.word_table(t, false));
+            }
             let started = Instant::now();
             r.render_at(&list, 1.0, &mut target);
             let record = started.elapsed().as_secs_f64() * 1e3;
             let Some(tm) = r.last_timings() else { continue };
             if f >= 10 {
-                gpu.push(tm.total_ms + water_ms);
+                gpu.push(tm.total_ms + water_ms + field_ms);
                 cpu.push(record);
                 for p in tm.passes {
                     match sections.iter_mut().find(|s| s.0 == p.label) {
@@ -491,6 +534,15 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
                     }
                 }
             }
+        }
+        if let Some((f, _)) = &field {
+            println!(
+                "effect_cost: grid-words at {w}x{h}: field {:?} texels, {} KiB, built {} times in {} frames",
+                f.size().unwrap_or_default(),
+                f.memory_bytes() / 1024,
+                f.builds(),
+                frames + 10
+            );
         }
         sections.sort_by(|a, b| b.1.total_cmp(&a.1));
         let slowest =
@@ -507,6 +559,48 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
     out
 }
 
+/// Times GPU work recorded into one encoder with two timestamps, waiting for the result.
+struct FieldClock {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+}
+
+impl FieldClock {
+    fn new(g: &Gpu) -> FieldClock {
+        let set = g.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: None,
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let buf = |usage| {
+            g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage, mapped_at_creation: false })
+        };
+        use wgpu::BufferUsages as U;
+        FieldClock { set, resolve: buf(U::QUERY_RESOLVE | U::COPY_SRC), read: buf(U::MAP_READ | U::COPY_DST) }
+    }
+
+    /// Milliseconds the GPU spent on what `record` encodes.
+    fn time(&mut self, g: &Gpu, record: impl FnOnce(&mut wgpu::CommandEncoder)) -> f64 {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        enc.write_timestamp(&self.set, 0);
+        record(&mut enc);
+        enc.write_timestamp(&self.set, 1);
+        enc.resolve_query_set(&self.set, 0..2, &self.resolve, 0);
+        enc.copy_buffer_to_buffer(&self.resolve, 0, &self.read, 0, 16);
+        let sub = g.queue.submit([enc.finish()]);
+        g.device.poll(wgpu::PollType::Wait { submission_index: Some(sub), timeout: None }).expect("poll");
+        self.read.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        g.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let ticks: Vec<u64> = {
+            let d = self.read.slice(..).get_mapped_range().expect("mapped");
+            d.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+        };
+        self.read.unmap();
+        ticks[1].saturating_sub(ticks[0]) as f64 * g.queue.get_timestamp_period() as f64 / 1e6
+    }
+}
+
 fn main() {
     if vo::preview::wanted() {
         let fonts = fonts();
@@ -515,7 +609,7 @@ fn main() {
         let options = move || Options::<Msg> {
             fonts: fonts.clone(),
             renderer_setup: Some(std::sync::Arc::new(move |r: &mut Renderer| {
-                add_frost(r);
+                add_materials(r);
                 vo_sim::water_render::install_pool(r, &water_pool(size, 0.0), 1.0);
                 vo_sim::fluid_render::install_layer(r, &ink_layer(size, 0.0, InkStyle::Ink), 1.0);
             })),
