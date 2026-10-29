@@ -591,6 +591,21 @@ impl State {
             .unwrap_or(1080)
     }
 
+    /// Logical size of the first output with a known size, as `output_height` finds it.
+    fn output_dims(&self) -> Option<(i32, i32)> {
+        self.outputs
+            .outputs()
+            .filter_map(|o| self.outputs.info(&o))
+            .find_map(|info| {
+                info.logical_size.or_else(|| {
+                    let mode = info.modes.iter().find(|m| m.current)?;
+                    let k = info.scale_factor.max(1);
+                    Some((mode.dimensions.0 / k, mode.dimensions.1 / k))
+                })
+            })
+            .filter(|(w, h)| *w > 0 && *h > 0)
+    }
+
     /// The surface `wl` belongs to: its role surface or its GPU sub-surface.
     pub(crate) fn surface_index(&self, wl: &WlSurface) -> Option<usize> {
         self.surfaces.iter().position(|s| s.role.wl() == wl || s.is_child(wl))
@@ -1057,6 +1072,10 @@ impl HostCtl for State {
         &self.caps
     }
 
+    fn output_size(&self) -> Option<Size> {
+        self.output_dims().map(|(w, h)| Size::new(w as f32, h as f32))
+    }
+
     fn diag(&self) -> &HostDiag {
         &self.diag
     }
@@ -1246,8 +1265,21 @@ impl HostCtl for State {
                 let (w, h) = (size.w.round().max(1.0) as u32, size.h.round().max(1.0) as u32);
                 let old = (s.spec.size.w.round().max(1.0) as u32, s.spec.size.h.round().max(1.0) as u32);
                 s.spec.size = size;
+                let out = self.output_dims().unwrap_or((1920, self.output_height()));
+                let s = &mut self.surfaces[i];
                 match &s.role {
                     Role::Layer(l) => {
+                        // The compositor places a new size at once, while the old frame is
+                        // still on screen: a centred or right- or bottom-anchored surface would
+                        // show that frame moved for a moment. Until the first frame at the new
+                        // size brings the real anchors back, it is pinned at its top-left.
+                        // A second resize before that frame keeps the first pin.
+                        if s.configured && old != (w, h) && s.resizing.is_none() && s.pending_place.is_none() {
+                            if let Some((x, y)) = layer_top_left(s.spec.placement, out, old) {
+                                l.set_anchor(Anchor::TOP | Anchor::LEFT);
+                                l.set_margin(y, 0, 0, x);
+                            }
+                        }
                         l.set_size(w, h);
                         // The margins of `FromTop` and `LineAt` depend on the height; they
                         // change with the first frame at the new size.
@@ -1324,6 +1356,9 @@ impl HostCtl for WaylandHost {
     }
     fn now(&self) -> f64 {
         self.state.now()
+    }
+    fn output_size(&self) -> Option<Size> {
+        HostCtl::output_size(&self.state)
     }
     fn gpu(&mut self) -> Result<Gpu, HostError> {
         self.state.gpu()
@@ -1513,6 +1548,30 @@ fn place_layer(l: &LayerSurface, placement: Placement, output_h: i32, h: i32) {
     }
 }
 
+/// Where `place_layer` puts the top-left of a surface of `size` on an output of `out`, in
+/// logical pixels, or `None` where an axis stretches or the output decides (full screen).
+fn layer_top_left(placement: Placement, out: (i32, i32), size: (u32, u32)) -> Option<(i32, i32)> {
+    let (ow, oh) = out;
+    let (w, h) = (size.0 as i32, size.1 as i32);
+    let centre = |o: i32, l: i32| (o - l) / 2;
+    let axis = |near: bool, far: bool, m_near: i32, m_far: i32, o: i32, l: i32| match (near, far) {
+        (true, false) => Some(m_near),
+        (false, true) => Some(o - m_far - l),
+        (false, false) => Some(centre(o, l)),
+        (true, true) => None,
+    };
+    match placement {
+        Placement::Fullscreen => None,
+        Placement::Centered => Some((centre(ow, w), centre(oh, h))),
+        Placement::Anchored { edges, margin } => Some((
+            axis(edges.left, edges.right, margin[3], margin[1], ow, w)?,
+            axis(edges.top, edges.bottom, margin[0], margin[2], oh, h)?,
+        )),
+        Placement::FromTop { fraction } => Some((centre(ow, w), from_top_margin(fraction, oh, h))),
+        Placement::LineAt { fraction, y } => Some((centre(ow, w), line_at_margin(fraction, y, oh, h))),
+    }
+}
+
 /// The top margin for `Placement::FromTop`: `fraction` of the output's height, moved up
 /// as far as needed to keep a surface `surface_h` tall on the output, but never above
 /// its top edge.
@@ -1538,6 +1597,23 @@ mod tests {
         assert!(!resize_expired(Some(10.0), 10.0));
         assert!(!resize_expired(Some(10.0), 10.0 + RESIZE_WAIT * 0.9));
         assert!(resize_expired(Some(10.0), 10.0 + RESIZE_WAIT));
+    }
+
+    #[test]
+    fn a_pinned_surface_keeps_the_top_left_place_layer_gives_it() {
+        use super::layer_top_left;
+        use vo_host::{Edges, Placement};
+        let out = (1920, 1080);
+        // Centred across, line 40 px down at 85%: (1920 - 400) / 2, 918 - 40.
+        assert_eq!(layer_top_left(Placement::LineAt { fraction: 0.85, y: 40.0 }, out, (400, 100)), Some((760, 878)));
+        // Kept on the output, as place_layer does.
+        assert_eq!(layer_top_left(Placement::LineAt { fraction: 0.85, y: 40.0 }, out, (400, 300)), Some((760, 780)));
+        assert_eq!(layer_top_left(Placement::Centered, out, (401, 101)), Some((759, 489)));
+        let br = Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0, 24, 16, 0] };
+        assert_eq!(layer_top_left(br, out, (400, 100)), Some((1920 - 24 - 400, 1080 - 16 - 100)));
+        let bar = Placement::Anchored { edges: Edges::BOTTOM, margin: [0, 0, 8, 0] };
+        assert_eq!(layer_top_left(bar, out, (400, 100)), Some((760, 972)));
+        assert_eq!(layer_top_left(Placement::Fullscreen, out, (400, 100)), None);
     }
 
     #[test]

@@ -49,6 +49,9 @@ struct MarginFollow {
     paired: (bool, bool),
     /// Since when a smaller margin has been enough.
     below: Option<f64>,
+    /// The most each side may have: the room between the panel and the output's edge. A
+    /// taller or wider surface would be pushed back onto the output, moving the panel.
+    cap: Option<vo_scene::Insets>,
 }
 
 impl MarginFollow {
@@ -59,7 +62,7 @@ impl MarginFollow {
             Placement::FromTop { .. } | Placement::LineAt { .. } => (true, false),
             Placement::Fullscreen => return None,
         };
-        Some(MarginFollow { base, now: base, paired, below: None })
+        Some(MarginFollow { base, now: base, paired, below: None, cap: None })
     }
 
     /// The margin for a view that reaches `need`: the first view's, plus whole steps.
@@ -115,7 +118,28 @@ impl MarginFollow {
                 t = t.max(bo);
                 bo = t;
             }
-            self.now = vo_scene::Insets::new(b.left + l, b.top + t, b.right + r, b.bottom + bo);
+            // Never past the output's edge, nor below what the surface has.
+            if let Some(c) = self.cap {
+                let room = |c: f32, base: f32, cur: f32| (c - base).max(cur - base).max(0.0);
+                l = l.min(room(c.left, b.left, n.left));
+                r = r.min(room(c.right, b.right, n.right));
+                t = t.min(room(c.top, b.top, n.top));
+                bo = bo.min(room(c.bottom, b.bottom, n.bottom));
+                if self.paired.0 {
+                    l = l.min(r);
+                    r = l;
+                }
+                if self.paired.1 {
+                    t = t.min(bo);
+                    bo = t;
+                }
+            }
+            let grown = vo_scene::Insets::new(b.left + l, b.top + t, b.right + r, b.bottom + bo);
+            self.below = None;
+            if grown == n {
+                return None;
+            }
+            self.now = grown;
             self.below = None;
             return Some(self.now);
         }
@@ -296,6 +320,18 @@ impl<A: App> Live<A> {
             need = need.max(m);
         }
         let may_shrink = self.driver().exit_at().is_none();
+        if let (Some(out), Some(f)) = (host.output_size(), self.follow.as_mut()) {
+            // The panel's place on the output, and the room on each side of it.
+            let (content, placement) = self.asked;
+            let a = PanelAnchor::of(placement, content, vo_scene::geom::Point::ZERO);
+            let (x, y) = (a.fx * out.w + a.dx, a.fy * out.h + a.dy);
+            f.cap = Some(vo_scene::Insets::new(
+                x.floor().max(0.0),
+                y.floor().max(0.0),
+                (out.w - x - content.w).floor().max(0.0),
+                (out.h - y - content.h).floor().max(0.0),
+            ));
+        }
         let Some(m) = self.follow.as_mut().and_then(|f| f.step(need, t, may_shrink)) else { return };
         self.insets = m;
         let fit = vo_scene::surface_for(self.asked.0, m);
@@ -1455,6 +1491,21 @@ mod margin_tests {
         assert_eq!(f.step(Insets::ZERO, 3.1 + MARGIN_HOLD, true), None, "the wait starts again");
         assert_eq!(f.step(Insets::ZERO, 3.1 + 2.0 * MARGIN_HOLD, true), Some(BASE), "back to the first view's");
         assert_eq!(f.step(Insets::ZERO, 9.0, true), None);
+    }
+
+    #[test]
+    fn never_grows_past_the_output_edge() {
+        // 50 px between the panel and the output's top, 30 on the left, 100 on the right.
+        let mut f = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
+        f.cap = Some(Insets::new(30.0, 50.0, 100.0, 2.0));
+        let m = f.step(Insets::uniform(300.0), 0.0, true).expect("grows");
+        // The bottom keeps its first view's 4, more than the 2 of room there.
+        assert_eq!(m, Insets::new(30.0, 50.0, 100.0, 4.0));
+        assert_eq!(f.step(Insets::uniform(400.0), 0.1, true), None, "no room left: no resize");
+        // On a centred axis both sides take the smaller room.
+        let mut c = follow(Placement::LineAt { fraction: 0.5, y: 0.0 });
+        c.cap = Some(Insets::new(30.0, 500.0, 100.0, 500.0));
+        assert_eq!(c.step(Insets::uniform(60.0), 0.0, true), Some(Insets::new(30.0, 60.0, 30.0, 60.0)));
     }
 
     #[test]

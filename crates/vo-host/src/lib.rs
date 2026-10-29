@@ -336,6 +336,13 @@ pub trait HostCtl {
     /// The host clock, in seconds. The only clock the app should read.
     fn now(&self) -> f64;
 
+    /// The logical size of the output overlays go on, when the host knows it. A live overlay
+    /// keeps its effect margin inside it, so a grown surface is never pushed back onto the
+    /// output, which would move the panel.
+    fn output_size(&self) -> Option<Size> {
+        None
+    }
+
     /// The shared GPU. Made on the first call, matched to the first open surface if there is
     /// one, so open the first surface before asking.
     fn gpu(&mut self) -> Result<Gpu, HostError>;
