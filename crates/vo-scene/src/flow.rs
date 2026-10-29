@@ -17,6 +17,9 @@
 //! - **Palimpsest (MO-20).** The default. `Revise::Palimpsest` diffs like `Revise::Glyphs`,
 //!   but survivors keep their ink, removed letters sink into a short-lived ghost and new
 //!   letters arrive in place (module `palimpsest`).
+//! - **Liquid (EG-32).** `Revise::Liquid` diffs like the palimpsest, and the old letters
+//!   drain into the new ones as liquid drawn by a GPU painter, in the word's material, for
+//!   at most 400 ms (module `liquid`). Without a painter it is the palimpsest.
 //! - **Around a revision (MO-21 to MO-23).** Opt-in with `revisions`: width escrow holds
 //!   the neighbours through a burst, a hinge brackets moved word breaks, and paired margin
 //!   marks point from an older changed line to the newest one (module `revisions`).
@@ -51,6 +54,8 @@ use crate::geom::{Color, Point, Rect};
 use crate::lines::LineLook;
 use crate::text::ShapedText;
 
+#[path = "motion/liquid.rs"]
+pub mod liquid;
 #[path = "motion/palimpsest.rs"]
 pub mod palimpsest;
 #[path = "motion/revisions.rs"]
@@ -152,6 +157,11 @@ pub enum Revise {
     /// opens to make room, for `GHOST_HOLD` before both fade back (FX-064). The opening
     /// pushes the lines below down: leave room under the text for it.
     Ghost,
+    /// The liquid morph (EG-32): the old letters drain and the new ones fill through a smooth
+    /// union, drawn by a GPU painter, in at most 400 ms. Kept letters slide on their springs;
+    /// on the reading line the text still draws the word. Without a painter it is
+    /// `Palimpsest`. See [`liquid`].
+    Liquid,
 }
 
 /// A rolled word's travel and fade take about 220 ms.
@@ -835,6 +845,7 @@ impl Flow {
                             o.spread = false;
                         }
                         Revise::Palimpsest => self.palimpsest(&mut o, w, &p, &graphemes, &make, reduced, joins),
+                        Revise::Liquid => self.revise_liquid(&mut o, w, &p, &graphemes, &make, reduced, joins),
                         Revise::Roll => self.roll(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Ghost => self.displace(&mut o, &p, &graphemes, &make, reduced),
                         Revise::Crossfade | Revise::Glyphs => self.crossfade(&mut o, &p, &graphemes, &make),
@@ -918,6 +929,7 @@ impl Flow {
         self.update_margin(t, motion.margin, reduced);
         self.update_bell(t, motion.bell, width, reduced);
         self.ghosts.retain(|g| g.opacity.target() > 0.0 || g.opacity.settled_at() > t);
+        self.liquid.retain(|l| l.start + liquid::LIQUID_SECS > t && self.words.iter().any(|w| w.id == l.id));
         self.leaving.retain(|l| l.done_at() > t);
         if arrived {
             self.arrived = t;
@@ -1415,7 +1427,8 @@ impl Flow {
         let caret = self.caret.iter().flat_map(|(x, y, ..)| [x, y]);
         let extras = self.margin_settled_at().max(self.spine_settled_at()).max(self.bell_settled_at());
         let leaving = self.leaving.iter().map(|l| l.done_at()).fold(extras, f64::max);
-        let leaving = leaving.max(self.letters_settled_at()).max(self.magnet_settled_at());
+        let leaving =
+            leaving.max(self.letters_settled_at()).max(self.magnet_settled_at()).max(self.liquid_settled_at());
         words.chain(ghosts).chain(caret).map(|c| c.settled_at()).fold(leaving.max(self.marks.settled_at()), f64::max)
     }
 
@@ -1463,6 +1476,8 @@ pub(crate) struct Flow {
     /// glyph outside any word (an ellipsis).
     index: Vec<Option<(u32, u32)>>,
     ghosts: Vec<Ghost>,
+    /// Words in liquid revision (EG-32).
+    liquid: Vec<liquid::LiquidWord>,
     /// Lines that left from the front, folding or thinning away (MO-33).
     leaving: Vec<overflow::Leaving>,
     /// The margin mark (MO-32).

@@ -14,6 +14,11 @@
 //!   and slide to their new place; the changed ones drain and fill through a smooth union
 //!   and melt into drops. The look hides the word's own glyphs while it runs
 //!   (`Element::words_drawn_elsewhere`).
+//! - The liquid revision (EG-32): the same liquid inside the live text, for words revised with
+//!   `Revise::Liquid`. The scene hands over a `vo_scene::flow::liquid::LiquidRevision` per
+//!   word and frame, and this painter draws it in the word's material, or its flat ink.
+//!   [`install`] tells the scene the painter is there; without it the word falls back to the
+//!   palimpsest.
 //!
 //! The app describes the glyphs (font, glyph id, pen position in the element's box, size,
 //! colour, start time) in a [`GlyphFx`] and puts it in `Element::gpu`; [`install`] adds the
@@ -28,8 +33,10 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use vo_core::signals::{Sig, SignalsCell};
 use vo_render::color::srgb_to_linear;
+use vo_render::material::{materials_source, GpuMaterial};
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_render::{GpuPainter, PaintCx, Renderer};
+use vo_scene::flow::liquid::{LiquidPart, LiquidRevision};
 use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point};
 use vo_scene::gpu::GpuSource;
@@ -39,8 +46,11 @@ use crate::glyph_sdf::{glyph_sdf, GlyphSdf};
 const FX_WGSL: &str = include_str!("wgsl/glyph_fx.wgsl");
 const ATLAS: u32 = 2048;
 
-pub fn shader_source() -> &'static str {
-    FX_WGSL
+/// The effect shader: `glyph_fx.wgsl` with vo-render's built-in materials composed in, as the
+/// glyph shader has them, their blocks bound at binding 6 of group 0.
+pub fn shader_source() -> String {
+    let materials = materials_source(&[]).replace("@group(2) @binding(0)", "@group(0) @binding(6)");
+    [FX_WGSL, materials.as_str()].join("\n")
 }
 
 /// MO-82: ink diffusion.
@@ -112,6 +122,10 @@ pub enum Side {
     Under,
     Over,
 }
+
+/// The liquid revision's join radius mid-way, in em: smaller than the morph's, since the
+/// live text sits at reading size and a wide join reads as bold type.
+const LIQUID_BRIDGE: f32 = 0.1;
 
 /// MO-87: liquid morph.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -292,6 +306,9 @@ struct FxUniform {
     p1: [f32; 4],
     c0: [f32; 4],
     c1: [f32; 4],
+    layer_m: [f32; 4],
+    layer_t: [f32; 4],
+    mat: [f32; 4],
 }
 
 #[repr(C)]
@@ -432,6 +449,8 @@ pub struct GlyphFxPainter {
     /// The stencil mask for the light, and a 1 by 1 stand-in for passes that do not read it.
     mask: Option<([u32; 2], wgpu::Texture, wgpu::TextureView)>,
     blank: Option<wgpu::TextureView>,
+    /// The renderer's fonts, for liquid revisions, which carry glyph ids only.
+    fonts: Option<FontRegistry>,
 }
 
 impl GlyphFxPainter {
@@ -471,11 +490,12 @@ impl GlyphFxPainter {
                 entry(3, tex),
                 entry(4, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(5, tex),
+                entry(6, storage),
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vo3d-glyph-fx"),
-            source: wgpu::ShaderSource::Wgsl(FX_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vo3d-glyph-fx"),
@@ -579,17 +599,18 @@ fn storage(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
     })
 }
 
-impl GpuPainter for GlyphFxPainter {
-    fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
-        let Some(src) = cx.source.as_any().downcast_ref::<GlyphFx>() else { return false };
+impl GlyphFxPainter {
+    /// The glyphs, quads and uniform of a [`GlyphFx`] element, and whether it is the light
+    /// under the text. `None` when it draws nothing.
+    fn prepare_fx(&mut self, cx: &PaintCx<'_>, src: &GlyphFx) -> Option<(Batch, FxUniform, bool)> {
         if cx.opacity <= 0.0 {
-            return true;
+            return None;
         }
         let t = cx.t;
         let [x0, y0, x1, y1] = cx.rect_px();
         let scale = (cx.to_px.a * cx.to_px.a + cx.to_px.b * cx.to_px.b).sqrt();
         let origin = cx.to_px.apply(Point::new(cx.rect.x, cx.rect.y));
-        let Some(fonts) = &src.fonts else { return true };
+        let fonts = src.fonts.as_ref()?;
         let atlas = self.atlas.get_or_insert_with(|| Atlas::new(cx.device));
 
         // Glyphs in surface pixels, with the time since their start.
@@ -668,6 +689,9 @@ impl GpuPainter for GlyphFxPainter {
             p1: [0.0; 4],
             c0: [0.0; 4],
             c1: [0.0; 4],
+            layer_m: [cx.to_px.a, cx.to_px.b, cx.to_px.c, cx.to_px.d],
+            layer_t: [cx.to_px.e, cx.to_px.f, scale, 0.0],
+            mat: [0.0; 4],
         };
         let mut under = false;
         match src.effect {
@@ -700,6 +724,87 @@ impl GpuPainter for GlyphFxPainter {
                 }
             }
         }
+        Some((batch, u, under))
+    }
+
+    /// The glyphs, quads and uniform of one word's liquid revision (EG-32), and its material.
+    fn prepare_liquid(&mut self, cx: &PaintCx<'_>, rev: &LiquidRevision) -> Option<(Batch, FxUniform, GpuMaterial)> {
+        let age = (cx.t - rev.start).max(0.0) as f32;
+        if cx.opacity <= 0.0 || age >= rev.secs {
+            return None;
+        }
+        let fonts = self.fonts.clone()?;
+        let [x0, y0, x1, y1] = cx.rect_px();
+        let scale = (cx.to_px.a * cx.to_px.a + cx.to_px.b * cx.to_px.b).sqrt();
+        let origin = cx.to_px.apply(Point::new(cx.rect.x, cx.rect.y));
+        let atlas = self.atlas.get_or_insert_with(|| Atlas::new(cx.device));
+        let mut glyphs = Vec::with_capacity(rev.glyphs.len());
+        let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for (i, g) in rev.glyphs.iter().enumerate() {
+            if g.ink <= 0.0 {
+                continue;
+            }
+            let Some(slot) = atlas.get(cx.queue, &fonts, g.font, g.glyph) else { continue };
+            let pen = Point::new(origin.x + g.pos.x * scale, origin.y + g.pos.y * scale);
+            let ppe = g.size * scale;
+            let part = match g.part {
+                LiquidPart::Kept => 0.0,
+                LiquidPart::Old => 1.0,
+                LiquidPart::New => 2.0,
+            };
+            let e = slot.em;
+            r = [
+                r[0].min(pen.x + e[0] * ppe),
+                r[1].min(pen.y - e[3] * ppe),
+                r[2].max(pen.x + e[2] * ppe),
+                r[3].max(pen.y - e[1] * ppe),
+            ];
+            glyphs.push(GpuGlyph {
+                atlas: slot.rect.map(|v| v as f32),
+                em: slot.em,
+                place: [pen.x, pen.y, ppe, age],
+                color: lin(rev.ink),
+                info: [part, (i % 97) as f32 + 1.0, 0.0, g.ink.min(1.0)],
+            });
+        }
+        // The liquid itself needs letters that change.
+        if !glyphs.iter().any(|g| g.info[0] > 0.5) {
+            return None;
+        }
+        let quads = vec![GpuQuad { rect: r, range: [0, glyphs.len() as u32, 0, 0] }];
+        let m = Morph::default();
+        let u = FxUniform {
+            viewport: [cx.size[0] as f32, cx.size[1] as f32, cx.opacity, cx.encode_srgb as u32 as f32],
+            dst: [0.0, 0.0, cx.size[0] as f32, cx.size[1] as f32],
+            rect: [x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)],
+            time: [if rev.reading { 6.0 } else { 5.0 }, cx.t as f32, 0.0, 1000.0],
+            light: [0.0; 4],
+            p0: [rev.secs, m.shrink, LIQUID_BRIDGE, m.melt],
+            p1: [0.0; 4],
+            c0: lin(rev.ink),
+            c1: [0.0; 4],
+            layer_m: [cx.to_px.a, cx.to_px.b, cx.to_px.c, cx.to_px.d],
+            layer_t: [cx.to_px.e, cx.to_px.f, scale, 0.0],
+            mat: [rev.material.is_some() as u32 as f32, 0.0, 0.0, 0.0],
+        };
+        let material = rev.material.as_ref().map(GpuMaterial::new).unwrap_or_default();
+        Some((Batch { glyphs, quads }, u, material))
+    }
+}
+
+impl GpuPainter for GlyphFxPainter {
+    fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
+        let source = cx.source.as_any();
+        let prepared = if let Some(src) = source.downcast_ref::<GlyphFx>() {
+            self.prepare_fx(cx, src).map(|(b, u, under)| (b, u, under, GpuMaterial::default()))
+        } else if let Some(rev) = source.downcast_ref::<LiquidRevision>() {
+            self.prepare_liquid(cx, rev).map(|(b, u, m)| (b, u, false, m))
+        } else {
+            return false;
+        };
+        let Some((mut batch, u, under, material)) = prepared else { return true };
+        let [x0, y0, x1, y1] = cx.rect_px();
+        let (rect_w, rect_h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
         if batch.quads.is_empty() && !under {
             return true;
         }
@@ -717,6 +822,7 @@ impl GpuPainter for GlyphFxPainter {
             })
             .clone();
         let glyph_buf = storage(cx.device, "vo3d-glyph-fx-glyphs", bytemuck::cast_slice(&batch.glyphs));
+        let material_buf = storage(cx.device, "vo3d-glyph-fx-material", bytemuck::bytes_of(&material));
         let quad_buf = storage(cx.device, "vo3d-glyph-fx-quads", bytemuck::cast_slice(&batch.quads));
         let atlas_view = self.atlas.as_ref().unwrap().view.clone();
         let device = cx.device;
@@ -737,6 +843,7 @@ impl GpuPainter for GlyphFxPainter {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(mask) },
+                    wgpu::BindGroupEntry { binding: 6, resource: material_buf.as_entire_binding() },
                 ],
             })
         };
@@ -805,6 +912,7 @@ impl GpuPainter for GlyphFxPainter {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&mask_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: material_buf.as_entire_binding() },
                 ],
             })
         } else {
@@ -834,7 +942,9 @@ impl GpuPainter for GlyphFxPainter {
 
 /// Adds a [`GlyphFxPainter`] to `renderer`.
 pub fn install(renderer: &mut Renderer) {
-    renderer.add_painter(Box::new(GlyphFxPainter::default()));
+    let fonts = Some(renderer.fonts().clone());
+    renderer.add_painter(Box::new(GlyphFxPainter { fonts, ..GlyphFxPainter::default() }));
+    vo_scene::flow::liquid::install_painter();
 }
 
 #[cfg(test)]
@@ -844,6 +954,7 @@ mod tests {
     #[test]
     fn fx_shader_validates_in_naga() {
         let src = shader_source();
+        let src = src.as_str();
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&module)
@@ -852,7 +963,7 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader() {
-        assert_eq!(std::mem::size_of::<FxUniform>(), 9 * 16);
+        assert_eq!(std::mem::size_of::<FxUniform>(), 12 * 16);
         assert_eq!(std::mem::size_of::<GpuGlyph>(), 5 * 16);
         assert_eq!(std::mem::size_of::<GpuQuad>(), 2 * 16);
     }

@@ -2085,6 +2085,10 @@ impl<M> Scene<M> {
                             }
                         }
                     }
+                    // Words in liquid revision (EG-32): their glyphs go to the liquid, and
+                    // off the reading line only there.
+                    let liquid = n.live.liquid_words(t);
+                    let mut flowing: Vec<crate::flow::liquid::LiquidRevision> = Vec::new();
                     for (i, (g, &span)) in n.shaped.glyphs.iter().zip(&spans).enumerate() {
                         let word = word_of(g.cluster);
                         let (k, dx, dy) = n.word_motion(word, t);
@@ -2143,6 +2147,36 @@ impl<M> Scene<M> {
                         }
                         if k <= 0.0 || g.glyph == OBJECT_GLYPH || live.elsewhere.contains(&word) {
                             continue;
+                        }
+                        if let Some(&(_, start, reading)) = liquid.iter().find(|l| l.0 == word) {
+                            use crate::flow::liquid::{LiquidGlyph, LiquidPart, LiquidRevision};
+                            let part = if n.live.glyph_is_new(i, start) { LiquidPart::New } else { LiquidPart::Kept };
+                            let lg = LiquidGlyph {
+                                font: g.font,
+                                glyph: g.glyph,
+                                pos: Point::new((g.pos.x + dx) * z, (g.pos.y + dy) * z),
+                                size: style.size * m.scale * grow * z,
+                                part,
+                                ink: k.min(1.0),
+                            };
+                            match flowing.iter_mut().find(|f| f.word == word) {
+                                Some(f) => f.glyphs.push(lg),
+                                None => flowing.push(LiquidRevision {
+                                    word,
+                                    glyphs: vec![lg],
+                                    start,
+                                    secs: crate::flow::liquid::LIQUID_SECS as f32,
+                                    ink: n.color(Slot::Text, t),
+                                    material: n.material.as_ref().map(|mat| {
+                                        let age = if n.reduced { 1e3 } else { (t - n.since).max(0.0) as f32 };
+                                        mat.at(age).in_box(rect)
+                                    }),
+                                    reading,
+                                }),
+                            }
+                            if !reading {
+                                continue;
+                            }
                         }
                         let (blur, dissolve, wipe) = n.word_fx(word, t);
                         let word_span = ws.map_or(span, |w| (w.1, w.2));
@@ -2206,6 +2240,29 @@ impl<M> Scene<M> {
                             word: gh.word,
                             color: color.fade(k),
                         });
+                    }
+                    // The liquid goes over the word's glyphs: the old letters ride with it.
+                    for mut f in flowing {
+                        let (wk, dx, dy) = n.word_motion(f.word, t);
+                        for (glyph, font, pos, scale, ink) in n.live.liquid_old(f.word, t) {
+                            f.glyphs.push(crate::flow::liquid::LiquidGlyph {
+                                font,
+                                glyph,
+                                pos: Point::new((pos.x + dx) * z, (pos.y + dy) * z),
+                                size: style.size * scale * z,
+                                part: crate::flow::liquid::LiquidPart::Old,
+                                ink: ink * wk,
+                            });
+                        }
+                        out.gpu.push(crate::gpu::GpuItem {
+                            source: crate::gpu::GpuRef(std::sync::Arc::new(f)),
+                            rect: Rect::new(origin.x, origin.y, size.w, size.h),
+                            t,
+                            opacity: alpha,
+                            part: crate::gpu::GpuPart::Whole,
+                            cut: Vec::new(),
+                        });
+                        push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
                     }
                 }
                 // Magnetic caret (MO-89): the field around the caret.

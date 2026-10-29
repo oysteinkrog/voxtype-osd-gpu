@@ -22,6 +22,12 @@ struct Fx {
   // Colours: linear light, straight alpha.
   c0: vec4f,
   c1: vec4f,
+  // The item's layer space to surface pixels, laid out like `Layer` in vo-render's
+  // `common.wgsl`: x' = m.x x + m.z y + t.x, y' = m.y x + m.w y + t.y; t.z pixels per unit.
+  layer_m: vec4f,
+  layer_t: vec4f,
+  // x: 1 when the glyphs have a material (`materials[0]`).
+  mat: vec4f,
 };
 
 struct Glyph {
@@ -33,7 +39,8 @@ struct Glyph {
   place: vec4f,
   // Linear colour, straight alpha.
   color: vec4f,
-  // Part (0 both, 1 old, 2 new), seed, x offset of the old place in pixels, 0.
+  // Part (0 both, 1 old, 2 new), seed, x offset of the old place in pixels, the glyph's own
+  // ink (liquid revision; 1 otherwise).
   info: vec4f,
 };
 
@@ -293,6 +300,130 @@ fn morph (q: Quad, px: vec2f) -> vec4f {
   return finish (rgb * a, a);
 }
 
+// ---- EG-32: liquid revision in the live text ----------------------------------------------
+//
+// The same liquid as the morph, from `vo_scene::flow::liquid::LiquidRevision`: every glyph is
+// at its place in this frame (the text's springs move the kept letters, so nothing slides
+// here), and each carries its own ink. p0 as the morph; c0 the word's ink; `fx.mat.x` says
+// the word has a material, which then colours the liquid as it colours the text.
+//
+// Mode 5, an older line: the text hides the word, and this draws all of it: kept letters
+// solid, the old letters draining and the new ones filling through the melted union.
+// Mode 6, the reading line: the text draws the kept and new letters, so this draws only what
+// the liquid adds outside the new letters (the old letters draining into them) and a short
+// glow of colour around the new letters.
+
+struct Layer {
+  m: vec4f,
+  t: vec4f,
+};
+
+// `materials.wgsl` reads the layer transform from here.
+var<private> layer: Layer;
+
+// The word's paint at `px` with coverage `cov`: its material, or flat ink. Premultiplied.
+fn liquid_paint (col: vec4f, cov: f32, px: vec2f, near: Glyph) -> vec4f {
+  if (fx.mat.x < 0.5) {
+    return vec4f (col.rgb * col.a * cov, col.a * cov);
+  }
+  layer = Layer (fx.layer_m, fx.layer_t);
+  var mi: MatIn;
+  mi.color = vec4f (col.rgb * col.a, col.a);
+  mi.cov = cov;
+  mi.has_dist = false;
+  mi.edge = 0.0;
+  mi.centre = 0.0;
+  mi.half_w = 0.0;
+  mi.px = px;
+  mi.p = mat_px_to_layer (px);
+  mi.em = em_at (near, px, 0.0);
+  mi.ppu = fx.layer_t.z;
+  mi.seed = near.info.y;
+  return material (1u, mi);
+}
+
+// The word's field at `px` while it flows: the old letters hold, then drain (their edge moves
+// in by up to 1.7 `shrink`, faster toward the end), the new ones fill (out from `shrink` in),
+// and both join the kept letters and each other through a smooth union whose radius peaks
+// mid-way, so an old letter pours into its neighbours instead of fading where it stood.
+// Returns the liquid (old and new letters), and the kept and new letters on their own
+// (`y`, `z`).
+fn rev_field (q: Quad, px: vec2f, p: f32) -> vec3f {
+  var dold = 1e3;
+  var dnew = 1e3;
+  var dkeep = 1e3;
+  for (var i = 0u; i < q.range.y; i++) {
+    let g = glyphs[q.range.x + i];
+    let part = u32 (g.info.x);
+    let d = field_em (g, em_at (g, px, 0.0));
+    if (part == 0u) {
+      dkeep = min (dkeep, d);
+    } else if (part == 1u) {
+      dold = min (dold, d);
+    } else {
+      dnew = min (dnew, d);
+    }
+  }
+  let shrink = fx.p0.y;
+  let k = fx.p0.z * sin (PI * p) + 1e-3;
+  let liquid = smin (dold + 1.7 * shrink * p * p, dnew + shrink * (1.0 - p), k);
+  return vec3f (liquid, dkeep, dnew);
+}
+
+fn revision (q: Quad, px: vec2f, reading: bool) -> vec4f {
+  let first = glyphs[q.range.x];
+  let p = ease_morph (clamp (first.place.w / fx.p0.x, 0.0, 1.0));
+  let bulge = sin (PI * p);
+  let ppe = first.place.z;
+  // The nearest glyph, for the material's em coordinates, and the old letters' ink.
+  var near = first;
+  var best = 1e3;
+  var ink_o = 0.0;
+  for (var i = 0u; i < q.range.y; i++) {
+    let g = glyphs[q.range.x + i];
+    let d = length (em_at (g, px, 0.0) - ink_centre (g));
+    if (d < best) {
+      best = d;
+      near = g;
+    }
+    if (u32 (g.info.x) == 1u) {
+      ink_o = max (ink_o, g.info.w);
+    }
+  }
+  let f = rev_field (q, px, p);
+  var dl = f.x;
+  // Melted mid-way: the field averaged over a small disc rounds every corner into a drop.
+  let melt = fx.p0.w * bulge;
+  if (melt * ppe > 0.5) {
+    var sum = dl;
+    for (var i = 0; i < 8; i++) {
+      let a = f32 (i) * PI * 0.25;
+      sum += rev_field (q, px + vec2f (cos (a), sin (a)) * melt * ppe, p).x;
+    }
+    dl = sum / 9.0 - 0.15 * melt;
+  }
+  // Kept letters join the liquid with a smaller radius and are never melted, so they keep
+  // their own weight.
+  dl = smin (dl, f.y, 0.35 * fx.p0.z * bulge + 1e-3);
+  let aa = clamp (fwidth (dl * ppe), 0.25, 1.0);
+  let cov_l = clamp (0.5 - dl * ppe / aa, 0.0, 1.0);
+  if (reading) {
+    // Outside the kept and new letters only: the text draws those itself, at reading ink.
+    let cov_t = clamp (0.5 - min (f.y, f.z) * ppe, 0.0, 1.0);
+    let flow = max (cov_l - cov_t, 0.0) * mix (1.0, ink_o, p);
+    // Colour around the new letters, strongest mid-way, gone by the end.
+    let glow = 0.22 * bulge * exp (-max (f.z, 0.0) / 0.08) * (1.0 - cov_t);
+    let cov = clamp (flow + glow * (1.0 - flow), 0.0, 1.0);
+    let c = liquid_paint (fx.c0, cov, px, near);
+    return finish (c.rgb, c.a);
+  }
+  // Kept letters keep their own ink; the liquid takes the word's.
+  let keep_ink = first.info.w;
+  let cov = cov_l * mix (1.0, keep_ink, clamp (0.5 - f.y * ppe, 0.0, 1.0));
+  let c = liquid_paint (fx.c0, cov, px, near);
+  return finish (c.rgb, c.a);
+}
+
 // ---- MO-84: light through letters ---------------------------------------------------------
 //
 // p0: shadow length (pixels), shadow strength, caustic strength, caustic scale (pixels per
@@ -383,6 +514,8 @@ fn light_over (g: Glyph, px: vec2f) -> vec4f {
     case 1u: { return morph (q, in.px); }
     case 2u: { return light_under (in.px); }
     case 4u: { return light_over (glyphs[q.range.x], in.px); }
+    case 5u: { return revision (q, in.px, false); }
+    case 6u: { return revision (q, in.px, true); }
     default: { return vec4f (0.0); }
   }
 }
