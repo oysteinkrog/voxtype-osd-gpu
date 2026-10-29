@@ -4,7 +4,7 @@
 
 use vo_core::words::Word;
 use vo_scene::display::DisplayList;
-use vo_scene::element::{Element, TextStyle};
+use vo_scene::element::{Element, TextStyle, Transition};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
 use vo_scene::typo::{Typo, Typos, WordTypo};
@@ -101,4 +101,29 @@ fn arrive_kicks_and_wakes_the_scene() {
     assert!(w(1.09) < 0.6 && w(1.09) > 0.0);
     assert!(s.next_wake(1.05).is_some());
     assert_eq!(w(2.0), 0.0);
+}
+
+#[test]
+fn an_arrival_fade_and_channel_ink_together_keep_the_reading_line_floor() {
+    // A word that fades in (pulled to 70 %) and arrives at 80 % channel ink: drawn alone,
+    // each keeps the floor, and their product (56 %) must not go under it.
+    let plain = {
+        let mut s = scene();
+        s.apply(view("one two", 400.0, None), 0.0);
+        s.sample(5.0)
+    };
+    let full = glyphs(&plain, 2)[0].2;
+    let mut s = scene();
+    s.apply(view("one", 400.0, Some(Typos::new())), 0.0);
+    let typos = Typos::new().word(2, WordTypo::rest(Typo::REST).arrive(Typo::REST.ink(0.8)));
+    let style = TextStyle { size: 20.0, line_height: 26.0, ..TextStyle::default() };
+    let live = Element::live_text("t", &words("one two"))
+        .text_style(style)
+        .width(400.0)
+        .word_typo(typos)
+        .word_enter(Transition::fade());
+    let live = Element::column("root").child(live);
+    s.apply(live, 1.0);
+    let ink = glyphs(&s.sample(1.0), 2)[0].2;
+    assert!(ink >= 0.7 * full - 1e-3, "first frame at {ink}, plain {full}");
 }

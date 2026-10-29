@@ -2134,9 +2134,16 @@ impl<M> Scene<M> {
                         let mut weight = 0.0;
                         if let Some(v) = n.typo.sample(word, t) {
                             let floor = n.typo.floor(word);
-                            let v = if n.live.on_reading_line(word) { Envelope::READING.clamp_over(v, floor) } else { v };
+                            let reading = n.live.on_reading_line(word);
+                            let v = if reading { Envelope::READING.clamp_over(v, floor) } else { v };
                             let (count, middle) = ws.map_or((1, g.pos.x), |w| (w.3, 0.5 * (w.4 + w.5)));
+                            let before = k;
                             k *= v.letter_ink_over(letter.1, count, floor);
+                            if reading {
+                                // An arrival or revision already at the floor (70 %) and a
+                                // channel's ink each keep it; their product must too.
+                                k = k.max(before.min(Envelope::READING.ink));
+                            }
                             // Tracking spreads the letters about the word's middle.
                             dx += (v.tracking - 1.0) * (g.pos.x + 0.5 * g.advance - middle);
                             dy -= v.baseline;
