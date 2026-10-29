@@ -25,6 +25,13 @@
 //! full as the pen finishes. A look that keeps the reading-line envelope uses a floor of 0.7,
 //! so the word is readable the frame it arrives and the writing is an overlay that lands on
 //! it.
+//!
+//! [`PenSchedule`] (SW-01) times the writing when words arrive one after another: one pen,
+//! a word at a time, at a speed in px/s clamped so a word takes 160 to 260 ms, faster (up
+//! to 2x) the further the pen is behind, and a word it cannot start within 250 ms of its
+//! arrival is swept in instead. [`Writing::pen_at`] turns the word's share of that time into
+//! the pen's place, eased per stroke with a pause at each lift, and [`Writing::draw_from`]
+//! draws the done strokes whole and trims only the live one.
 
 use std::sync::{Arc, OnceLock};
 
@@ -282,36 +289,242 @@ impl Writing {
     /// Draws the word with the pen `s` along its path (0 nothing written, [`Writing::length`]
     /// all of it).
     pub fn draw(&self, p: &mut Painter, s: f32, style: &WriteStyle) {
+        let (done, along) = self.split(s);
+        self.draw_from(p, done, along, style);
+    }
+
+    /// Where pen distance `s` falls: the index of the first stroke not finished, and how far
+    /// along it the pen is (0 in a lift before it). [`Writing::draw`] is
+    /// `draw_from(split(s))`.
+    pub fn split(&self, s: f32) -> (usize, f32) {
+        let done = self.strokes.partition_point(|t| t.start + t.contour.length() <= s);
+        let along = self.strokes.get(done).map_or(0.0, |t| (s - t.start).max(0.0));
+        (done, along)
+    }
+
+    /// The pen's place when the word is `u` (0 to 1) through its writing time: the time is
+    /// shared out by pen distance, each stroke eases in and out, and the pen rests over each
+    /// lift. Returns what [`Writing::draw_from`] takes.
+    pub fn pen_at(&self, u: f32) -> (usize, f32) {
+        let s = u.clamp(0.0, 1.0) * self.total;
+        let i = self.strokes.partition_point(|t| t.start <= s);
+        let Some(t) = i.checked_sub(1).and_then(|k| self.strokes.get(k)) else { return (0, 0.0) };
+        let len = t.contour.length();
+        if s >= t.start + len {
+            // In the lift after it.
+            return (i, 0.0);
+        }
+        let x = ((s - t.start) / len.max(1e-6)).clamp(0.0, 1.0);
+        // Half linear, half smoothstep: slower at the ends of a stroke, never stopped.
+        let e = 0.5 * x + 0.5 * x * x * (3.0 - 2.0 * x);
+        (i - 1, e * len)
+    }
+
+    /// Draws the word with strokes before `done` whole and stroke `done` written `along`
+    /// its length, the pen head there. The done strokes are drawn as built, so only the
+    /// live stroke is trimmed each frame. `done` at the stroke count draws it all.
+    pub fn draw_from(&self, p: &mut Painter, done: usize, along: f32, style: &WriteStyle) {
+        let s = match self.strokes.get(done) {
+            Some(t) => t.start + along.clamp(0.0, t.contour.length()),
+            None => self.total,
+        };
         // The type first, so the pen writes over it.
-        for (i, g) in self.word.glyphs.iter().enumerate() {
-            if !g.has_ink() || style.ink.a <= 0.0 {
-                continue;
-            }
-            let end = self.glyph_end[i];
-            let begin = self.strokes.iter().find(|t| t.glyph == i).map_or(end, |t| t.start);
-            let k = ((s - begin) / (end - begin).max(1e-3)).clamp(0.0, 1.0);
-            let ink = style.ink_floor + (1.0 - style.ink_floor) * k;
-            p.glyph(crate::display::GlyphInstance { word: self.word_id, ..g.instance(style.ink.fade(ink)) });
-        }
-        let mut head = None;
-        for t in &self.strokes {
-            if s <= t.start {
-                break;
-            }
-            let len = t.contour.length();
-            let done = (s - t.start).min(len);
-            let piece = if done >= len { t.contour.clone() } else { t.contour.trim(0.0, done) };
-            p.stroke(&piece, &style.pen);
-            if done < len {
-                head = t.contour.at(done).map(|x| x.0);
+        if style.ink.a > 0.0 {
+            for (i, g) in self.word.glyphs.iter().enumerate() {
+                if !g.has_ink() {
+                    continue;
+                }
+                let end = self.glyph_end[i];
+                let begin = self.strokes.iter().find(|t| t.glyph == i).map_or(end, |t| t.start);
+                let k = ((s - begin) / (end - begin).max(1e-3)).clamp(0.0, 1.0);
+                let ink = style.ink_floor + (1.0 - style.ink_floor) * k;
+                p.glyph(crate::display::GlyphInstance { word: self.word_id, ..g.instance(style.ink.fade(ink)) });
             }
         }
-        if let (Some(at), true) = (head, style.head > 0.0) {
+        let done = done.min(self.strokes.len());
+        for t in &self.strokes[..done] {
+            p.stroke(&t.contour, &style.pen);
+        }
+        let Some(t) = self.strokes.get(done) else { return };
+        let len = t.contour.length();
+        let along = along.clamp(0.0, len);
+        if along <= 0.0 {
+            return;
+        }
+        if along >= len {
+            p.stroke(&t.contour, &style.pen);
+            return;
+        }
+        p.stroke(&t.contour.trim(0.0, along), &style.pen);
+        if let (Some((at, _)), true) = (t.contour.at(along), style.head > 0.0) {
             p.stroke(
                 &Contour::polyline(&[at, Point::new(at.x + 0.01, at.y)], false),
                 &StrokeStyle::solid(style.head, style.head_color),
             );
         }
+    }
+
+    /// Draws the word swept in with no pen, `k` from 0 to 1: glyph by glyph left to right,
+    /// each glyph's strokes and ink rising from nothing (ink from the floor) to full.
+    pub fn draw_swept(&self, p: &mut Painter, k: f32, style: &WriteStyle) {
+        let n = self.word.glyphs.len().max(1) as f32;
+        // Glyph i rises over 3 of n + 2 equal steps, starting at step i.
+        let glyph_k = |i: usize| ((k * (n + 2.0) - i as f32) / 3.0).clamp(0.0, 1.0);
+        if style.ink.a > 0.0 {
+            for (i, g) in self.word.glyphs.iter().enumerate() {
+                if g.has_ink() {
+                    let ink = style.ink_floor + (1.0 - style.ink_floor) * glyph_k(i);
+                    p.glyph(crate::display::GlyphInstance { word: self.word_id, ..g.instance(style.ink.fade(ink)) });
+                }
+            }
+        }
+        for t in &self.strokes {
+            let a = glyph_k(t.glyph);
+            if a <= 0.0 {
+                continue;
+            }
+            let pen = StrokeStyle { c0: style.pen.c0.fade(a), c1: style.pen.c1.fade(a), ..style.pen };
+            p.stroke(&t.contour, &pen);
+        }
+    }
+}
+
+/// How a [`PenSchedule`] paces the pen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenParams {
+    /// Pen speed in layer px per second, lifts counted ([`Writing::length`]).
+    pub speed: f32,
+    /// A word's writing time at speed is clamped to this range, in seconds.
+    pub min_secs: f64,
+    pub max_secs: f64,
+    /// The pen runs up to this many times faster the further it is behind.
+    pub max_boost: f64,
+    /// A word the pen cannot start within this many seconds of its arrival is swept.
+    pub sweep_after: f64,
+    /// How long a sweep takes.
+    pub sweep_secs: f64,
+}
+
+impl Default for PenParams {
+    fn default() -> PenParams {
+        PenParams { speed: 900.0, min_secs: 0.16, max_secs: 0.26, max_boost: 2.0, sweep_after: 0.25, sweep_secs: 0.08 }
+    }
+}
+
+/// When one word is written. Times are scene seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSlot {
+    pub arrive: f64,
+    /// The pen starts it, or the sweep does.
+    pub start: f64,
+    pub end: f64,
+    /// Swept in with no pen ([`Writing::draw_swept`]).
+    pub swept: bool,
+}
+
+/// Where a word is at a moment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PenPhase {
+    /// Arrived (or not yet), the pen not on it.
+    Waiting,
+    /// The pen is on it, this far (0 to 1) through its writing time: [`Writing::pen_at`].
+    Writing(f32),
+    /// Being swept in, this far (0 to 1): [`Writing::draw_swept`].
+    Sweeping(f32),
+    Done,
+}
+
+impl PenSlot {
+    pub fn phase(&self, t: f64) -> PenPhase {
+        if t < self.start {
+            return PenPhase::Waiting;
+        }
+        if t >= self.end {
+            return PenPhase::Done;
+        }
+        let k = ((t - self.start) / (self.end - self.start).max(1e-9)) as f32;
+        if self.swept {
+            PenPhase::Sweeping(k)
+        } else {
+            PenPhase::Writing(k)
+        }
+    }
+}
+
+/// One pen for a run of words (SW-01): a pure function of the words' arrival times and pen
+/// lengths, in arrival order.
+///
+/// The pen takes each word when it is free and the word has arrived. A word's time is its
+/// length over [`PenParams::speed`], clamped to `min_secs..max_secs`, divided by a boost
+/// that rises from 1 with no wait to `max_boost` at a wait of `sweep_after`. A word that
+/// would wait longer than `sweep_after` is swept instead, from its arrival, over
+/// `sweep_secs`, and the pen goes on to the next. Which happens is known when the word
+/// arrives, because the pen's time depends only on earlier words, so [`PenSchedule::push`]
+/// adds words as they come and never changes a slot already given. With the defaults every
+/// word is done by its arrival plus 0.51 s.
+#[derive(Clone, Debug)]
+pub struct PenSchedule {
+    params: PenParams,
+    slots: Vec<PenSlot>,
+    /// When the pen is free.
+    free: f64,
+}
+
+impl PenSchedule {
+    pub fn new(params: PenParams) -> PenSchedule {
+        PenSchedule { params, slots: Vec::new(), free: f64::NEG_INFINITY }
+    }
+
+    /// The schedule of `words` (arrival, pen length), in order.
+    pub fn plan(params: PenParams, words: &[(f64, f32)]) -> PenSchedule {
+        let mut s = PenSchedule::new(params);
+        for &(arrive, length) in words {
+            s.push(arrive, length);
+        }
+        s
+    }
+
+    pub fn params(&self) -> &PenParams {
+        &self.params
+    }
+
+    /// Adds the next word and returns its index.
+    pub fn push(&mut self, arrive: f64, length: f32) -> usize {
+        let p = &self.params;
+        let start = arrive.max(self.free);
+        let wait = start - arrive;
+        let slot = if wait > p.sweep_after {
+            PenSlot { arrive, start: arrive, end: arrive + p.sweep_secs, swept: true }
+        } else {
+            let base = (length.max(0.0) as f64 / (p.speed.max(1e-3) as f64)).clamp(p.min_secs, p.max_secs);
+            let boost = 1.0 + (p.max_boost - 1.0).max(0.0) * (wait / p.sweep_after.max(1e-9)).clamp(0.0, 1.0);
+            let end = start + base / boost;
+            self.free = end;
+            PenSlot { arrive, start, end, swept: false }
+        };
+        self.slots.push(slot);
+        self.slots.len() - 1
+    }
+
+    pub fn slot(&self, i: usize) -> Option<&PenSlot> {
+        self.slots.get(i)
+    }
+
+    pub fn slots(&self) -> &[PenSlot] {
+        &self.slots
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// The scene time after which nothing changes.
+    pub fn until(&self) -> f64 {
+        self.slots.iter().map(|s| s.end).fold(f64::NEG_INFINITY, f64::max)
     }
 }
 
@@ -490,5 +703,99 @@ mod tests {
         assert_eq!(a.length(), b.length());
         assert!(a.centre(0).is_none() && a.stem(0).is_none() && !a.pending());
         assert!(a.strokes().all(|t| !t.delayed));
+    }
+    #[test]
+    fn pen_keeps_up_with_a_burst_then_steady_speech() {
+        // 6 words within 0.3 s, then a word every 0.3 s for 10 s; lengths 60 to 330 px.
+        let mut words: Vec<(f64, f32)> = (0..6).map(|i| (0.06 * i as f64, 60.0 + 45.0 * i as f32)).collect();
+        let mut t = 0.3;
+        let mut k = 0;
+        while t <= 10.3 {
+            t += 0.3;
+            words.push((t, 80.0 + ((k * 37) % 250) as f32));
+            k += 1;
+        }
+        let s = PenSchedule::plan(PenParams::default(), &words);
+        assert_eq!(s.len(), words.len());
+        let mut most = 0;
+        let mut step = 0;
+        loop {
+            let t = step as f64 * 0.001;
+            if t > s.until() + 0.01 {
+                break;
+            }
+            let pen = s.slots().iter().filter(|x| matches!(x.phase(t), PenPhase::Writing(_))).count();
+            most = most.max(pen);
+            step += 1;
+        }
+        assert!(most <= 1, "{most} words in pen at once");
+        for (i, x) in s.slots().iter().enumerate() {
+            assert!(x.end <= x.arrive + 0.60, "word {i}: {x:?}");
+            assert!(x.start >= x.arrive && x.start - x.arrive <= 0.25 + 1e-9, "word {i}: {x:?}");
+            assert!(matches!(x.phase(x.arrive + 0.60), PenPhase::Done));
+        }
+        // The burst makes the pen hurry and sweep some; steady speech is all written.
+        assert!(s.slots()[..6].iter().any(|x| x.swept));
+        assert!(s.slots()[8..].iter().all(|x| !x.swept));
+        let fast = s.slots()[1];
+        assert!(fast.end - fast.start < 0.16, "{fast:?}");
+        // Bit-identical across runs, and pushing one by one gives the plan.
+        let again = PenSchedule::plan(PenParams::default(), &words);
+        let bits = |s: &PenSchedule| -> Vec<(u64, u64, bool)> {
+            s.slots().iter().map(|x| (x.start.to_bits(), x.end.to_bits(), x.swept)).collect()
+        };
+        assert_eq!(bits(&s), bits(&again));
+        let mut live = PenSchedule::new(PenParams::default());
+        for &(a, l) in &words {
+            live.push(a, l);
+        }
+        assert_eq!(bits(&s), bits(&live));
+    }
+
+    #[test]
+    fn a_word_alone_takes_160_to_260_ms() {
+        for len in [1.0, 100.0, 180.0, 230.0, 5000.0] {
+            let s = PenSchedule::plan(PenParams::default(), &[(1.0, len)]);
+            let x = s.slots()[0];
+            assert!(!x.swept && x.start == 1.0);
+            let d = x.end - x.start;
+            assert!((0.16 - 1e-9..=0.26 + 1e-9).contains(&d), "{len}: {d}");
+        }
+        let s = PenSchedule::plan(PenParams::default(), &[(0.0, 180.0)]);
+        let x = s.slots()[0];
+        assert_eq!(x.phase(-0.1), PenPhase::Waiting);
+        assert_eq!(x.phase(0.1), PenPhase::Writing(0.5));
+        assert_eq!(x.phase(0.2), PenPhase::Done);
+    }
+
+    #[test]
+    fn pen_eases_per_stroke_and_rests_over_lifts() {
+        let fonts = FontRegistry::new();
+        let id = fonts.add_file(&crate::font::test_font_path()).unwrap();
+        let w = Writing::new(&fonts, "tiff", shaped_word(&fonts, id, "tiff"), 6.0);
+        let n = w.strokes().count();
+        assert!(n >= 4);
+        let mut last = (0usize, 0.0f32);
+        let mut rested = 0;
+        for i in 0..=1000 {
+            let (done, along) = w.pen_at(i as f32 / 1000.0);
+            // The pen only moves forward.
+            assert!(done > last.0 || (done == last.0 && along >= last.1), "{i}: {last:?} -> {:?}", (done, along));
+            if (done, along) == last && done > 0 {
+                rested += 1;
+            }
+            let s = w.strokes().nth(done).map_or(w.length(), |t| t.start + along);
+            assert_eq!(w.split(s).0, done.min(n), "{i}");
+            last = (done, along);
+        }
+        assert_eq!(w.pen_at(0.0), (0, 0.0));
+        assert_eq!(w.pen_at(1.0).0, n);
+        // The pen holds still over the lifts.
+        assert!(rested >= n - 1, "{rested}");
+        // Easing: a stroke's first tenth of its time covers less than a tenth of it.
+        let t = w.strokes().next().unwrap();
+        let (d, a) = w.pen_at(0.1 * t.contour.length() / w.length());
+        assert_eq!(d, 0);
+        assert!(a < 0.1 * t.contour.length() && a > 0.0);
     }
 }
