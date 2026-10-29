@@ -137,8 +137,10 @@ fn outline_near (p: vec2f, o: vec4f, k: f32) -> Near {
 // without the loop over every point. Its points (`o`, count `-o.y`) sit at even steps of the
 // ellipse's angle, clockwise from the top. The nearest point on the true ellipse (a few fixed
 // trig-free iterations, exact for a circle) gives its angle, and only the five edges of the
-// polygon around that angle are tested, so the result is the polygon's, as before.
-fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
+// polygon around that angle are tested, so the result is the polygon's, as before. More than
+// `inner` pixels inside or `outer` outside, where the bevel, rim and edge line no longer
+// reach, the true ellipse answers alone (within 0.1 px of the polygon) and no edge is read.
+fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, inner: f32, outer: f32, want_s: bool) -> Near {
   let ab = max (0.5 * rect.zw, vec2f (1e-3));
   let c = p - (rect.xy + 0.5 * rect.zw);
   let q = abs (c);
@@ -155,6 +157,24 @@ fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
   let first = u32 (o.x);
   let count = u32 (-o.y);
   let f = fract ((atan2 (t.y * sg.y, t.x * sg.x) + 1.5707963) / 6.2831853) * f32 (count);
+  let on = ab * t * sg;
+  let de = select (1.0, -1.0, dot (c / ab, c / ab) < 1.0) * length (c - on);
+  if (de < -inner || de > outer) {
+    var r: Near;
+    r.d = de;
+    r.n = normalize (t * sg / ab);
+    // Arc length between the two points around the nearest point's angle, for the orbit.
+    r.s = 0.0;
+    if (want_s) {
+      let i = min (u32 (f), count - 1u);
+      var s1 = o.w;
+      if (i + 1u < count) {
+        s1 = glass_point (first + i + 1u).z;
+      }
+      r.s = mix (glass_point (first + i).z, s1, fract (f)) * k;
+    }
+    return r;
+  }
   let origin = glass_origin ();
   var best = 1e30;
   var bv = vec2f (0.0);
@@ -202,10 +222,11 @@ fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
   return r;
 }
 
-// `outline_near` or, for the ellipse (a negative count), `ellipse_near`.
-fn shape_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
+// `outline_near` or, for the ellipse (a negative count), `ellipse_near` with its exact band;
+// `want_s` asks for the arc length.
+fn shape_near (p: vec2f, rect: vec4f, o: vec4f, k: f32, inner: f32, outer: f32, want_s: bool) -> Near {
   if (o.y < 0.0) {
-    return ellipse_near (p, rect, o, k);
+    return ellipse_near (p, rect, o, k, inner, outer, want_s);
   }
   return outline_near (p, o, k);
 }
@@ -339,8 +360,18 @@ fn film_colour (th: f32) -> vec3f {
   var d: f32;
   var gn: vec2f;
   var near: Near;
+  // How far in the outline's own shape still shows (EG-36): the bevel and its dispersion,
+  // and with an orbit its inner glow; everywhere for the bubble, which bends along the
+  // outline's normal over the whole face.
+  var exact_in = (max (in.fx.x, 1.0) + 3.0 * abs (in.fx.w)) * k + 2.0;
+  if (in.anim.x >= 0.0) {
+    exact_in = max (exact_in, 30.0 * k + 2.0);
+  }
+  if (in.refract.x > 3.5) {
+    exact_in = 1e30;
+  }
   if (shaped) {
-    near = shape_near (in.p, in.rect, in.outline, k);
+    near = shape_near (in.p, in.rect, in.outline, k, exact_in, 1.0, in.anim.x >= 0.0);
     d = near.d;
     gn = near.n;
   } else {
@@ -361,7 +392,7 @@ fn film_colour (th: f32) -> vec3f {
     let drop = turn * vec2f (0.0, in.shadow.z * k);
     var ds: f32;
     if (shaped) {
-      ds = shape_near (in.p - drop, in.rect, in.outline, k).d;
+      ds = shape_near (in.p - drop, in.rect, in.outline, k, exact_in, 1.0, false).d;
     } else {
       ds = sd_box (q - drop, half, r);
     }
