@@ -14,7 +14,7 @@
 //! Behind it they are set type. A word whose final text differs changes as the front reaches
 //! it, nods `nod` px down and back, and gets a hairline bracket under it; its new
 //! punctuation pops in and a new capital grows from 82 % (not on the newest line, where the
-//! reading-line envelope allows no scale). Final words with new ids (a split) appear when the
+//! reading-line envelope allows no scale and no fade from clear: there both only flash). Final words with new ids (a split) appear when the
 //! word before them is reached, and live words the final text drops (a merge) leave when the
 //! pass reaches them. Reduced motion keeps the ink, the swap and the bracket, without the
 //! nod, the pop or the growth.

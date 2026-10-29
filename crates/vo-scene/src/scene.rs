@@ -2168,9 +2168,14 @@ impl<M> Scene<M> {
                                 let ch = glyph_char(words, &starts, g.cluster);
                                 let first = starts.iter().any(|s| s.1 == word && s.0 == g.cluster);
                                 if ch.is_some_and(|ch| ch.is_ascii_punctuation()) && !c.old.contains(ch.unwrap()) {
-                                    // New punctuation pops in.
+                                    // New punctuation pops in: it fades in from clear, except
+                                    // on the newest line, where it is readable the frame it
+                                    // arrives and only the lift flashes it (the flow's own
+                                    // arrival already starts it at reading ink).
                                     if !(n.reduced || p.still) {
-                                        k *= final_pass::ease_in(dt, final_pass::POP);
+                                        if g.pos.y < *newest {
+                                            k *= final_pass::ease_in(dt, final_pass::POP);
+                                        }
                                         pop = 1.0 - final_pass::ease_in(dt, 2.0 * final_pass::POP);
                                     }
                                 } else if first

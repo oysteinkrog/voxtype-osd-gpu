@@ -167,14 +167,20 @@ fn a_changed_word_nods_and_gets_a_bracket_and_only_changed_words_do() {
     // The capital grows on line 1, which is not the newest line.
     let size = |list: &DisplayList| list.glyphs.iter().find(|g| g.word == 2).unwrap().size;
     assert!(size(&s.sample(1.0)) < 0.85 * 20.0 && (size(&later) - 20.0).abs() < 1e-3);
-    // The new full stop pops in: transparent when the word changes, whole 90 ms later.
+    // The new full stop pops in. It is on the newest line, so it is readable at once (the
+    // flow's arrival ink, at least 70 % of the letters beside it), not faded in from clear.
     let comma = |list: &DisplayList| {
         list.glyphs.iter().find(|g| g.word == 3 && g.glyph == '.' as u32).map_or(0.0, |g| g.color.a)
     };
     let mut s = Scene::<()>::new();
     s.apply(view_with(Some(0.0), &finals), 0.0);
     s.apply(view_with(Some(0.6), &finals), 1.0);
-    assert!(comma(&s.sample(1.0)) < 0.05);
+    let letter = |list: &DisplayList| {
+        list.glyphs.iter().find(|g| g.word == 3 && g.glyph == 'e' as u32).map_or(0.0, |g| g.color.a)
+    };
+    let first = s.sample(1.0);
+    let (arrives, beside) = (comma(&first), letter(&first));
+    assert!(arrives >= 0.7 * beside, "pops in readable: {arrives} beside {beside}");
     assert!(comma(&s.sample(1.2)) > 0.7, "in, as spoken ink since it is ahead of the front");
 }
 
