@@ -137,6 +137,7 @@ impl GlassGpu {
         refract: bool,
     ) -> GlassGpu {
         let outline = g.outline_points(segs).map_or([0.0; 4], |pts| push_points(&pts, g.rect, points));
+        let outline = exact_ellipse(outline, g.outline.is_none() && g.glass.shape == GlassShape::Ellipse);
         let d = GlassDraw::from_instance(g, 1.0, 0.0, 0.0, opacity, g.glass.blur_behind);
         GlassGpu(instance(&d, 1.0, outline, refract))
     }
@@ -178,6 +179,16 @@ fn push_points(pts: &[Point], rect: [f32; 4], out: &mut Vec<[f32; 4]>) -> [f32; 
         s += len;
     }
     [first as f32, n as f32, s_top, s]
+}
+
+/// The outline block of [`push_points`] marked as the ellipse filling the panel rect (a
+/// negative count) when `ellipse`: the shader then finds the distance in closed form and
+/// reads only two points for the arc length, not the whole polygon per pixel (EG-36).
+fn exact_ellipse(mut outline: [f32; 4], ellipse: bool) -> [f32; 4] {
+    if ellipse && outline[1] > 0.0 {
+        outline[1] = -outline[1];
+    }
+    outline
 }
 
 pub struct GlassPass {
@@ -286,6 +297,7 @@ impl GlassPass {
         for d in draws {
             let outline =
                 d.glass.shape.points(d.rect, d.radius).map_or([0.0; 4], |pts| push_points(&pts, d.rect, &mut points));
+            let outline = exact_ellipse(outline, d.glass.shape == GlassShape::Ellipse);
             // No backdrop here: refraction is off (EG-05).
             data.extend_from_slice(&floats(&instance(d, scale, outline, false)));
         }

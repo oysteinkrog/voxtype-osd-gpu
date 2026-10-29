@@ -34,8 +34,9 @@ struct GlassIn {
   @location(5) fx: vec4f,
   // Shadow alpha, shadow blur, shadow y offset (logical pixels), blur behind (0 or 1).
   @location(6) shadow: vec4f,
-  // Outline (EG-06): first point, point count (0: the rounded rect), arc length of the top
-  // centre and the perimeter, in the units of the points.
+  // Outline (EG-06): first point, point count (0: the rounded rect; negative: the ellipse
+  // filling the rect, drawn exactly, EG-36), arc length of the top centre and the perimeter,
+  // in the units of the points.
   @location(7) outline: vec4f,
   // Refraction (EG-05): profile (-1 off, 0 flat, 1 dome, 2 slab, 3 prism, 4 bubble), bend
   // (logical pixels), magnification, dispersion.
@@ -130,6 +131,83 @@ fn outline_near (p: vec2f, o: vec4f, k: f32) -> Near {
   r.n = n;
   r.s = bs;
   return r;
+}
+
+// `p` against the ellipse filling `rect` (EG-36): `outline_near` for `GlassShape::Ellipse`
+// without the loop over every point. Its points (`o`, count `-o.y`) sit at even steps of the
+// ellipse's angle, clockwise from the top. The nearest point on the true ellipse (a few fixed
+// trig-free iterations, exact for a circle) gives its angle, and only the five edges of the
+// polygon around that angle are tested, so the result is the polygon's, as before.
+fn ellipse_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
+  let ab = max (0.5 * rect.zw, vec2f (1e-3));
+  let c = p - (rect.xy + 0.5 * rect.zw);
+  let q = abs (c);
+  var t = vec2f (0.70710678);
+  let e2 = ab.x * ab.x - ab.y * ab.y;
+  for (var j = 0; j < 3; j++) {
+    let ev = vec2f (e2 / ab.x, -e2 / ab.y) * t * t * t;
+    let rr = length (ab * t - ev);
+    let qq = max (length (q - ev), 1e-6);
+    t = clamp (((q - ev) * rr / qq + ev) / ab, vec2f (0.0), vec2f (1.0));
+    t = t / max (length (t), 1e-6);
+  }
+  let sg = select (vec2f (-1.0), vec2f (1.0), c >= vec2f (0.0));
+  let first = u32 (o.x);
+  let count = u32 (-o.y);
+  let f = fract ((atan2 (t.y * sg.y, t.x * sg.x) + 1.5707963) / 6.2831853) * f32 (count);
+  let origin = glass_origin ();
+  var best = 1e30;
+  var bv = vec2f (0.0);
+  var be = vec2f (1.0, 0.0);
+  var bs = 0.0;
+  // Inside a convex polygon: on the inner side of every edge near the nearest point.
+  var inside = true;
+  // Edge `i` runs from point i - 1 to point i, as in `outline_near`.
+  var ia = (min (u32 (f), count - 1u) + count - 2u) % count;
+  var a4 = glass_point (first + ia);
+  var a = a4.xy * k + origin;
+  for (var j = 0u; j < 5u; j++) {
+    let ib = (ia + 1u) % count;
+    let b4 = glass_point (first + ib);
+    let b = b4.xy * k + origin;
+    let e = b - a;
+    let w = p - a;
+    let h = clamp (dot (w, e) / max (dot (e, e), 1e-12), 0.0, 1.0);
+    let v = w - e * h;
+    let d2 = dot (v, v);
+    if (d2 < best) {
+      best = d2;
+      bv = v;
+      be = e;
+      bs = a4.z * k + h * length (e);
+    }
+    // Clockwise on screen (y down): inside is to the right of each edge.
+    if (e.x * w.y - e.y * w.x < 0.0) {
+      inside = false;
+    }
+    ia = ib;
+    a4 = b4;
+    a = b;
+  }
+  let sgn = select (1.0, -1.0, inside);
+  let dist = sqrt (best);
+  var r: Near;
+  r.d = sgn * dist;
+  if (dist > 1e-3) {
+    r.n = sgn * bv / dist;
+  } else {
+    r.n = normalize (vec2f (be.y, -be.x));
+  }
+  r.s = bs;
+  return r;
+}
+
+// `outline_near` or, for the ellipse (a negative count), `ellipse_near`.
+fn shape_near (p: vec2f, rect: vec4f, o: vec4f, k: f32) -> Near {
+  if (o.y < 0.0) {
+    return ellipse_near (p, rect, o, k);
+  }
+  return outline_near (p, o, k);
 }
 
 fn sd_box (q: vec2f, half: vec2f, r: f32) -> f32 {
@@ -255,14 +333,14 @@ fn film_colour (th: f32) -> vec3f {
   let half = 0.5 * in.rect.zw;
   let q = in.p - (in.rect.xy + half);
   let r = min (in.shape.x, min (half.x, half.y));
-  let shaped = in.outline.y > 0.0;
+  let shaped = in.outline.y != 0.0;
   // Distance, outward normal and border position: exact for the rounded rect, from the
   // polygon for an outline.
   var d: f32;
   var gn: vec2f;
   var near: Near;
   if (shaped) {
-    near = outline_near (in.p, in.outline, k);
+    near = shape_near (in.p, in.rect, in.outline, k);
     d = near.d;
     gn = near.n;
   } else {
@@ -276,13 +354,14 @@ fn film_colour (th: f32) -> vec3f {
   let turn = transpose (glass_turn ());
 
   // Drop shadow, outside the panel only: the glass is see-through, so a shadow under it
-  // would darken the backdrop the blur shows.
+  // would darken the backdrop the blur shows. Fully covered pixels skip the second
+  // distance (EG-36): their shadow is zero anyway.
   var shadow = 0.0;
-  if (in.shadow.x > 0.0) {
+  if (in.shadow.x > 0.0 && cover < 1.0) {
     let drop = turn * vec2f (0.0, in.shadow.z * k);
     var ds: f32;
     if (shaped) {
-      ds = outline_near (in.p - drop, in.outline, k).d;
+      ds = shape_near (in.p - drop, in.rect, in.outline, k).d;
     } else {
       ds = sd_box (q - drop, half, r);
     }
