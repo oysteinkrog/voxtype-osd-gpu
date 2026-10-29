@@ -181,7 +181,9 @@ impl ImagePainter {
 /// A raster as linear, premultiplied half floats.
 fn linear_premul_f16(r: &Raster) -> Vec<u16> {
     let lin: [f32; 256] = std::array::from_fn(|i| vo_scene::image::srgb_decode(i as f32 / 255.0));
-    r.px.chunks_exact(4)
+    r.px.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3] as f32 / 255.0;
             [lin[p[0] as usize] * a, lin[p[1] as usize] * a, lin[p[2] as usize] * a, a]

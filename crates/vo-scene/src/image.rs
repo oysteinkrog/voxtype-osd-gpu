@@ -158,6 +158,9 @@ pub fn fit(rect: Rect, w: u32, h: u32) -> Rect {
     Rect::new(rect.x + 0.5 * (rect.w - fw), rect.y + 0.5 * (rect.h - fh), fw, fh)
 }
 
+/// A cache key: source id and the asked pixel size.
+pub type CacheKey = (u64, [u32; 2]);
+
 /// Decoded rasters, least recently used out first, bounded by bytes. See the module docs.
 #[derive(Debug)]
 pub struct ImageCache {
@@ -165,7 +168,7 @@ pub struct ImageCache {
     bytes: usize,
     tick: u64,
     /// (source id, asked pixel size), last use, raster.
-    entries: Vec<((u64, [u32; 2]), u64, Arc<Raster>)>,
+    entries: Vec<(CacheKey, u64, Arc<Raster>)>,
     /// Sources that failed, with why.
     failed: Vec<(u64, ImageError)>,
 }
@@ -234,7 +237,7 @@ impl ImageCache {
 
     /// Adds `raster` under `key`, dropping the least recently used until it fits. A raster
     /// bigger than the whole cache is not kept.
-    pub fn insert(&mut self, key: (u64, [u32; 2]), raster: Arc<Raster>) {
+    pub fn insert(&mut self, key: CacheKey, raster: Arc<Raster>) {
         let n = raster.bytes();
         if n > self.max {
             return;
@@ -312,8 +315,8 @@ fn png_rgba(b: &[u8]) -> Result<(u32, u32, Vec<u8>), ImageError> {
     let src = &buf[..info.buffer_size()];
     let rgba = match info.color_type {
         png::ColorType::Rgba => src.to_vec(),
-        png::ColorType::Rgb => src.chunks_exact(3).take(n).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => src.chunks_exact(2).take(n).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => src.as_chunks::<3>().0.iter().take(n).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => src.as_chunks::<2>().0.iter().take(n).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => src.iter().take(n).flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err(ImageError::Decode("palette not expanded".into())),
     };
@@ -338,7 +341,7 @@ fn svg(b: &[u8], px: [u32; 2]) -> Result<Raster, ImageError> {
     resvg::render(&tree, t, &mut pixmap.as_mut());
     // tiny-skia holds premultiplied colour; rasters are straight.
     let mut out = pixmap.take();
-    for p in out.chunks_exact_mut(4) {
+    for p in out.as_chunks_mut::<4>().0 {
         let a = p[3];
         if a != 0 && a != 255 {
             for c in &mut p[..3] {
@@ -367,7 +370,9 @@ fn scaled(w: u32, h: u32, src: &[u8], px: [u32; 2]) -> Result<Raster, ImageError
     }
     let lin = lut();
     let premul: Vec<[f32; 4]> = src
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| {
             let a = p[3] as f32 / 255.0;
             [lin[p[0] as usize] * a, lin[p[1] as usize] * a, lin[p[2] as usize] * a, a]
