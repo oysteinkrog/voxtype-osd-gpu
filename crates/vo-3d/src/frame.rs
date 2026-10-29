@@ -18,6 +18,10 @@ use crate::math::{Mat4, Vec3};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(pub u32);
 
+/// A texture registered with [`crate::Renderer3d::add_texture`], for [`Material::texture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextureId(pub u32);
+
 #[derive(Clone, Debug, Default)]
 pub struct Frame3d {
     pub camera: Camera,
@@ -155,6 +159,11 @@ pub struct Material {
     /// its width, and how strongly they show (0 to 1, 0 for none).
     pub fibres: f32,
     pub fibre: f32,
+    /// A premultiplied texture over the front face, sampled by the vertices' `uv` (x left to
+    /// right, y bottom to top) with linear filtering and mipmaps (EG-14, text on curved
+    /// surfaces). `color` is then the paper under it, and may be transparent; back faces
+    /// show only `back`. `None` keeps the untextured pipeline.
+    pub texture: Option<TextureId>,
 }
 
 impl Default for Material {
@@ -167,6 +176,7 @@ impl Default for Material {
             back: None,
             fibres: 0.0,
             fibre: 0.0,
+            texture: None,
         }
     }
 }

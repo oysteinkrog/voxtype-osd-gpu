@@ -258,6 +258,7 @@ impl RibbonItem {
             back: Some(l.back),
             fibres: l.fibres,
             fibre: l.fibre,
+            texture: None,
         }
     }
 }

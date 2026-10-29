@@ -17,6 +17,9 @@
 //! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
 //! - `ribbon3d`: [`Ribbon3d`], silk ribbons and cloth strips that twist to show their back
 //!   and swell with the voice, in closed form, rewritten each frame (EG-13).
+//! - `surface_text`: [`SurfaceText`], text drawn into a mipmapped texture for a textured mesh
+//!   ([`Material::texture`]), and two surfaces to print it on: a [`Scroll`] that unrolls and
+//!   a [`PageTurn`] (EG-14).
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
 //! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
 //!   loudness (MO-88).
@@ -44,6 +47,7 @@ pub mod ribbon3d;
 pub mod sculpture;
 pub mod sdf;
 pub mod stack;
+pub mod surface_text;
 pub mod text3d;
 pub mod timer;
 
@@ -51,7 +55,7 @@ pub use camera::{Camera, Projection};
 pub use field::TextField;
 pub use frame::{
     Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, OnStage, Orb,
-    PointCloud, Pool, MAX_POOLS,
+    PointCloud, Pool, TextureId, MAX_POOLS,
 };
 pub use grid::{grid_floor, GridFrame, GridItem, GridPainter, GridPool, GridSource};
 pub use item::{ItemPainter, ItemPlace, Source3d, StageAt};
@@ -63,5 +67,6 @@ pub use ribbon3d::{Ribbon3d, RibbonItem, RibbonLook};
 pub use sculpture::{Letter, SculptLook, Sculpture};
 pub use sdf::{hero, HeroFrame, HeroItem, HeroLook, HeroPainter, HeroShape, HeroSource};
 pub use stack::{Layers, Stack, TextPlane};
+pub use surface_text::{PageTurn, Scroll, SurfaceText};
 pub use text3d::{extrude_glyph, extrude_text, GlyphMesh, TurningWord};
 pub use timer::GpuTimer;

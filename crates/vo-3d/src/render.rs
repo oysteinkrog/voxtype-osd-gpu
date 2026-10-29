@@ -17,7 +17,7 @@ use vo_render::color::linear_premul;
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_scene::geom::Color;
 
-use crate::frame::{Background, CloudShape, Frame3d, MeshId, MAX_POOLS};
+use crate::frame::{Background, CloudShape, Frame3d, MeshId, TextureId, MAX_POOLS};
 use crate::math::{Mat4, Vec3};
 use crate::mesh::{Mesh, Vertex};
 
@@ -126,6 +126,8 @@ struct Pipelines {
     format: wgpu::TextureFormat,
     background: wgpu::RenderPipeline,
     mesh: wgpu::RenderPipeline,
+    /// Meshes with [`crate::Material::texture`] (EG-14): `fs_mesh_tex`, group 2 bound.
+    mesh_tex: wgpu::RenderPipeline,
     points: wgpu::RenderPipeline,
     orbs: wgpu::RenderPipeline,
     floor: wgpu::RenderPipeline,
@@ -174,6 +176,12 @@ pub struct Renderer3d {
     globals_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
+    texture_layout: wgpu::BindGroupLayout,
+    /// The textured mesh pipeline's layout: the two groups above plus the texture.
+    texture_pipeline_layout: wgpu::PipelineLayout,
+    texture_sampler: wgpu::Sampler,
+    /// One bind group per [`TextureId`].
+    textures: Vec<wgpu::BindGroup>,
     modules: Option<[wgpu::ShaderModule; 6]>,
     pipelines: Option<Pipelines>,
     meshes: Vec<GpuMesh>,
@@ -232,6 +240,41 @@ impl Renderer3d {
             bind_group_layouts: &[Some(&globals_layout), Some(&draw_layout)],
             immediate_size: 0,
         });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo3d-texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vo3d-textured"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&draw_layout), Some(&texture_layout)],
+            immediate_size: 0,
+        });
+        let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vo3d-texture"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vo3d-globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -262,6 +305,10 @@ impl Renderer3d {
             globals_layout,
             draw_layout,
             pipeline_layout,
+            texture_layout,
+            texture_pipeline_layout,
+            texture_sampler,
+            textures: Vec::new(),
             modules: None,
             pipelines: None,
             meshes: Vec::new(),
@@ -302,6 +349,32 @@ impl Renderer3d {
         self.queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(vertices));
     }
 
+    /// Registers a texture for [`crate::Material::texture`]: a 2D view of premultiplied,
+    /// sRGB-encoded bytes in a plain UNORM format (what the 2D renderer writes into an
+    /// `Rgba8Unorm` target), with any number of mip levels. [`crate::SurfaceText::view`]
+    /// gives one.
+    pub fn add_texture(&mut self, view: &wgpu::TextureView) -> TextureId {
+        let bind = self.texture_bind(view);
+        self.textures.push(bind);
+        TextureId(self.textures.len() as u32 - 1)
+    }
+
+    /// Points `id` at another view, for a texture that was made again at a new size.
+    pub fn set_texture(&mut self, id: TextureId, view: &wgpu::TextureView) {
+        self.textures[id.0 as usize] = self.texture_bind(view);
+    }
+
+    fn texture_bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vo3d-texture"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.texture_sampler) },
+            ],
+        })
+    }
+
     /// Compiles the pipelines for `format` now instead of on the first frame.
     pub fn prepare(&mut self, format: wgpu::TextureFormat) {
         if self.pipelines.as_ref().is_some_and(|p| p.format == format) {
@@ -324,17 +397,18 @@ impl Renderer3d {
             },
             alpha: PREMULTIPLIED_OVER.alpha,
         };
-        let make = |module: &wgpu::ShaderModule,
-                    vs: &str,
-                    fs: &str,
-                    buffers: &[Option<wgpu::VertexBufferLayout>],
-                    topology,
-                    blend,
-                    depth_write: bool,
-                    compare| {
+        let make_in = |layout: &wgpu::PipelineLayout,
+                       module: &wgpu::ShaderModule,
+                       vs: &str,
+                       fs: &str,
+                       buffers: &[Option<wgpu::VertexBufferLayout>],
+                       topology,
+                       blend,
+                       depth_write: bool,
+                       compare| {
             self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(vs),
-                layout: Some(&self.pipeline_layout),
+                label: Some(fs),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some(vs),
@@ -364,6 +438,16 @@ impl Renderer3d {
                 cache: None,
             })
         };
+        let make = |module: &wgpu::ShaderModule,
+                    vs: &str,
+                    fs: &str,
+                    buffers: &[Option<wgpu::VertexBufferLayout>],
+                    topology,
+                    blend,
+                    depth_write: bool,
+                    compare| {
+            make_in(&self.pipeline_layout, module, vs, fs, buffers, topology, blend, depth_write, compare)
+        };
         use wgpu::{CompareFunction as Cmp, PrimitiveTopology as Topo};
         let orb_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<OrbInstance>() as u64,
@@ -378,6 +462,17 @@ impl Renderer3d {
                 mesh,
                 "vs_mesh",
                 "fs_mesh",
+                &[Some(Vertex::layout())],
+                Topo::TriangleList,
+                PREMULTIPLIED_OVER,
+                true,
+                Cmp::Less,
+            ),
+            mesh_tex: make_in(
+                &self.texture_pipeline_layout,
+                mesh,
+                "vs_mesh",
+                "fs_mesh_tex",
                 &[Some(Vertex::layout())],
                 Topo::TriangleList,
                 PREMULTIPLIED_OVER,
@@ -626,8 +721,18 @@ impl Renderer3d {
         let at = |slot: u32| [slot * SLOT as u32];
         let draw_scene = |pass: &mut wgpu::RenderPass<'_>, first: u32| {
             pass.set_pipeline(&p.mesh);
+            let mut textured = false;
             for (i, d) in frame.meshes.iter().enumerate() {
                 let mesh = &self.meshes[d.mesh.0 as usize];
+                let tex = d.material.texture.and_then(|t| self.textures.get(t.0 as usize));
+                if tex.is_some() != textured {
+                    textured = tex.is_some();
+                    pass.set_pipeline(if textured { &p.mesh_tex } else { &p.mesh });
+                    pass.set_bind_group(0, &globals_bind, &[]);
+                }
+                if let Some(bind) = tex {
+                    pass.set_bind_group(2, bind, &[]);
+                }
                 pass.set_bind_group(1, draws, &at(first + i as u32));
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
