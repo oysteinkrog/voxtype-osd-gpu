@@ -324,10 +324,13 @@ impl Tracker {
         let n = self.frames.len();
         let mut now: Vec<(Key, Sample)> = Vec::new();
         collect(list, &mut now);
+        let shifts = self.word_steps(&now);
         let mut open: HashMap<Key, Vec<usize>> = HashMap::new();
         let mut drawn = Vec::with_capacity(now.len());
         for (key, s) in now {
-            // The nearest glyph with the same key in the last frame, within an em and a half.
+            // The nearest glyph with the same key in the last frame, within an em and a half,
+            // after the step its whole word took.
+            let step = shifts.get(&key.0).copied().unwrap_or(Point::new(0.0, 0.0));
             let best = self.open.get(&key).and_then(|cands| {
                 cands
                     .iter()
@@ -335,7 +338,7 @@ impl Tracker {
                     .filter(|&i| self.tracks[i].last_frame() + 1 == n)
                     .map(|i| {
                         let p = self.tracks[i].samples.last().unwrap();
-                        (i, (p.pos.x - s.pos.x).hypot(p.pos.y - s.pos.y), p.em)
+                        (i, (p.pos.x + step.x - s.pos.x).hypot(p.pos.y + step.y - s.pos.y), p.em)
                     })
                     .filter(|&(_, d, em)| d <= 1.5 * em.max(s.em))
                     .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -356,6 +359,51 @@ impl Tracker {
         }
         self.open = open;
         self.frames.push(FrameRec { t, tracks: drawn });
+    }
+
+    /// Words that moved whole along their row since the last frame, by how far: the same
+    /// glyphs in the same order, every one moved by the same step, and that step less than
+    /// half an em up or down. A centred line that re-centres as words arrive moves every word
+    /// on it sideways at once, under reduced motion in one jump; matched glyph by glyph, a
+    /// repeated letter ("u" in "punctuation") is taken for the next one along, and the word
+    /// reads as stretched.
+    fn word_steps(&self, now: &[(Key, Sample)]) -> HashMap<u32, Point> {
+        let mut steps = HashMap::new();
+        let Some(last) = self.frames.last() else {
+            return steps;
+        };
+        let mut before: HashMap<u32, Vec<(Key, Point, f32)>> = HashMap::new();
+        for &ti in &last.tracks {
+            let tr = &self.tracks[ti];
+            let s = tr.samples.last().unwrap();
+            before.entry(tr.key.0).or_default().push((tr.key, s.pos, s.em));
+        }
+        let mut after: HashMap<u32, Vec<(Key, Point, f32)>> = HashMap::new();
+        for (key, s) in now {
+            after.entry(key.0).or_default().push((*key, s.pos, s.em));
+        }
+        for (word, mut a) in after {
+            let Some(mut b) = before.remove(&word) else {
+                continue;
+            };
+            if a.len() != b.len() {
+                continue;
+            }
+            a.sort_by(|p, q| p.1.x.total_cmp(&q.1.x));
+            b.sort_by(|p, q| p.1.x.total_cmp(&q.1.x));
+            if a.iter().zip(&b).any(|(p, q)| p.0 != q.0) {
+                continue;
+            }
+            let step = Point::new(a[0].1.x - b[0].1.x, a[0].1.y - b[0].1.y);
+            let same = a
+                .iter()
+                .zip(&b)
+                .all(|(p, q)| (p.1.x - q.1.x - step.x).abs() <= 0.5 && (p.1.y - q.1.y - step.y).abs() <= 0.5);
+            if same && step.y.abs() < 0.5 * a[0].2 && step.x.abs() > 0.5 {
+                steps.insert(word, step);
+            }
+        }
+        steps
     }
 
     /// A removed letter's ghost (a correction's, MO-20): the glyph fades to under the
@@ -415,7 +463,15 @@ impl Tracker {
         let level_rests: Vec<Vec<Option<usize>>> = level
             .iter()
             .zip(&rests)
-            .map(|(tr, r)| if r.iter().all(Option::is_none) { vec![None; r.len()] } else { rests_of(tr, env, last_frame) })
+            .map(
+                |(tr, r)| {
+                    if r.iter().all(Option::is_none) {
+                        vec![None; r.len()]
+                    } else {
+                        rests_of(tr, env, last_frame)
+                    }
+                },
+            )
             .collect();
         // Where sample `k` of track `ti` rests on its row, carried along by the row's scroll to
         // that sample's frame.
@@ -1177,6 +1233,37 @@ mod tests {
         let r = tr.check(&Envelope::default());
         r.assert_ok();
         assert_eq!(r.leaving, 18);
+    }
+
+    #[test]
+    fn a_word_that_jumps_along_its_row_keeps_its_letters_apart() {
+        // "punctuation" at 36 px as the popup's captions draw it, which jumps 56 px left as
+        // it arrives and 31 px more two frames later (its centred line re-centring under
+        // reduced motion). Glyph by glyph, a "u" and a "t" are taken for the other "u" and
+        // "t", and the word read 146 % as wide.
+        const X: [f32; 11] = [0.0, 20.9, 40.9, 61.3, 77.9, 90.4, 110.5, 129.4, 142.2, 150.4, 170.3];
+        const G: [u32; 11] = [408, 439, 362, 272, 431, 439, 241, 431, 328, 373, 362];
+        let punctuation = |x0: f32| -> Vec<GlyphInstance> {
+            X.iter()
+                .zip(G)
+                .map(|(&x, glyph)| GlyphInstance {
+                    pos: Point::new(x0 + x, 120.0),
+                    size: 36.0,
+                    glyph,
+                    ..word(1, 0.0, 0.0, 0.0, 1.0)[0]
+                })
+                .collect()
+        };
+        let mut tr = Tracker::new();
+        for n in 0..20usize {
+            let x = match n {
+                0..=2 => 873.0,
+                3..=4 => 816.9,
+                _ => 786.3,
+            };
+            tr.push(n as f64 / 30.0, &list(punctuation(x)));
+        }
+        tr.check(&Envelope::default()).assert_ok();
     }
 
     #[test]
