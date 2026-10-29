@@ -6,6 +6,8 @@
 //!   distinct dots and hand over to solid text with no change in light.
 //! - `--concept 24`: a river of light: glowing ribbons that sway from the mic to the text,
 //!   with sparks flowing along the same strands.
+//! - `--concept 26`: shapes (EG-26): a swarm of sparks above the text forms a check mark at
+//!   1.2 s, then scatters into a microphone icon read from SVG at 2.6 s.
 //!
 //! Offline, to PNG frames (default 600x300 at scale 1):
 //!   cargo run --release -p vo --example particles_v2 -- --concept 09 --offline DIR [--fps 60]
@@ -19,7 +21,8 @@ use std::sync::Arc;
 
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::emitter::{
-    tilt_x, ColorBy, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, SpriteStyle, WordParticles,
+    tilt_x, ColorBy, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, ShapeTarget, SpriteStyle,
+    Target as Form, WordParticles,
 };
 use vo::scene::geom::{Color, Point, Size};
 use vo::scene::Scene;
@@ -167,6 +170,56 @@ fn line(a: Point, b: Point) -> Arc<[Point]> {
     Arc::from([a, b])
 }
 
+/// A swarm that forms a check mark, then a microphone icon (concept 26, EG-26).
+#[derive(Debug)]
+struct Swarm {
+    targets: Arc<[ShapeTarget]>,
+    ramp: [Color; 3],
+}
+
+impl Swarm {
+    /// When the swarm stops spawning: its sparks die out as the check mark forms.
+    const FORM: f64 = 1.2;
+
+    fn new(ramp: [Color; 3]) -> Swarm {
+        let mic = r#"<svg viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2">
+            <rect x="9" y="2" width="6" height="12" rx="3"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>"#;
+        let mic = Form::Svg(Arc::new(vo::scene::svg::parse(mic).expect("mic icon")));
+        Swarm {
+            targets: Arc::from([
+                ShapeTarget { sweep: 0.25, ..ShapeTarget::new(Swarm::FORM, Form::CheckMark, 96.0) },
+                ShapeTarget { scatter: true, ..ShapeTarget::new(2.6, mic, 104.0) },
+            ]),
+            ramp,
+        }
+    }
+}
+
+impl EmitterSource for Swarm {
+    fn sim(&self, t: f64) -> EmitterSim {
+        EmitterSim {
+            shape: Shape::Disc { radius: 46.0 },
+            emit: if t < Swarm::FORM { 1.0 } else { 0.0 },
+            life: 0.9,
+            spawn_speed: 20.0,
+            swirl: 1.2,
+            noise: 140.0,
+            noise_scale: 0.03,
+            drag: 2.0,
+            ..Default::default()
+        }
+    }
+
+    fn look(&self, _: f64) -> EmitterLook {
+        EmitterLook { size: 1.1, brightness: 0.9, ramp: self.ramp, style: SpriteStyle::SPARK, ..Default::default() }
+    }
+
+    fn targets(&self) -> Option<Arc<[ShapeTarget]>> {
+        Some(self.targets.clone())
+    }
+}
+
 const CYAN: u32 = 0x36d6ff;
 const BLUE: u32 = 0x3a6bff;
 const VIOLET: u32 = 0xa24bff;
@@ -179,6 +232,7 @@ struct Popup {
     left: Arc<[Point]>,
     right: Arc<[Point]>,
     river: Arc<[Point]>,
+    swarm: Arc<dyn EmitterSource>,
 }
 
 impl Popup {
@@ -192,6 +246,7 @@ impl Popup {
             left: line(Point::new(-40.0, 0.0), Point::new(-0.5 * w + 30.0, 0.0)),
             right: line(Point::new(40.0, 0.0), Point::new(0.5 * w - 30.0, 0.0)),
             river: line(Point::new(-0.5 * w + 40.0, 0.0), Point::new(0.5 * w - 40.0, 0.0)),
+            swarm: Arc::new(Swarm::new([Color::hex(0xdff4ff, 1.0), Color::hex(CYAN, 1.0), Color::hex(BLUE, 0.0)])),
         }
     }
 
@@ -273,6 +328,11 @@ impl App for Popup {
                 120.0,
             ));
             card.child(river).child(self.text(22.0))
+        } else if self.concept == 26 {
+            // "river" is the key that takes no margin: the only emitter here.
+            let swarm =
+                Element::layer("glow").bloom(0.8, 6.0).child(emitter("river", self.swarm.clone(), 2000, 8, false, 150.0));
+            card.child(swarm).child(self.text(24.0))
         } else {
             let pink = [Color::hex(VIOLET, 1.0), Color::hex(0x6a5cff, 1.0), Color::hex(CYAN, 1.0)];
             let cyan = [Color::hex(CYAN, 1.0), Color::hex(BLUE, 1.0), Color::hex(VIOLET, 1.0)];
@@ -336,7 +396,7 @@ fn bench() {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    for concept in [9, 24] {
+    for concept in [9, 24, 26] {
         for (w, h, scale) in [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)] {
             let mut renderer = Renderer::with_fonts(&device, &queue, fonts.clone());
             let target = Target::new(&device, w, h, vo_render::offscreen::FORMAT);
@@ -397,7 +457,7 @@ fn main() {
         match a.as_str() {
             "--offline" => offline = Some(v().into()),
             "--fps" => fps = v().parse().expect("--fps takes a number"),
-            "--concept" => concept = v().parse().expect("--concept takes 9 or 24"),
+            "--concept" => concept = v().parse().expect("--concept takes 9, 24 or 26"),
             "--bench" => bench_it = true,
             "--preview" => {}
             _ => panic!("unknown option {a}"),
