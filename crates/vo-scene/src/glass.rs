@@ -709,7 +709,7 @@ fn cross(pts: &[Point], y: f32, out: &mut Vec<[f32; 2]>) {
     }
     xs.sort_by(f32::total_cmp);
     out.clear();
-    out.extend(xs.chunks_exact(2).map(|c| [c[0], c[1]]));
+    out.extend(xs.as_chunks::<2>().0.iter().copied());
 }
 
 /// The intersection of two sorted span lists.
