@@ -3,8 +3,10 @@
 //! The reading-line envelope of the motion plan (section 2, rule 1) allows a new word at
 //! least 70 % ink, at most 3 px off its baseline, and no blur or scale. By default a word's
 //! enter transition (`Element::word_enter`) is pulled inside that: a fade starts at 70 %, a
-//! rise starts at 3 px, a dissolve starts at most 30 % in, and a blur or wipe is dropped (a
-//! wipe hides the end of the word outright, so no part of it is readable).
+//! rise starts at 2.5 px, a dissolve starts at most 30 % in, and a blur or wipe is dropped (a
+//! wipe hides the end of the word outright, so no part of it is readable). The rise keeps
+//! half a pixel inside the 3 px limit: a look's spring that overshoots its place a little,
+//! and is then carried off by a line scroll before it settles back, stays inside.
 //! The look keeps the direction and the springs of its arrival; only the distance shrinks.
 //! A sideways slide is left alone: the envelope says nothing about it.
 //!
@@ -15,8 +17,9 @@ use crate::element::Transition;
 
 /// Ink a word starts at, at least.
 pub const INK: f32 = 0.7;
-/// Baseline offset a word starts at, at most, in logical pixels.
-pub const RISE: f32 = 3.0;
+/// Baseline offset a word starts at, at most, in logical pixels. Half a pixel inside the
+/// envelope's 3 px (see the module docs).
+pub const RISE: f32 = 2.5;
 /// Dissolve a word starts at, at most (it takes ink away).
 pub const COVER: f32 = 1.0 - INK;
 
