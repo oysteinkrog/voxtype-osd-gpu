@@ -252,6 +252,11 @@ struct GpuState {
 
 /// An sRGB format, premultiplied alpha when offered (else the first mode), `Fifo`. Also returns
 /// the alpha modes offered, for the setup note.
+///
+/// `Bgra8UnormSrgb` wins over `Rgba8UnormSrgb` when both are offered. The order the driver
+/// lists them in changes from run to run (NVIDIA, both ways in one budget run), and pipelines
+/// are made per format, so a warm-up for `Bgra8UnormSrgb` (`vo::Resident::warm_up`) was
+/// wasted on every show that took the other one.
 fn swapchain_config(
     surface: &wgpu::Surface<'_>,
     adapter: &wgpu::Adapter,
@@ -259,11 +264,9 @@ fn swapchain_config(
     h: u32,
 ) -> (wgpu::SurfaceConfiguration, Vec<wgpu::CompositeAlphaMode>) {
     let caps = surface.get_capabilities(adapter);
-    let format = caps
-        .formats
-        .iter()
-        .copied()
-        .find(|f| matches!(f, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb))
+    let format = [wgpu::TextureFormat::Bgra8UnormSrgb, wgpu::TextureFormat::Rgba8UnormSrgb]
+        .into_iter()
+        .find(|f| caps.formats.contains(f))
         .unwrap_or(caps.formats[0]);
     let alpha = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
         wgpu::CompositeAlphaMode::PreMultiplied
