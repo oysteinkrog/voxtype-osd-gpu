@@ -35,6 +35,10 @@ required-features = ["render"]
 name = "gpu_fluid"
 required-features = ["gpu"]
 
+[[test]]
+name = "gpu_fluid_render"
+required-features = ["render"]
+
 [[example]]
 name = "water_demo"
 required-features = ["gpu"]

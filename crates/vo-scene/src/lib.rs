@@ -75,6 +75,7 @@ pub mod emitter_signals;
 pub mod erase;
 pub mod final_pass;
 pub mod flow;
+pub mod fluid;
 pub mod font;
 pub mod frame;
 pub mod geom;

@@ -20,10 +20,13 @@
 //! compute dispatch, and its snapshot is a GPU-side buffer copy. [`reference::Diffusion`] is a
 //! small CPU sim used by the tests. With the `gpu` feature (on by default), [`water`] is the GPU
 //! water surface and [`fluid`] the GPU ink and smoke (stable fluids with velocity and dye). With
-//! the `render` feature (on by default), [`water_render`] draws the water as a pool in a vo scene.
+//! the `render` feature (on by default), [`water_render`] draws the water as a pool in a vo scene
+//! and [`fluid_render`] draws the fluid's dye as ink, smoke or watercolour.
 
 #[cfg(feature = "gpu")]
 pub mod fluid;
+#[cfg(feature = "render")]
+pub mod fluid_render;
 pub mod reference;
 pub mod snapshot;
 #[cfg(feature = "gpu")]
