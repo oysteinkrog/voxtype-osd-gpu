@@ -358,12 +358,41 @@ impl Tracker {
         self.frames.push(FrameRec { t, tracks: drawn });
     }
 
+    /// A removed letter's ghost (a correction's, MO-20): the glyph fades to under the
+    /// envelope's ink of what it was, holds there, and then goes while other glyphs of its
+    /// word stay drawn. Its hold is still long enough to look like a rest, but the ghost is
+    /// leaving, not the word, so none of its frames are checked. A whole word that dims
+    /// and goes (a cancel, an exit) takes all its glyphs with it and is still checked.
+    fn is_ghost(&self, tr: &Track, rests: &[Option<usize>], env: &Envelope, last_frame: usize) -> bool {
+        let end = tr.last_frame();
+        if end >= last_frame {
+            return false;
+        }
+        let word = tr.key.0;
+        let stays = self.frames[end + 1].tracks.iter().any(|&o| self.tracks[o].key.0 == word);
+        if !stays {
+            return false;
+        }
+        let Some(hold) = rests.iter().rev().flatten().next().copied() else {
+            return false;
+        };
+        // The most ink it had up to the hold: a word revised a few frames after it arrived
+        // has never rested at full ink before its letter turns into a ghost.
+        let was = tr.samples[..=hold].iter().map(|s| s.ink).fold(0.0f32, f32::max);
+        tr.samples[hold].ink < env.ink * was
+    }
+
     /// Checks every recorded frame.
     pub fn check(&self, env: &Envelope) -> Report {
         let mut report = Report { frames: self.frames.len() as u64, ..Report::default() };
         let last_frame = self.frames.len().saturating_sub(1);
         // Per track, per sample: the sample index where it next comes to rest.
-        let rests: Vec<Vec<Option<usize>>> = self.tracks.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
+        let mut rests: Vec<Vec<Option<usize>>> = self.tracks.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
+        for (ti, tr) in self.tracks.iter().enumerate() {
+            if self.is_ghost(tr, &rests[ti], env, last_frame) {
+                rests[ti].fill(None);
+            }
+        }
         // The same with the scroll of the glyph's row ([`Tracker::row_scroll`]) taken out, so
         // a word that scrolls with its line rests on that line. Text that scrolls a line every
         // few frames is never still long enough to rest where it is drawn.
@@ -383,7 +412,11 @@ impl Tracker {
                     .collect(),
             })
             .collect();
-        let level_rests: Vec<Vec<Option<usize>>> = level.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
+        let level_rests: Vec<Vec<Option<usize>>> = level
+            .iter()
+            .zip(&rests)
+            .map(|(tr, r)| if r.iter().all(Option::is_none) { vec![None; r.len()] } else { rests_of(tr, env, last_frame) })
+            .collect();
         // Where sample `k` of track `ti` rests on its row, carried along by the row's scroll to
         // that sample's frame.
         let on_row = |ti: usize, k: usize| {
@@ -1144,6 +1177,59 @@ mod tests {
         let r = tr.check(&Envelope::default());
         r.assert_ok();
         assert_eq!(r.leaving, 18);
+    }
+
+    #[test]
+    fn a_ghost_that_holds_before_it_goes_is_not_checked() {
+        // Word 1 loses a letter: its old glyph sinks 4 px, fades to 20 % and holds there for
+        // half a second before it goes; the rest of the word stays.
+        let mut tr = Tracker::new();
+        for n in 0..60usize {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if n < 50 {
+                let k = n.saturating_sub(10).min(4) as f32 / 4.0;
+                let mut ghost = word(1, 37.0, 40.0 + 4.0 * k, 9.0, 1.0 - 0.8 * k);
+                ghost.truncate(1);
+                ghost[0].glyph = 20;
+                g.extend(ghost);
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default()).assert_ok();
+    }
+
+    #[test]
+    fn a_ghost_of_a_letter_revised_as_it_arrived_is_not_checked() {
+        // The letter shows for two frames, then turns into a ghost as above.
+        let mut tr = Tracker::new();
+        for n in 0..60usize {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if (8..50).contains(&n) {
+                let k = n.saturating_sub(10).min(4) as f32 / 4.0;
+                let mut ghost = word(1, 37.0, 40.0 + 4.0 * k, 9.0, 1.0 - 0.8 * k);
+                ghost.truncate(1);
+                ghost[0].glyph = 20;
+                g.extend(ghost);
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default()).assert_ok();
+    }
+
+    #[test]
+    fn a_word_that_dims_and_goes_whole_is_still_checked() {
+        // The same sink and hold on every glyph of word 2: no glyph of it stays, so the
+        // hold is a rest and the frames before it are measured against it.
+        let mut tr = Tracker::new();
+        for n in 0..60usize {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if n < 50 {
+                let k = n.saturating_sub(10).min(4) as f32 / 4.0;
+                g.extend(word(2, 50.0, 40.0 + 4.0 * k, 9.0, 1.0 - 0.8 * k));
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        assert!(!tr.check(&Envelope::default()).is_ok());
     }
 
     #[test]
