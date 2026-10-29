@@ -16,14 +16,23 @@
 //! The words themselves are drawn by the caller with the same layout, so the reading line
 //! never moves (rule 1). [`anchors`] places the nodes from that layout.
 //!
-//! The drawing is a pure function of `t` and the words' arrival times. Under reduced
-//! motion strands are drawn whole and still, at their resting bow.
+//! Plucked strings (LT-02): [`LatticeLook::plucks`] lists [`Pluck`] events. Each bundle
+//! rings as a damped sine summed over the last four plucks, and a pluck spreads to the
+//! neighbouring bundles, 40 ms later and half as strong per bundle. A live tension can come
+//! from a [`LevelTrack`] instead of the arrival swing: under [`LatticeLook::level_floor`] the
+//! strands hang slack, above it they pull taut with the level.
+//!
+//! The drawing is a pure function of `t`, the words' arrival times, the plucks and the
+//! level: there is no simulation state, so any `t` can be drawn in any order. Under reduced
+//! motion strands are drawn whole and still, at their resting bow, and plucks and the level
+//! are ignored.
 
 use std::sync::Arc;
 
 use crate::canvas::Painter;
 use crate::display::{Paint, ShapeInstance};
 use crate::element::{Element, Key, TextStyle};
+use crate::emitter::LevelTrack;
 use crate::geom::{Color, Point, Rect, Size};
 use crate::path::{Contour, StrokeStyle};
 use crate::taffy;
@@ -40,6 +49,29 @@ pub struct LatticeWord {
     /// Scene time the word arrived on screen.
     pub at: f64,
 }
+
+/// A pluck of one bundle. Bundle `i` is the bundle of strands that leads into word `i`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pluck {
+    /// Scene time of the pluck.
+    pub at: f64,
+    pub bundle: usize,
+    /// Peak swing of the plucked bundle, in logical pixels.
+    pub amp: f32,
+}
+
+/// Seconds a pluck takes to reach the next bundle.
+pub const PLUCK_SPREAD: f64 = 0.04;
+/// How much of a pluck reaches the next bundle.
+pub const PLUCK_FALLOFF: f32 = 0.5;
+/// How many of the latest plucks ring at once.
+pub const PLUCK_RING: usize = 4;
+/// A pluck is still within this many seconds after it.
+pub const PLUCK_SETTLE: f64 = 2.5;
+/// The swing, in pixels, under which the strings count as still.
+pub const PLUCK_STILL: f32 = 0.05;
+/// Each ringing pluck settles under this, so all of them together stay under [`PLUCK_STILL`].
+const PLUCK_EPS: f32 = PLUCK_STILL / PLUCK_RING as f32;
 
 /// Where a word's node sits: its left edge, its baseline and its line, in the text box.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +123,17 @@ pub struct LatticeLook {
     /// Per text line (indexed by `Anchor::line`) the gutter its strands stay in. Empty, or a
     /// line past the end, draws as before.
     pub gutters: Vec<LineGutter>,
+    /// Plucks in time order. Empty: no bundle rings on its own.
+    pub plucks: Arc<[Pluck]>,
+    /// Swings per second of a plucked bundle, and seconds for its swing to fall to 1/e
+    /// (shorter for a big pluck, so it still settles within [`PLUCK_SETTLE`]).
+    pub pluck_hz: f32,
+    pub pluck_decay: f32,
+    /// The live tension. `None` keeps the swing after each arrival ([`LatticeLook::tension`]).
+    pub level: Option<LevelTrack>,
+    /// Level under which the strands hang slack; from there to 1 they pull taut by up to
+    /// `tighten`.
+    pub level_floor: f32,
 }
 
 impl Default for LatticeLook {
@@ -110,6 +153,11 @@ impl Default for LatticeLook {
             label_color: Color::rgba(0.7, 0.74, 0.8, 0.7),
             stem: 10.0,
             gutters: Vec::new(),
+            plucks: Arc::from([]),
+            pluck_hz: 6.0,
+            pluck_decay: 0.35,
+            level: None,
+            level_floor: 0.08,
         }
     }
 }
@@ -162,6 +210,72 @@ impl LatticeLook {
         (1.0 - self.tighten as f64 * (-u / 0.3).exp() * (u * 7.0).cos()) as f32
     }
 
+    /// The tension multiplier at `t` from [`LatticeLook::level`]: 1 (slack, at rest) while the
+    /// level is under the floor, down to `1 - tighten` at full level. Without a level, the
+    /// arrival swing of [`LatticeLook::tension`] for the newest arrival at `last`.
+    pub fn live_tension(&self, last: Option<f64>, t: f64) -> f32 {
+        let Some(level) = &self.level else { return self.tension(last, t) };
+        let floor = self.level_floor.clamp(0.0, 0.99);
+        let k = ((level.at(t) - floor) / (1.0 - floor)).clamp(0.0, 1.0);
+        1.0 - self.tighten * k
+    }
+
+    /// The swing of one pluck's share at `d` bundles away: `(start, amp, decay)`, or `None`
+    /// when it never reaches.
+    fn ring(&self, p: &Pluck, d: usize) -> Option<(f64, f32, f32)> {
+        let delay = PLUCK_SPREAD * d as f64;
+        if delay >= PLUCK_SETTLE {
+            return None;
+        }
+        let amp = p.amp.abs() * PLUCK_FALLOFF.powi(d.min(64) as i32);
+        if amp <= 0.0 {
+            return None;
+        }
+        let mut decay = self.pluck_decay.max(1e-3);
+        if amp > PLUCK_EPS {
+            // Fall under PLUCK_EPS by PLUCK_SETTLE after the pluck at the latest.
+            decay = decay.min(((PLUCK_SETTLE - delay) as f32) / (amp / PLUCK_EPS).ln());
+        }
+        Some((p.at + delay, amp * p.amp.signum(), decay))
+    }
+
+    /// How far bundle `bundle` swings off its bow at `t`, in pixels: a damped sine per pluck,
+    /// summed over the last [`PLUCK_RING`] plucks at or before `t`.
+    pub fn pluck_offset(&self, bundle: usize, t: f64) -> f32 {
+        let end = self.plucks.partition_point(|p| p.at <= t);
+        let w = std::f32::consts::TAU * self.pluck_hz;
+        self.plucks[end.saturating_sub(PLUCK_RING)..end]
+            .iter()
+            .filter_map(|p| self.ring(p, bundle.abs_diff(p.bundle)))
+            .map(|(start, amp, decay)| {
+                let u = (t - start) as f32;
+                if u < 0.0 {
+                    0.0
+                } else {
+                    amp * (-u / decay).exp() * (w * u).sin()
+                }
+            })
+            .sum()
+    }
+
+    /// Seconds after `p` until every bundle it reaches swings under [`PLUCK_STILL`] (at most
+    /// [`PLUCK_SETTLE`]).
+    pub fn pluck_settle(&self, p: &Pluck) -> f64 {
+        (0..)
+            .map_while(|d| self.ring(p, d).map(|r| (d, r)))
+            .take_while(|&(d, (_, amp, _))| d == 0 || amp.abs() > PLUCK_EPS)
+            .map(|(d, (_, amp, decay))| {
+                let delay = PLUCK_SPREAD * d as f64;
+                let a = amp.abs();
+                if a <= PLUCK_EPS {
+                    delay
+                } else {
+                    (delay + (decay * (a / PLUCK_EPS).ln()) as f64).min(PLUCK_SETTLE)
+                }
+            })
+            .fold(0.0, f64::max)
+    }
+
     /// The resting bow of a bundle after a pause of `pause` seconds.
     pub fn rest_bow(&self, pause: f32) -> f32 {
         (pause.max(0.0) * self.bow_per_sec).clamp(self.bow.0, self.bow.1)
@@ -199,7 +313,13 @@ impl LatticeLook {
         for k in 0..s {
             if skip {
                 // Arcs rise (negative) as before; in a gutter the newest line sends them down.
-                let off = if g.is_some_and(|g| g.newest) { hi } else if g.is_some() { -hi.abs() } else { -bow.abs() };
+                let off = if g.is_some_and(|g| g.newest) {
+                    hi
+                } else if g.is_some() {
+                    -hi.abs()
+                } else {
+                    -bow.abs()
+                };
                 out.push((lens(pa, pb, off, 20), 1.0));
                 continue;
             }
@@ -217,9 +337,12 @@ impl LatticeLook {
         out
     }
 
-    /// When the drawing stops changing.
+    /// When the drawing stops changing: 1.2 s after the newest arrival, or once the last
+    /// pluck settles, whichever is later. A [`LatticeLook::level`] that still moves after
+    /// that is not counted: a caller that pushes a live level rebuilds the view as it goes.
     pub fn until(&self, words: &[LatticeWord]) -> f64 {
-        words.iter().map(|w| w.at).fold(f64::NEG_INFINITY, f64::max) + 1.2
+        let arrivals = words.iter().map(|w| w.at).fold(f64::NEG_INFINITY, f64::max) + 1.2;
+        self.plucks.iter().map(|p| p.at + self.pluck_settle(p)).fold(arrivals, f64::max)
     }
 
     /// Draws the lattice of `words` at `nodes` (same order) at `t`.
@@ -228,7 +351,8 @@ impl LatticeLook {
         let shown: Vec<usize> = (0..n).filter(|&i| reduced || words[i].at <= t).collect();
         let Some(&newest) = shown.last() else { return };
         let last = (!reduced).then(|| words[newest].at);
-        let tension = self.tension(last, t);
+        let tension = if reduced { 1.0 } else { self.live_tension(last, t) };
+        let swing = |bundle: usize| if reduced { 0.0 } else { self.pluck_offset(bundle, t) };
         let node = |i: usize| Point::new(nodes[i].x, self.node_y(&nodes[i]));
 
         for w in shown.windows(2) {
@@ -240,7 +364,7 @@ impl LatticeLook {
             if grow <= 0.0 {
                 continue;
             }
-            let bow = self.rest_bow(words[b].pause) * tension;
+            let bow = self.rest_bow(words[b].pause) * tension + swing(b);
             let width = self.width.0 + (self.width.1 - self.width.0) * words[b].loud.clamp(0.0, 1.0);
             let color = if b == newest { mix(self.color, self.accent, 0.8) } else { self.color };
             for (c, edge) in self.strands(&nodes[a], &nodes[b], bow, false) {
@@ -255,7 +379,8 @@ impl LatticeLook {
                 continue;
             }
             let grow = if reduced { 1.0 } else { ease(((t - words[c].at) / (2.0 * self.draw_on)).clamp(0.0, 1.0)) };
-            let bow = (self.rest_bow(words[c].pause) + self.rest_bow(words[w[1]].pause)) * tension;
+            let bow =
+                (self.rest_bow(words[c].pause) + self.rest_bow(words[w[1]].pause)) * tension + swing(c) + swing(w[1]);
             let arc = self.strands(&nodes[a], &nodes[c], bow, true).remove(0).0;
             let arc = arc.trim(0.0, grow * arc.length());
             p.stroke(&arc, &StrokeStyle::solid(0.6, self.color.fade(0.5)));
@@ -350,6 +475,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::DisplayList;
     use crate::text::EstimateText;
 
     #[test]
@@ -442,5 +568,132 @@ mod tests {
         assert_eq!(l.strands(&a, &b, 5.0, false).len(), 4);
         l.gutters[0].height = 5.0;
         assert_eq!(l.strands(&a, &b, 5.0, false).len(), 1);
+    }
+
+    fn plucked() -> (LatticeLook, Vec<LatticeWord>, Vec<Anchor>) {
+        let words: Vec<LatticeWord> =
+            (0..5).map(|i| LatticeWord { pause: 0.3, loud: 0.5, at: 0.2 * i as f64 }).collect();
+        let nodes: Vec<Anchor> =
+            (0..5).map(|i| Anchor { x: 60.0 * i as f32, width: 40.0, baseline: 20.0, line: 0 }).collect();
+        let plucks: Vec<Pluck> = vec![
+            Pluck { at: 0.4, bundle: 2, amp: 6.0 },
+            Pluck { at: 0.6, bundle: 3, amp: 3.0 },
+            Pluck { at: 0.9, bundle: 1, amp: 8.0 },
+            Pluck { at: 1.1, bundle: 4, amp: 5.0 },
+            Pluck { at: 1.3, bundle: 2, amp: 12.0 },
+        ];
+        let mut level = LevelTrack::new(12.0);
+        level.push(0.0, 0.0);
+        level.push(0.5, 0.9);
+        level.push(1.0, 0.02);
+        let look = LatticeLook { plucks: plucks.into(), level: Some(level), ..LatticeLook::default() };
+        (look, words, nodes)
+    }
+
+    fn draw_list(l: &LatticeLook, words: &[LatticeWord], nodes: &[Anchor], t: f64, reduced: bool) -> DisplayList {
+        let mut list = DisplayList::default();
+        let mut items = Vec::new();
+        let mut p = Painter { list: &mut list, items: &mut items, alpha: 1.0, layer: 0 };
+        l.draw(words, nodes, t, reduced, &mut p);
+        list
+    }
+
+    #[test]
+    fn plucked_drawing_is_pure_in_time() {
+        let (l, words, nodes) = plucked();
+        for (t1, t2) in [(0.45, 1.4), (0.95, 3.0), (1.32, 1.33)] {
+            let fresh = draw_list(&l, &words, &nodes, t1, false);
+            let _ = draw_list(&l, &words, &nodes, t2, false);
+            assert_eq!(draw_list(&l, &words, &nodes, t1, false), fresh, "{t1} after {t2}");
+        }
+        assert_ne!(draw_list(&l, &words, &nodes, 1.35, false), draw_list(&l, &words, &nodes, 1.4, false));
+    }
+
+    #[test]
+    fn plucks_settle_under_the_still_swing_within_the_settle_time() {
+        let (l, words, _) = plucked();
+        let last = l.plucks.last().unwrap().at;
+        for amp in [0.01, 1.0, 12.0, 400.0] {
+            let one = LatticeLook { plucks: Arc::from([Pluck { at: 0.0, bundle: 3, amp }]), ..l.clone() };
+            assert!(one.pluck_settle(&one.plucks[0]) <= PLUCK_SETTLE);
+            for b in 0..12 {
+                assert!(one.pluck_offset(b, PLUCK_SETTLE).abs() < PLUCK_STILL, "{amp} {b}");
+            }
+        }
+        for b in 0..8 {
+            for k in 0..50 {
+                let t = last + PLUCK_SETTLE + 0.1 * k as f64;
+                assert!(l.pluck_offset(b, t).abs() < PLUCK_STILL, "{b} {t}");
+            }
+        }
+        let until = l.until(&words);
+        assert!(until <= last + PLUCK_SETTLE + 1e-9 && until >= words[4].at + 1.2, "{until}");
+        assert!(l.pluck_offset(2, last + 0.02).abs() > 0.5, "a fresh pluck rings");
+    }
+
+    #[test]
+    fn a_pluck_reaches_its_neighbours_later_and_weaker() {
+        let l = LatticeLook { plucks: Arc::from([Pluck { at: 1.0, bundle: 3, amp: 6.0 }]), ..LatticeLook::default() };
+        // The first time a bundle moves, and its biggest swing.
+        let probe = |b: usize| {
+            let mut first = None;
+            let mut peak = 0.0f32;
+            for k in 0..2000 {
+                let t = 1.0 + k as f64 * 0.001;
+                let y = l.pluck_offset(b, t).abs();
+                if y > 1e-4 && first.is_none() {
+                    first = Some(t);
+                }
+                peak = peak.max(y);
+            }
+            (first.unwrap(), peak)
+        };
+        let (t3, p3) = probe(3);
+        for b in [2, 4] {
+            let (tb, pb) = probe(b);
+            assert!(tb > t3 + 0.03, "bundle {b} starts later: {tb} vs {t3}");
+            assert!(pb < p3 * 0.6, "bundle {b} swings less: {pb} vs {p3}");
+        }
+        assert_eq!(l.pluck_offset(3, 0.99), 0.0, "nothing before the pluck");
+    }
+
+    #[test]
+    fn only_the_last_four_plucks_ring() {
+        let p = |at: f64| Pluck { at, bundle: 0, amp: 5.0 };
+        let five =
+            LatticeLook { plucks: Arc::from([p(0.0), p(0.01), p(0.02), p(0.03), p(0.04)]), ..LatticeLook::default() };
+        let four = LatticeLook { plucks: Arc::from([p(0.01), p(0.02), p(0.03), p(0.04)]), ..LatticeLook::default() };
+        assert_eq!(five.pluck_offset(0, 0.1), four.pluck_offset(0, 0.1));
+    }
+
+    #[test]
+    fn the_level_pulls_taut_only_over_its_floor() {
+        let (l, _, _) = plucked();
+        assert_eq!(l.live_tension(Some(0.0), 0.0), 1.0, "quiet start is slack");
+        assert!(l.live_tension(None, 0.95) < 0.6, "loud is taut");
+        assert_eq!(l.live_tension(None, 3.0), 1.0, "under the floor hangs at rest");
+        let none = LatticeLook::default();
+        assert_eq!(none.live_tension(Some(1.0), 1.1), none.tension(Some(1.0), 1.1));
+    }
+
+    #[test]
+    fn reduced_motion_is_still_with_plucks_and_level() {
+        let (l, words, nodes) = plucked();
+        for t in [0.0, 0.5, 1.3, 2.0] {
+            assert_eq!(draw_list(&l, &words, &nodes, t, true), draw_list(&l, &words, &nodes, t + 1.0, true), "{t}");
+        }
+    }
+
+    #[test]
+    fn without_plucks_or_level_the_drawing_is_unchanged() {
+        let (l, words, _) = plucked();
+        let plain = LatticeLook { plucks: Arc::from([]), level: None, ..l.clone() };
+        let base = LatticeLook::default();
+        assert_eq!(plain, base);
+        assert_eq!(base.until(&words), words[4].at + 1.2);
+        for t in [0.3, 0.9, 1.5] {
+            assert_eq!(base.pluck_offset(2, t), 0.0);
+            assert_eq!(base.live_tension(Some(0.8), t), base.tension(Some(0.8), t));
+        }
     }
 }
