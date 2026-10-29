@@ -17,20 +17,27 @@ use crate::{Options, SurfaceMargin, Tokens};
 /// Channel history kept by a live overlay, in seconds. Seeking is an offline need.
 const LIVE_RETENTION: f64 = 10.0;
 
-/// A margin that follows the show grows in steps of this many logical pixels a side, so a
-/// reach that creeps up does not resize the surface every frame.
+/// A margin that follows the show grows in steps of this many logical pixels a side.
 const MARGIN_STEP: f32 = 8.0;
 
-/// How long a smaller margin must be enough before the surface shrinks to it, in seconds.
-const MARGIN_HOLD: f64 = 0.5;
+/// The least a side grows by: a reach that creeps up, such as a glow that follows the voice,
+/// then resizes the surface a few times a show, not at every step. Each later growth at least
+/// doubles what the side has over the first view's margin.
+const MARGIN_MIN_GROW: f32 = 32.0;
+
+/// How long the first view's margin must be enough again before the surface shrinks back to
+/// it, in seconds.
+const MARGIN_HOLD: f64 = 1.0;
 
 /// While the scene moves without a new view, the margin is checked this often, in seconds:
 /// a particle's reach grows with time, and an effect that fades out lets the margin shrink.
 const MARGIN_RECHECK: f64 = 0.5;
 
 /// The transparent margin round the main view while it follows the show (EG-08). It grows at
-/// once when the view reaches further, and shrinks back once a smaller one has been enough
-/// for `MARGIN_HOLD`, never below the first view's. On an axis where the host centres the
+/// once when the view reaches further, with room to spare (`MARGIN_MIN_GROW`), and shrinks
+/// only all the way back to the first view's margin, once that has been enough for
+/// `MARGIN_HOLD` and the app has not asked to exit. So a show resizes a few times at most:
+/// every resize costs the compositor a configure. On an axis where the host centres the
 /// surface, both sides grow by the same amount, so the panel stays where it is on screen.
 #[derive(Clone, Debug, PartialEq)]
 struct MarginFollow {
@@ -79,23 +86,48 @@ impl MarginFollow {
     }
 
     /// The new margin at `t` for a view that reaches `need`, or `None` to keep the one there.
-    fn step(&mut self, need: vo_scene::Insets, t: f64) -> Option<vo_scene::Insets> {
+    /// `may_shrink` is false once the app has asked to exit: the surface closes soon anyway.
+    fn step(&mut self, need: vo_scene::Insets, t: f64, may_shrink: bool) -> Option<vo_scene::Insets> {
         let want = self.want(need);
-        let n = self.now;
+        let (n, b) = (self.now, self.base);
         if want.left > n.left || want.top > n.top || want.right > n.right || want.bottom > n.bottom {
-            self.now = n.max(want);
+            // Each side that needs more gets room to spare; on a centred axis both sides then
+            // take the larger extra.
+            let grow = |w: f32, cur: f32, base: f32| {
+                let (w, cur) = (w - base, cur - base);
+                if w > cur {
+                    w.max(2.0 * cur).max(MARGIN_MIN_GROW)
+                } else {
+                    cur
+                }
+            };
+            let (mut l, mut t, mut r, mut bo) = (
+                grow(want.left, n.left, b.left),
+                grow(want.top, n.top, b.top),
+                grow(want.right, n.right, b.right),
+                grow(want.bottom, n.bottom, b.bottom),
+            );
+            if self.paired.0 {
+                l = l.max(r);
+                r = l;
+            }
+            if self.paired.1 {
+                t = t.max(bo);
+                bo = t;
+            }
+            self.now = vo_scene::Insets::new(b.left + l, b.top + t, b.right + r, b.bottom + bo);
             self.below = None;
             return Some(self.now);
         }
-        if want == n {
+        if want != b || n == b || !may_shrink {
             self.below = None;
             return None;
         }
         let since = *self.below.get_or_insert(t);
         if t - since >= MARGIN_HOLD {
-            self.now = want;
+            self.now = b;
             self.below = None;
-            return Some(want);
+            return Some(b);
         }
         None
     }
@@ -263,7 +295,8 @@ impl<A: App> Live<A> {
         if let Some(SurfaceMargin::AtLeast(m)) = self.options_rest.as_ref().map(|o| o.margin) {
             need = need.max(m);
         }
-        let Some(m) = self.follow.as_mut().and_then(|f| f.step(need, t)) else { return };
+        let may_shrink = self.driver().exit_at().is_none();
+        let Some(m) = self.follow.as_mut().and_then(|f| f.step(need, t, may_shrink)) else { return };
         self.insets = m;
         let fit = vo_scene::surface_for(self.asked.0, m);
         self.spec.size = fit.size;
@@ -1381,39 +1414,53 @@ mod margin_tests {
     }
 
     #[test]
-    fn grows_at_once_in_whole_steps() {
+    fn grows_at_once_with_room_to_spare() {
         let mut f = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
-        assert_eq!(f.step(Insets::uniform(3.0), 0.0), None, "the first view's margin is enough");
-        // 5 more than the base on the left: one step of 8.
-        assert_eq!(f.step(Insets::new(9.0, 0.0, 0.0, 0.0), 0.1), Some(Insets::new(12.0, 4.0, 4.0, 4.0)));
-        // A little more, still inside that step: no resize.
-        assert_eq!(f.step(Insets::new(11.0, 0.0, 0.0, 0.0), 0.2), None);
-        assert_eq!(f.step(Insets::new(13.0, 0.0, 0.0, 0.0), 0.3), Some(Insets::new(20.0, 4.0, 4.0, 4.0)));
+        assert_eq!(f.step(Insets::uniform(3.0), 0.0, true), None, "the first view's margin is enough");
+        // 5 more than the base on the left: at least 32 more.
+        assert_eq!(f.step(Insets::new(9.0, 0.0, 0.0, 0.0), 0.1, true), Some(Insets::new(36.0, 4.0, 4.0, 4.0)));
+        // A reach that creeps up inside that room: no resize.
+        for (i, need) in [12.0, 20.0, 30.0, 36.0].into_iter().enumerate() {
+            assert_eq!(f.step(Insets::new(need, 0.0, 0.0, 0.0), 0.2 + 0.1 * i as f64, true), None);
+        }
+        // Past it: the extra at least doubles (32 to 64), or takes what is needed if more.
+        assert_eq!(f.step(Insets::new(41.0, 0.0, 0.0, 0.0), 1.0, true), Some(Insets::new(68.0, 4.0, 4.0, 4.0)));
+        assert_eq!(f.step(Insets::new(300.0, 0.0, 0.0, 0.0), 1.1, true), Some(Insets::new(300.0, 4.0, 4.0, 4.0)));
+        // A ramp from 8 to 200 over the base resizes four times (32, 64, 128, 256), not 25.
+        let mut g = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
+        let n = (1..=25).filter(|i| g.step(Insets::uniform(4.0 + 8.0 * *i as f32), *i as f64 * 0.02, true).is_some()).count();
+        assert_eq!(n, 4);
     }
 
     #[test]
-    fn shrinks_after_the_hold_and_never_below_the_first_view() {
+    fn shrinks_only_to_the_first_view_after_the_hold() {
         let mut f = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
-        let big = f.step(Insets::uniform(60.0), 1.0).expect("grows");
+        let big = f.step(Insets::uniform(60.0), 1.0, true).expect("grows");
         assert_eq!(big, Insets::uniform(60.0));
-        // The effect is gone: the smaller margin waits for the hold.
-        assert_eq!(f.step(Insets::ZERO, 2.0), None);
-        assert_eq!(f.wake(), Some(2.0 + MARGIN_HOLD));
-        assert_eq!(f.step(Insets::ZERO, 2.0 + MARGIN_HOLD * 0.5), None);
-        // Back up within the hold: the wait starts again.
-        assert_eq!(f.step(Insets::uniform(60.0), 2.3), None);
+        // Less, but still more than the first view's: no shrink to a middle size.
+        assert_eq!(f.step(Insets::uniform(20.0), 1.5, true), None);
         assert_eq!(f.wake(), None);
-        assert_eq!(f.step(Insets::ZERO, 3.0), None);
-        assert_eq!(f.step(Insets::ZERO, 3.0 + MARGIN_HOLD), Some(BASE), "back to the first view's");
-        assert_eq!(f.step(Insets::ZERO, 9.0), None);
+        // The effect is gone: the first view's margin waits for the hold.
+        assert_eq!(f.step(Insets::ZERO, 2.0, true), None);
+        assert_eq!(f.wake(), Some(2.0 + MARGIN_HOLD));
+        assert_eq!(f.step(Insets::ZERO, 2.0 + MARGIN_HOLD * 0.5, true), None);
+        // Back up within the hold: the wait starts again.
+        assert_eq!(f.step(Insets::uniform(60.0), 2.7, true), None);
+        assert_eq!(f.wake(), None);
+        assert_eq!(f.step(Insets::ZERO, 3.0, true), None);
+        // The app asked to exit: no shrink, the surface closes soon.
+        assert_eq!(f.step(Insets::ZERO, 3.0 + MARGIN_HOLD, false), None);
+        assert_eq!(f.step(Insets::ZERO, 3.1 + MARGIN_HOLD, true), None, "the wait starts again");
+        assert_eq!(f.step(Insets::ZERO, 3.1 + 2.0 * MARGIN_HOLD, true), Some(BASE), "back to the first view's");
+        assert_eq!(f.step(Insets::ZERO, 9.0, true), None);
     }
 
     #[test]
     fn a_centred_axis_grows_on_both_sides() {
         // `LineAt` centres across: left and right grow together, top and bottom on their own.
         let mut f = follow(Placement::LineAt { fraction: 0.5, y: 40.0 });
-        let m = f.step(Insets::new(0.0, 0.0, 20.0, 30.0), 0.0).expect("grows");
-        assert_eq!(m, Insets::new(20.0, 4.0, 20.0, 36.0));
+        let m = f.step(Insets::new(0.0, 0.0, 20.0, 50.0), 0.0, true).expect("grows");
+        assert_eq!(m, Insets::new(36.0, 4.0, 36.0, 52.0));
         assert!(MarginFollow::new(BASE, Placement::Fullscreen).is_none(), "a full-screen surface has no margin");
     }
 
@@ -1541,7 +1588,7 @@ mod margin_tests {
         assert!(sizes.iter().filter(|(t, _)| *t >= 4.0).all(|(_, s)| *s == first));
         // Only a few resizes: grow once, shrink once (or a step or two while it fades).
         let changes = sizes.windows(2).filter(|w| w[0].1 != w[1].1).count();
-        assert!((2..=6).contains(&changes), "{changes} resizes");
+        assert_eq!(changes, 2, "grows once, shrinks once");
     }
 
     #[test]
