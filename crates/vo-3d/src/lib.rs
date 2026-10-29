@@ -17,7 +17,7 @@
 //!   texture built from its layer's backdrop (EG-17).
 //! - `grid`: [`grid_floor`], a perspective grid floor (FX-152) with a horizon glow and a pool
 //!   of light.
-//! - `field`: [`TextField`], the text distance field (TY19) by jump flooding.
+//! - `field`: [`TextField`], the text distance field (TY19), re-exported from vo-render (exact two-pass search).
 //! - `ribbon3d`: [`Ribbon3d`], silk ribbons and cloth strips that twist to show their back
 //!   and swell with the voice, in closed form, rewritten each frame (EG-13).
 //! - `surface_text`: [`SurfaceText`], text drawn into a mipmapped texture for a textured mesh
