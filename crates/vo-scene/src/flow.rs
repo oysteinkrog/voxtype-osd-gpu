@@ -1035,7 +1035,9 @@ impl Flow {
             .iter()
             .zip(graphemes)
             .map(|(g, &gr)| FlowGlyph {
-                opacity: make.to(0.0, 1.0, WORD_ROLL, Rest::UNIT),
+                // Under reduced motion nothing rolls: the new word crossfades in place, so
+                // it starts readable, at the palimpsest's arrival ink.
+                opacity: make.to(if reduced { palimpsest::ARRIVE_INK } else { 0.0 }, 1.0, WORD_ROLL, Rest::UNIT),
                 rise: make.to(travel, 0.0, WORD_ROLL, Rest::PIXELS),
                 ..make.rest(g, gr)
             })

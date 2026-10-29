@@ -649,3 +649,20 @@ fn under_reduced_motion_a_word_rewrapped_onto_the_newest_line_arrives_readable()
     assert!(list.glyphs.iter().any(|g| on_row(&g)), "popup shows on the second line at once");
     assert!(ink >= 0.7, "popup arrives at {ink} ink");
 }
+
+#[test]
+fn under_reduced_motion_a_rolled_revision_arrives_readable() {
+    // Revise::Roll does not roll under reduced motion; the new word crossfades in place and
+    // its letters start at reading ink, not clear.
+    let roll = |w: &[Word]| {
+        Element::column("root").child(Element::live_text("live", w).text_style(style()).word_revise(Revise::Roll))
+    };
+    let mut s = scene().with_reduced_motion(true);
+    s.apply(roll(&words(&[(1, "the"), (2, "confi")])), 0.0);
+    s.apply(roll(&words(&[(1, "the"), (2, "configuration")])), 1.0);
+    let list = s.sample(1.0);
+    let count = list.glyphs.iter().filter(|g| g.word == 2).count();
+    // The new word's 13 letters, at or over 70 %; the old word's ghost may fade under them.
+    let readable = list.glyphs.iter().filter(|g| g.word == 2 && g.color.a >= 0.7).count();
+    assert!(readable >= 13, "{readable} of {count} glyphs readable");
+}
