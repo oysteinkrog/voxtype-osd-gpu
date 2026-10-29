@@ -831,6 +831,7 @@ impl Renderer3d {
         self.encode_inner(enc, out, frame, None, None, Some(halves), used);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_inner(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
