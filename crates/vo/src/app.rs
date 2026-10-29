@@ -204,6 +204,12 @@ pub(crate) struct Driver<A: App> {
     margin: Option<vo_scene::Insets>,
     /// The app's extra surfaces, each with its own scene (`App::surfaces`).
     pub(crate) extras: Extras<A::Msg>,
+    /// Build the view at the next frame, not at each message, while the app has a frame
+    /// pace (`App::frame_pace`). A live overlay sets it: room tone at 50 audio batches a
+    /// second then costs one view per drawn frame, not one per message.
+    pub(crate) lazy: bool,
+    /// The time of the newest message whose view `lazy` put off (`flush` builds it).
+    stale: Option<f64>,
 }
 
 impl<A: App> Driver<A> {
@@ -226,7 +232,20 @@ impl<A: App> Driver<A> {
         app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit });
         let extras = Extras::new(make);
         let exit_at = exit.then_some(t);
-        let mut d = Driver { app, scene, tokens, timers, exit, exit_at, last_t: t, dirty: true, margin: None, extras };
+        let mut d = Driver {
+            app,
+            scene,
+            tokens,
+            timers,
+            exit,
+            exit_at,
+            last_t: t,
+            dirty: true,
+            margin: None,
+            extras,
+            lazy: false,
+            stale: None,
+        };
         let view = d.view();
         d.scene.apply(view, t);
         d.extras.apply(d.app.surfaces(&d.tokens), t);
@@ -245,6 +264,7 @@ impl<A: App> Driver<A> {
     /// Puts the view inside a transparent margin of `m` from `t` on.
     pub(crate) fn set_margin(&mut self, m: vo_scene::Insets, t: f64) {
         self.margin = Some(m);
+        self.stale = None;
         let view = self.view();
         self.dirty |= self.scene.apply(view, t);
     }
@@ -258,11 +278,36 @@ impl<A: App> Driver<A> {
         if self.exit && self.exit_at.is_none() {
             self.exit_at = Some(t);
         }
+        // Under a frame pace the frame waits for its slot anyway, so the view waits with it.
+        // Extra surfaces and the exit build at once: their frames are not paced.
+        if self.lazy && !self.exit && self.extras.list.is_empty() && self.app.frame_pace().is_some() {
+            self.stale = Some(t);
+            return;
+        }
+        self.stale = None;
+        self.rebuild(t);
+    }
+
+    /// Builds the view and applies it to the scenes at `t`.
+    fn rebuild(&mut self, t: f64) {
         let view = self.view();
         // A message that changes nothing drawn, such as a hover that only stops a timer,
         // costs no frame.
         self.dirty |= self.scene.apply(view, t);
         self.extras.apply(self.app.surfaces(&self.tokens), t);
+    }
+
+    /// Whether a message's view waits for the next frame (`lazy`).
+    pub(crate) fn stale(&self) -> bool {
+        self.stale.is_some()
+    }
+
+    /// Builds the view put off by `lazy`, at the time of the newest message it shows. Runs
+    /// before anything reads the scene: a frame, a pointer event, a new viewport.
+    pub(crate) fn flush(&mut self) {
+        if let Some(t) = self.stale.take() {
+            self.rebuild(t);
+        }
     }
 
     /// Fires the earliest timer if it is due at or before `t`. Returns whether one fired.
@@ -290,6 +335,7 @@ impl<A: App> Driver<A> {
     /// A pointer event on the main surface (`None`) or on extra surface `extra`.
     pub(crate) fn pointer_on(&mut self, extra: Option<usize>, ev: &PointerEvent) {
         self.fire_timers(ev.t);
+        self.flush();
         let mut ev = *ev;
         ev.t = ev.t.max(self.last_t);
         self.last_t = ev.t;

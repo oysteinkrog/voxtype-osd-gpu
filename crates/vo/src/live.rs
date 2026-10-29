@@ -91,7 +91,7 @@ impl<A: App> Live<A> {
         // A capped-rate animation is not due at every event (each present is one), only at
         // its own wake time.
         let due = d.scene.next_wake(now).is_some_and(|w| w <= now) || paced.is_some_and(|w| w <= now);
-        if d.dirty || due {
+        if d.dirty || d.stale() || due {
             match slot {
                 Some(s) => paced = Some(s),
                 None => host.request_frame(id),
@@ -104,7 +104,7 @@ impl<A: App> Live<A> {
         let wake = [next, paced, extra_paced, deadline].into_iter().flatten().min_by(f64::total_cmp);
         host.wake_at(wake);
         let d = self.driver();
-        let drawn = !d.dirty && !d.extras.list.iter().any(|e| e.dirty);
+        let drawn = !d.dirty && !d.stale() && !d.extras.list.iter().any(|e| e.dirty);
         if d.done(now) && (drawn || d.overdue(now)) {
             self.finish(host);
         }
@@ -257,6 +257,7 @@ impl<A: App> Live<A> {
         let t = host.now();
         scene.set_viewport(t, self.spec.size, 1.0);
         let mut driver = Driver::with_surfaces(app, scene, self.tokens.clone(), t, options.scene_maker());
+        driver.lazy = true;
         if let Some(m) = options.margin.reach(&driver.scene, t) {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
@@ -301,6 +302,7 @@ impl<A: App> Live<A> {
 
     /// Samples the scene at `t` into `self.list` and sends a changed input region.
     fn sample(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) {
+        self.driver().flush();
         let mut list = std::mem::take(&mut self.list);
         self.driver().scene.sample_into(t, &mut list);
         if matches!(self.spec.input, InputMode::Regions(_)) {
@@ -388,6 +390,7 @@ impl<A: App> HostApp for Live<A> {
     fn event(&mut self, host: &mut dyn HostCtl, event: HostEvent) {
         match event {
             HostEvent::Configured { id, t, size, scale } if id == self.surface => {
+                self.driver().flush();
                 self.driver().scene.set_viewport(t, size, scale);
                 self.driver().dirty = true;
                 self.host_asked = true;
@@ -896,6 +899,8 @@ mod pace_tests {
     struct Counter {
         n: u32,
         pace: Cell<Option<f64>>,
+        /// How many times the view was built.
+        views: Cell<u32>,
     }
 
     impl App for Counter {
@@ -904,6 +909,7 @@ mod pace_tests {
             self.n += 1;
         }
         fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            self.views.set(self.views.get() + 1);
             vo_scene::element::Element::column("root").size(100.0 + self.n as f32, 50.0)
         }
         fn frame_pace(&self) -> Option<f64> {
@@ -954,7 +960,7 @@ mod pace_tests {
     }
 
     fn live(pace: Option<f64>) -> Live<Counter> {
-        let app = Counter { n: 0, pace: Cell::new(pace) };
+        let app = Counter { n: 0, pace: Cell::new(pace), views: Cell::new(0) };
         let mut live = Live::new(app, OverlaySpec::default(), crate::Options::default(), None);
         let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
         live.driver = Some(driver);
@@ -977,6 +983,58 @@ mod pace_tests {
         host.now = slot;
         live.after_change(&mut host);
         assert_eq!(host.frames, 1);
+    }
+
+    /// A live overlay as `start` makes it: views wait for the frame under a pace.
+    fn lazy(pace: Option<f64>) -> Live<Counter> {
+        let mut live = live(pace);
+        live.driver().lazy = true;
+        live.driver().app.views.set(0);
+        live
+    }
+
+    #[test]
+    fn paced_messages_build_one_view_per_frame() {
+        let mut live = lazy(Some(30.0));
+        let mut host = Clock { now: 1.01, ..Clock::default() };
+        // An audio batch as two messages, then the next batch 20 ms later: no view yet.
+        live.driver().dispatch((), 1.01);
+        live.driver().dispatch((), 1.01);
+        live.after_change(&mut host);
+        live.driver().dispatch((), 1.02);
+        host.now = 1.02;
+        live.after_change(&mut host);
+        assert_eq!(live.driver().app.views.get(), 0, "no view before the frame");
+        assert_eq!(host.frames, 0, "no frame before the slot");
+        let slot = 1.0 + 1.0 / 30.0 - 1.0 / 120.0;
+        assert!(host.wake.is_some_and(|w| (w - slot).abs() < 1e-9), "wakes at the slot: {:?}", host.wake);
+        host.now = slot;
+        live.after_change(&mut host);
+        assert_eq!(host.frames, 1);
+        // The frame builds the view once, with the newest state.
+        live.sample(&mut host, 7, 1.04);
+        assert_eq!(live.driver().app.views.get(), 1);
+        assert!(!live.driver().stale());
+        let mut list = DisplayList::default();
+        live.driver().scene.sample_into(1.04, &mut list);
+        assert_eq!(list, live.list, "the frame shows the scene as built");
+        live.sample(&mut host, 7, 1.05);
+        assert_eq!(live.driver().app.views.get(), 1, "nothing new, no view");
+    }
+
+    #[test]
+    fn unpaced_and_exiting_messages_build_their_view_at_once() {
+        let mut live = lazy(None);
+        live.driver().dispatch((), 1.01);
+        assert_eq!(live.driver().app.views.get(), 1);
+        // A message that ends the pace builds at once, with what waited before it.
+        let mut live = lazy(Some(30.0));
+        live.driver().dispatch((), 1.01);
+        live.driver().app.pace.set(None);
+        live.driver().dispatch((), 1.02);
+        assert_eq!(live.driver().app.views.get(), 1);
+        assert!(!live.driver().stale());
+        assert_eq!(live.driver().app.n, 2);
     }
 
     #[test]
