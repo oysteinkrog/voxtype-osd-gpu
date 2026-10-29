@@ -109,6 +109,8 @@ impl TextField {
 
     /// A field with `downscale` target pixels per field texel.
     pub fn with_downscale(device: &wgpu::Device, queue: &wgpu::Queue, downscale: f32) -> TextField {
+        // Measures pipeline creation for the warm-up report; no animation reads it.
+        #[allow(clippy::disallowed_methods)]
         let start = Instant::now();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vo-text-field"),
@@ -412,7 +414,7 @@ pub fn glyphs_only(list: &DisplayList, out: &mut DisplayList) {
     out.clear();
     out.size = list.size;
     out.scale = list.scale;
-    out.stage = list.stage.clone();
+    out.stage = list.stage;
     out.layers.extend(list.layers.iter().map(|l| {
         let mut l = l.clone();
         l.trail = None;
