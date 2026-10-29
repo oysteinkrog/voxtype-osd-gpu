@@ -121,6 +121,8 @@ Measured 2026-10-28 by `scripts/osd-vo-budget.sh` (popup at 055a7f4 plus RD-02, 
 
 The seven new looks do not exist yet; their LOOK beads run the script once they do.
 
+Scope with its idle motion (m18: the trace's 1 px live floor, the graticule glow breathing 6 to 9 %, the trigger marker's 1 Hz blink), measure build, 2026-10-29: recording 6.79 % CPU, 52.0 frames/s, GPU 0.692 / 0.705 ms; idle-open 2.00 % CPU, 15.4 frames/s, GPU 0.705 / 0.711 ms. Idle-open was 2.00 % before the idle motion too (RD-14), so it costs no measurable CPU, but scope sits on the 2 % limit.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
