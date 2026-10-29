@@ -666,32 +666,12 @@ pub struct TimedMask {
 /// `n` points of `path`: along its contours by arc length, and, when `fill` and it has closed
 /// contours, 60 % of them inside on a jittered grid (nonzero winding), row by row.
 pub fn sample_path(path: &kurbo::BezPath, n: usize, fill: bool) -> Vec<Point> {
-    use kurbo::PathEl;
     if n == 0 {
         return Vec::new();
     }
-    // Flatten into polylines, one per subpath.
-    let mut lines: Vec<Vec<kurbo::Point>> = Vec::new();
-    let mut closed = false;
-    kurbo::flatten(path, 0.05, |el| match el {
-        PathEl::MoveTo(p) => lines.push(vec![p]),
-        PathEl::LineTo(p) => {
-            if let Some(l) = lines.last_mut() {
-                l.push(p);
-            }
-        }
-        PathEl::ClosePath => {
-            if let Some(l) = lines.last_mut() {
-                if let Some(&first) = l.first() {
-                    l.push(first);
-                }
-                closed = true;
-            }
-        }
-        _ => {}
-    });
+    let (lines, closed) = polylines(path);
     let total: f64 = lines.iter().flat_map(|l| l.windows(2)).map(|w| w[0].distance(w[1])).sum();
-    let inside = if fill && closed { interior(path, (n as f64 * 0.6).round() as usize) } else { Vec::new() };
+    let inside = if fill && closed { interior(&lines, (n as f64 * 0.6).round() as usize) } else { Vec::new() };
     let n_c = if total > 0.0 { n - inside.len() } else { 0 };
     let mut out = Vec::with_capacity(n);
     if n_c > 0 {
@@ -715,33 +695,113 @@ pub fn sample_path(path: &kurbo::BezPath, n: usize, fill: bool) -> Vec<Point> {
     out
 }
 
-/// `n` points inside `path` (nonzero winding) on a jittered grid, row by row; none when the
-/// path has no inside.
-fn interior(path: &kurbo::BezPath, n: usize) -> Vec<Point> {
-    use kurbo::Shape as _;
-    let b = path.bounding_box();
-    if n == 0 || b.area() <= 0.0 {
+/// `path` flattened to polylines, one per subpath, closed ones ending at their start; and
+/// whether any subpath was closed.
+fn polylines(path: &kurbo::BezPath) -> (Vec<Vec<kurbo::Point>>, bool) {
+    use kurbo::PathEl;
+    let mut lines: Vec<Vec<kurbo::Point>> = Vec::new();
+    let mut closed = false;
+    kurbo::flatten(path, 0.05, |el| match el {
+        PathEl::MoveTo(p) => lines.push(vec![p]),
+        PathEl::LineTo(p) => {
+            if let Some(l) = lines.last_mut() {
+                l.push(p);
+            }
+        }
+        PathEl::ClosePath => {
+            if let Some(l) = lines.last_mut() {
+                if let Some(&first) = l.first() {
+                    l.push(first);
+                }
+                closed = true;
+            }
+        }
+        _ => {}
+    });
+    (lines, closed)
+}
+
+/// The x ranges where the horizontal line at `y` is inside `lines` by the nonzero rule, each
+/// polyline taken as closed (as a fill takes it), into `out` in order.
+fn spans(lines: &[Vec<kurbo::Point>], y: f64, cross: &mut Vec<(f64, i32)>, out: &mut Vec<(f64, f64)>) {
+    cross.clear();
+    out.clear();
+    for l in lines {
+        let n = l.len();
+        for i in 0..n {
+            let (a, b) = (l[i], l[(i + 1) % n]);
+            if (a.y <= y) != (b.y <= y) {
+                let x = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+                cross.push((x, if b.y > a.y { 1 } else { -1 }));
+            }
+        }
+    }
+    cross.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut wind = 0;
+    for c in cross.iter() {
+        let was = wind;
+        wind += c.1;
+        if was == 0 && wind != 0 {
+            out.push((c.0, c.0));
+        } else if was != 0 && wind == 0 {
+            if let Some(s) = out.last_mut() {
+                s.1 = c.0;
+            }
+        }
+    }
+}
+
+/// `n` points inside `lines` (nonzero winding) on a jittered grid, row by row; none when they
+/// have no inside.
+fn interior(lines: &[Vec<kurbo::Point>], n: usize) -> Vec<Point> {
+    let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in lines.iter().flatten() {
+        y0 = y0.min(p.y);
+        y1 = y1.max(p.y);
+    }
+    if n == 0 || y1 <= y0 {
         return Vec::new();
     }
-    // Start at twice the cells needed if the box were full, finer until enough are inside.
-    let mut cell = (b.area() / (2.0 * n as f64)).sqrt();
-    for _ in 0..6 {
-        let (w, h) = ((b.width() / cell).ceil() as u32, (b.height() / cell).ceil() as u32);
+    let (mut cross, mut row) = (Vec::new(), Vec::new());
+    // The filled area, from 256 scanlines, sizes the grid.
+    let dy = (y1 - y0) / 256.0;
+    let mut area = 0.0;
+    for k in 0..256 {
+        spans(lines, y0 + (k as f64 + 0.5) * dy, &mut cross, &mut row);
+        area += row.iter().map(|s| s.1 - s.0).sum::<f64>() * dy;
+    }
+    if area <= 0.0 {
+        return Vec::new();
+    }
+    // About 1.25 cells per point; finer if that falls short.
+    let mut cell = (area / (1.25 * n as f64)).sqrt();
+    for _ in 0..4 {
+        let rows = ((y1 - y0) / cell).ceil() as u32;
         let mut cand = Vec::new();
-        for y in 0..h {
-            for x in 0..w {
-                let jx = vo_core::hash::rand_f32(0xe626, x, y, 0) as f64;
-                let jy = vo_core::hash::rand_f32(0xe626, x, y, 1) as f64;
-                let p = kurbo::Point::new(b.x0 + (x as f64 + jx) * cell, b.y0 + (y as f64 + jy) * cell);
-                if path.winding(p) != 0 {
-                    cand.push(Point::new(p.x as f32, p.y as f32));
+        for r in 0..rows {
+            // Four scanlines per row; each cell takes one of them, and a jittered x.
+            let mut subs: [Vec<(f64, f64)>; 4] = Default::default();
+            for (k, sub) in subs.iter_mut().enumerate() {
+                spans(lines, y0 + (r as f64 + (k as f64 + 0.5) / 4.0) * cell, &mut cross, sub);
+            }
+            let (x0, x1) = subs.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |a, s| (a.0.min(s.0), a.1.max(s.1)));
+            if x1 <= x0 {
+                continue;
+            }
+            let c0 = (x0 / cell).floor() as i64;
+            for c in c0..=(x1 / cell).ceil() as i64 {
+                let k = (vo_core::hash::rand_f32(0xe626, c as u32, r, 1) * 4.0) as usize % 4;
+                let x = (c as f64 + vo_core::hash::rand_f32(0xe626, c as u32, r, 0) as f64) * cell;
+                if subs[k].iter().any(|s| s.0 <= x && x < s.1) {
+                    let y = y0 + (r as f64 + (k as f64 + 0.5) / 4.0) * cell;
+                    cand.push(Point::new(x as f32, y as f32));
                 }
             }
         }
         if cand.len() >= n {
             return (0..n).map(|i| cand[((i as f64 + 0.5) * cand.len() as f64 / n as f64) as usize]).collect();
         }
-        cell *= 0.7;
+        cell *= 0.95 * (cand.len().max(1) as f64 / n as f64).sqrt().min(0.95);
     }
     Vec::new()
 }
@@ -778,19 +838,18 @@ impl MaskField {
     /// cells stay fully covered, so the hug force (a negative `EmitterSim::mask`) holds
     /// particles at the shape's own edge, and its halo reaches about `2 * blur` cells out.
     pub fn from_path(path: &kurbo::BezPath, rect: [f32; 4], cell: f32, blur: u32) -> MaskField {
-        use kurbo::Shape as _;
         let (w, h) = mask_size(rect, cell);
-        let b = path.bounding_box();
+        let (lines, _) = polylines(path);
         let (cw, ch) = (rect[2] as f64 / w as f64, rect[3] as f64 / h as f64);
         let mut acc = vec![0f32; (w * h) as usize];
+        let (mut cross, mut row) = (Vec::new(), Vec::new());
         for y in 0..h {
-            let py = rect[1] as f64 + (y as f64 + 0.5) * ch;
-            if py < b.y0 || py > b.y1 {
-                continue;
-            }
-            for x in 0..w {
-                let p = kurbo::Point::new(rect[0] as f64 + (x as f64 + 0.5) * cw, py);
-                if p.x >= b.x0 && p.x <= b.x1 && path.winding(p) != 0 {
+            spans(&lines, rect[1] as f64 + (y as f64 + 0.5) * ch, &mut cross, &mut row);
+            for s in &row {
+                // Cells whose centres are inside the span.
+                let a = ((s.0 - rect[0] as f64) / cw - 0.5).ceil().max(0.0) as u32;
+                let b = (((s.1 - rect[0] as f64) / cw - 0.5).ceil().max(0.0) as u32).min(w);
+                for x in a..b {
                     acc[(y * w + x) as usize] = 1.0;
                 }
             }

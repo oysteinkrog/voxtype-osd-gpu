@@ -7,7 +7,10 @@
 
 use std::time::Instant;
 
-use vo_render::particles::{EmitterLook, EmitterSim, FrameParams, ParticleConfig, Particles, SlotLook, WordGlyph};
+use vo_render::particles::{
+    EmitterLook, EmitterSim, FrameParams, Part, ParticleConfig, Particles, PointForm, SlotLook, SpriteStyle, WordGlyph,
+};
+use vo_scene::emitter::{ShapeTarget, Target};
 use vo_scene::element::TextStyle;
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
@@ -337,5 +340,88 @@ fn main() {
         median(set_warm),
         if timed { median(draw) } else { f64::NAN },
         p.gpu_bytes() as f64 / 1e6
+    );
+
+    // A shape (EG-26): 2000 particles forming an icon at 600x300, timed while they fly in.
+    println!();
+    let (sw, sh) = (600u32, 300u32);
+    let small = d.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let small_view = small.create_view(&Default::default());
+    let mut p = Particles::new(
+        &d,
+        &q,
+        fonts.clone(),
+        ParticleConfig { free_capacity: 64, word_slots: 1, slot_capacity: 2048, ..Default::default() },
+    );
+    p.ensure_pipelines(FORMAT);
+    let svg = r#"<svg viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+        <circle cx="12" cy="20" r="1.5" fill="black"/></svg>"#;
+    let icon = Target::Svg(std::sync::Arc::new(vo_scene::svg::parse(svg).unwrap()));
+    let c = Instant::now();
+    let points = ShapeTarget::new(0.0, icon, 200.0).points(2000);
+    let sample_ms = c.elapsed().as_secs_f64() * 1e3;
+    let c = Instant::now();
+    let form = PointForm { points: &points, starts: None, size: 200.0, persist: true, sweep: 0.0, scatter: false };
+    p.set_points(0, 0.0, &form);
+    let set_ms = c.elapsed().as_secs_f64() * 1e3;
+    let slot = [SlotLook { size: 1.2, style: SpriteStyle::SPARK, ..SlotLook::new(Point::new(300.0, 150.0), Color::WHITE) }];
+    let timer = Timer::new(&d, &q);
+    let mut draw = Vec::new();
+    for f in 0..90 {
+        let t = f as f64 / 60.0;
+        let fp = FrameParams::new(t, Affine::IDENTITY, sw, sh, FORMAT);
+        p.prepare(&fp, &look, &slot);
+        let mut enc = d.create_command_encoder(&Default::default());
+        {
+            let att = [Some(wgpu::RenderPassColorAttachment {
+                view: &small_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let tw = timed.then_some(wgpu::RenderPassTimestampWrites {
+                query_set: &timer.set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            });
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &att,
+                depth_stencil_attachment: None,
+                timestamp_writes: tw,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            p.draw_part(&mut pass, 0, Part::Slot(0));
+        }
+        if timed {
+            timer.finish(&mut enc);
+        }
+        q.submit([enc.finish()]);
+        if timed {
+            draw.push(timer.ms(&d));
+        }
+    }
+    let p95 = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[(v.len() * 95 / 100).min(v.len() - 1)]
+    };
+    println!(
+        "shape: 2000 particles forming an icon at {sw}x{sh}; sampling {sample_ms:.2} ms, set_points {set_ms:.3} ms CPU; draw {:.4} ms median, {:.4} ms p95 GPU",
+        if timed { median(draw.clone()) } else { f64::NAN },
+        if timed { p95(draw) } else { f64::NAN },
     );
 }
