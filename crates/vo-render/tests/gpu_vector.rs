@@ -567,6 +567,7 @@ fn cpu_strokes_match_gpu() {
     ] {
         let want = render(&mut off, name, &list, scale);
         let mut got = vec![0u8; (want.w * want.h * 4) as usize];
+        #[allow(clippy::disallowed_methods, reason = "times the CPU frame for the log, not motion")]
         let started = std::time::Instant::now();
         cpu.draw_bgra(&list, scale, want.w, want.h, want.w as usize * 4, &mut got);
         let ms = started.elapsed().as_secs_f64() * 1e3;

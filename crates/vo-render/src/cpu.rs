@@ -481,7 +481,7 @@ impl CpuRenderer {
         best.clear();
         best.resize(bw * bh, [f32::NEG_INFINITY, 0.0]);
         let reach = if glow > 0.0 { 2.5 * glow } else { 0.0 } + 1.0;
-        for seg in segs.chunks_exact(SEG_TEXELS) {
+        for seg in segs.as_chunks::<SEG_TEXELS>().0 {
             let (a, c) = ([seg[0][0], seg[0][1]], [seg[1][0], seg[1][1]]);
             let bb = [seg[0][2], seg[0][3]];
             let (s0, s1, w0, w1) = (seg[1][2], seg[1][3], seg[2][0], seg[2][1]);
