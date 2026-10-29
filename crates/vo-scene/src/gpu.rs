@@ -205,7 +205,7 @@ pub(crate) fn place_front_halves(list: &mut DisplayList) {
             }
         }
     }
-    let newest = newest.and_then(|(_, li)| runs(&list.layers[li]).last().map(|(ii, _)| (li, ii + 1)));
+    let newest = newest.and_then(|(_, li)| runs(&list.layers[li]).next_back().map(|(ii, _)| (li, ii + 1)));
     let surface_boxes = reading_line_boxes(list, READING_PAD);
     // Insert from the back so earlier positions stay valid.
     let mut fronts: Vec<(usize, u32, GpuItem)> = Vec::new();
