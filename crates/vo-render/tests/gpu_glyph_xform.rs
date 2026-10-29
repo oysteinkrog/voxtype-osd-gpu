@@ -184,20 +184,27 @@ fn cpu_matches_gpu_for_turned_glyphs() {
     let fonts = vo_scene::font::FontRegistry::new();
     fonts.add(data.clone()).unwrap();
     let mut cpu = vo_render::cpu::CpuRenderer::new(fonts);
-    for (name, list, scale) in
-        [("1x", xform_scene(&font, DARK, Color::WHITE), 1.0), ("1.5x", xform_scene(&font, DARK, Color::WHITE), 1.5)]
-    {
+    let mut compare = |list: &DisplayList, scale: f32| {
         let [w, h] = [(list.size.w * scale).ceil() as u32, (list.size.h * scale).ceil() as u32];
-        let want = off.render_to_rgba(&list, [w, h], scale);
+        let want = off.render_to_rgba(list, [w, h], scale);
         let mut got = vec![0u8; (w * h * 4) as usize];
-        cpu.draw_bgra(&list, scale, w, h, w as usize * 4, &mut got);
+        cpu.draw_bgra(list, scale, w, h, w as usize * 4, &mut got);
         for px in got.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         let diffs: Vec<u32> = want.iter().zip(&got).map(|(a, b)| a.abs_diff(*b) as u32).collect();
         let max = *diffs.iter().max().unwrap();
-        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
-        eprintln!("cpu vs gpu, turned glyphs {name}: max {max}, mean {mean:.3}");
-        assert!(max <= 96 && mean <= 1.0, "{name}: CPU differs from GPU: max {max}, mean {mean:.3}");
+        (max, diffs.iter().sum::<u32>() as f64 / diffs.len() as f64)
+    };
+    for scale in [1.0, 1.5] {
+        let turned = xform_scene(&font, DARK, Color::WHITE);
+        let mut upright = turned.clone();
+        for g in &mut upright.glyphs {
+            g.xform = GlyphXform::IDENTITY;
+        }
+        let (max, mean) = compare(&turned, scale);
+        let (max0, mean0) = compare(&upright, scale);
+        eprintln!("cpu vs gpu at {scale}x: turned max {max}, mean {mean:.3}; upright max {max0}, mean {mean0:.3}");
+        assert!(max <= 96.max(max0) && mean <= 1.0, "{scale}x: CPU differs from GPU: max {max}, mean {mean:.3}");
     }
 }
