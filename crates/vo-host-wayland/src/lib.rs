@@ -900,6 +900,43 @@ impl State {
                 self.stage("swapchain configured");
             }
         }
+        let now = self.now();
+        let t = self.predict(&self.surfaces[i], now);
+        if !first_gpu {
+            // The app may keep the frame on screen (`HostApp::prepare_frame`): then nothing is
+            // acquired, drawn or committed, and no frame callback is asked for.
+            let id = self.surfaces[i].id;
+            // Cleared before the app runs, so a request_frame made inside it is kept.
+            self.surfaces[i].want_frame = false;
+            self.in_frame = Some(id);
+            let draw = app.prepare_frame(self, id, t);
+            self.in_frame = None;
+            let Ok(j) = self.index(id) else { return };
+            if j != i {
+                return;
+            }
+            if std::mem::take(&mut self.close_after_frame) {
+                self.remove(i);
+                return;
+            }
+            if !draw {
+                // Nothing to show changed, but a region the app sent still goes out.
+                let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
+                if pending.0.is_some() || pending.1.is_some() {
+                    let wl = self.surfaces[i].gpu_wl().clone();
+                    if let Some(mode) = pending.0 {
+                        self.apply_input(&wl, &mode);
+                    }
+                    if let Some(region) = pending.1 {
+                        self.apply_blur(i, region.as_ref());
+                    }
+                    wl.commit();
+                }
+                return;
+            }
+            // Drawing goes on; if the texture cannot be had, the frame is tried again.
+            self.surfaces[i].want_frame = true;
+        }
         let tex = {
             let s = &self.surfaces[i];
             match s.wgpu.as_ref().unwrap().get_current_texture() {
@@ -912,10 +949,9 @@ impl State {
                 }
             }
         };
-        let now = self.now();
-        let (id, wl, frame, scale, t, on_child) = {
+        let (id, wl, frame, scale, on_child) = {
             let s = &self.surfaces[i];
-            (s.id, s.gpu_wl().clone(), s.frames, s.px_scale() as f32, self.predict(s, now), s.child.is_some())
+            (s.id, s.gpu_wl().clone(), s.frames, s.px_scale() as f32, s.child.is_some())
         };
         wl.frame(&self.qh, wl.clone());
         if self.caps.present_feedback && self.presentation.feedback(&wl, &self.qh).is_ok() {

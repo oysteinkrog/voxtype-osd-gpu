@@ -1030,6 +1030,65 @@ impl DisplayList {
         self.hits.clear();
     }
 
+    /// True when drawing this list would give the same pixels as drawing `other`, so a host
+    /// may keep showing `other`'s frame (RD-14). It holds when the lists are equal apart from
+    /// the signal block, which no built-in shader reads, and neither holds anything whose
+    /// pixels move on their own between frames: particles, feedback trails, app GPU code or
+    /// app materials (those may read the signal block or keep state). False when unsure.
+    pub fn draws_same_as(&self, other: &DisplayList) -> bool {
+        let still = |l: &DisplayList| {
+            l.emitters.is_empty()
+                && l.particle_words.is_none()
+                && l.gpu.is_empty()
+                && l.layers.iter().all(|x| x.trail.is_none())
+                && l.materials.iter().all(|m| m.func < crate::material::CUSTOM_FIRST)
+        };
+        // Destructured so a new field must be placed here: compared, or said to be skipped.
+        let DisplayList {
+            size,
+            scale,
+            stage,
+            layers,
+            items,
+            shapes,
+            shape_prims,
+            glyphs,
+            glyph_fx,
+            emitters: _,
+            emitter_sources: _,
+            particle_words: _,
+            dots,
+            vectors,
+            vector_segs,
+            glass,
+            gpu: _,
+            signals: _,
+            materials,
+            width_tables,
+            width_knots,
+            hits,
+        } = self;
+        still(self)
+            && still(other)
+            && *size == other.size
+            && *scale == other.scale
+            && *stage == other.stage
+            && *layers == other.layers
+            && *items == other.items
+            && *shapes == other.shapes
+            && *shape_prims == other.shape_prims
+            && *glyphs == other.glyphs
+            && *glyph_fx == other.glyph_fx
+            && *dots == other.dots
+            && *vectors == other.vectors
+            && *vector_segs == other.vector_segs
+            && *glass == other.glass
+            && *materials == other.materials
+            && *width_tables == other.width_tables
+            && *width_knots == other.width_knots
+            && *hits == other.hits
+    }
+
     /// Adds `m` and returns its id for an instance's material. The same material as the last
     /// one added reuses its id, so the glyphs of one label share one block.
     pub fn add_material(&mut self, m: Material) -> u32 {
@@ -1179,6 +1238,24 @@ mod tests {
         let m = Affine::rotate(std::f32::consts::FRAC_PI_4).then(&Affine::translate(50.0, 50.0));
         let list = DisplayList { hits: vec![hit(m, Rect::new(-10.0, -10.0, 20.0, 20.0), 0.0)], ..Default::default() };
         assert_eq!(list.input_region().rects, vec![IRect { x: 35, y: 35, w: 30, h: 30 }]);
+    }
+
+    #[test]
+    fn same_pixels_ignores_the_signal_block_only() {
+        let a = DisplayList {
+            hits: vec![hit(Affine::IDENTITY, Rect::new(0.0, 0.0, 10.0, 10.0), 0.0)],
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.signals.head[0] = 1.25;
+        assert!(a.draws_same_as(&b) && b.draws_same_as(&a));
+        let mut c = a.clone();
+        c.hits[0].shape = RRect::new(Rect::new(0.0, 0.0, 11.0, 10.0), 0.0);
+        assert!(!a.draws_same_as(&c));
+        // An app material may read the signal block, so its lists never count as the same.
+        let mut d = a.clone();
+        d.add_material(Material::custom(crate::material::CUSTOM_FIRST));
+        assert!(!d.draws_same_as(&d.clone()));
     }
 
     #[test]

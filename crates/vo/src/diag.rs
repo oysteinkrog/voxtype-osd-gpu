@@ -17,6 +17,12 @@ pub trait Diagnostics {
         let _ = (n, t, host);
     }
 
+    /// A paced frame at `t` was not drawn: it would have shown the same pixels as the frame
+    /// on screen (`HostApp::prepare_frame`).
+    fn kept_frame(&mut self, t: f64) {
+        let _ = t;
+    }
+
     /// Nothing moves any more at `t`, so no frames until the next event.
     fn settled(&mut self, t: f64, host: &HostDiag) {
         let _ = (t, host);
@@ -66,6 +72,8 @@ pub struct LogDiagnostics {
     settles: Vec<(f64, usize, u64)>,
     /// Frames drawn while idle. Should stay 0.
     idle_frames: u64,
+    /// Paced frames not drawn because nothing they show changed.
+    kept_frames: u64,
     /// Frame times per extra surface, by key, in the order the surfaces opened.
     surfaces: Vec<(String, Vec<f64>)>,
 }
@@ -128,6 +136,13 @@ impl Diagnostics for LogDiagnostics {
         }
     }
 
+    fn kept_frame(&mut self, t: f64) {
+        self.kept_frames += 1;
+        if self.every_frame {
+            eprintln!("vo: kept the frame on screen t={t:.4}");
+        }
+    }
+
     fn settled(&mut self, t: f64, host: &HostDiag) {
         self.settles.push((t, self.frames.len(), host.loop_wakeups));
         eprintln!("vo: settled t={t:.3} frames={} {}", self.frames.len(), self.memory());
@@ -169,7 +184,13 @@ impl Diagnostics for LogDiagnostics {
         for (key, times) in &self.surfaces {
             eprintln!("{}", self.surface_summary(key, times));
         }
-        eprintln!("vo: exit: frames={} loop_wakeups={} {}", self.frames.len(), host.loop_wakeups, self.memory());
+        eprintln!(
+            "vo: exit: frames={} kept={} loop_wakeups={} {}",
+            self.frames.len(),
+            self.kept_frames,
+            host.loop_wakeups,
+            self.memory()
+        );
     }
 }
 

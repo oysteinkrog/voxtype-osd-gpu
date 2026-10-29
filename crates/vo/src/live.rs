@@ -58,6 +58,11 @@ struct Live<A: App> {
     /// The transparent margin round the view, from the first view (`Options::margin`).
     insets: vo_scene::Insets,
     list: DisplayList,
+    /// The list `list` held before the last `prepare_frame` sampled into it: the frame on
+    /// screen when that frame is kept. A spare buffer otherwise.
+    shown: DisplayList,
+    /// The time `prepare_frame` sampled `list` at, for the frame that follows it.
+    prepared: Option<f64>,
     /// The last region sent to the host, for `InputMode::Regions` specs.
     region: Option<InputRegion>,
     /// The last compositor blur region sent, from the glass panels in the list (FX07).
@@ -324,12 +329,16 @@ impl<A: App> Live<A> {
     }
 
     /// After a frame, CPU or GPU: report it, then ask for the next one or report the settle.
-    fn after_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) {
+    /// `drawn` is false for a frame kept on screen (`prepare_frame`): it paces and settles as
+    /// a drawn one, but is not counted or reported as one.
+    fn after_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64, drawn: bool) {
         let n = self.frames;
-        self.frames += 1;
+        if drawn {
+            self.frames += 1;
+        }
         let host_asked = std::mem::take(&mut self.host_asked);
         if let Some(before) = self.settled_list.take() {
-            if !host_asked && before == self.list {
+            if drawn && !host_asked && before == self.list {
                 if let Some(d) = self.diag() {
                     d.idle_frame(n, t);
                 }
@@ -341,7 +350,11 @@ impl<A: App> Live<A> {
         self.last_frame = Some(t);
         let pace = self.driver().app.frame_pace();
         if let Some(d) = self.diag() {
-            d.frame(n, t, &host_diag);
+            if drawn {
+                d.frame(n, t, &host_diag);
+            } else {
+                d.kept_frame(t);
+            }
         }
         self.paced = None;
         if moving {
@@ -458,7 +471,9 @@ impl<A: App> HostApp for Live<A> {
         }
         self.cpu = None;
         self.first_gpu_frame.get_or_insert(frame.frame);
-        self.sample(host, frame.id, frame.t);
+        if self.prepared.take() != Some(frame.t) {
+            self.sample(host, frame.id, frame.t);
+        }
         let mut target = Target::from_texture(frame.texture.clone());
         self.renderer.as_mut().expect("GPU ready").render_at(&self.list, frame.scale, &mut target);
         if self.first_gpu_frame == Some(frame.frame) && !host.caps().present_feedback && !self.startup_logged {
@@ -468,7 +483,36 @@ impl<A: App> HostApp for Live<A> {
                 d.startup(&host_diag);
             }
         }
-        self.after_frame(host, frame.id, frame.t);
+        self.after_frame(host, frame.id, frame.t, true);
+    }
+
+    /// RD-14: under the app's frame pace, a frame whose display list draws the same pixels as
+    /// the one on screen is kept: no encode, submit or present. Room tone on a look whose
+    /// waveform holds still then costs one scene sample per paced frame. Frames the host
+    /// asked for, the first GPU frames and frames without a pace are always drawn.
+    fn prepare_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) -> bool {
+        // A prepared frame that was never drawn (the host could not get a texture) left `list`
+        // holding pixels that are not on screen; `shown` still holds those that are.
+        let undrawn = self.prepared.take().is_some();
+        let eligible = id == self.surface
+            && self.cpu.is_none()
+            && self.first_gpu_frame.is_some()
+            && self.frames > 0
+            && !self.host_asked
+            && pace_period(self.driver().app.frame_pace()).is_some();
+        if !eligible {
+            return true;
+        }
+        if !undrawn {
+            std::mem::swap(&mut self.list, &mut self.shown);
+        }
+        self.sample(host, id, t);
+        if self.list.draws_same_as(&self.shown) {
+            self.after_frame(host, id, t, false);
+            return false;
+        }
+        self.prepared = Some(t);
+        true
     }
 
     fn cpu_frame(&mut self, host: &mut dyn HostCtl, frame: &mut CpuFrame<'_>) -> bool {
@@ -478,7 +522,7 @@ impl<A: App> HostApp for Live<A> {
         self.sample(host, frame.id, frame.t);
         let [w, h] = frame.size;
         self.cpu.as_mut().unwrap().draw_bgra(&self.list, frame.scale, w, h, frame.stride, frame.pixels);
-        self.after_frame(host, frame.id, frame.t);
+        self.after_frame(host, frame.id, frame.t, true);
         true
     }
 }
@@ -546,6 +590,8 @@ impl<A: App> Live<A> {
             asked,
             insets: vo_scene::Insets::ZERO,
             list: DisplayList::default(),
+            shown: DisplayList::default(),
+            prepared: None,
             region: None,
             blur: None,
             paced: None,
@@ -1067,6 +1113,32 @@ mod pace_tests {
         live.host_asked = true;
         live.after_change(&mut host);
         assert_eq!(host.frames, 1);
+    }
+
+    /// RD-14: a paced frame that would show what is on screen is kept, not drawn.
+    #[test]
+    fn a_paced_frame_with_nothing_new_is_kept() {
+        let mut live = live(Some(30.0));
+        let mut host = Clock { now: 1.01, ..Clock::default() };
+        live.surface = 7;
+        live.first_gpu_frame = Some(0);
+        live.frames = 1;
+        live.sample(&mut host, 7, 1.0);
+        assert!(!live.prepare_frame(&mut host, 7, 1.04), "same list: kept");
+        assert_eq!((live.frames, live.last_frame), (1, Some(1.04)), "paced as a frame, not counted as one");
+        // A change draws, and the frame uses the list sampled for it. (The counter's view
+        // draws nothing, so a new surface size is the change.)
+        live.driver().scene.set_viewport(1.05, vo_scene::geom::Size::new(320.0, 200.0), 1.0);
+        assert!(live.prepare_frame(&mut host, 7, 1.08));
+        assert_eq!(live.prepared, Some(1.08));
+        assert_ne!(live.list, live.shown, "the list on screen is kept apart");
+        // Not under a pace, or when the host asked: always drawn.
+        live.after_frame(&mut host, 7, 1.08, true);
+        live.host_asked = true;
+        assert!(live.prepare_frame(&mut host, 7, 1.12));
+        live.host_asked = false;
+        live.driver().app.pace.set(None);
+        assert!(live.prepare_frame(&mut host, 7, 1.12));
     }
 
     #[test]

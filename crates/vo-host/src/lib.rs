@@ -381,6 +381,16 @@ pub trait HostApp {
     /// same commit as the frame.
     fn frame(&mut self, host: &mut dyn HostCtl, frame: &Frame<'_>);
 
+    /// Called before the host takes a texture for a GPU frame on `id` at time `t` (the same
+    /// `t` the frame then gets). Return false when that frame would show the same pixels as
+    /// the one on screen: the host then draws and presents nothing, the old frame stays, and
+    /// no `frame` call follows. A host that does not ask always draws. Changes asked for with
+    /// `HostCtl::update` here land on the same commit as the frame.
+    fn prepare_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) -> bool {
+        let _ = (host, id, t);
+        true
+    }
+
     /// Draw `frame` on the CPU, before the GPU is ready. Return false to skip it; the host
     /// then waits for the GPU. Changes asked for with `HostCtl::update` during this call land
     /// on the same commit.
