@@ -18,6 +18,8 @@
 //! - `svg`: a small SVG importer for icons and logos.
 //! - `canvas`: elements drawn by app code from the frame time.
 //! - `path`: vector paths: strokes with arc length, trim, morph, filled paths.
+//! - `centreline`: pen strokes from a real glyph: centre lines, stroke order and stem width
+//!   (EG-29).
 //! - `curve`: glyphs on curves: text along a path, a glyph flying on an S-curve, curved arrows.
 //! - `reach`: how far effects draw outside an element's box, to size a surface's margin.
 //! - `repeat`: children and ticks around a ring or along a path, sliding on springs.
@@ -63,6 +65,7 @@ pub mod assets;
 pub mod bars;
 pub mod bind;
 pub mod canvas;
+pub mod centreline;
 pub mod container;
 pub mod curve;
 pub mod depth_stack;
