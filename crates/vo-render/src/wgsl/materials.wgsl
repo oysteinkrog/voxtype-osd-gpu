@@ -64,9 +64,36 @@ struct MatIn {
 //     image, bilinear, clamped at the edges. Colour as the texture holds it. Transparent black
 //     for an empty slot or a slot past 3.
 //
-// Pipelines for materials that read no texture define both as stubs that return transparent
-// black, so an app function that calls them compiles everywhere; their bind groups and cost
-// are unchanged.
+// Text (EG-31). A material that reads text (`Material::reads_text`) also sees the text field
+// and the word table the app built with `TextField::update_words` and handed over with
+// `TextField::bind` (`vo_render::text_field`):
+//
+//   text_dist (px: vec2f) -> vec4f
+//     x: signed distance from `px` (target pixels) to the nearest ink in pixels, negative
+//     inside; yz: the unit direction away from the ink; w: the ink's coverage. The field is
+//     at half resolution and bilinear, so trust it to a pixel or two. Without a field, or
+//     for a material that does not read text, x is 1e4 and the rest 0.
+//
+//   word_near (px: vec2f) -> WordHit
+//     The word whose box is nearest `px`: its id, its age in seconds (long settled under
+//     reduced motion), the distance to its box (0 inside) and the box (left, top, right,
+//     bottom in target pixels). `id` is NO_WORD_ID and `dist` 1e9 when there are no words.
+//
+//   text_word_count () -> u32, text_word (k: u32, px: vec2f) -> WordHit
+//     The table itself, newest word first (up to 64), with the distance from `px`.
+//
+// Pipelines for materials that read no texture define all of these as stubs that return
+// transparent black, no ink and no words, so an app function that calls them compiles
+// everywhere; their bind groups and cost are unchanged.
+
+const NO_WORD_ID: u32 = 0xffffffffu;
+
+struct WordHit {
+  id: u32,
+  age: f32,
+  dist: f32,
+  rect: vec4f,
+};
 
 // vo: texture helpers begin
 fn tex_backdrop (px: vec2f) -> vec4f {
@@ -75,6 +102,22 @@ fn tex_backdrop (px: vec2f) -> vec4f {
 
 fn tex_image (slot: u32, uv: vec2f) -> vec4f {
   return vec4f (0.0);
+}
+
+fn text_dist (px: vec2f) -> vec4f {
+  return vec4f (1e4, 0.0, 0.0, 0.0);
+}
+
+fn text_word_count () -> u32 {
+  return 0u;
+}
+
+fn text_word (k: u32, px: vec2f) -> WordHit {
+  return WordHit (NO_WORD_ID, 0.0, 1e9, vec4f (0.0));
+}
+
+fn word_near (px: vec2f) -> WordHit {
+  return WordHit (NO_WORD_ID, 0.0, 1e9, vec4f (0.0));
 }
 // vo: texture helpers end
 

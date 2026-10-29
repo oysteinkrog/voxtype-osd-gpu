@@ -422,6 +422,8 @@ struct MatTextures {
     empty: wgpu::TextureView,
     /// This frame's bind groups, by backdrop index (`NO_BACKDROP` for none).
     binds: Vec<(u32, wgpu::BindGroup)>,
+    /// The word table materials that read text see (EG-31).
+    words: wgpu::Buffer,
 }
 
 impl MatTextures {
@@ -456,6 +458,18 @@ impl MatTextures {
             },
         ];
         entries.extend((0..IMAGE_SLOTS as u32).map(|i| tex(3 + i)));
+        // The text field and the word table (EG-31).
+        entries.push(tex(7));
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vo-material-textures"),
             entries: &entries,
@@ -479,7 +493,13 @@ impl MatTextures {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        MatTextures { layout, sampler, empty, binds: Vec::new() }
+        let words = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vo-material-words"),
+            size: crate::text_field::WORDS_BYTES as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        MatTextures { layout, sampler, empty, binds: Vec::new(), words }
     }
 }
 
@@ -752,6 +772,12 @@ pub struct Renderer {
     material_images: [Option<wgpu::TextureView>; IMAGE_SLOTS],
     /// A material read a backdrop that was not there: warned once.
     warned_backdrop: bool,
+    /// The text field and the word table bytes for materials that read text (EG-31).
+    text_view: Option<wgpu::TextureView>,
+    text_words: Vec<u8>,
+    /// Each glyph's word id and box in target pixels, gathered while `collect_words` (EG-31).
+    collect_words: bool,
+    word_boxes: Vec<(u32, [f32; 4])>,
 }
 
 // `vo::Resident` builds a renderer on a warm-up thread and hands it to the host's thread.
@@ -836,6 +862,10 @@ impl Renderer {
             mat_tex: None,
             material_images: Default::default(),
             warned_backdrop: false,
+            text_view: None,
+            text_words: crate::text_field::WordTable::default().gpu_bytes(None),
+            collect_words: false,
+            word_boxes: Vec::new(),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -1078,6 +1108,31 @@ impl Renderer {
         self.material_images[slot] = view;
     }
 
+    /// The text field and word table for materials that read text (EG-31,
+    /// `Material::reads_text`): the field's view, its size in texels and target pixels per
+    /// texel, or `None` for no field. `vo_render::text_field::TextField::bind` calls it. They
+    /// stay bound until changed.
+    pub fn set_text_inputs(
+        &mut self,
+        field: Option<(wgpu::TextureView, [u32; 2], f32)>,
+        words: &crate::text_field::WordTable,
+    ) {
+        self.text_words = words.gpu_bytes(field.as_ref().map(|(_, s, k)| (*s, *k)));
+        self.text_view = field.map(|(v, _, _)| v);
+    }
+
+    /// While on, each encode gathers the word id and box in target pixels of every glyph in
+    /// live text, for [`Renderer::word_boxes`] (EG-31). Off by default.
+    pub fn collect_word_boxes(&mut self, on: bool) {
+        self.collect_words = on;
+    }
+
+    /// The boxes the last encode gathered, one per glyph, in paint order (EG-31). Kept until
+    /// gathering is turned on again.
+    pub fn word_boxes(&self) -> &[(u32, [f32; 4])] {
+        &self.word_boxes
+    }
+
     /// Adds a painter for GPU elements (`vo_scene::gpu`). Painters are asked in the order they
     /// were added; an item no painter knows is skipped.
     pub fn add_painter(&mut self, painter: Box<dyn GpuPainter>) {
@@ -1132,6 +1187,9 @@ impl Renderer {
         self.surfaces.clear();
         self.gpu_items.clear();
         self.backdrops.clear();
+        if self.collect_words {
+            self.word_boxes.clear();
+        }
         if let Some(d) = &mut self.displace {
             d.clear();
         }
@@ -1409,6 +1467,9 @@ impl Renderer {
                                 &mut self.surfaces[draw_surface].bounds,
                                 intersect(reach(glyph_bounds(&inst)), scissor),
                             );
+                            if self.collect_words && g.word != vo_scene::display::NO_WORD {
+                                self.word_boxes.push((g.word, glyph_bounds(&inst)));
+                            }
                             self.glyphs.push(inst);
                         }
                     }
@@ -2570,6 +2631,7 @@ impl Renderer {
             return;
         }
         let t = self.mat_tex.get_or_insert_with(|| MatTextures::new(&self.device));
+        self.queue.write_buffer(&t.words, 0, &self.text_words);
         let materials = &self.material_buf.as_ref().expect("uploaded").0;
         for k in keys {
             let backdrop = self.backdrops.get(k as usize).and_then(|b| b.tex).map(|i| &self.pool[i].view);
@@ -2587,6 +2649,11 @@ impl Renderer {
                     resource: wgpu::BindingResource::TextureView(view.as_ref().unwrap_or(&t.empty)),
                 });
             }
+            entries.push(wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(self.text_view.as_ref().unwrap_or(&t.empty)),
+            });
+            entries.push(wgpu::BindGroupEntry { binding: 8, resource: t.words.as_entire_binding() });
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vo-material-textures"),
                 layout: &t.layout,

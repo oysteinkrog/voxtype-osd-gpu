@@ -35,6 +35,7 @@ pub mod profile;
 pub mod renderer;
 pub mod shapes;
 pub mod text;
+pub mod text_field;
 pub mod vector;
 
 pub use gpu::{BackdropView, GpuPainter, PaintCx, StagePx};

@@ -78,8 +78,12 @@ pub const READS_BACKDROP: u32 = 1 << 30;
 /// `tex_image` in WGSL). Reserved like [`READS_BACKDROP`].
 pub const READS_IMAGES: u32 = 1 << 31;
 
-/// Both texture bits.
-pub const READS_TEXTURES: u32 = READS_BACKDROP | READS_IMAGES;
+/// `Material::flags` bit for any material: it reads the text field and the word table (EG-31,
+/// `text_dist` and `word_near` in WGSL). Reserved like [`READS_BACKDROP`].
+pub const READS_TEXT: u32 = 1 << 29;
+
+/// Every texture bit: a material with any of them draws with the textured pipelines.
+pub const READS_TEXTURES: u32 = READS_BACKDROP | READS_IMAGES | READS_TEXT;
 
 /// Image slots a material can read with `tex_image (slot, uv)`.
 pub const IMAGE_SLOTS: usize = 4;
@@ -148,6 +152,15 @@ impl Material {
     /// transparent black.
     pub fn reads_images(mut self) -> Material {
         self.flags |= READS_IMAGES;
+        self
+    }
+
+    /// The material reads the text field and the word table (EG-31): how far each pixel is
+    /// from the ink, and the words near it with their ages. The app builds the field with
+    /// `vo_render::text_field::TextField::update_words`, which does nothing for a frame where
+    /// no material reads text.
+    pub fn reads_text(mut self) -> Material {
+        self.flags |= READS_TEXT;
         self
     }
 
@@ -509,7 +522,8 @@ mod tests {
         let b = m.reads_backdrop();
         assert_eq!(b.flags, super::READS_BACKDROP);
         assert!(b.reads_textures() && m.reads_images().reads_textures());
-        assert_eq!(b.reads_images().flags, super::READS_TEXTURES);
+        assert_eq!(b.reads_images().flags, super::READS_BACKDROP | super::READS_IMAGES);
+        assert!(Material::custom(super::CUSTOM_FIRST).reads_text().reads_textures());
     }
 
     use super::*;

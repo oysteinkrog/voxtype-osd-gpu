@@ -195,13 +195,7 @@ pub struct PassInfo {
 pub type ExtraDraw<'a> = &'a mut dyn FnMut(&mut wgpu::RenderPass<'_>, &PassInfo);
 
 /// The text field the clouds react to, or none.
-pub struct FieldBinding<'a> {
-    pub view: &'a wgpu::TextureView,
-    /// The field texture's size in its own pixels.
-    pub size: [u32; 2],
-    /// Target pixels per field pixel.
-    pub scale: f32,
-}
+pub use vo_render::text_field::FieldBinding;
 
 pub struct Renderer3d {
     device: wgpu::Device,

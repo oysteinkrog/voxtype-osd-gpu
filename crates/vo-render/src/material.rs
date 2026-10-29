@@ -14,6 +14,11 @@
 //! `materials.wgsl` swapped for `wgsl/material_tex.wgsl` ([`with_textures`]), and their group 2
 //! adds the backdrop, a sampler and the image slots. Draws whose materials read no texture
 //! keep the plain pipelines and bind group.
+//!
+//! Text (EG-31): a material with `vo_scene::material::READS_TEXT` takes the same textured
+//! pipelines, whose group 2 also binds the text field (binding 7) and the word table (binding
+//! 8) from [`crate::text_field`]. `text_dist`, `word_near`, `text_word` and `text_word_count`
+//! are stubs in `materials.wgsl` and real in `material_tex.wgsl`.
 
 use bytemuck::{Pod, Zeroable};
 use vo_scene::geom::Color;
@@ -124,5 +129,7 @@ mod tests {
         let tex = with_textures(&plain);
         assert!(tex.contains("var mat_backdrop") && tex.contains("fn tex_image"));
         assert_eq!(tex.matches("fn tex_backdrop").count(), 1);
+        assert!(plain.contains("fn word_near") && !plain.contains("mat_words"));
+        assert!(tex.contains("var<storage, read> mat_words") && tex.matches("fn text_dist").count() == 1);
     }
 }
