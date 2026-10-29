@@ -714,6 +714,13 @@ impl Resident {
     pub fn is_warm(&self) -> bool {
         self.host.is_some()
     }
+
+    /// Whether the warm-up `warm_up` started has finished, so a show started now draws on the
+    /// warm renderer from its first GPU frame. True when no warm-up is running. A tool that
+    /// measures a show as one after the first would be waits for this before `run`.
+    pub fn warm_up_done(&self) -> bool {
+        self.warming.as_ref().is_none_or(|slot| slot.lock().map_or(true, |r| r.is_some()))
+    }
 }
 
 /// Gives memory freed during a show back to the system. glibc keeps freed heap pages for
