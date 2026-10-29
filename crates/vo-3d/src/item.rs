@@ -66,6 +66,8 @@ pub trait Source3d: Debug + Send + Sync {
 struct ItemUniform {
     rect: [f32; 4],
     viewport: [f32; 4],
+    /// The region's top left in the scratch texture.
+    src: [f32; 4],
     /// x0, y0, x1, y1 in surface pixels; the first `cut_count` are used.
     cuts: [[f32; 4]; MAX_CUTS],
 }
@@ -86,6 +88,20 @@ pub struct ItemPainter {
     scratch: Option<Scratch>,
     /// Sources whose meshes are uploaded, by address, with the id of their first mesh.
     uploaded: Vec<(usize, u32)>,
+    /// The front half's composite buffer, apart from the back half's (one submit).
+    uniform_front: wgpu::Buffer,
+    /// A front half already drawn beside its back half, waiting for its composite.
+    front: Option<Front>,
+}
+
+/// A front half drawn in the back half's pass (EG-20): where it is in the scratch texture.
+struct Front {
+    key: usize,
+    t: f64,
+    /// `x, y, w, h` in surface pixels; `w` 0 when the half is empty.
+    rect: [f32; 4],
+    /// Its top left in the scratch texture.
+    src: [f32; 2],
 }
 
 /// Where an item goes on the surface.
@@ -160,11 +176,21 @@ impl ItemPainter {
             pipeline: None,
             scratch: None,
             uploaded: Vec::new(),
+            uniform_front: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo3d-item-front"),
+                size: std::mem::size_of::<ItemUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            front: None,
         }
     }
 
     /// Records `source` at `t` into `enc`, composited over `view` (which has `format`) at
-    /// `at`. Writes queue buffers now, so at most one item per painter per submit.
+    /// `at`. Writes queue buffers now, so at most one item per painter per submit, except for
+    /// the two halves of one split element (EG-20): a back half on the stage camera with
+    /// meshes alone draws its front half in the same pass, and the front half's own call then
+    /// only composites it ([`ItemPainter::has_front`]).
     pub fn paint(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
@@ -174,6 +200,16 @@ impl ItemPainter {
         t: f64,
         at: &ItemPlace,
     ) {
+        let key = source_key(source);
+        if at.part == Part::Front {
+            if let Some(f) = self.front.take().filter(|f| f.key == key && f.t == t) {
+                if f.rect[2] > 0.0 {
+                    self.composite(enc, view, format, f.rect, f.src, at, true);
+                }
+                return;
+            }
+        }
+        self.front = None;
         let [_, _, w, h] = at.rect;
         if at.opacity <= 0.0 || w <= 0.0 || h <= 0.0 {
             return;
@@ -210,8 +246,42 @@ impl ItemPainter {
                     return;
                 }
                 let rect = [r[0], r[1], r[2] - r[0], r[3] - r[1]];
-                frame.camera = Camera::stage(st.perspective / scale, st.origin, st.centre, scale, rect);
-                rect
+                let camera = |rect: [f32; 4]| Camera::stage(st.perspective / scale, st.origin, st.centre, scale, rect);
+                frame.camera = camera(rect);
+                // Draw only the box the meshes (or this half of them) cover: the same
+                // projection on a smaller window, so the pixels inside are the same.
+                let tight = |scene: &mut Renderer3d, frame: &Frame3d, part: Part| {
+                    scene.part = part;
+                    let b = scene.draw_bounds_px(frame, [rect[2], rect[3]])?;
+                    let t = [
+                        r[0].max((r[0] + b[0]).floor()),
+                        r[1].max((r[1] + b[1]).floor()),
+                        r[2].min((r[0] + b[2]).ceil()),
+                        r[3].min((r[1] + b[3]).ceil()),
+                    ];
+                    Some(if t[2] <= t[0] || t[3] <= t[1] {
+                        [t[0], t[1], 0.0, 0.0]
+                    } else {
+                        [t[0], t[1], t[2] - t[0], t[3] - t[1]]
+                    })
+                };
+                if at.part == Part::Behind {
+                    let back = tight(&mut self.scene, &frame, Part::Behind);
+                    let front = tight(&mut self.scene, &frame, Part::Front);
+                    self.scene.part = Part::Behind;
+                    if let (Some(back), Some(front)) = (back, front) {
+                        self.paint_halves(enc, view, format, &frame, back, front, &camera, scale, at, key, t);
+                        return;
+                    }
+                }
+                match tight(&mut self.scene, &frame, at.part) {
+                    Some(t) if t[2] == 0.0 => return,
+                    Some(t) => {
+                        frame.camera = camera(t);
+                        t
+                    }
+                    None => rect,
+                }
             }
             _ => at.rect,
         };
@@ -221,7 +291,75 @@ impl ItemPainter {
         let scratch = self.scratch.as_ref().unwrap();
         let out = crate::render::Output { view: &scratch.view, size, format, scale };
         self.scene.encode_with(enc, out, &frame, None, None);
+        self.composite(enc, view, format, [x0, y0, size[0] as f32, size[1] as f32], [0.0; 2], at, false);
+    }
 
+    /// Whether a front half of `source` at `t` is drawn and waits for its composite.
+    pub fn has_front(&self, source: &dyn Source3d, t: f64) -> bool {
+        self.front.as_ref().is_some_and(|f| f.key == source_key(source) && f.t == t)
+    }
+
+    /// Both halves in one pass, side by side in the scratch texture: composites the back
+    /// half now and keeps the front half for its own call. `back` and `front` are the halves'
+    /// boxes in surface pixels, whole pixels, `w` 0 when empty.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_halves(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        frame: &Frame3d,
+        back: [f32; 4],
+        front: [f32; 4],
+        camera: &dyn Fn([f32; 4]) -> Camera,
+        scale: f32,
+        at: &ItemPlace,
+        key: usize,
+        t: f64,
+    ) {
+        let (wb, wf) = (back[2] as u32, front[2] as u32);
+        let (hb, hf) = (back[3] as u32, front[3] as u32);
+        if wb + wf > 0 {
+            let size = [wb + wf, hb.max(hf)];
+            self.ensure_scratch(size, format);
+            let scratch = self.scratch.as_ref().unwrap();
+            let out = crate::render::Output { view: &scratch.view, size, format, scale };
+            if wb > 0 && wf > 0 {
+                let halves = [
+                    crate::render::Half { camera: camera(back), part: Part::Behind, viewport: [0, 0, wb, hb] },
+                    crate::render::Half { camera: camera(front), part: Part::Front, viewport: [wb, 0, wf, hf] },
+                ];
+                self.scene.encode_halves(enc, out, frame, halves);
+            } else {
+                // One half is empty: an ordinary pass for the other.
+                let (r, part) = if wb > 0 { (back, Part::Behind) } else { (front, Part::Front) };
+                let mut f = frame.clone();
+                f.camera = camera(r);
+                self.scene.part = part;
+                self.scene.encode_with(enc, out, &f, None, None);
+                self.scene.part = Part::Behind;
+            }
+        }
+        if wb > 0 {
+            self.composite(enc, view, format, back, [0.0; 2], at, false);
+        }
+        let src = if wb > 0 { [wb as f32, 0.0] } else { [0.0; 2] };
+        self.front = Some(Front { key, t, rect: if wf > 0 { front } else { [0.0; 4] }, src });
+    }
+
+    /// Composites `rect` (surface pixels) of the scratch texture, from `src` in it, over
+    /// `view`, leaving the cut boxes alone.
+    #[allow(clippy::too_many_arguments)]
+    fn composite(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        rect: [f32; 4],
+        src: [f32; 2],
+        at: &ItemPlace,
+        front: bool,
+    ) {
         let mut cuts = [[0.0f32; 4]; MAX_CUTS];
         for (i, c) in at.cut.iter().enumerate() {
             let k = i.min(MAX_CUTS - 1);
@@ -233,17 +371,20 @@ impl ItemPainter {
             };
         }
         let u = ItemUniform {
-            rect: [x0, y0, size[0] as f32, size[1] as f32],
+            rect,
             viewport: [at.surface[0] as f32, at.surface[1] as f32, at.opacity, at.cut.len().min(MAX_CUTS) as f32],
+            src: [src[0], src[1], 0.0, 0.0],
             cuts,
         };
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
+        let uniform = if front { &self.uniform_front } else { &self.uniform };
+        self.queue.write_buffer(uniform, 0, bytemuck::bytes_of(&u));
+        let scratch = self.scratch.as_ref().unwrap();
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vo3d-item"),
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scratch.view) },
-                wgpu::BindGroupEntry { binding: 1, resource: self.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
             ],
         });
         let pipeline = self.pipeline(format);
@@ -270,7 +411,7 @@ impl ItemPainter {
 
     /// The id of the source's first mesh, uploading its meshes the first time.
     fn mesh_base(&mut self, source: &dyn Source3d) -> u32 {
-        let key = source as *const dyn Source3d as *const () as usize;
+        let key = source_key(source);
         if let Some(&(_, base)) = self.uploaded.iter().find(|(k, _)| *k == key) {
             return base;
         }
@@ -346,6 +487,11 @@ impl ItemPainter {
         }
         &self.pipeline.as_ref().unwrap().1
     }
+}
+
+/// A source's identity: its address.
+fn source_key(source: &dyn Source3d) -> usize {
+    source as *const dyn Source3d as *const () as usize
 }
 
 #[cfg(test)]

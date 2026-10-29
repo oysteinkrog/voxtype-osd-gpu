@@ -70,7 +70,7 @@ pub use item::{ItemPainter, ItemPlace, Part, Source3d, StageAt};
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
 pub use painter::{install, item, Item3d, Painter3d};
-pub use render::{ExtraDraw, FieldBinding, Output, PassInfo, Renderer3d};
+pub use render::{ExtraDraw, FieldBinding, Half, Output, PassInfo, Renderer3d};
 pub use ribbon3d::{Ribbon3d, RibbonItem, RibbonLook};
 pub use sculpture::{Letter, SculptLook, Sculpture};
 pub use shadow::Shadows;

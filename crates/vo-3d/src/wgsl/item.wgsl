@@ -6,6 +6,8 @@ struct Item {
   rect: vec4f,
   // Surface width and height in pixels, opacity, number of cut boxes.
   viewport: vec4f,
+  // The region's top left in the scratch texture.
+  src: vec4f,
   // Boxes x0, y0, x1, y1 in surface pixels where nothing is drawn (EG-20's reading line).
   cuts: array<vec4f, 16>,
 };
@@ -22,7 +24,7 @@ struct Item {
 
 @fragment fn fs_item (@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let p = vec2i (frag.xy - item.rect.xy);
-  let size = vec2i (textureDimensions (item_tex));
+  let size = vec2i (item.rect.zw);
   if (any (p < vec2i (0)) || any (p >= size)) {
     return vec4f (0.0);
   }
@@ -32,5 +34,5 @@ struct Item {
       discard;
     }
   }
-  return textureLoad (item_tex, p, 0) * item.viewport.z;
+  return textureLoad (item_tex, p + vec2i (item.src.xy), 0) * item.viewport.z;
 }

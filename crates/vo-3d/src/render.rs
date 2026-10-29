@@ -238,6 +238,17 @@ pub struct Renderer3d {
     pub pipeline_time: Duration,
     /// Which half of the scene the next passes draw (EG-20); `Whole` by default.
     pub part: crate::item::Part,
+    /// The second half's globals in [`Renderer3d::encode_halves`].
+    globals_b: wgpu::Buffer,
+}
+
+/// One half of a split frame drawn by [`Renderer3d::encode_halves`]: its camera, which half,
+/// and its place in the target, `x, y, w, h` in pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Half {
+    pub camera: crate::camera::Camera,
+    pub part: crate::item::Part,
+    pub viewport: [u32; 4],
 }
 
 impl Renderer3d {
@@ -428,6 +439,12 @@ impl Renderer3d {
             light_bind,
             pipeline_time: Duration::ZERO,
             part: crate::item::Part::Whole,
+            globals_b: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo3d-globals-b"),
+                size: std::mem::size_of::<Globals>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
         }
     }
 
@@ -462,6 +479,78 @@ impl Renderer3d {
         assert_eq!(mesh.len, vertices.len(), "update_mesh: the vertex count must stay the same");
         self.queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(vertices));
         mesh.bounds = bounds_of(vertices);
+    }
+
+    /// The pixel box `x0, y0, x1, y1` of what `frame` draws on a target `size` pixels big in
+    /// the current [`Renderer3d::part`], grown by 2 pixels for antialiasing: the meshes' boxes
+    /// cut at the text plane and projected. `None` when it cannot tell: a background, a floor,
+    /// point clouds, orbs, light cones, or a box reaching behind the eye. An empty box (x1 <=
+    /// x0) when nothing is drawn.
+    pub fn draw_bounds_px(&self, frame: &Frame3d, size: [f32; 2]) -> Option<[f32; 4]> {
+        let busy = !matches!(frame.background, Background::Transparent)
+            || frame.floor.is_some()
+            || !frame.clouds.is_empty()
+            || !frame.orbs.is_empty()
+            || !frame.cones.is_empty();
+        if busy {
+            return None;
+        }
+        let cam = &frame.camera;
+        let vp = cam.view_proj(size[0] / size[1]);
+        let fwd = (cam.target - cam.eye()).normalize();
+        let k = match self.part {
+            crate::item::Part::Whole => 0.0,
+            crate::item::Part::Behind => 1.0,
+            crate::item::Part::Front => -1.0,
+        };
+        // Signed distance from the plane on the kept side.
+        let side = |p: Vec3| k * fwd.dot(p - cam.target);
+        let mut b = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        let mut add = |p: Vec3| -> bool {
+            let c = vp.transform_point(p);
+            if c[3] <= 1e-4 {
+                return false;
+            }
+            let (x, y) = ((c[0] / c[3] + 1.0) * 0.5 * size[0], (1.0 - c[1] / c[3]) * 0.5 * size[1]);
+            b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+            true
+        };
+        for d in &frame.meshes {
+            let (lo, hi) = self.meshes.get(d.mesh.0 as usize)?.bounds;
+            let corner = |i: usize| {
+                let p = Vec3::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                );
+                let q = d.model.transform_point(p);
+                Vec3::new(q[0] / q[3], q[1] / q[3], q[2] / q[3])
+            };
+            let corners: [Vec3; 8] = std::array::from_fn(corner);
+            for (i, &p) in corners.iter().enumerate() {
+                if side(p) >= 0.0 && !add(p) {
+                    return None;
+                }
+                // Where the box's edges from this corner cross the plane.
+                for bit in [1, 2, 4] {
+                    let j = i | bit;
+                    if j == i {
+                        continue;
+                    }
+                    let (sa, sb) = (side(p), side(corners[j]));
+                    if (sa < 0.0) != (sb < 0.0) {
+                        let q = p + (corners[j] - p) * (sa / (sa - sb));
+                        if !add(q) {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        if b[0] > b[2] {
+            return Some([0.0; 4]);
+        }
+        Some([b[0] - 2.0, b[1] - 2.0, b[2] + 2.0, b[3] + 2.0])
     }
 
     /// The shadow map's size in texels, or `None` while no frame has asked for shadows.
@@ -719,6 +808,34 @@ impl Renderer3d {
         field: Option<FieldBinding<'_>>,
         extra: Option<ExtraDraw<'_>>,
     ) {
+        self.encode_inner(enc, out, frame, field, extra, None);
+    }
+
+    /// Both halves of a split frame (EG-20) in one pass, side by side in `out`: each half
+    /// drawn with its own camera and part into its own viewport, which must not overlap. One
+    /// pass instead of two saves a pass's fixed cost. Only for frames of meshes alone (see
+    /// [`Renderer3d::draw_bounds_px`]); `frame.camera` is ignored. Leaves
+    /// [`Renderer3d::part`] as it was.
+    pub fn encode_halves(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        out: Output<'_>,
+        frame: &Frame3d,
+        halves: [Half; 2],
+    ) {
+        debug_assert!(self.draw_bounds_px(frame, [1.0, 1.0]).is_some(), "encode_halves: meshes only");
+        self.encode_inner(enc, out, frame, None, None, Some(halves));
+    }
+
+    fn encode_inner(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        out: Output<'_>,
+        frame: &Frame3d,
+        field: Option<FieldBinding<'_>>,
+        extra: Option<ExtraDraw<'_>>,
+        halves: Option<[Half; 2]>,
+    ) {
         let Output { view: target, size, format, scale } = out;
         self.prepare(format);
         self.attachments(size, format);
@@ -728,6 +845,7 @@ impl Renderer3d {
         // Globals.
         let cam = &frame.camera;
         let l = &frame.light;
+        let full = Half { camera: frame.camera, part: self.part, viewport: [0, 0, size[0], size[1]] };
         let lin = |c: Color| linear_premul(c, 1.0);
         let (bg_top, bg_bottom) = match frame.background {
             Background::Transparent => ([0.0; 4], [0.0; 4]),
@@ -736,7 +854,6 @@ impl Renderer3d {
         };
         let to_light = (-l.dir).normalize();
         let lc = lin(l.color);
-        let eye = cam.eye();
         let fog = frame.fog.map_or([0.0, 0.0, 0.0, scale], |(a, b)| [a, b, 1.0, scale]);
 
         // Shadows (EG-18): fit the light's box to the casters' bounds in this pose.
@@ -771,55 +888,75 @@ impl Renderer3d {
             }
             None => ([0.0; 4], [0.0; 4], Mat4::IDENTITY.cols),
         };
-        // The text plane through the camera's target, facing the camera (EG-20): keep where
-        // dot(n, p) + d >= 0.
-        let fwd = (cam.target - eye).normalize();
-        let behind = [fwd.x, fwd.y, fwd.z, -fwd.dot(cam.target)];
-        let clip = match self.part {
-            crate::item::Part::Whole => [0.0; 4],
-            crate::item::Part::Behind => behind,
-            crate::item::Part::Front => behind.map(|v| -v),
+        let globals_of = |half: &Half| {
+            let cam = &half.camera;
+            let eye = cam.eye();
+            let [w, h] = [half.viewport[2] as f32, half.viewport[3] as f32];
+            // The text plane through the camera's target, facing the camera (EG-20): keep
+            // where dot(n, p) + d >= 0.
+            let fwd = (cam.target - eye).normalize();
+            let behind = [fwd.x, fwd.y, fwd.z, -fwd.dot(cam.target)];
+            let clip = match half.part {
+                crate::item::Part::Whole => [0.0; 4],
+                crate::item::Part::Behind => behind,
+                crate::item::Part::Front => behind.map(|v| -v),
+            };
+            Globals {
+                view_proj: cam.view_proj(w / h).cols,
+                view: cam.view().cols,
+                light_dir: [to_light.x, to_light.y, to_light.z, l.rim],
+                light_color: [lc[0] * l.intensity, lc[1] * l.intensity, lc[2] * l.intensity, 1.0],
+                ambient: lin(l.ambient),
+                eye: [eye.x, eye.y, eye.z, 1.0],
+                viewport: [w, h, cam.focal_px(h), encode_srgb as u32 as f32],
+                focus: [
+                    frame.focus.distance,
+                    frame.focus.range,
+                    frame.focus.max_blur_px,
+                    field.is_some() as u32 as f32,
+                ],
+                fog,
+                bg_top,
+                bg_bottom,
+                field: field
+                    .as_ref()
+                    .map_or([1.0, 1.0, 1.0, 0.0], |f| [f.size[0] as f32, f.size[1] as f32, f.scale, 0.0]),
+                floor: frame.floor.map_or([0.0; 4], |f| [f.y, f.fade, f.reflect, 1.0]),
+                light_view_proj,
+                shadow,
+                shadow_k,
+                clip,
+            }
         };
-        let globals = Globals {
-            view_proj: cam.view_proj(w / h).cols,
-            view: cam.view().cols,
-            light_dir: [to_light.x, to_light.y, to_light.z, l.rim],
-            light_color: [lc[0] * l.intensity, lc[1] * l.intensity, lc[2] * l.intensity, 1.0],
-            ambient: lin(l.ambient),
-            eye: [eye.x, eye.y, eye.z, 1.0],
-            viewport: [w, h, cam.focal_px(h), encode_srgb as u32 as f32],
-            focus: [frame.focus.distance, frame.focus.range, frame.focus.max_blur_px, field.is_some() as u32 as f32],
-            fog,
-            bg_top,
-            bg_bottom,
-            field: field.as_ref().map_or([1.0, 1.0, 1.0, 0.0], |f| [f.size[0] as f32, f.size[1] as f32, f.scale, 0.0]),
-            floor: frame.floor.map_or([0.0; 4], |f| [f.y, f.fade, f.reflect, 1.0]),
-            light_view_proj,
-            shadow,
-            shadow_k,
-            clip,
+        let halves_or_full = halves.unwrap_or([full, full]);
+        self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals_of(&halves_or_full[0])));
+        if halves.is_some() {
+            self.queue.write_buffer(&self.globals_b, 0, bytemuck::bytes_of(&globals_of(&halves_or_full[1])));
+        }
+        let bind_globals = |buf: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo3d-globals"),
+                layout: &self.globals_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(field.as_ref().map_or(&self.no_field, |f| f.view)),
+                    },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(match (&fit, &self.shadow) {
+                            (Some(_), Some(s)) => &s.view,
+                            _ => &self.no_shadow,
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
+                ],
+            })
         };
-        self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo3d-globals"),
-            layout: &self.globals_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.globals.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(field.as_ref().map_or(&self.no_field, |f| f.view)),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(match (&fit, &self.shadow) {
-                        (Some(_), Some(s)) => &s.view,
-                        _ => &self.no_shadow,
-                    }),
-                },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
-            ],
-        });
+        let globals_bind = bind_globals(&self.globals);
+        let globals_b_bind = halves.map(|_| bind_globals(&self.globals_b));
 
         // Per-draw blocks: meshes, clouds, then with a floor their mirrored copies and the
         // floor block, then cones.
@@ -999,13 +1136,9 @@ impl Renderer3d {
         let draws = &self.draws.as_ref().unwrap().1;
         pass.set_bind_group(0, &globals_bind, &[]);
         pass.set_bind_group(1, draws, &[0]);
-        if !matches!(frame.background, Background::Transparent) && self.part != crate::item::Part::Front {
-            pass.set_pipeline(&p.background);
-            pass.draw(0..3, 0..1);
-        }
         let (n_mesh, n_cloud) = (frame.meshes.len() as u32, frame.clouds.len() as u32);
         let at = |slot: u32| [slot * SLOT as u32];
-        let draw_scene = |pass: &mut wgpu::RenderPass<'_>, first: u32| {
+        let draw_scene = |pass: &mut wgpu::RenderPass<'_>, first: u32, globals_bind: &wgpu::BindGroup| {
             pass.set_pipeline(&p.mesh);
             let mut textured = false;
             for (i, d) in frame.meshes.iter().enumerate() {
@@ -1014,7 +1147,7 @@ impl Renderer3d {
                 if tex.is_some() != textured {
                     textured = tex.is_some();
                     pass.set_pipeline(if textured { &p.mesh_tex } else { &p.mesh });
-                    pass.set_bind_group(0, &globals_bind, &[]);
+                    pass.set_bind_group(0, globals_bind, &[]);
                 }
                 if let Some(bind) = tex {
                     pass.set_bind_group(2, bind, &[]);
@@ -1030,9 +1163,24 @@ impl Renderer3d {
                 pass.draw(0..4, 0..c.count);
             }
         };
+        // Two halves side by side (EG-20): meshes only, each in its own viewport.
+        if let (Some(hs), Some(bind_b)) = (halves, &globals_b_bind) {
+            for (half, bind) in hs.iter().zip([&globals_bind, bind_b]) {
+                let [x, y, w, h] = half.viewport;
+                pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+                pass.set_scissor_rect(x, y, w, h);
+                pass.set_bind_group(0, bind, &[]);
+                draw_scene(&mut pass, 0, bind);
+            }
+            return;
+        }
+        if !matches!(frame.background, Background::Transparent) && self.part != crate::item::Part::Front {
+            pass.set_pipeline(&p.background);
+            pass.draw(0..3, 0..1);
+        }
         let mut next = n_mesh + n_cloud;
         if frame.floor.is_some() {
-            draw_scene(&mut pass, next);
+            draw_scene(&mut pass, next, &globals_bind);
             next += n_mesh + n_cloud;
             if let (true, Some(buf)) = (orbs.len() as u32 > real_orbs, &self.orbs) {
                 pass.set_pipeline(&p.orbs);
@@ -1048,7 +1196,7 @@ impl Renderer3d {
             }
             next += 1;
         }
-        draw_scene(&mut pass, 0);
+        draw_scene(&mut pass, 0, &globals_bind);
         if let Some(extra) = extra {
             let info = PassInfo {
                 view_proj: cam.view_proj(w / h),

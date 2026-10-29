@@ -53,11 +53,21 @@ impl GpuPainter for Painter3d {
 
     fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
         let Some(item) = cx.source.as_any().downcast_ref::<Item3d>() else { return false };
-        if self.next == self.painters.len() {
-            self.painters.push(ItemPainter::new(cx.device, cx.queue));
-        }
-        let painter = &mut self.painters[self.next];
-        self.next += 1;
+        // A front half (EG-20) goes to the painter that drew it beside its back half.
+        let waiting = (cx.part == vo_scene::gpu::GpuPart::Front)
+            .then(|| self.painters[..self.next].iter().position(|p| p.has_front(item.0.as_ref(), cx.t)))
+            .flatten();
+        let index = match waiting {
+            Some(i) => i,
+            None => {
+                if self.next == self.painters.len() {
+                    self.painters.push(ItemPainter::new(cx.device, cx.queue));
+                }
+                self.next += 1;
+                self.next - 1
+            }
+        };
+        let painter = &mut self.painters[index];
         let [x0, y0, x1, y1] = cx.rect_px();
         let at = ItemPlace {
             rect: [x0, y0, x1 - x0, y1 - y0],
