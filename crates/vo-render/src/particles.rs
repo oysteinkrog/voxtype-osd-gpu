@@ -40,7 +40,7 @@ use vo_core::hash::rand_f32;
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
 
-pub use vo_scene::emitter::{tilt_x, ColorBy, EmitterLook, EmitterSim, Shape, Shock, SpriteStyle};
+pub use vo_scene::emitter::{tilt_x, ColorBy, EmitterLook, EmitterSim, MaskField, Shape, Shock, SpriteStyle};
 
 use crate::color::srgb_to_linear;
 use crate::glyph_points::{GlyphPointCache, GlyphPoints};
@@ -128,6 +128,9 @@ pub struct ParticleConfig {
     /// Slots of formed particles, and particles per slot (rounded up to [`WORKGROUP`]).
     pub word_slots: u32,
     pub slot_capacity: u32,
+    /// Particles a word may use in a slot, at most `slot_capacity`; 0 means all of it. Shapes
+    /// ([`Particles::set_points`]) use the whole slot.
+    pub word_capacity: u32,
     /// Hero particles with ribbons, across all emitters.
     pub trail_capacity: u32,
     /// Fixed tick of the free particles.
@@ -141,6 +144,7 @@ impl Default for ParticleConfig {
             free_capacity: 20_480,
             word_slots: 32,
             slot_capacity: 1024,
+            word_capacity: 0,
             trail_capacity: 256,
             tick_hz: 120.0,
             seed: 1,
@@ -329,66 +333,6 @@ impl FrameParams {
     }
 }
 
-/// A coverage field of text (or any shape) for the PA08 mask force, in emitter space.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MaskField {
-    pub width: u32,
-    pub height: u32,
-    /// The field's box in emitter space: x, y, w, h.
-    pub rect: [f32; 4],
-    /// Coverage 0 to 255, rows top to bottom.
-    pub data: Vec<u8>,
-}
-
-impl MaskField {
-    /// A field over `rect` with cells of `cell` units, from points that fill shapes (as
-    /// glyph points do), blurred by `blur` cells so the force reaches past the edges.
-    pub fn from_points(points: &[[f32; 2]], rect: [f32; 4], cell: f32, blur: u32) -> MaskField {
-        let w = ((rect[2] / cell).ceil() as u32).clamp(1, 512);
-        let h = ((rect[3] / cell).ceil() as u32).clamp(1, 512);
-        let mut acc = vec![0f32; (w * h) as usize];
-        for p in points {
-            let x = ((p[0] - rect[0]) / rect[2] * w as f32).floor();
-            let y = ((p[1] - rect[1]) / rect[3] * h as f32).floor();
-            if x >= 0.0 && y >= 0.0 && (x as u32) < w && (y as u32) < h {
-                acc[(y as u32 * w + x as u32) as usize] += 1.0;
-            }
-        }
-        // Coverage: a cell with points counts as ink, then a box blur twice.
-        for v in &mut acc {
-            *v = if *v > 0.0 { 1.0 } else { 0.0 };
-        }
-        for _ in 0..2 {
-            acc = box_blur(&acc, w, h, blur);
-        }
-        let data = acc.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
-        MaskField { width: w, height: h, rect, data }
-    }
-}
-
-fn box_blur(src: &[f32], w: u32, h: u32, r: u32) -> Vec<f32> {
-    if r == 0 {
-        return src.to_vec();
-    }
-    let (w, h, r) = (w as i32, h as i32, r as i32);
-    let n = (2 * r + 1) as f32;
-    let mut tmp = vec![0f32; src.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let s: f32 = (-r..=r).map(|d| src[(y * w + (x + d).clamp(0, w - 1)) as usize]).sum();
-            tmp[(y * w + x) as usize] = s / n;
-        }
-    }
-    let mut out = vec![0f32; src.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let s: f32 = (-r..=r).map(|d| tmp[((y + d).clamp(0, h - 1) * w + x) as usize]).sum();
-            out[(y * w + x) as usize] = s / n;
-        }
-    }
-    out
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct GpuFree {
@@ -570,6 +514,9 @@ struct Slot {
     points: Vec<[f32; 2]>,
     /// Pixels² of ink per particle: the light each carries when formed.
     ink: f32,
+    /// Particles that may be visible: one past the highest index any form used since the
+    /// last reset, so a draw skips the slot's unused tail.
+    hi: usize,
 }
 
 /// A pipeline set for one target format, blend and depth format.
@@ -723,6 +670,11 @@ impl Particles {
             trail_capacity: cfg.trail_capacity.max(1),
             ..cfg
         };
+        let word_capacity = match cfg.word_capacity {
+            0 => cfg.slot_capacity,
+            w => w.min(cfg.slot_capacity),
+        };
+        let cfg = ParticleConfig { word_capacity, ..cfg };
         use wgpu::BufferUsages as U;
         use wgpu::ShaderStages as S;
         let free_bytes = cfg.free_capacity as u64 * size_of::<GpuFree>() as u64;
@@ -1252,7 +1204,7 @@ impl Particles {
         dot_area: f32,
         held_from: usize,
     ) {
-        let cap = self.cfg.slot_capacity;
+        let cap = self.cfg.word_capacity;
         let dot_area = dot_area.max(0.25);
         let old = std::mem::take(&mut self.slots[slot as usize]);
         let same = |a: &WordGlyph, b: &WordGlyph| a.font == b.font && a.glyph == b.glyph && a.size == b.size;
@@ -1325,7 +1277,7 @@ impl Particles {
             allocate(cap as usize, &counts, |gi| info[gi].3.map(|o| old.glyphs[o].range).filter(|r| r.1 == counts[gi]));
 
         self.target_data.clear();
-        self.target_data.resize(cap as usize, GpuTarget::default());
+        self.target_data.resize(self.cfg.slot_capacity as usize, GpuTarget::default());
         let mut slot_glyphs = Vec::with_capacity(n_glyphs);
         let mut points = Vec::new();
         for (gi, (g, p)) in glyphs.iter().zip(&pts).enumerate() {
@@ -1372,7 +1324,7 @@ impl Particles {
         }
         let anchor = GpuAnchor {
             slot,
-            capacity: cap,
+            capacity: self.cfg.slot_capacity,
             gen: old.gen + 1,
             seed: self.cfg.seed,
             t: t as f32,
@@ -1387,7 +1339,8 @@ impl Particles {
         self.form(anchor);
         let ink_px: f32 = pts.iter().map(|p| p.area * px2).sum();
         let ink = if points.is_empty() { dot_area } else { ink_px / points.len() as f32 };
-        self.slots[slot as usize] = Slot { gen: anchor.gen, glyphs: slot_glyphs, points, ink };
+        let hi = ranges.iter().map(|r| r.0 + r.1).fold(old.hi, usize::max);
+        self.slots[slot as usize] = Slot { gen: anchor.gen, glyphs: slot_glyphs, points, ink, hi };
     }
 
     /// Forms `form.points` in slot `slot` from time `t` (PA09 and any shape): dots that
@@ -1450,6 +1403,7 @@ impl Particles {
             glyphs: if n > 0 { vec![glyph] } else { Vec::new() },
             points: form.points[..n].iter().map(|p| [p.x, p.y]).collect(),
             ink: DOT_AREA,
+            hi: old.hi.max(n),
         };
     }
 
@@ -1651,10 +1605,10 @@ impl Particles {
                 }
             }
             Part::Slot(slot) => {
-                if self.slots.get(slot as usize).is_some_and(|s| s.gen > 0) {
-                    let n = self.cfg.slot_capacity * 6;
+                if let Some(s) = self.slots.get(slot as usize).filter(|s| s.gen > 0 && s.hi > 0) {
+                    let base = slot * self.cfg.slot_capacity;
                     pass.set_pipeline(&pipes.word);
-                    pass.draw(slot * n..(slot + 1) * n, 0..1);
+                    pass.draw(base * 6..(base + s.hi as u32) * 6, 0..1);
                 }
             }
         }

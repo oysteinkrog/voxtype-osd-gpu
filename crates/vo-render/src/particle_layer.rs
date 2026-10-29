@@ -26,17 +26,25 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use vo_scene::display::{DisplayList, GlyphInstance, NO_WORD};
-use vo_scene::emitter::{EmitterInstance, EmitterLook, EmitterSim, EmitterSource, Shape, WordParticles};
+use vo_scene::emitter::{
+    EmitterInstance, EmitterLook, EmitterSim, EmitterSource, Shape, ShapeTarget, WordParticles,
+    MAX_SHAPE_POINTS,
+};
 use vo_scene::font::FontRegistry;
 use vo_scene::geom::{Affine, Point};
 
 use crate::particle_text::{word_runs, ParticleText};
 use crate::particles::{
-    Camera, EmitterId, EmitterSpec, FrameParams, Part, ParticleConfig, Particles, SlotLook, MAX_EMITTERS, VIEWS,
+    Camera, EmitterId, EmitterSpec, FrameParams, Part, ParticleConfig, Particles, PointForm, SlotLook, MAX_EMITTERS,
+    VIEWS,
 };
 
 /// Word slots: live words that can form at once.
 const WORD_SLOTS: u32 = 16;
+/// Shape slots after the word slots: emitters whose particles form shapes (EG-26).
+const SHAPE_SLOTS: u32 = 4;
+/// Particles a word may use, as before shapes came; shapes use the whole slot.
+const WORD_CAPACITY: u32 = 1024;
 /// Free particles for all emitter elements together.
 const FREE_CAPACITY: u32 = 131_072;
 const TRAIL_CAPACITY: u32 = 1024;
@@ -53,6 +61,36 @@ struct Pool {
     gone: bool,
     /// The path last uploaded for a path emitter.
     path: Option<Arc<[Point]>>,
+    /// Shapes (EG-26): the slot its particles form in, the time of the last target applied,
+    /// and how far its points reach from the origin.
+    slot: Option<u32>,
+    target_at: f64,
+    shape_reach: f32,
+    /// The time of the last mask applied.
+    mask_at: f64,
+    /// Its pool size: the points a shape gets, up to a slot.
+    capacity: u32,
+    /// Reduced motion: shapes appear already formed.
+    reduced: bool,
+}
+
+impl Pool {
+    fn new(node: u64, generation: u32, id: EmitterId, source: Arc<dyn EmitterSource>) -> Pool {
+        Pool {
+            node,
+            generation,
+            id,
+            source,
+            gone: false,
+            path: None,
+            slot: None,
+            target_at: f64::NEG_INFINITY,
+            shape_reach: 0.0,
+            mask_at: f64::NEG_INFINITY,
+            capacity: 0,
+            reduced: false,
+        }
+    }
 }
 
 struct Placement {
@@ -64,6 +102,8 @@ struct Placement {
     look: Option<EmitterLook>,
     /// Slots: the word's look and opacity.
     word: Option<(WordParticles, f32)>,
+    /// Shape slots: the look, its origin set in `prepare`.
+    shape: Option<SlotLook>,
 }
 
 /// Particle state that lives from frame to frame.
@@ -86,6 +126,8 @@ pub struct ParticleLayer {
     /// The particle view of each surface that draws particles.
     views: Vec<(usize, u32)>,
     warned: bool,
+    /// Which pool (node, generation) holds each shape slot.
+    shape_slots: [Option<(u64, u32)>; SHAPE_SLOTS as usize],
 }
 
 impl ParticleLayer {
@@ -104,6 +146,7 @@ impl ParticleLayer {
             glyph_index: Vec::new(),
             views: Vec::new(),
             warned: false,
+            shape_slots: [None; SHAPE_SLOTS as usize],
         }
     }
 
@@ -131,12 +174,15 @@ impl ParticleLayer {
             self.text.clear();
             self.words.clear();
             self.held = None;
+            self.shape_slots = [None; SHAPE_SLOTS as usize];
         }
         self.t = t;
         let parts = self.parts.get_or_insert_with(|| {
             let cfg = ParticleConfig {
                 free_capacity: FREE_CAPACITY,
-                word_slots: WORD_SLOTS,
+                word_slots: WORD_SLOTS + SHAPE_SLOTS,
+                slot_capacity: MAX_SHAPE_POINTS as u32,
+                word_capacity: WORD_CAPACITY,
                 trail_capacity: TRAIL_CAPACITY,
                 ..Default::default()
             };
@@ -153,6 +199,7 @@ impl ParticleLayer {
             match self.pools.iter_mut().find(|p| p.node == e.node && p.generation == e.generation) {
                 Some(p) => {
                     p.gone = false;
+                    p.reduced = e.reduced;
                     p.source = list.emitter_sources[e.source as usize].0.clone();
                 }
                 None => new.push(e),
@@ -172,8 +219,12 @@ impl ParticleLayer {
             let start = parts.ticks_for(e.since) - 1;
             let id = parts.add_emitter_at(spec, start);
             let source = list.emitter_sources[e.source as usize].0.clone();
-            self.pools.push(Pool { node: e.node, generation: e.generation, id, source, gone: false, path: None });
+            let mut pool = Pool::new(e.node, e.generation, id, source);
+            pool.capacity = e.capacity;
+            pool.reduced = e.reduced;
+            self.pools.push(pool);
         }
+        let mut masks: Vec<(f64, Arc<vo_scene::emitter::MaskField>)> = Vec::new();
         for p in &mut self.pools {
             if let Some(path) = p.source.path() {
                 if !p.path.as_ref().is_some_and(|old| Arc::ptr_eq(old, &path)) {
@@ -181,14 +232,34 @@ impl ParticleLayer {
                     p.path = Some(path);
                 }
             }
+            // Shapes and masks (EG-26) at their recorded times; a seek back replays them.
+            if let Some(list) = p.source.masks() {
+                let since = p.mask_at;
+                for m in list.iter().filter(|m| m.at > since && m.at <= t) {
+                    masks.push((m.at, m.mask.clone()));
+                    p.mask_at = m.at;
+                }
+            }
+            if let Some(list) = p.source.targets() {
+                if list.iter().any(|g| g.at > p.target_at && g.at <= t) {
+                    apply_targets(parts, p, &list, t, &mut self.shape_slots, &mut self.warned);
+                }
+            }
+        }
+        // Each mask switches on the tick its time falls in: step up to it first, so ticks
+        // before it keep the mask before.
+        masks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (at, mask) in masks {
+            let pools = &self.pools;
+            let switch = (at * parts.config().tick_hz).ceil().max(0.0);
+            let before = (switch - 1.0) / parts.config().tick_hz;
+            if parts.ticks_for(before) > parts.tick() && before <= t {
+                parts.advance(before, &|id, tt| pool_sim(pools, id, tt));
+            }
+            parts.set_mask(at, &mask);
         }
         let pools = &self.pools;
-        let sim = |id: EmitterId, tt: f64| match pools.iter().find(|p| p.id == id) {
-            Some(p) if !p.gone => p.source.sim(tt),
-            Some(p) => EmitterSim { emit: 0.0, ..p.source.sim(tt) },
-            None => EmitterSim { emit: 0.0, ..Default::default() },
-        };
-        parts.advance(t, &sim);
+        parts.advance(t, &|id, tt| pool_sim(pools, id, tt));
 
         // Particle words, at the times their text changed.
         let mut changes: Vec<_> = words
@@ -290,15 +361,18 @@ impl ParticleLayer {
         look.size *= k;
         let path = pool.path.as_ref().map_or(0.0, |p| p.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max));
         let reach = ((extent(&pool.source.sim(self.t)) + path) * k + 4.0 * look.size) * s;
+        // A shape's particles (EG-26) are drawn round the same origin, without the layer's
+        // rotation and scale.
+        let reach = reach.max((pool.shape_reach + 4.0 * look.size) * s);
+        let origin = Point::new(centre.x / s, centre.y / s);
         let start = self.placements.len() as u32;
-        self.placements.push(Placement {
-            part: Part::Emitter(pool.id),
-            surface,
-            origin: Point::new(centre.x / s, centre.y / s),
-            look: Some(look),
-            word: None,
-        });
-        Some((start..start + 1, [centre.x - reach, centre.y - reach, centre.x + reach, centre.y + reach]))
+        self.placements.push(Placement { part: Part::Emitter(pool.id), surface, origin, look: Some(look), word: None, shape: None });
+        if let Some(slot) = pool.slot {
+            let shape = SlotLook { size: look.size, style: look.style, ..SlotLook::new(origin, look.ramp[0].fade(look.brightness)) };
+            self.placements.push(Placement { part: Part::Slot(slot), surface, origin, look: None, word: None, shape: Some(shape) });
+        }
+        let end = self.placements.len() as u32;
+        Some((start..end, [centre.x - reach, centre.y - reach, centre.x + reach, centre.y + reach]))
     }
 
     /// Places the formed particles of the particle words among `glyphs` (one glyph item run),
@@ -339,6 +413,7 @@ impl ParticleLayer {
                 origin,
                 look: None,
                 word: Some((look, opacity)),
+                shape: None,
             });
         }
         let end = self.placements.len() as u32;
@@ -367,6 +442,7 @@ impl ParticleLayer {
                 origin,
                 look: None,
                 word: Some((look, 1.0)),
+                shape: None,
             });
         }
         let end = self.placements.len() as u32;
@@ -388,9 +464,15 @@ impl ParticleLayer {
         }
         let s = self.scale;
         let mut looks: Vec<Option<EmitterLook>> = vec![None; MAX_EMITTERS as usize];
-        let mut slots =
-            vec![SlotLook { visible: false, ..SlotLook::new(Point::ZERO, Default::default()) }; WORD_SLOTS as usize];
+        let mut slots = vec![
+            SlotLook { visible: false, ..SlotLook::new(Point::ZERO, Default::default()) };
+            (WORD_SLOTS + SHAPE_SLOTS) as usize
+        ];
         for p in &self.placements {
+            if let (Part::Slot(slot), Some(shape)) = (p.part, p.shape) {
+                slots[slot as usize] = SlotLook { origin: p.origin, ..shape };
+                continue;
+            }
             match (p.part, p.look, p.word) {
                 (Part::Emitter(id), Some(look), _) => {
                     looks[id as usize] = Some(EmitterLook { origin: p.origin, ..look });
@@ -456,4 +538,57 @@ fn extent(s: &EmitterSim) -> f32 {
     let flight = (s.spawn_speed + s.noise * 0.2) * s.life.max(0.1) + s.gravity[0].abs().max(s.gravity[1].abs()) * 0.5;
     let shock = s.shock.map_or(0.0, |k| (k.speed * 0.3).min(4.0 * shape.max(10.0)));
     shape + flight + shock + 8.0
+}
+
+/// An emitter's inputs at tick time `t`: a pool that left the scene spawns nothing more.
+fn pool_sim(pools: &[Pool], id: EmitterId, t: f64) -> EmitterSim {
+    match pools.iter().find(|p| p.id == id) {
+        Some(p) if !p.gone => p.source.sim(t),
+        Some(p) => EmitterSim { emit: 0.0, ..p.source.sim(t) },
+        None => EmitterSim { emit: 0.0, ..Default::default() },
+    }
+}
+
+/// Forms the targets of `list` that apply after the pool's last one and by `t`, in order, each
+/// at its own time, in the pool's shape slot (taken on its first target).
+fn apply_targets(
+    parts: &mut Particles,
+    p: &mut Pool,
+    list: &[ShapeTarget],
+    t: f64,
+    slots: &mut [Option<(u64, u32)>; SHAPE_SLOTS as usize],
+    warned: &mut bool,
+) {
+    let slot = match p.slot {
+        Some(s) => s,
+        None => {
+            let Some(i) = slots.iter().position(|s| s.is_none()) else {
+                if !*warned {
+                    eprintln!("vo-render: no room for another particle shape; it is not drawn");
+                    *warned = true;
+                }
+                return;
+            };
+            slots[i] = Some((p.node, p.generation));
+            p.slot = Some(WORD_SLOTS + i as u32);
+            WORD_SLOTS + i as u32
+        }
+    };
+    let n = (p.capacity as usize).min(MAX_SHAPE_POINTS);
+    let since = p.target_at;
+    for g in list.iter().filter(|g| g.at > since && g.at <= t) {
+        let points = g.points(n);
+        let form = PointForm {
+            points: &points,
+            // Reduced motion: each particle starts on its target, so the shape is there at once.
+            starts: p.reduced.then_some(&points[..]),
+            size: g.size,
+            persist: true,
+            sweep: if p.reduced { 0.0 } else { g.sweep },
+            scatter: g.scatter && !p.reduced,
+        };
+        parts.set_points(slot, g.at, &form);
+        p.target_at = g.at;
+        p.shape_reach = points.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max) + g.size;
+    }
 }

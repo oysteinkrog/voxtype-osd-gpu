@@ -247,12 +247,31 @@ pub trait EmitterSource: Debug + Send + Sync {
     /// surface margin (`crate::reach`). The default estimates it from `sim` and `look`.
     fn reach(&self, t: f64) -> f32 {
         let path = self.path().map_or(0.0, |p| p.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max));
-        path + crate::reach::particle_reach(&self.sim(t), &self.look(t))
+        // A fitted shape spans its square: about 0.71 of its side from the centre, plus the
+        // cloud its particles come from.
+        let shape = self.targets().map_or(0.0, |l| l.iter().filter(|g| g.at <= t).map(|g| g.size).fold(0.0, f32::max));
+        (path + crate::reach::particle_reach(&self.sim(t), &self.look(t))).max(1.4 * shape)
     }
 
     /// For `Shape::Path`: the path's points in emitter space, start to end. Return the same
     /// `Arc` while the path does not change; a changed path takes effect at the next frame.
     fn path(&self) -> Option<Arc<[Point]>> {
+        None
+    }
+
+    /// Shapes the particles form, each from its own time on (EG-26), in time order. The
+    /// renderer forms them with up to `Emitter::capacity` particles (at most
+    /// [`MAX_SHAPE_POINTS`]) next to the free pool, applying each at its recorded time, so a
+    /// seek replays them. Return the same `Arc` while the list does not change; append to it
+    /// as time goes on.
+    fn targets(&self) -> Option<Arc<[ShapeTarget]>> {
+        None
+    }
+
+    /// Masks for the PA08 mask force (`EmitterSim::mask`), each from its own time on, in
+    /// time order ([`text_mask`] builds one from text). One mask is live at a time for all
+    /// emitters: the latest one applied. Return the same `Arc` while the list does not change.
+    fn masks(&self) -> Option<Arc<[TimedMask]>> {
         None
     }
 }
@@ -319,9 +338,12 @@ pub struct EmitterInstance {
     pub pos: Point,
     /// Inherited opacity, multiplied into the brightness.
     pub opacity: f32,
+    /// Reduced motion: shape targets appear already formed.
+    pub reduced: bool,
 }
 
 /// Adds an emitter element's instance and its source to `out`; returns the instance index.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_instance(
     out: &mut crate::display::DisplayList,
     e: &Emitter,
@@ -330,6 +352,7 @@ pub(crate) fn push_instance(
     t: f64,
     pos: Point,
     opacity: f32,
+    reduced: bool,
 ) -> u32 {
     let source = match out.emitter_sources.iter().position(|s| Arc::ptr_eq(&s.0, &e.source)) {
         Some(i) => i,
@@ -350,6 +373,7 @@ pub(crate) fn push_instance(
         t,
         pos,
         opacity,
+        reduced,
     });
     out.emitters.len() as u32 - 1
 }
@@ -572,6 +596,293 @@ impl EmitterSource for RingEmitter {
     }
 }
 
+// --- Shapes the particles form, and the mask force's field (EG-26) ---
+
+/// Most points a shape target forms: the renderer's formed-particle pool per shape.
+pub const MAX_SHAPE_POINTS: usize = 2048;
+
+/// What a shape target's particles form.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    /// Nothing: the formed particles scatter and fade.
+    None,
+    /// A path in emitter space. Closed contours are filled (nonzero winding): points go
+    /// along the outline and inside; open ones get points along their line only.
+    Path(kurbo::BezPath),
+    /// An icon read by [`crate::svg::parse`], fitted into a square of the target's `size`
+    /// round the emitter's origin. Strokes count as filled outlines.
+    Svg(Arc<crate::svg::SvgIcon>),
+    /// A check mark drawn as a line ([`crate::path::icons::check`]), fitted like an icon.
+    CheckMark,
+}
+
+/// A shape the particles form from time `at` on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapeTarget {
+    pub at: f64,
+    pub target: Target,
+    /// The side of the square an icon or the check mark is fitted into, in units. For a
+    /// path, the shape's size for the cloud the particles come from and their scatter.
+    pub size: f32,
+    /// A left to right sweep of start delays across the points, in seconds.
+    pub sweep: f32,
+    /// Particles already formed scatter before they move on to this shape.
+    pub scatter: bool,
+}
+
+impl ShapeTarget {
+    pub fn new(at: f64, target: Target, size: f32) -> ShapeTarget {
+        ShapeTarget { at, target, size, sweep: 0.0, scatter: false }
+    }
+
+    /// `n` points of the shape in emitter space: along its outlines and inside its fills.
+    /// The same target always gives the same points.
+    pub fn points(&self, n: usize) -> Vec<Point> {
+        let fit = |path: kurbo::BezPath, view: crate::geom::Rect| {
+            let side = view.w.max(view.h).max(1e-3) as f64;
+            let k = self.size as f64 / side;
+            let (cx, cy) = (view.x as f64 + 0.5 * view.w as f64, view.y as f64 + 0.5 * view.h as f64);
+            kurbo::Affine::scale(k) * kurbo::Affine::translate((-cx, -cy)) * path
+        };
+        match &self.target {
+            Target::None => Vec::new(),
+            Target::Path(p) => sample_path(p, n, true),
+            Target::Svg(icon) => sample_path(&fit(icon.filled(), icon.view), n, true),
+            Target::CheckMark => {
+                let view = crate::geom::Rect::new(0.0, 0.0, 24.0, 24.0);
+                sample_path(&fit(crate::path::icons::check(), view), n, false)
+            }
+        }
+    }
+}
+
+/// A mask for the PA08 force from time `at` on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimedMask {
+    pub at: f64,
+    pub mask: Arc<MaskField>,
+}
+
+/// `n` points of `path`: along its contours by arc length, and, when `fill` and it has closed
+/// contours, 60 % of them inside on a jittered grid (nonzero winding), row by row.
+pub fn sample_path(path: &kurbo::BezPath, n: usize, fill: bool) -> Vec<Point> {
+    use kurbo::PathEl;
+    if n == 0 {
+        return Vec::new();
+    }
+    // Flatten into polylines, one per subpath.
+    let mut lines: Vec<Vec<kurbo::Point>> = Vec::new();
+    let mut closed = false;
+    kurbo::flatten(path, 0.05, |el| match el {
+        PathEl::MoveTo(p) => lines.push(vec![p]),
+        PathEl::LineTo(p) => {
+            if let Some(l) = lines.last_mut() {
+                l.push(p);
+            }
+        }
+        PathEl::ClosePath => {
+            if let Some(l) = lines.last_mut() {
+                if let Some(&first) = l.first() {
+                    l.push(first);
+                }
+                closed = true;
+            }
+        }
+        _ => {}
+    });
+    let total: f64 = lines.iter().flat_map(|l| l.windows(2)).map(|w| w[0].distance(w[1])).sum();
+    let inside = if fill && closed { interior(path, (n as f64 * 0.6).round() as usize) } else { Vec::new() };
+    let n_c = if total > 0.0 { n - inside.len() } else { 0 };
+    let mut out = Vec::with_capacity(n);
+    if n_c > 0 {
+        let step = total / n_c as f64;
+        let mut next = 0.5 * step;
+        let mut run = 0.0;
+        for w in lines.iter().flat_map(|l| l.windows(2)) {
+            let d = w[0].distance(w[1]);
+            while next < run + d && out.len() < n_c {
+                let p = w[0].lerp(w[1], (next - run) / d);
+                out.push(Point::new(p.x as f32, p.y as f32));
+                next += step;
+            }
+            run += d;
+        }
+        // Rounding at the very end of the length.
+        let end = lines.last().and_then(|l| l.last()).copied().unwrap_or_default();
+        out.resize(n_c, Point::new(end.x as f32, end.y as f32));
+    }
+    out.extend(inside);
+    out
+}
+
+/// `n` points inside `path` (nonzero winding) on a jittered grid, row by row; none when the
+/// path has no inside.
+fn interior(path: &kurbo::BezPath, n: usize) -> Vec<Point> {
+    use kurbo::Shape as _;
+    let b = path.bounding_box();
+    if n == 0 || b.area() <= 0.0 {
+        return Vec::new();
+    }
+    // Start at twice the cells needed if the box were full, finer until enough are inside.
+    let mut cell = (b.area() / (2.0 * n as f64)).sqrt();
+    for _ in 0..6 {
+        let (w, h) = ((b.width() / cell).ceil() as u32, (b.height() / cell).ceil() as u32);
+        let mut cand = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let jx = vo_core::hash::rand_f32(0xe626, x, y, 0) as f64;
+                let jy = vo_core::hash::rand_f32(0xe626, x, y, 1) as f64;
+                let p = kurbo::Point::new(b.x0 + (x as f64 + jx) * cell, b.y0 + (y as f64 + jy) * cell);
+                if path.winding(p) != 0 {
+                    cand.push(Point::new(p.x as f32, p.y as f32));
+                }
+            }
+        }
+        if cand.len() >= n {
+            return (0..n).map(|i| cand[((i as f64 + 0.5) * cand.len() as f64 / n as f64) as usize]).collect();
+        }
+        cell *= 0.7;
+    }
+    Vec::new()
+}
+
+/// A coverage field of text (or any shape) for the PA08 mask force, in emitter space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskField {
+    pub width: u32,
+    pub height: u32,
+    /// The field's box in emitter space: x, y, w, h.
+    pub rect: [f32; 4],
+    /// Coverage 0 to 255, rows top to bottom.
+    pub data: Vec<u8>,
+}
+
+impl MaskField {
+    /// A field over `rect` with cells of `cell` units, from points that fill shapes (as
+    /// glyph points do), blurred by `blur` cells so the force reaches past the edges.
+    pub fn from_points(points: &[[f32; 2]], rect: [f32; 4], cell: f32, blur: u32) -> MaskField {
+        let (w, h) = mask_size(rect, cell);
+        let mut acc = vec![0f32; (w * h) as usize];
+        for p in points {
+            let x = ((p[0] - rect[0]) / rect[2] * w as f32).floor();
+            let y = ((p[1] - rect[1]) / rect[3] * h as f32).floor();
+            if x >= 0.0 && y >= 0.0 && (x as u32) < w && (y as u32) < h {
+                acc[(y as u32 * w + x as u32) as usize] = 1.0;
+            }
+        }
+        MaskField::blurred(acc, w, h, rect, blur)
+    }
+
+    /// A field over `rect` with cells of `cell` units, covered where `path` is (nonzero
+    /// winding at each cell's centre), blurred by `blur` cells.
+    pub fn from_path(path: &kurbo::BezPath, rect: [f32; 4], cell: f32, blur: u32) -> MaskField {
+        use kurbo::Shape as _;
+        let (w, h) = mask_size(rect, cell);
+        let b = path.bounding_box();
+        let (cw, ch) = (rect[2] as f64 / w as f64, rect[3] as f64 / h as f64);
+        let mut acc = vec![0f32; (w * h) as usize];
+        for y in 0..h {
+            let py = rect[1] as f64 + (y as f64 + 0.5) * ch;
+            if py < b.y0 || py > b.y1 {
+                continue;
+            }
+            for x in 0..w {
+                let p = kurbo::Point::new(rect[0] as f64 + (x as f64 + 0.5) * cw, py);
+                if p.x >= b.x0 && p.x <= b.x1 && path.winding(p) != 0 {
+                    acc[(y * w + x) as usize] = 1.0;
+                }
+            }
+        }
+        MaskField::blurred(acc, w, h, rect, blur)
+    }
+
+    /// The coverage at `p` in emitter space, 0 to 1 (nearest cell; 0 outside the box).
+    pub fn at(&self, p: Point) -> f32 {
+        let x = ((p.x - self.rect[0]) / self.rect[2] * self.width as f32).floor();
+        let y = ((p.y - self.rect[1]) / self.rect[3] * self.height as f32).floor();
+        if x < 0.0 || y < 0.0 || x as u32 >= self.width || y as u32 >= self.height {
+            return 0.0;
+        }
+        self.data[(y as u32 * self.width + x as u32) as usize] as f32 / 255.0
+    }
+
+    fn blurred(mut acc: Vec<f32>, w: u32, h: u32, rect: [f32; 4], blur: u32) -> MaskField {
+        for _ in 0..2 {
+            acc = box_blur(&acc, w, h, blur);
+        }
+        let data = acc.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+        MaskField { width: w, height: h, rect, data }
+    }
+}
+
+fn mask_size(rect: [f32; 4], cell: f32) -> (u32, u32) {
+    let cell = cell.max(1e-3);
+    (((rect[2] / cell).ceil() as u32).clamp(1, 512), ((rect[3] / cell).ceil() as u32).clamp(1, 512))
+}
+
+fn box_blur(src: &[f32], w: u32, h: u32, r: u32) -> Vec<f32> {
+    if r == 0 {
+        return src.to_vec();
+    }
+    let (w, h, r) = (w as i32, h as i32, r as i32);
+    let n = (2 * r + 1) as f32;
+    let mut tmp = vec![0f32; src.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let s: f32 = (-r..=r).map(|d| src[(y * w + (x + d).clamp(0, w - 1)) as usize]).sum();
+            tmp[(y * w + x) as usize] = s / n;
+        }
+    }
+    let mut out = vec![0f32; src.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let s: f32 = (-r..=r).map(|d| tmp[((y + d).clamp(0, h - 1) * w + x) as usize]).sum();
+            out[(y * w + x) as usize] = s / n;
+        }
+    }
+    out
+}
+
+/// The outlines of shaped text as one path, the text box's top left at `origin`, glyphs at
+/// `size` (placed as `WordOutline::new` places them).
+pub fn text_path(
+    fonts: &crate::font::FontRegistry,
+    shaped: &crate::text::ShapedText,
+    size: f32,
+    origin: Point,
+) -> kurbo::BezPath {
+    let mut out = kurbo::BezPath::new();
+    for g in &shaped.glyphs {
+        let Some(face) = fonts.get(g.font) else { continue };
+        let at = kurbo::Affine::translate((origin.x as f64 + g.pos.x as f64, origin.y as f64 + g.pos.y as f64));
+        out.extend((at * crate::path::glyph_path(&face, g.glyph, size)).iter());
+    }
+    out
+}
+
+/// A mask of shaped text for the PA08 force (`EmitterSim::mask`), in emitter space with the
+/// text box's top left at `origin`: cells of `cell` units over the text's ink plus `margin`
+/// units round it, blurred by `blur` cells so the force reaches past the edges.
+pub fn text_mask(
+    fonts: &crate::font::FontRegistry,
+    shaped: &crate::text::ShapedText,
+    size: f32,
+    origin: Point,
+    cell: f32,
+    margin: f32,
+    blur: u32,
+) -> MaskField {
+    use kurbo::Shape as _;
+    let path = text_path(fonts, shaped, size, origin);
+    let b = path.bounding_box();
+    let rect = if b.area() > 0.0 {
+        [b.x0 as f32 - margin, b.y0 as f32 - margin, b.width() as f32 + 2.0 * margin, b.height() as f32 + 2.0 * margin]
+    } else {
+        [origin.x, origin.y, 1.0, 1.0]
+    };
+    MaskField::from_path(&path, rect, cell, blur)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +932,87 @@ mod tests {
         assert!(close(s.at(2.0), 20.0, 50.0));
         // A word that came at 1.25 was said at 1.0.
         assert!(close(s.start(1.25), 100.0, 30.0));
+    }
+
+    fn seg_dist(p: Point, a: Point, b: Point) -> f32 {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let k = (((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        (p.x - a.x - k * dx).hypot(p.y - a.y - k * dy)
+    }
+
+    #[test]
+    fn a_check_mark_gives_points_along_its_line_spread_by_length() {
+        let g = ShapeTarget::new(0.0, Target::CheckMark, 48.0);
+        let pts = g.points(600);
+        assert_eq!(pts.len(), 600);
+        // The 24-unit grid fitted to 48 units round the origin.
+        let m = |x: f32, y: f32| Point::new((x - 12.0) * 2.0, (y - 12.0) * 2.0);
+        let (a, b, c) = (m(4.5, 12.5), m(9.5, 17.5), m(19.5, 6.5));
+        for p in &pts {
+            let d = seg_dist(*p, a, b).min(seg_dist(*p, b, c));
+            assert!(d < 0.05, "{p:?} is {d} off the line");
+        }
+        // The long arm is about 2.1 times the short one, and so is its share of points.
+        let short = pts.iter().filter(|p| seg_dist(**p, a, b) < 0.05 && seg_dist(**p, b, c) > 0.05).count();
+        let ratio = (600 - short) as f32 / short as f32;
+        assert!((ratio - 2.1).abs() < 0.15, "long over short arm: {ratio}");
+        // The same target gives the same points.
+        assert_eq!(pts, g.points(600));
+    }
+
+    #[test]
+    fn a_closed_path_gives_outline_and_inside_points() {
+        let square = kurbo::Rect::new(-20.0, -10.0, 20.0, 10.0);
+        let path = kurbo::Shape::to_path(&square, 0.01);
+        let pts = sample_path(&path, 500, true);
+        assert_eq!(pts.len(), 500);
+        let on_edge = |p: &Point| (p.x.abs() - 20.0).abs() < 1e-3 || (p.y.abs() - 10.0).abs() < 1e-3;
+        let edge = pts.iter().filter(|p| on_edge(p)).count();
+        let inside = pts.iter().filter(|p| p.x.abs() < 20.0 && p.y.abs() < 10.0 && !on_edge(p)).count();
+        assert_eq!(edge + inside, 500, "every point is on the square or in it");
+        assert!((190..=210).contains(&edge) && (290..=310).contains(&inside), "{edge} on the edge, {inside} inside");
+        // Inside points cover the square: each quarter gets a fair share.
+        let quarter = pts[edge..].iter().filter(|p| p.x < 0.0 && p.y < 0.0).count();
+        assert!((55..=95).contains(&quarter), "{quarter} of {inside} in one quarter");
+        // Not filled: only the outline.
+        assert!(sample_path(&path, 100, false).iter().all(on_edge));
+    }
+
+    #[test]
+    fn an_svg_icon_is_fitted_round_the_origin_and_filled() {
+        let svg = r#"<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="black" stroke-width="2"/></svg>"#;
+        let icon = Arc::new(crate::svg::parse(svg).unwrap());
+        let g = ShapeTarget::new(0.0, Target::Svg(icon), 120.0);
+        let pts = g.points(2000);
+        assert_eq!(pts.len(), 2000);
+        // A ring 10 of 24 units out, 2 wide: 45 to 55 units out at 120 units across.
+        for p in &pts {
+            let r = p.x.hypot(p.y);
+            assert!((44.9..=55.1).contains(&r), "{p:?} is {r} from the centre");
+        }
+        let mean = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.x, a.1 + p.y));
+        assert!(mean.0.abs() < 1000.0 && mean.1.abs() < 1000.0, "centred: {mean:?}");
+        assert!(ShapeTarget::new(0.0, Target::None, 10.0).points(10).is_empty());
+    }
+
+    #[test]
+    fn a_text_mask_covers_the_ink_and_blurs_past_it() {
+        use crate::text::TextLayout;
+        let fonts = crate::font::FontRegistry::new();
+        fonts.add_file(&crate::font::test_font_path()).unwrap();
+        let layout = crate::text::ShapedLayout::new(fonts.clone());
+        let shaped = layout.layout("I", &crate::element::TextStyle::new(0, 80.0, 90.0), None);
+        let m = text_mask(&fonts, &shaped, 80.0, Point::new(-20.0, -45.0), 1.0, 6.0, 1);
+        let path = text_path(&fonts, &shaped, 80.0, Point::new(-20.0, -45.0));
+        let b = kurbo::Shape::bounding_box(&path);
+        let mid = Point::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        assert!(m.at(mid) > 0.95, "inside the stem: {}", m.at(mid));
+        assert_eq!(m.at(Point::new(b.x1 as f32 + 5.0, mid.y)), 0.0);
+        // Going right from the stem, the coverage falls through the middle values (the blur)
+        // within a few units.
+        let row: Vec<f32> = (0..40).map(|i| m.at(Point::new(mid.x + i as f32 * 0.5, mid.y))).collect();
+        let first_soft = row.iter().position(|v| *v < 0.9).unwrap();
+        let first_zero = row.iter().position(|v| *v == 0.0).unwrap();
+        assert!(row[first_soft] > 0.05 && first_zero - first_soft <= 8, "{row:?}");
     }
 }

@@ -1897,7 +1897,7 @@ impl<M> Scene<M> {
             (c.draw)(t, Rect::new(m.e, m.f, size.w, size.h), &mut painter);
         } else if let Kind::Emitter(e) = &n.kind {
             let centre = Point::new(m.e + 0.5 * size.w, m.f + 0.5 * size.h);
-            let i = crate::emitter::push_instance(out, e, id.to_bits(), n.born, t, centre, alpha);
+            let i = crate::emitter::push_instance(out, e, id.to_bits(), n.born, t, centre, alpha, self.reduced_motion);
             push_item(items, ItemKind::Emitters, i);
         } else if let Kind::Gpu(g, split) = &n.kind {
             out.gpu.push(crate::gpu::GpuItem {
