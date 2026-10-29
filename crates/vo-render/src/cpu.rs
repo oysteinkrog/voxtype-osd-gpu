@@ -561,9 +561,10 @@ impl CpuRenderer {
     /// Draws a GPU item that is an image (`vo_scene::image`) if its raster is in the cache,
     /// sampled bilinear in linear light like the GPU's texture.
     fn image(&mut self, g: &vo_scene::gpu::GpuItem, st: &State) {
-        use vo_scene::image::{fit, srgb_decode, ImageCache, ImageSource};
+        use vo_scene::image::{decode_px, fit, srgb_decode, ImageCache, ImageSource};
         let Some(src) = g.source.0.as_any().downcast_ref::<ImageSource>() else { return };
-        let want = [(g.rect.w * st.ppu).round() as u32, (g.rect.h * st.ppu).round() as u32];
+        // The size the GPU painter and `ImageSource::warm` decode at.
+        let want = decode_px(vo_scene::geom::Size::new(g.rect.w, g.rect.h), st.ppu);
         let raster = {
             let mut cache = ImageCache::global().lock().unwrap_or_else(|e| e.into_inner());
             cache.peek(src, want)

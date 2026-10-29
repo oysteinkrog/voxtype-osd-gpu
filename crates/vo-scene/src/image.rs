@@ -6,12 +6,18 @@
 //! image painter, so no app code is needed.
 //!
 //! **Rasters.** An image is decoded and scaled once per pixel size: the box's logical size
-//! times the surface's pixels per unit. [`ImageCache`] keeps the results, keyed by
-//! (source, pixel size), least recently used first out, at most [`CACHE_BYTES`] of pixels.
+//! times the pixels per unit, rounded up to a step ([`decode_px`]) so a layer whose scale
+//! animates decodes a few times, not once a frame; the GPU scales the rest. [`ImageCache`]
+//! keeps the results, keyed by ([`ImageSource::key`], pixel size), least recently used first
+//! out, at most [`CACHE_BYTES`] of pixels.
 //! A raster is straight-alpha sRGB RGBA, 8 bits per channel; scaling a PNG averages in linear
 //! light with premultiplied alpha, so edges do not darken. An SVG is drawn by resvg straight at
-//! the pixel size. A source that fails to decode is remembered, so it fails once, not once a
-//! frame; the caller logs it.
+//! the pixel size. A source that fails to decode is remembered for [`RETRY`], so it fails once
+//! every two seconds, not once a frame; the caller logs it.
+//!
+//! **Files.** A file source's key includes the file's modified time and size, so a file
+//! rewritten at the same path, or a missing file created later, shows on the next frame the
+//! scene draws (an image does not wake the scene by itself).
 //!
 //! **Where decoding happens.** The GPU painter decodes on first use, on the render thread.
 //! A caller that wants the first frame to be quick calls [`ImageCache::raster`] from its own
@@ -25,7 +31,9 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::element::{Element, Key};
 use crate::geom::Rect;
@@ -36,6 +44,29 @@ pub const CACHE_BYTES: usize = 8 << 20;
 
 /// The largest raster side in pixels. Bigger requests are scaled down to fit.
 pub const MAX_SIDE: u32 = 4096;
+
+/// How long a failed source is left alone before it is tried again.
+pub const RETRY: Duration = Duration::from_secs(2);
+
+/// The decode scale for `ppu` pixels per unit: `ppu` rounded up to a step of 0.25, or for
+/// `ppu` under 1 to a step of 0.25 times the power of two at or below it (1/8 from 0.5 to 1).
+/// Whole and quarter scales (1, 1.25, 1.5, 2) come out unchanged.
+pub fn decode_scale(ppu: f32) -> f32 {
+    if !(ppu > 0.0) || !ppu.is_finite() {
+        return 0.0;
+    }
+    let step = 0.25 * 2f32.powi(ppu.log2().floor() as i32).min(1.0);
+    // The small margin keeps 1.5000001 at 1.5.
+    (ppu / step - 1e-3).ceil().max(1.0) * step
+}
+
+/// The pixel size to decode an image at for a box of `size` units at `ppu` pixels per unit,
+/// with the scale rounded up by [`decode_scale`]. Every drawer and [`ImageSource::warm`] use
+/// it, so they share rasters.
+pub fn decode_px(size: crate::geom::Size, ppu: f32) -> [u32; 2] {
+    let q = decode_scale(ppu);
+    [(size.w * q).round().max(0.0) as u32, (size.h * q).round().max(0.0) as u32]
+}
 
 /// Where an image's bytes come from.
 #[derive(Clone, Debug)]
@@ -54,32 +85,56 @@ pub enum ImageData {
 pub struct ImageSource {
     id: u64,
     data: ImageData,
+    /// How many times this source has been decoded.
+    decodes: AtomicU32,
 }
 
 impl ImageSource {
     /// PNG or SVG file contents.
     pub fn bytes(bytes: impl Into<Arc<[u8]>>) -> Arc<ImageSource> {
         let bytes: Arc<[u8]> = bytes.into();
-        Arc::new(ImageSource { id: fnv(&bytes, 1), data: ImageData::Bytes(bytes) })
+        Arc::new(ImageSource::new(fnv(&bytes, 1), ImageData::Bytes(bytes)))
     }
 
     /// A PNG or SVG file, read when first needed.
     pub fn file(path: impl Into<PathBuf>) -> Arc<ImageSource> {
         let path: PathBuf = path.into();
         let id = fnv(path.as_os_str().as_encoded_bytes(), 2);
-        Arc::new(ImageSource { id, data: ImageData::File(path) })
+        Arc::new(ImageSource::new(id, ImageData::File(path)))
     }
 
     /// Straight-alpha sRGB RGBA pixels, `w` by `h` (`px.len() == 4 * w * h`).
     pub fn rgba(w: u32, h: u32, px: impl Into<Arc<[u8]>>) -> Arc<ImageSource> {
         let px: Arc<[u8]> = px.into();
         let id = fnv(&px, 3) ^ ((w as u64) << 32 | h as u64);
-        Arc::new(ImageSource { id, data: ImageData::Rgba { w, h, px } })
+        Arc::new(ImageSource::new(id, ImageData::Rgba { w, h, px }))
     }
 
-    /// The cache key for this image's content (for a file, its path).
+    fn new(id: u64, data: ImageData) -> ImageSource {
+        ImageSource { id, data, decodes: AtomicU32::new(0) }
+    }
+
+    /// The id of this image's content (for a file, its path).
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The cache key for what this image shows now: [`ImageSource::id`], and for a file also
+    /// its modified time and size (one `stat`), so a rewritten or newly created file gets a
+    /// new key. A file that cannot be read keys as its path alone.
+    pub fn key(&self) -> u64 {
+        let ImageData::File(path) = &self.data else { return self.id };
+        let Ok(meta) = std::fs::metadata(path) else { return self.id };
+        let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        let mut stamp = [0u8; 24];
+        stamp[..16].copy_from_slice(&mtime.to_le_bytes());
+        stamp[16..].copy_from_slice(&meta.len().to_le_bytes());
+        fnv(&stamp, self.id)
+    }
+
+    /// How many times this source has been decoded, for tests and counters.
+    pub fn decodes(&self) -> u32 {
+        self.decodes.load(Ordering::Relaxed)
     }
 
     pub fn data(&self) -> &ImageData {
@@ -89,7 +144,7 @@ impl ImageSource {
     /// Decodes this image for a box of `size` logical units at `scale` pixels per unit into
     /// the global cache, so the first frame that shows it does not. For a worker thread.
     pub fn warm(&self, size: crate::geom::Size, scale: f32) -> Result<Arc<Raster>, ImageError> {
-        let px = [(size.w * scale).round() as u32, (size.h * scale).round() as u32];
+        let px = decode_px(size, scale);
         ImageCache::global().lock().unwrap_or_else(|e| e.into_inner()).raster(self, px)
     }
 }
@@ -158,7 +213,7 @@ pub fn fit(rect: Rect, w: u32, h: u32) -> Rect {
     Rect::new(rect.x + 0.5 * (rect.w - fw), rect.y + 0.5 * (rect.h - fh), fw, fh)
 }
 
-/// A cache key: source id and the asked pixel size.
+/// A cache key: [`ImageSource::key`] and the asked pixel size.
 pub type CacheKey = (u64, [u32; 2]);
 
 /// Decoded rasters, least recently used out first, bounded by bytes. See the module docs.
@@ -169,8 +224,8 @@ pub struct ImageCache {
     tick: u64,
     /// (source id, asked pixel size), last use, raster.
     entries: Vec<(CacheKey, u64, Arc<Raster>)>,
-    /// Sources that failed, with why.
-    failed: Vec<(u64, ImageError)>,
+    /// Source keys that failed, with why and when.
+    failed: Vec<(u64, ImageError, Instant)>,
 }
 
 impl ImageCache {
@@ -199,39 +254,58 @@ impl ImageCache {
 
     /// The raster for `src` in a box of `px` pixels, if it is already decoded. Never decodes.
     pub fn peek(&mut self, src: &ImageSource, px: [u32; 2]) -> Option<Arc<Raster>> {
+        self.peek_key((src.key(), px))
+    }
+
+    fn peek_key(&mut self, key: CacheKey) -> Option<Arc<Raster>> {
         self.tick += 1;
         let tick = self.tick;
-        let e = self.entries.iter_mut().find(|e| e.0 == (src.id, px))?;
+        let e = self.entries.iter_mut().find(|e| e.0 == key)?;
         e.1 = tick;
         Some(e.2.clone())
     }
 
-    /// The error `src` failed with, if it did.
+    /// The error `src` failed with in the last [`RETRY`], if it did.
     pub fn failure(&self, src: &ImageSource) -> Option<&ImageError> {
-        self.failed.iter().find(|f| f.0 == src.id).map(|f| &f.1)
+        self.failure_key(src.key())
+    }
+
+    fn failure_key(&self, key: u64) -> Option<&ImageError> {
+        self.failed.iter().find(|f| f.0 == key && f.2.elapsed() < RETRY).map(|f| &f.1)
     }
 
     /// The raster for `src` fitted into a box of `px` pixels, decoded now if it is not in the
-    /// cache. A source that failed before fails again at once.
+    /// cache. A source that failed in the last [`RETRY`] fails again at once.
     pub fn raster(&mut self, src: &ImageSource, px: [u32; 2]) -> Result<Arc<Raster>, ImageError> {
-        if let Some(r) = self.peek(src, px) {
+        let key = src.key();
+        if let Some(r) = self.peek_key((key, px)) {
             return Ok(r);
         }
-        if let Some(e) = self.failure(src) {
+        if let Some(e) = self.failure_key(key) {
             return Err(e.clone());
         }
+        self.failed.retain(|f| f.0 != key && f.2.elapsed() < RETRY);
+        src.decodes.fetch_add(1, Ordering::Relaxed);
         match decode(&src.data, px) {
             Ok(r) => {
                 let r = Arc::new(r);
-                self.insert((src.id, px), r.clone());
+                self.insert((key, px), r.clone());
                 Ok(r)
             }
             // A box with no pixels is not the image's fault.
             Err(ImageError::Empty) if px[0] == 0 || px[1] == 0 => Err(ImageError::Empty),
             Err(e) => {
-                self.failed.push((src.id, e.clone()));
+                self.failed.push((key, e.clone(), Instant::now()));
                 Err(e)
             }
+        }
+    }
+
+    /// Ages every remembered failure by `by`, as if that much time had passed. For tests.
+    #[doc(hidden)]
+    pub fn age_failures(&mut self, by: Duration) {
+        for f in &mut self.failed {
+            f.2 = f.2.checked_sub(by).unwrap_or(f.2);
         }
     }
 
@@ -556,7 +630,7 @@ mod tests {
         // The newest eight are kept.
         assert!(cache.entries.iter().all(|e| e.0 .0 >= 92));
         // Using one keeps it past the next insert.
-        let src = ImageSource { id: 92, data: ImageData::Rgba { w: 0, h: 0, px: Arc::from(vec![]) } };
+        let src = ImageSource::new(92, ImageData::Rgba { w: 0, h: 0, px: Arc::from(vec![]) });
         assert!(cache.peek(&src, [512, 512]).is_some());
         cache.insert((100, [512, 512]), one.clone());
         assert!(cache.peek(&src, [512, 512]).is_some());
@@ -564,6 +638,104 @@ mod tests {
         // Too big for the cache: not kept.
         cache.insert((200, [0, 0]), Arc::new(Raster { w: 0, h: 0, px: vec![0; CACHE_BYTES + 1] }));
         assert!(cache.bytes() <= CACHE_BYTES);
+    }
+
+    #[test]
+    fn decode_scale_keeps_quarter_steps_and_rounds_up() {
+        for k in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            assert_eq!(decode_scale(k), k);
+        }
+        assert_eq!(decode_scale(1.000_000_1), 1.0, "float noise stays on the step");
+        assert_eq!(decode_scale(1.1), 1.25);
+        assert_eq!(decode_scale(0.8), 0.875);
+        assert_eq!(decode_scale(0.0), 0.0);
+        for i in 1..400 {
+            let ppu = i as f32 * 0.01;
+            let q = decode_scale(ppu);
+            assert!(q >= ppu * 0.999 && q <= ppu * 1.26, "{ppu} -> {q}");
+        }
+    }
+
+    #[test]
+    fn a_scale_animating_from_0_8_to_1_decodes_at_most_twice() {
+        let mut cache = ImageCache::new(CACHE_BYTES);
+        let src = ImageSource::bytes(test_png(64, 64));
+        let size = crate::geom::Size::new(48.0, 48.0);
+        for f in 0..=20 {
+            let ppu = 0.8 + 0.2 * f as f32 / 20.0;
+            cache.raster(&src, decode_px(size, ppu)).unwrap();
+        }
+        assert!(src.decodes() <= 2, "{} decodes", src.decodes());
+        // Painted again at rest: no more decodes.
+        cache.raster(&src, decode_px(size, 1.0)).unwrap();
+        assert!(src.decodes() <= 2);
+    }
+
+    #[test]
+    fn a_failure_is_retried_after_a_while() {
+        let mut cache = ImageCache::new(CACHE_BYTES);
+        let junk = ImageSource::bytes(b"not an image either".to_vec());
+        assert!(cache.raster(&junk, [8, 8]).is_err());
+        assert!(cache.raster(&junk, [8, 8]).is_err());
+        assert_eq!(junk.decodes(), 1, "a fresh failure is not tried again");
+        cache.age_failures(RETRY);
+        assert!(cache.failure(&junk).is_none());
+        assert!(cache.raster(&junk, [8, 8]).is_err());
+        assert_eq!(junk.decodes(), 2, "tried again after RETRY");
+        assert_eq!(cache.failed.len(), 1, "the old failure is replaced, not piled up");
+    }
+
+    fn solid_png(w: u32, h: u32, p: [u8; 4]) -> Vec<u8> {
+        let px: Vec<u8> = (0..w * h).flat_map(|_| p).collect();
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+        out
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vo-image-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn write_at(path: &Path, bytes: &[u8], secs: u64) {
+        std::fs::write(path, bytes).unwrap();
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn a_file_rewritten_at_the_same_path_shows_new_pixels() {
+        let mut cache = ImageCache::new(CACHE_BYTES);
+        let path = temp_path("rewrite.png");
+        // Same size both times: only the modified time tells them apart.
+        write_at(&path, &solid_png(4, 4, [255, 0, 0, 255]), 1_000_000);
+        let src = ImageSource::file(&path);
+        assert_eq!(&cache.raster(&src, [4, 4]).unwrap().px[..4], &[255, 0, 0, 255]);
+        assert_eq!(&cache.raster(&src, [4, 4]).unwrap().px[..4], &[255, 0, 0, 255]);
+        assert_eq!(src.decodes(), 1);
+        write_at(&path, &solid_png(4, 4, [0, 0, 255, 255]), 1_000_001);
+        assert_eq!(&cache.raster(&src, [4, 4]).unwrap().px[..4], &[0, 0, 255, 255]);
+        assert_eq!(src.decodes(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_created_later_shows_up() {
+        let mut cache = ImageCache::new(CACHE_BYTES);
+        let path = temp_path("later.png");
+        let src = ImageSource::file(&path);
+        assert!(matches!(cache.raster(&src, [4, 4]), Err(ImageError::Read(_))));
+        assert!(matches!(cache.raster(&src, [4, 4]), Err(ImageError::Read(_))));
+        assert_eq!(src.decodes(), 1, "the missing file is not read every frame");
+        std::fs::write(&path, solid_png(4, 4, [0, 255, 0, 255])).unwrap();
+        assert_eq!(&cache.raster(&src, [4, 4]).unwrap().px[..4], &[0, 255, 0, 255]);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

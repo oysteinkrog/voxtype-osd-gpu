@@ -4,12 +4,15 @@
 //! It is a GPU painter (`crate::gpu`): the renderer breaks its pass at the image and the
 //! painter draws one textured quad in a pass of its own.
 //!
-//! - The raster comes from `vo_scene::image::ImageCache::global()`, at the box's size in
-//!   surface pixels, decoded on first use. A source that fails to decode is logged once and
-//!   then skipped.
+//! - The pixel size is the box's size in surface pixels with the scale rounded up a step
+//!   (`vo_scene::image::decode_px`), so an animated layer scale does not decode every frame.
+//! - The painter's own textures are looked up first, by (`ImageSource::key`, pixel size);
+//!   only on a miss does it ask `vo_scene::image::ImageCache::global()`, which decodes on
+//!   first use. So a raster too big for that cache is still decoded once, not every frame.
+//!   A source that fails to decode is logged once per key and skipped.
 //! - Each raster is uploaded once as an `Rgba16Float` texture of linear, premultiplied colour,
-//!   so filtering and blending are in linear light. Textures are kept by (source, pixel size),
-//!   least recently used out first, at most [`TEXTURE_BYTES`].
+//!   so filtering and blending are in linear light. Textures are kept least recently used out
+//!   first, at most [`TEXTURE_BYTES`] (one bigger texture is kept while it is the only one).
 //! - The quad goes through the layer's transform and its stage warp, perspective correct.
 //! - Output follows the painter contract: linear on the effect path and on sRGB targets,
 //!   encoded by the shader on a plain UNORM target. Premultiplied over.
@@ -19,8 +22,8 @@
 
 use std::sync::Arc;
 
-use vo_scene::geom::Point;
-use vo_scene::image::{fit, ImageCache, ImageSource, Raster};
+use vo_scene::geom::{Point, Size};
+use vo_scene::image::{decode_px, fit, ImageCache, ImageSource, Raster};
 
 use crate::gpu::{GpuPainter, PaintCx};
 
@@ -62,6 +65,9 @@ fn encode(c: vec3f) -> vec3f {
 
 struct Tex {
     key: (u64, [u32; 2]),
+    /// The raster's size in pixels.
+    w: u32,
+    h: u32,
     view: wgpu::TextureView,
     bytes: usize,
     last: u64,
@@ -131,13 +137,17 @@ impl ImagePainter {
         &self.pipelines.last().expect("pushed").1
     }
 
-    /// The texture for `raster` under `key`, uploaded now if new.
-    fn texture(&mut self, cx: &PaintCx<'_>, key: (u64, [u32; 2]), raster: &Raster) -> wgpu::TextureView {
+    /// The texture held under `key` with its raster size, marked used this frame.
+    fn held(&mut self, key: (u64, [u32; 2])) -> Option<(wgpu::TextureView, [u32; 2])> {
         let frame = self.frame;
-        if let Some(t) = self.textures.iter_mut().find(|t| t.key == key) {
-            t.last = frame;
-            return t.view.clone();
-        }
+        let t = self.textures.iter_mut().find(|t| t.key == key)?;
+        t.last = frame;
+        Some((t.view.clone(), [t.w, t.h]))
+    }
+
+    /// Uploads `raster` as the texture under `key`.
+    fn upload(&mut self, cx: &PaintCx<'_>, key: (u64, [u32; 2]), raster: &Raster) -> wgpu::TextureView {
+        let frame = self.frame;
         let size = wgpu::Extent3d { width: raster.w, height: raster.h, depth_or_array_layers: 1 };
         let tex = cx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vo-image"),
@@ -173,7 +183,7 @@ impl ImagePainter {
             self.bytes -= self.textures.swap_remove(i).bytes;
         }
         self.bytes += bytes;
-        self.textures.push(Tex { key, view: view.clone(), bytes, last: frame });
+        self.textures.push(Tex { key, w: raster.w, h: raster.h, view: view.clone(), bytes, last: frame });
         view
     }
 }
@@ -201,26 +211,32 @@ impl GpuPainter for ImagePainter {
         let Some(src) = cx.source.as_any().downcast_ref::<ImageSource>() else { return false };
         let m = cx.to_px;
         let ppu = (m.a * m.d - m.b * m.c).abs().sqrt();
-        let want = [(cx.rect.w * ppu).round() as u32, (cx.rect.h * ppu).round() as u32];
+        let want = decode_px(Size::new(cx.rect.w, cx.rect.h), ppu);
         if want[0] == 0 || want[1] == 0 || cx.opacity <= 0.0 {
             return true;
         }
-        let raster: Arc<Raster> = {
-            let mut cache = ImageCache::global().lock().unwrap_or_else(|e| e.into_inner());
-            match cache.raster(src, want) {
-                Ok(r) => r,
-                Err(e) => {
-                    if !self.logged.contains(&src.id()) {
-                        self.logged.push(src.id());
-                        eprintln!("vo-render: image {:?} not drawn: {e}", src.data());
+        let key = (src.key(), want);
+        let (view, [rw, rh]) = match self.held(key) {
+            Some(held) => held,
+            None => {
+                let raster: Arc<Raster> = {
+                    let mut cache = ImageCache::global().lock().unwrap_or_else(|e| e.into_inner());
+                    match cache.raster(src, want) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            if !self.logged.contains(&key.0) {
+                                self.logged.push(key.0);
+                                eprintln!("vo-render: image {:?} not drawn: {e}", src.data());
+                            }
+                            return true;
+                        }
                     }
-                    return true;
-                }
+                };
+                (self.upload(cx, key, &raster), [raster.w, raster.h])
             }
         };
-        let view = self.texture(cx, (src.id(), want), &raster);
         // The quad: the fitted box, through the layer and the stage warp, in clip space.
-        let r = fit(cx.rect, raster.w, raster.h);
+        let r = fit(cx.rect, rw, rh);
         let [sw, sh] = cx.size.map(|v| v as f32);
         let corners = [(r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h)].map(|(x, y)| {
             let p = m.apply(Point::new(x, y));

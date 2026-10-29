@@ -157,3 +157,98 @@ fn images_draw_their_colours() {
     let icon = rgba(&img, 191, 75);
     assert!(icon[0] > 120, "icon drawn in the chip {icon:?}");
 }
+
+/// A `w` by `h` PNG of a diagonal gradient, its content salted by `salt` so no other test
+/// shares its cache entries.
+fn gradient_png(w: u32, h: u32, salt: u8) -> Vec<u8> {
+    let mut px = Vec::with_capacity((4 * w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            px.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, salt, 255]);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().unwrap().write_image_data(&px).unwrap();
+    out
+}
+
+/// One frame: `src` in a `box_size` box inside a layer scaled by `scale`, on a fresh scene.
+fn scaled_frame(off: &mut Offscreen, src: &Arc<ImageSource>, box_size: f32, scale: f32) -> Image {
+    let layer =
+        Element::layer("l").size(box_size, box_size).scale(scale).child(Element::image("img", src.clone()).size(box_size, box_size));
+    let root = Element::panel("root").size(box_size, box_size).child(layer);
+    let mut scene: Scene<()> = Scene::new();
+    scene.set_viewport(0.0, Size::new(box_size, box_size), 1.0);
+    scene.apply(root, 0.0);
+    let list = scene.sample(0.0);
+    let n = box_size as u32;
+    let px = off.render_to_rgba(&list, [n, n], 1.0);
+    Image { name: "probe".into(), w: n, h: n, channels: 4, px }
+}
+
+/// RV-03 (a): a raster too big for the 8 MB decode cache (1500 x 1500 x 4 bytes) is decoded
+/// once and then drawn from the painter's texture, not decoded every frame.
+#[test]
+fn a_big_image_painted_ten_frames_decodes_once() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let src = ImageSource::bytes(gradient_png(2000, 2000, 7));
+    for _ in 0..10 {
+        scaled_frame(&mut off, &src, 1500.0, 1.0);
+    }
+    assert_eq!(src.decodes(), 1);
+}
+
+/// RV-03 (b): a layer scale animating 0.8 to 1.0 over 20 frames (a pop-in) decodes at most
+/// twice, and the image still fills its scaled box.
+#[test]
+fn a_pop_in_scale_decodes_at_most_twice() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let src = ImageSource::bytes(gradient_png(256, 256, 9));
+    let mut last = None;
+    for f in 0..=20 {
+        let img = scaled_frame(&mut off, &src, 100.0, 0.8 + 0.2 * f as f32 / 20.0);
+        if f == 0 {
+            assert_eq!(rgba(&img, 2, 2)[3], 0, "at 0.8 the scaled box leaves the corner clear");
+        }
+        last = Some(img);
+    }
+    assert!(src.decodes() <= 2, "{} decodes", src.decodes());
+    let img = last.unwrap();
+    assert_eq!(rgba(&img, 2, 2)[3], 255, "the image covers the box at rest");
+    assert!(rgba(&img, 97, 50)[0] > 230, "the right edge is the gradient's red end");
+}
+
+/// RV-03 (9): a file rewritten at the same path draws its new pixels.
+#[test]
+fn a_rewritten_file_draws_its_new_pixels() {
+    let gpu = support::gpu();
+    let mut off = Offscreen::new(&gpu.device, &gpu.queue);
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gpu_image");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rewrite.png");
+    let solid = |p: [u8; 4]| {
+        let px: Vec<u8> = (0..16).flat_map(|_| p).collect();
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 4, 4);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+        out
+    };
+    let write = |bytes: Vec<u8>, secs: u64| {
+        std::fs::write(&path, bytes).unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    };
+    write(solid([255, 0, 0, 255]), 2_000_000);
+    let src = ImageSource::file(&path);
+    assert_eq!(rgba(&scaled_frame(&mut off, &src, 16.0, 1.0), 8, 8), [255, 0, 0, 255]);
+    write(solid([0, 0, 255, 255]), 2_000_001);
+    assert_eq!(rgba(&scaled_frame(&mut off, &src, 16.0, 1.0), 8, 8), [0, 0, 255, 255]);
+    std::fs::remove_file(&path).unwrap();
+}
