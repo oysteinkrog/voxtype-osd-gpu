@@ -1354,7 +1354,6 @@ impl Particles {
             width,
             scatter: SCATTER,
             stroke: 0.09 * size,
-            ..Default::default()
         };
         self.form(anchor);
         let ink_px: f32 = pts.iter().map(|p| p.area * px2).sum();
@@ -1409,7 +1408,6 @@ impl Particles {
             width,
             scatter: if form.scatter { SCATTER } else { 0.0 },
             stroke: 0.09 * form.size,
-            ..Default::default()
         };
         self.form(anchor);
         let glyph = SlotGlyph {
