@@ -211,6 +211,35 @@ impl<M> Element<M> {
     }
 }
 
+/// The last bus energies read: the store they were read from, the time, the bands and the
+/// time constants, and the values.
+type LastRead = (Arc<Signals>, u64, (u8, u8, u32, u32), Vec<f32>);
+
+thread_local! {
+    static LAST_READ: std::cell::RefCell<Option<LastRead>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`Spectrum::energies`], read once per frame for the same bus bands: a look that draws two
+/// rings over the same bands (bars and their cores) smooths them once. The store is kept
+/// with the values, so an equal pointer is the same store.
+fn shared_energies(s: &Spectrum, store: Option<&Arc<Signals>>, t: f64) -> Vec<f32> {
+    let (Bands::Signals { lo, hi, attack, release }, Some(store)) = (&s.bands, store) else {
+        return s.energies(store.map(|a| &**a), t);
+    };
+    let key = (*lo, *hi, attack.to_bits(), release.to_bits());
+    LAST_READ.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((at, when, k, values)) = last.as_ref() {
+            if Arc::ptr_eq(at, store) && *when == t.to_bits() && *k == key {
+                return values.clone();
+            }
+        }
+        let values = s.energies(Some(store), t);
+        *last = Some((store.clone(), t.to_bits(), key, values.clone()));
+        values
+    })
+}
+
 /// A number from 0 to 1 for bar `i`, `seed` and drift `step` (a small integer hash).
 fn hash(i: u32, seed: u32, step: i64) -> f32 {
     let mut x = (i as u64) ^ ((seed as u64) << 32) ^ (step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -242,7 +271,7 @@ pub(crate) fn draw(
         return;
     }
     let store = signals.map(SignalsCell::get);
-    let energies = s.energies(store.as_deref(), t);
+    let energies = shared_energies(s, store.as_ref(), t);
     if energies.is_empty() {
         return;
     }
@@ -348,6 +377,34 @@ mod tests {
         assert!(len[7] > 20.0 && len[0] < 1e-3, "{len:?}");
         assert_eq!(scene.next_wake(0.4), Some(0.4));
         assert_eq!(scene.next_wake(30.0), None);
+    }
+
+    #[test]
+    fn two_rings_on_the_same_bands_read_the_bus_once_and_follow_a_new_store() {
+        let loud = |band: usize| {
+            Signals::recorded(
+                (0..50).map(move |i| {
+                    let mut f = SignalFrame::silent(i as f64 * 0.01);
+                    f.mel[band] = 1.0;
+                    f
+                }),
+                0.0,
+            )
+        };
+        let bus = Bands::Signals { lo: 0, hi: 23, attack: 0.015, release: 0.18 };
+        let s = Spectrum::new(Color::WHITE, Color::WHITE).bands(bus);
+        let a = Arc::new(loud(2));
+        let first = shared_energies(&s, Some(&a), 0.4);
+        assert_eq!(first, s.energies(Some(&a), 0.4));
+        // The second ring of the frame gets the same values.
+        assert_eq!(shared_energies(&s.clone().count(12), Some(&a), 0.4), first);
+        // Another store, another time or other bands read again.
+        let b = Arc::new(loud(20));
+        assert_eq!(shared_energies(&s, Some(&b), 0.4), s.energies(Some(&b), 0.4));
+        assert_ne!(shared_energies(&s, Some(&b), 0.4), first);
+        assert_eq!(shared_energies(&s, Some(&b), 0.3), s.energies(Some(&b), 0.3));
+        let other = s.clone().bands(Bands::Signals { lo: 0, hi: 5, attack: 0.015, release: 0.18 });
+        assert_eq!(shared_energies(&other, Some(&b), 0.3).len(), 6);
     }
 
     #[test]

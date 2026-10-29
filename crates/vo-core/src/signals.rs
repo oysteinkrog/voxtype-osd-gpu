@@ -376,6 +376,12 @@ impl Signals {
         if sig == Sig::Pitch {
             return self.pitch_read(i, s);
         }
+        self.read_from(sig, i, s)
+    }
+
+    /// The value of a plain signal (not pitch or an onset pulse) at read time `s`, frame `i`
+    /// being the last at or before it.
+    fn read_from(&self, sig: Sig, i: usize, s: f64) -> f32 {
         let a = &self.frames[i];
         match self.frames.get(i + 1) {
             Some(b) if b.at - a.at <= GAP_SECS => {
@@ -419,8 +425,35 @@ impl Signals {
                 y + (x - y) * (1.0 - (-dt as f32 / tc).exp())
             }
         };
-        for k in first + 1..=last {
-            y = step(y, self.sample_read(sig, k as f64 * FRAME_SECS), FRAME_SECS);
+        if matches!(sig, Sig::Pitch | Sig::OnsetPulse { .. }) {
+            for k in first + 1..=last {
+                y = step(y, self.sample_read(sig, k as f64 * FRAME_SECS), FRAME_SECS);
+            }
+        } else {
+            // The same steps, without a search and an `exp` per step: the grid walks
+            // forward, so the frame under each step is found by moving on from the last one,
+            // and every whole step has the same factor (a spectrum ring reads 24 bands of
+            // about 100 steps each per frame).
+            let gain = |tc: f32| (tc > 0.0).then(|| 1.0 - (-FRAME_SECS as f32 / tc).exp());
+            let (up, down) = (gain(attack), gain(release));
+            let mut i = self.index((first + 1) as f64 * FRAME_SECS);
+            for k in first + 1..=last {
+                let at = k as f64 * FRAME_SECS;
+                while let Some(next) = self.frames.get(i.map_or(0, |i| i + 1)) {
+                    if next.at > at {
+                        break;
+                    }
+                    i = Some(i.map_or(0, |i| i + 1));
+                }
+                let x = match i {
+                    Some(i) => self.read_from(sig, i, at),
+                    None => sig.rest(),
+                };
+                y = match if x > y { up } else { down } {
+                    Some(g) => y + (x - y) * g,
+                    None => x,
+                };
+            }
         }
         let rest = s - last as f64 * FRAME_SECS;
         if rest > 0.0 {
@@ -804,6 +837,55 @@ mod tests {
             s.envelope(Sig::Level, 0.02, 0.3, k as f64 * 0.016);
         }
         assert_eq!(a, s.envelope(Sig::Level, 0.02, 0.3, 1.2345));
+    }
+
+    /// `Signals::envelope` as it was written first: a search and an `exp` per step.
+    fn envelope_reference(s: &Signals, sig: Sig, attack: f32, release: f32, t: f64) -> f32 {
+        let r = s.read_at(t);
+        let span = 6.0 * attack.max(release) as f64;
+        let first = ((r - span) / FRAME_SECS).floor() as i64;
+        let last = (r / FRAME_SECS).floor() as i64;
+        let mut y = s.sample_read(sig, first as f64 * FRAME_SECS);
+        let step = |y: f32, x: f32, dt: f64| {
+            let tc = if x > y { attack } else { release };
+            if tc <= 0.0 {
+                x
+            } else {
+                y + (x - y) * (1.0 - (-dt as f32 / tc).exp())
+            }
+        };
+        for k in first + 1..=last {
+            y = step(y, s.sample_read(sig, k as f64 * FRAME_SECS), FRAME_SECS);
+        }
+        let rest = r - last as f64 * FRAME_SECS;
+        if rest > 0.0 {
+            y = step(y, s.sample_read(sig, r), rest);
+        }
+        y
+    }
+
+    #[test]
+    fn envelope_matches_the_step_by_step_reference_exactly() {
+        // Frames with a gap in the middle and jittered times, read before, inside and past
+        // the history, with an instant attack too.
+        let mut frames: Vec<_> = (0..300)
+            .filter(|i| !(120..160).contains(i))
+            .map(|i| frame(i as f64 * FRAME_SECS + 0.0037 * ((i * 7) % 3) as f64, -60.0 + (i % 17) as f32 * 3.0))
+            .collect();
+        for (i, f) in frames.iter_mut().enumerate() {
+            f.mel[3] = ((i * 13) % 29) as f32 / 29.0;
+        }
+        let s = Signals::recorded(frames, 0.5).with_playout(0.05);
+        for (attack, release) in [(0.015, 0.18), (0.0, 0.1), (0.05, 0.05)] {
+            for k in 0..500 {
+                let t = k as f64 * 0.0091;
+                for sig in [Sig::Level, Sig::Band(3)] {
+                    let fast = s.envelope(sig, attack, release, t);
+                    let slow = envelope_reference(&s, sig, attack, release, t);
+                    assert_eq!(fast.to_bits(), slow.to_bits(), "{sig:?} {attack} {release} at {t}");
+                }
+            }
+        }
     }
 
     #[test]
