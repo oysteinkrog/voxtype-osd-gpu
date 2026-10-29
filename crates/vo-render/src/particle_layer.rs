@@ -582,7 +582,8 @@ fn apply_targets(
             points: &points,
             // Reduced motion: each particle starts on its target, so the shape is there at once.
             starts: p.reduced.then_some(&points[..]),
-            size: g.size,
+            // Reduced motion: no size, so no wobble while the spring settles.
+            size: if p.reduced { 0.0 } else { g.size },
             persist: true,
             sweep: if p.reduced { 0.0 } else { g.sweep },
             scatter: g.scatter && !p.reduced,

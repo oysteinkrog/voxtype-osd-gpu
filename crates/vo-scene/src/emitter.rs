@@ -774,7 +774,9 @@ impl MaskField {
     }
 
     /// A field over `rect` with cells of `cell` units, covered where `path` is (nonzero
-    /// winding at each cell's centre), blurred by `blur` cells.
+    /// winding at each cell's centre), with a halo blurred `blur` cells out. The covered
+    /// cells stay fully covered, so the hug force (a negative `EmitterSim::mask`) holds
+    /// particles at the shape's own edge, and its halo reaches about `2 * blur` cells out.
     pub fn from_path(path: &kurbo::BezPath, rect: [f32; 4], cell: f32, blur: u32) -> MaskField {
         use kurbo::Shape as _;
         let (w, h) = mask_size(rect, cell);
@@ -793,7 +795,13 @@ impl MaskField {
                 }
             }
         }
-        MaskField::blurred(acc, w, h, rect, blur)
+        let mut m = MaskField::blurred(acc.clone(), w, h, rect, blur);
+        for (d, a) in m.data.iter_mut().zip(&acc) {
+            if *a > 0.0 {
+                *d = 255;
+            }
+        }
+        m
     }
 
     /// The coverage at `p` in emitter space, 0 to 1 (nearest cell; 0 outside the box).
