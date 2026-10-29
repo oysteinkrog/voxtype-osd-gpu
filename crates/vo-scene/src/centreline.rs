@@ -1281,7 +1281,7 @@ impl Graph {
                 let k = end / 2;
                 done[k] = true;
                 let mut ep = self.points(&self.edges[k]);
-                if end % 2 == 1 {
+                if !end.is_multiple_of(2) {
                     ep.reverse();
                 }
                 if !pts.is_empty() {
@@ -1289,7 +1289,7 @@ impl Graph {
                 }
                 pts.extend(ep);
                 let exit = end ^ 1;
-                let exit_node = if exit % 2 == 0 { self.edges[k].a } else { self.edges[k].b };
+                let exit_node = if exit.is_multiple_of(2) { self.edges[k].a } else { self.edges[k].b };
                 match partner[exit] {
                     Some(p) if p == start => {
                         through.push(exit_node);
@@ -1308,7 +1308,7 @@ impl Graph {
             if !self.edges[start / 2].alive || done[start / 2] || partner[start].is_some() {
                 continue;
             }
-            let first = if start % 2 == 0 { self.edges[start / 2].a } else { self.edges[start / 2].b };
+            let first = if start.is_multiple_of(2) { self.edges[start / 2].a } else { self.edges[start / 2].b };
             let (pts, through, closed, last) = walk(start, &mut done);
             let mut raw = Raw::new(pts, closed, through);
             let junction = |n: usize| (deg[n] >= 3).then(|| (self.nodes[n].pos, self.nodes[n].radius));
