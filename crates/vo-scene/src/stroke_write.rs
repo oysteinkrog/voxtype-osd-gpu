@@ -290,7 +290,8 @@ impl Writing {
     /// all of it).
     pub fn draw(&self, p: &mut Painter, s: f32, style: &WriteStyle) {
         let (done, along) = self.split(s);
-        self.draw_from(p, done, along, style);
+        // The raw distance sets the type's ink, so a pen resting in a lift reads as before.
+        self.draw_at(p, done, along, s, style);
     }
 
     /// Where pen distance `s` falls: the index of the first stroke not finished, and how far
@@ -328,6 +329,11 @@ impl Writing {
             Some(t) => t.start + along.clamp(0.0, t.contour.length()),
             None => self.total,
         };
+        self.draw_at(p, done, along, s, style);
+    }
+
+    /// [`Writing::draw_from`] with the type's ink taken at pen distance `s`.
+    fn draw_at(&self, p: &mut Painter, done: usize, along: f32, s: f32, style: &WriteStyle) {
         // The type first, so the pen writes over it.
         if style.ink.a > 0.0 {
             for (i, g) in self.word.glyphs.iter().enumerate() {
