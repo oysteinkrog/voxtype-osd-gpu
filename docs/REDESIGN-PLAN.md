@@ -58,7 +58,7 @@ Rules (fixed by RD-02, in full in MOTION-PLAN.md rule 8):
 - Off under reduced motion. The CPU first frame shows the rest pose.
 - Inside the element's own box, and no brightness change over 10 % more than 3 times a second.
 - A waveform that redraws on every audio frame in silence counts as idle motion.
-- Budget per look at 600x300, checked by `scripts/osd-vo-budget.sh` in the popup repo: idle-open at most 2 % of one core and 30 frames per second; recording at most 10 % of one core; GPU at most 1 ms p95 and 3 ms p99 per frame.
+- Budget per look at 600x300, checked by `scripts/osd-vo-budget.sh` in the popup repo: idle-open at most 2 % of one core and 30 frames per second; recording at most 10 % of one core; GPU at most 1 ms p95 per frame, taken as the lowest p95 of 3 `--offline --gpu-times` runs (the shared GPU makes single runs jump between 0.3 and 4.2 ms; RD-13); p99 is reported, not gated.
 
 - **Swiss:** the accent hairline shimmers once every few seconds; the recording dot breathes; the timer colon softens on each second.
 - **Showcase:** a slow nebula drift behind the text; idle particles orbit the waveform.
