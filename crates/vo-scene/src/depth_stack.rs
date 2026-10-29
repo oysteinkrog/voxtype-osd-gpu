@@ -12,6 +12,13 @@
 //! Sheets are keyed by the caller's line keys, so a line keeps its node, and its springs,
 //! as it moves back. A sheet past `DepthStack::depth` fades out and leaves.
 //!
+//! A line that has just left the reading place can be held flat for a moment ([`Hold`])
+//! before it moves back: on the row it was read on when the box grew by a line, or gliding
+//! one row up, like a plain scroll, when it did not. Without the hold, in a box that grows
+//! the line lands back almost where it was read, so a reader (and the envelope check, MO-08)
+//! takes that turned, pushed-back spot for where the line came to rest; in a box that keeps
+//! its size, the line turns while it still sits on the new line's row.
+//!
 //! Under reduced motion every sheet jumps to its place: the same stack, still.
 
 use vo_core::spring::Spring;
@@ -52,6 +59,36 @@ pub struct DepthStack {
     /// Frost (EG-04, `Element::frost`) of each sheet, in logical units: the sheets and lines
     /// behind a sheet show blurred through it. 0 for none (the default).
     pub frost: f32,
+}
+
+/// A line that has just left the reading place, held flat for a moment before it moves back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hold {
+    /// The line's key, as given to [`DepthStack::view_at`].
+    pub key: Key,
+    /// When it left the reading place, on the scene clock.
+    pub since: f64,
+    /// How long it is held, in seconds.
+    pub secs: f64,
+    /// How far it is held above the newest sheet's box, in logical pixels: one line pitch.
+    pub rise: f32,
+    /// False when the box grew by `rise` as the new line arrived: the line jumps with its box
+    /// and so stays where it was read. True when the box kept its size: the line glides up
+    /// one row on the newest sheet's spring, as a plain scroll would, also under reduced
+    /// motion.
+    pub glide: bool,
+}
+
+impl Hold {
+    /// Whether the line is held at time `now`: from `since` for `secs`.
+    pub fn holds(&self, now: f64) -> bool {
+        now >= self.since && now < self.until()
+    }
+
+    /// When the line moves back. Show the stack again at this time.
+    pub fn until(&self) -> f64 {
+        self.since + self.secs
+    }
 }
 
 /// The glass pane under a line.
@@ -127,6 +164,11 @@ impl DepthStack {
         }
     }
 
+    /// Where a held line sits: as the reading line does, `rise` above the newest sheet's box.
+    pub fn held_place(&self, hold: &Hold) -> Place {
+        Place { offset: (0.0, -hold.rise), ..self.place(0) }
+    }
+
     /// The spring that moves a sheet to place `d`.
     pub fn spring(&self, d: usize) -> Spring {
         Spring::critical_to_98(self.spring_secs + self.slowdown * d as f64)
@@ -156,6 +198,24 @@ impl DepthStack {
         content: impl Fn(&L, usize, &Place) -> Element<M>,
         reduced: bool,
     ) -> Element<M> {
+        self.view_at(key, size, sheet, lines, content, reduced, None, 0.0)
+    }
+
+    /// [`DepthStack::view`] at time `now`, with `hold` keeping the line just behind the
+    /// newest flat while [`Hold::holds`]. Its content is built for place 1
+    /// with the held [`Place`]. A hold on any other line does nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn view_at<L, M>(
+        &self,
+        key: impl Into<Key>,
+        size: Size,
+        sheet: Size,
+        lines: &[(Key, L)],
+        content: impl Fn(&L, usize, &Place) -> Element<M>,
+        reduced: bool,
+        hold: Option<&Hold>,
+        now: f64,
+    ) -> Element<M> {
         let n = lines.len();
         let keep = self.depth + 2;
         let mut root = Element::layer(key).size(size.w, size.h);
@@ -164,12 +224,15 @@ impl DepthStack {
             if d >= keep {
                 continue;
             }
-            let body = content(line, d, &self.place(d));
-            root = root.child(self.sheet_view(k.clone(), d, size, sheet, body, reduced));
+            let held = hold.filter(|h| d == 1 && h.key == *k && h.holds(now));
+            let place = held.map_or_else(|| self.place(d), |h| self.held_place(h));
+            let body = content(line, d, &place);
+            root = root.child(self.sheet_view(k.clone(), d, size, sheet, body, reduced, held));
         }
         root
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sheet_view<M>(
         &self,
         key: Key,
@@ -178,9 +241,15 @@ impl DepthStack {
         sheet: Size,
         content: Element<M>,
         reduced: bool,
+        held: Option<&Hold>,
     ) -> Element<M> {
-        let p = self.place(d);
-        let motion = self.motion(d, reduced);
+        let p = held.map_or_else(|| self.place(d), |h| self.held_place(h));
+        let motion = match held {
+            // It jumps with its box, so it stays where it was read.
+            Some(h) if !h.glide => Motion::Snap,
+            Some(_) => Motion::Spring(self.spring(0)),
+            None => self.motion(d, reduced),
+        };
         let pane = match self.sheet {
             Some(s) => Element::panel(format!("{}-pane", key.0))
                 .size(sheet.w, sheet.h)
@@ -211,6 +280,7 @@ impl DepthStack {
             .motion(Prop::Offset, motion)
             .motion(Prop::Opacity, motion)
             .child(pane);
+        let layer = if held.is_some() { layer.motion(Prop::Position, motion) } else { layer };
         // A new reading line is readable in the frame it arrives: it rises at most 3 px
         // and starts at 70 % ink (rule 1).
         let enter = if reduced { Transition::NONE } else { Transition::fade().opacity(0.7).offset(0.0, 3.0) };
@@ -280,5 +350,89 @@ mod tests {
         scene.sample(1.0);
         let ink = scene.sampled(scene.find(&["stack", "a"]).unwrap(), 1.0).unwrap().opacity;
         assert!((ink - s.place(1).ink).abs() < 1e-4, "{ink}");
+    }
+
+    fn hold(key: &'static str, since: f64, secs: f64, glide: bool) -> Hold {
+        Hold { key: Key::from(key), since, secs, rise: 40.0, glide }
+    }
+
+    /// The stack `rows` lines of 40 px tall at `now`.
+    fn view_held(s: &DepthStack, keys: &[&'static str], rows: f32, hold: Option<&Hold>, now: f64) -> Element<()> {
+        let content = |k: &&str, _: usize, _: &Place| Element::column(format!("{k}-text")).size(200.0, 30.0);
+        let size = Size::new(400.0, 40.0 * rows);
+        s.view_at("stack", size, Size::new(300.0, 40.0), &lines(keys), content, false, hold, now)
+    }
+
+    /// Where sheet `k` is drawn at `t`, its ink, and how many sheets are turned.
+    fn at(scene: &Scene<()>, k: &str, t: f64) -> ((f32, f32), f32, usize) {
+        let warped = scene.sample(t).layers.iter().filter(|l| l.warp.is_some()).count();
+        let n = scene.sampled(scene.find(&["stack", k]).unwrap(), t).unwrap();
+        ((n.transform.e, n.transform.f), n.opacity, warped)
+    }
+
+    #[test]
+    fn a_hold_is_pure_in_time() {
+        let h = hold("a", 1.0, 0.15, false);
+        assert!(!h.holds(0.99));
+        assert!(h.holds(1.0) && h.holds(1.149));
+        assert!(!h.holds(1.15) && !h.holds(2.0));
+        assert_eq!(h.until(), 1.15);
+        let p = DepthStack::default().held_place(&h);
+        assert_eq!((p.z, p.offset, p.turn, p.ink, p.blur), (0.0, (0.0, -40.0), 0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn a_held_line_stays_where_it_was_read_while_the_box_grows() {
+        let s = DepthStack::default();
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(view_held(&s, &["a"], 1.0, None, 0.0), 0.0);
+        let (read, _, _) = at(&scene, "a", 0.5);
+        // The box grows by a line as "b" arrives; "a" is held where it was read.
+        let h = hold("a", 1.0, 0.15, false);
+        scene.apply(view_held(&s, &["a", "b"], 2.0, Some(&h), 1.0), 1.0);
+        for t in [1.0, 1.05, 1.1, 1.149] {
+            let (pos, ink, warped) = at(&scene, "a", t);
+            assert!((pos.0 - read.0).abs() < 1e-3 && (pos.1 - read.1).abs() < 1e-3, "{t}: {pos:?} {read:?}");
+            assert!((ink - 1.0).abs() < 1e-4 && warped == 0, "{t}: ink {ink}, {warped} turned");
+        }
+        // Then it moves back.
+        scene.apply(view_held(&s, &["a", "b"], 2.0, Some(&h), h.until()), h.until());
+        let (_, ink, warped) = at(&scene, "a", 3.0);
+        assert!((ink - s.place(1).ink).abs() < 1e-3 && warped == 1, "ink {ink}, {warped} turned");
+    }
+
+    #[test]
+    fn a_held_line_glides_up_a_row_flat_when_the_box_keeps_its_size() {
+        let s = DepthStack::default();
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(view_held(&s, &["a"], 2.0, None, 0.0), 0.0);
+        let (read, _, _) = at(&scene, "a", 0.5);
+        let h = hold("a", 1.0, 0.6, true);
+        scene.apply(view_held(&s, &["a", "b"], 2.0, Some(&h), 1.0), 1.0);
+        let mut last = read.1;
+        for t in [1.05, 1.1, 1.2, 1.3, 1.59] {
+            let (pos, ink, warped) = at(&scene, "a", t);
+            assert!(pos.1 < last && (pos.0 - read.0).abs() < 1e-3, "{t}: rises straight up, {pos:?}");
+            assert!((ink - 1.0).abs() < 1e-4 && warped == 0, "{t}: flat, ink {ink}, {warped} turned");
+            last = pos.1;
+        }
+        assert!((last - (read.1 - 40.0)).abs() < 0.5, "a row up: {last} from {}", read.1);
+    }
+
+    #[test]
+    fn a_hold_on_another_line_or_after_its_time_does_nothing() {
+        let s = DepthStack::default();
+        let plain = |h: Option<&Hold>, now: f64| {
+            let mut scene: Scene<()> = Scene::new();
+            scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+            scene.apply(view_held(&s, &["a", "b", "c"], 2.0, h, now), 0.0);
+            ["a", "b", "c"].map(|k| at(&scene, k, 2.0))
+        };
+        let none = plain(None, 1.0);
+        assert_eq!(plain(Some(&hold("a", 1.0, 0.15, false)), 1.0), none, "a is two places back");
+        assert_eq!(plain(Some(&hold("b", 0.5, 0.15, false)), 1.0), none, "the hold is over");
+        assert_ne!(plain(Some(&hold("b", 1.0, 0.15, false)), 1.0), none, "b is held");
     }
 }
