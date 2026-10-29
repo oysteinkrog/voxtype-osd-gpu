@@ -1228,11 +1228,49 @@ impl Graph {
     }
 
     /// Joins edges into strokes through the junctions where they run on straightest.
+    /// At a three-way node where a ring meets a short free spur that runs on from neither side
+    /// of it (the slash of a heavy `ø`, cut short by the ink at the ring's corner), the
+    /// ring's two ends, to be joined so the ring stays one closed stroke, and the spur, a
+    /// stroke of its own: `(spur, ring end, ring end)` as indices into `ends`. A spur that
+    /// runs on straight from the ring (the stem of `b` above its bowl, the legs of `A`) keeps
+    /// the usual join.
+    fn slash_at(&self, n: usize, ends: &[(usize, Point)], deg: &[usize], stem: f32) -> Option<(usize, usize, usize)> {
+        if ends.len() != 3 {
+            return None;
+        }
+        let other = |end: usize| {
+            let e = &self.edges[end / 2];
+            if end.is_multiple_of(2) {
+                e.b
+            } else {
+                e.a
+            }
+        };
+        let spur = (0..3).find(|&k| {
+            let m = other(ends[k].0);
+            m != n && deg[m] == 1 && polylen(&self.points(&self.edges[ends[k].0 / 2])) < SLASH_LEN * stem
+        })?;
+        let (i, j) = match spur {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        // The two ring ends lead to the same node, round a ring.
+        if other(ends[i].0) != other(ends[j].0) || deg[other(ends[i].0)] == 1 {
+            return None;
+        }
+        let run_on = |a: usize, b: usize| -(ends[a].1.x * ends[b].1.x + ends[a].1.y * ends[b].1.y);
+        (run_on(spur, i) < SLASH && run_on(spur, j) < SLASH).then_some((spur, i, j))
+    }
+
     fn strokes(&self, stem: f32) -> Vec<Raw> {
         let ne = self.edges.len();
         // End reference: 2 * edge + (0 at a, 1 at b).
         let mut partner: Vec<Option<usize>> = vec![None; 2 * ne];
         let reach = stem.max(3.0);
+        let deg = self.degrees();
+        // Spurs a ring kept closed past (`slash_at`): written apart, after the ring.
+        let mut slashes: Vec<usize> = Vec::new();
         for n in 0..self.nodes.len() {
             if !self.nodes[n].alive {
                 continue;
@@ -1260,6 +1298,14 @@ impl Graph {
             }
             pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
             let mut used = vec![false; ends.len()];
+            if let Some((spur, i, j)) = self.slash_at(n, &ends, &deg, stem) {
+                used[spur] = true;
+                used[i] = true;
+                used[j] = true;
+                partner[ends[i].0] = Some(ends[j].0);
+                partner[ends[j].0] = Some(ends[i].0);
+                slashes.push(ends[spur].0 / 2);
+            }
             for (s, i, j) in pairs {
                 if s < STRAIGHT || used[i] || used[j] {
                     continue;
@@ -1272,7 +1318,6 @@ impl Graph {
         }
         let mut done = vec![false; ne];
         let mut out = Vec::new();
-        let deg = self.degrees();
         let walk = |start: usize, done: &mut Vec<bool>| -> (Vec<Point>, Vec<usize>, bool, usize) {
             let mut pts: Vec<Point> = Vec::new();
             let mut through = Vec::new();
@@ -1313,6 +1358,7 @@ impl Graph {
             let mut raw = Raw::new(pts, closed, through);
             let junction = |n: usize| (deg[n] >= 3).then(|| (self.nodes[n].pos, self.nodes[n].radius));
             raw.ends = [junction(first), junction(last)];
+            raw.delayed = slashes.contains(&(start / 2));
             out.push(raw);
         }
         for k in 0..ne {
@@ -1351,6 +1397,11 @@ const CORNER_SPUR: f32 = 0.6;
 /// Two branches at a junction join when they run on within this much of straight
 /// (-cos of the angle between their headings; 0.6 is about 127 degrees).
 const STRAIGHT: f32 = 0.6;
+/// A spur off a ring is a slash ([`Graph::slash_at`]) when it runs on from both sides of the
+/// ring at less than this (about 154 degrees) and is shorter than `SLASH_LEN` stems: a
+/// longer one is a leg or a tail of its own (`R`, `A`).
+const SLASH: f32 = 0.9;
+const SLASH_LEN: f32 = 1.0;
 
 fn reversed(e: Edge) -> Edge {
     let mut mid = e.mid;

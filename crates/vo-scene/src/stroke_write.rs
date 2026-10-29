@@ -15,10 +15,11 @@
 //! analysed off the frame: [`StrokeSource::Font`] takes them from the cache and writes a
 //! glyph that is not ready yet by tracing its outline, and [`Writing::pending`] says to
 //! build the writing again a frame later; [`StrokeSource::FontNow`] analyses on the calling
-//! thread, for offline renders and tests. Font strokes keep the glyph's pen order (base
-//! strokes, then dots, crossbars and marks, [`WrittenStroke::delayed`]) and carry the ink's
-//! width along them as a width table relative to the stem ([`Writing::stem`]), so a pen
-//! `stem` wide draws the letter's own weight.
+//! thread, for offline renders and tests. Font strokes keep each glyph's pen order, with
+//! its dots, crossbars and marks ([`WrittenStroke::delayed`]) held to the end of the word,
+//! the way a hand dots its i's after the word (SW-03), and carry the ink's width along them
+//! as a width table relative to the stem ([`Writing::stem`]), so a pen `stem` wide draws the
+//! letter's own weight.
 //!
 //! [`Writing::draw`] draws the strokes up to a pen distance along the whole word, with a
 //! bright pen head, and lays the real glyphs under them at an ink that rises from a floor to
@@ -32,6 +33,11 @@
 //! arrival is swept in instead. [`Writing::pen_at`] turns the word's share of that time into
 //! the pen's place, eased per stroke with a pause at each lift, and [`Writing::draw_from`]
 //! draws the done strokes whole and trims only the live one.
+//!
+//! [`WetInk`] (SW-03) is the font strokes' own look: [`Writing::draw_wet`] lays each stroke on
+//! its letter at the glyph's stem width in the text colour lifted toward white, with a soft
+//! nib light in the accent at the pen, and lets each glyph's ink dry to nothing 180 ms after
+//! the pen leaves it. [`WriteStyle`] with [`Writing::draw`] stays the Hershey script look.
 
 use std::sync::{Arc, OnceLock};
 
@@ -139,7 +145,8 @@ pub struct WrittenStroke<'a> {
     pub contour: &'a Contour,
     /// Pen distance at the stroke's start.
     pub start: f32,
-    /// A dot, crossbar or mark (font strokes only).
+    /// A dot, crossbar or mark (font strokes only), written after every base stroke of the
+    /// word.
     pub delayed: bool,
 }
 
@@ -148,7 +155,9 @@ pub struct WrittenStroke<'a> {
 pub struct Writing {
     pub word: WordOutline,
     strokes: Vec<Stroke>,
-    /// Pen distance at the end of each glyph's last stroke.
+    /// Pen distance where each glyph's first stroke starts and its last base stroke ends (its
+    /// last delayed stroke when it has only those): the type's ink rises over this span.
+    glyph_begin: Vec<f32>,
     glyph_end: Vec<f32>,
     total: f32,
     /// Each glyph's centre-line analysis, for the font sources.
@@ -182,11 +191,9 @@ impl Writing {
     /// [`Writing::new`] with the strokes from `source`.
     pub fn with_source(fonts: &FontRegistry, text: &str, word: WordOutline, lift: f32, source: StrokeSource) -> Writing {
         let pen = PenFont::script();
-        let mut strokes = Vec::new();
-        let mut glyph_end = Vec::with_capacity(word.glyphs.len());
+        let mut placed_all: Vec<(usize, Contour, bool)> = Vec::new();
         let mut centres = Vec::with_capacity(word.glyphs.len());
         let mut pending = false;
-        let mut at = 0.0f32;
         for (i, g) in word.glyphs.iter().enumerate() {
             let c = text.get(g.cluster as usize..).and_then(|s| s.chars().next()).unwrap_or(' ');
             let centre = match (source, g.has_ink(), fonts.get(g.font)) {
@@ -238,18 +245,43 @@ impl Writing {
                 // contour by contour.
                 (None, None) => g.outline.contours.iter().map(|c| (c.clone(), false)).collect(),
             };
-            for (c, delayed) in placed {
-                let len = c.length();
-                if len <= 0.0 {
-                    continue;
-                }
-                strokes.push(Stroke { contour: c, start: at, glyph: i, delayed });
-                at += len + lift;
-            }
-            glyph_end.push(at);
+            placed_all.extend(placed.into_iter().filter(|(c, _)| c.length() > 0.0).map(|(c, d)| (i, c, d)));
             centres.push(centre);
         }
-        Writing { word, strokes, glyph_end, total: at, centres, pending, word_id: crate::display::NO_WORD }
+        // Base strokes glyph by glyph, then the delayed ones (dots, crossbars, marks) at the
+        // end of the word, the way a hand dots its i's and crosses its t's (SW-03). Only font
+        // strokes are ever delayed, so Hershey keeps its own order.
+        let n = word.glyphs.len();
+        let mut strokes = Vec::with_capacity(placed_all.len());
+        let mut glyph_begin = vec![f32::NAN; n];
+        let mut glyph_end = vec![f32::NAN; n];
+        let mut at = 0.0f32;
+        for late in [false, true] {
+            for (i, c, delayed) in placed_all.iter().filter(|t| t.2 == late) {
+                let len = c.length();
+                if glyph_begin[*i].is_nan() {
+                    glyph_begin[*i] = at;
+                }
+                strokes.push(Stroke { contour: c.clone(), start: at, glyph: *i, delayed: *delayed });
+                at += len + lift;
+                if !late || glyph_end[*i].is_nan() {
+                    glyph_end[*i] = at;
+                }
+            }
+            if !late {
+                // A glyph with no strokes holds its place after the glyph before it.
+                let mut last = 0.0f32;
+                for i in 0..n {
+                    if glyph_end[i].is_nan() && !placed_all.iter().any(|t| t.0 == i) {
+                        (glyph_begin[i], glyph_end[i]) = (last, last);
+                    }
+                    if !glyph_end[i].is_nan() {
+                        last = glyph_end[i];
+                    }
+                }
+            }
+        }
+        Writing { word, strokes, glyph_begin, glyph_end, total: at, centres, pending, word_id: crate::display::NO_WORD }
     }
 
     /// The word id the drawn glyphs carry, so per-word tools (the reading-line envelope)
@@ -340,8 +372,7 @@ impl Writing {
                 if !g.has_ink() {
                     continue;
                 }
-                let end = self.glyph_end[i];
-                let begin = self.strokes.iter().find(|t| t.glyph == i).map_or(end, |t| t.start);
+                let (begin, end) = (self.glyph_begin[i], self.glyph_end[i]);
                 let k = ((s - begin) / (end - begin).max(1e-3)).clamp(0.0, 1.0);
                 let ink = style.ink_floor + (1.0 - style.ink_floor) * k;
                 p.glyph(crate::display::GlyphInstance { word: self.word_id, ..g.instance(style.ink.fade(ink)) });
@@ -391,6 +422,177 @@ impl Writing {
             }
             let pen = StrokeStyle { c0: style.pen.c0.fade(a), c1: style.pen.c1.fade(a), ..style.pen };
             p.stroke(&t.contour, &pen);
+        }
+    }
+}
+
+/// Wet ink (SW-03): the pen writes each glyph along its own centre lines at its stem width,
+/// so the stroke lies on the letter's ink, in the text colour lifted toward white, and dries
+/// back into the type. Only the nib light takes the accent. Draw with [`Writing::draw_wet`];
+/// a look that wants the Hershey script draws with a [`WriteStyle`] instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WetInk {
+    /// The wet stroke's colour.
+    pub ink: Color,
+    /// The nib light: a soft blob this many px across at the pen, 0 for none.
+    pub nib: f32,
+    pub nib_color: Color,
+    /// A stroke dries to nothing over this many seconds once its glyph is done.
+    pub dry_secs: f64,
+    /// The wet shine: a line down the middle of the stroke, a third of its width, in
+    /// `sheen_color` at this alpha, drying with the stroke; 0 for none.
+    pub sheen: f32,
+    pub sheen_color: Color,
+    /// The real glyphs' colour under the ink, transparent when the look draws the type
+    /// itself; their ink rises from `ink_floor` to full as the pen finishes each glyph.
+    pub type_ink: Color,
+    pub ink_floor: f32,
+}
+
+impl WetInk {
+    /// The text colour lifted 15 % toward white, drying over 180 ms, with a shine lifted
+    /// 60 % toward white and a 5 px nib light in `accent`. The type is not drawn.
+    pub fn new(text: Color, accent: Color) -> WetInk {
+        let lift = |k: f32| {
+            let l = |c: f32| c + k * (1.0 - c);
+            Color { r: l(text.r), g: l(text.g), b: l(text.b), a: text.a }
+        };
+        WetInk {
+            ink: lift(0.15),
+            nib: 5.0,
+            nib_color: accent,
+            dry_secs: 0.18,
+            sheen: 0.45,
+            sheen_color: lift(0.6),
+            type_ink: Color::TRANSPARENT,
+            ink_floor: 0.7,
+        }
+    }
+
+    /// The scene time after which a word in `slot` shows no wet ink.
+    pub fn until(&self, slot: &PenSlot) -> f64 {
+        slot.end + self.dry_secs
+    }
+}
+
+impl Writing {
+    /// Each stroke's wetness at scene time `t` for a word written in `slot`: 0 before the pen
+    /// (or the sweep) reaches it, 1 from then until its glyph is done (its own end, for a
+    /// delayed stroke), then falling to 0 over [`WetInk::dry_secs`].
+    pub fn wetness(&self, slot: &PenSlot, t: f64, wet: &WetInk) -> Vec<f32> {
+        let dry = |from: f64| -> f32 {
+            let x = ((t - from) / wet.dry_secs.max(1e-6)).clamp(0.0, 1.0) as f32;
+            1.0 - x * x * (3.0 - 2.0 * x)
+        };
+        if slot.swept {
+            let n = self.word.glyphs.len().max(1) as f32;
+            let k = (((t - slot.start) / (slot.end - slot.start).max(1e-9)) as f32).clamp(0.0, 1.0);
+            return self
+                .strokes
+                .iter()
+                .map(|s| if t < slot.start { 0.0 } else { ((k * (n + 2.0) - s.glyph as f32) / 3.0).clamp(0.0, 1.0) * dry(slot.end) })
+                .collect();
+        }
+        let dur = slot.end - slot.start;
+        let total = self.total.max(1e-6) as f64;
+        let when = |s: f32| slot.start + dur * (s as f64 / total).min(1.0);
+        // Where each glyph's base strokes end.
+        let mut base_end = vec![0.0f32; self.word.glyphs.len()];
+        for s in self.strokes.iter().filter(|s| !s.delayed) {
+            base_end[s.glyph] = base_end[s.glyph].max(s.start + s.contour.length());
+        }
+        self.strokes
+            .iter()
+            .map(|s| {
+                let end = s.start + s.contour.length();
+                if t < when(s.start) {
+                    return 0.0;
+                }
+                dry(when(end.max(base_end[s.glyph])))
+            })
+            .collect()
+    }
+
+    /// Draws the word in wet ink at scene time `t`, written in `slot` (one word of a
+    /// [`PenSchedule`]): written strokes at their wetness, the live one trimmed at the pen
+    /// with the nib light there, a swept word's strokes rising glyph by glyph.
+    pub fn draw_wet(&self, p: &mut Painter, t: f64, slot: &PenSlot, wet: &WetInk) {
+        let phase = slot.phase(t);
+        if wet.type_ink.a > 0.0 {
+            let glyph_k: Box<dyn Fn(usize) -> f32> = match phase {
+                PenPhase::Waiting => Box::new(|_| 0.0),
+                PenPhase::Done => Box::new(|_| 1.0),
+                PenPhase::Sweeping(k) => {
+                    let n = self.word.glyphs.len().max(1) as f32;
+                    Box::new(move |i| ((k * (n + 2.0) - i as f32) / 3.0).clamp(0.0, 1.0))
+                }
+                PenPhase::Writing(u) => {
+                    let (done, along) = self.pen_at(u);
+                    let s = self.strokes.get(done).map_or(self.total, |t| t.start + along);
+                    Box::new(move |i| {
+                        let (b, e) = (self.glyph_begin[i], self.glyph_end[i]);
+                        ((s - b) / (e - b).max(1e-3)).clamp(0.0, 1.0)
+                    })
+                }
+            };
+            for (i, g) in self.word.glyphs.iter().enumerate() {
+                if g.has_ink() {
+                    let ink = wet.ink_floor + (1.0 - wet.ink_floor) * glyph_k(i);
+                    p.glyph(crate::display::GlyphInstance { word: self.word_id, ..g.instance(wet.type_ink.fade(ink)) });
+                }
+            }
+        }
+        let alpha = self.wetness(slot, t, wet);
+        let live = match phase {
+            PenPhase::Writing(u) => Some(self.pen_at(u)),
+            _ => None,
+        };
+        let fallback = self.fallback_stem();
+        for (j, s) in self.strokes.iter().enumerate() {
+            let width = self.stem(s.glyph).unwrap_or(fallback);
+            match live {
+                Some((done, _)) if j > done => break,
+                Some((done, along)) if j == done => {
+                    let len = s.contour.length();
+                    let along = along.clamp(0.0, len);
+                    if along <= 0.0 {
+                        break;
+                    }
+                    let piece = if along >= len { s.contour.clone() } else { s.contour.trim(0.0, along) };
+                    self.wet_stroke(p, &piece, width, 1.0, wet);
+                    if let (Some((at, _)), true) = (s.contour.at(along), wet.nib > 0.0) {
+                        p.stroke(
+                            &Contour::polyline(&[at, Point::new(at.x + 0.01, at.y)], false),
+                            &StrokeStyle::solid(0.5 * wet.nib, wet.nib_color).glow(0.25 * wet.nib),
+                        );
+                    }
+                    break;
+                }
+                _ => {
+                    if alpha[j] > 0.0 {
+                        self.wet_stroke(p, &s.contour, width, alpha[j], wet);
+                    }
+                }
+            }
+        }
+    }
+
+    /// One stroke of wet ink at `wetness`, with its shine.
+    fn wet_stroke(&self, p: &mut Painter, c: &Contour, width: f32, wetness: f32, wet: &WetInk) {
+        p.stroke(c, &StrokeStyle::solid(width, wet.ink.fade(wetness)));
+        if wet.sheen > 0.0 {
+            p.stroke(c, &StrokeStyle::solid(width / 3.0, wet.sheen_color.fade(wet.sheen * wetness)));
+        }
+    }
+
+    /// The pen width for a glyph with no centre lines (Hershey, or traced while its
+    /// analysis is pending): the word's widest stem, else a twelfth of the em.
+    fn fallback_stem(&self) -> f32 {
+        let stem = (0..self.word.glyphs.len()).filter_map(|i| self.stem(i)).fold(0.0, f32::max);
+        if stem > 0.0 {
+            stem
+        } else {
+            self.word.glyphs.first().map_or(1.0, |g| g.size / 12.0)
         }
     }
 }
