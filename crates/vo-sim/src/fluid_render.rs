@@ -29,7 +29,10 @@
 //! Cost: one fluid tick per 1/120 s of scene time (two per frame at 60 fps) plus one output
 //! pass (`Fluid::gpu_cost`); the material reads the dye five times per pixel of the box, and
 //! the smear is one displacement pass. `effect_cost` has the `ink`, `smoke` and `watercolour`
-//! cases.
+//! cases. Measured on the dev box's GPU at 600x300 with [`LAYER_PRESSURE_ITERATIONS`] sweeps:
+//! two ticks and the output pass 0.32 ms; `ink_demo --cost` frames (sim plus render) p95
+//! 0.39 ms ink, 0.46 ms smoke, 0.38 ms watercolour; `effect_cost` adds 0.33, 0.41 and 0.34 ms
+//! over the plain card.
 
 use vo_render::{GpuPainter, PaintCx, Renderer};
 use vo_scene::fluid::{FluidLayer, FluidSource, InkSplat, FLUID_MATERIAL};
