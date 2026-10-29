@@ -243,6 +243,8 @@ pub struct Typos {
     pub motion: TypoMotion,
     /// What a word that has no entry and is new arrives as (before springing to rest).
     pub arrive: Option<Typo>,
+    /// Fill tracks by word: see [`Typos::fill_track`].
+    pub tracks: Vec<(WordId, Vec<(f64, f32)>)>,
 }
 
 impl Typos {
@@ -268,6 +270,27 @@ impl Typos {
         self
     }
 
+    /// Drives word `id`'s fill from `keys`, scene-time `(t, fill)` pairs in time order, joined
+    /// by straight lines and held before the first and after the last, instead of from its
+    /// spring: for a fill that follows something timed, such as a pen (SW-02), between
+    /// views. A later call for the same id wins. Ignored under reduced motion; a word whose
+    /// track a later view drops goes back to its fill channel.
+    pub fn fill_track(mut self, id: WordId, keys: Vec<(f64, f32)>) -> Typos {
+        self.set_fill_track(id, keys);
+        self
+    }
+
+    pub fn set_fill_track(&mut self, id: WordId, keys: Vec<(f64, f32)>) {
+        match self.tracks.iter_mut().find(|(i, _)| *i == id) {
+            Some(e) => e.1 = keys,
+            None => self.tracks.push((id, keys)),
+        }
+    }
+
+    fn track(&self, id: WordId) -> &[(f64, f32)] {
+        self.tracks.iter().find(|(i, _)| *i == id).map_or(&[], |(_, k)| k)
+    }
+
     fn get(&self, id: WordId) -> Option<&WordTypo> {
         self.words.iter().find(|(i, _)| *i == id).map(|(_, w)| w)
     }
@@ -279,6 +302,23 @@ struct WordChannels {
     ch: [Channel; CHANNELS],
     kick: Option<u32>,
     floor: f32,
+    /// The fill track, empty for none.
+    track: Vec<(f64, f32)>,
+}
+
+/// `keys` at `t`: straight lines between the keys, held at the ends.
+fn track_at(keys: &[(f64, f32)], t: f64) -> Option<f32> {
+    let (first, last) = (keys.first()?, keys.last()?);
+    if t <= first.0 {
+        return Some(first.1);
+    }
+    if t >= last.0 {
+        return Some(last.1);
+    }
+    let i = keys.partition_point(|k| k.0 <= t);
+    let (a, b) = (keys[i - 1], keys[i]);
+    let k = ((t - a.0) / (b.0 - a.0).max(1e-9)) as f32;
+    Some(a.1 + (b.1 - a.1) * k)
 }
 
 /// The channels the scene keeps for one live text node.
@@ -319,7 +359,7 @@ impl TypoState {
                     });
                     changed = true;
                     // A word that arrives with a kick takes it as already seen.
-                    WordChannels { id, ch, kick: want.kick.map(|k| k.0), floor: want.floor }
+                    WordChannels { id, ch, kick: want.kick.map(|k| k.0), floor: want.floor, track: Vec::new() }
                 }
             };
             let kick = want.kick.filter(|k| Some(k.0) != w.kick);
@@ -328,6 +368,11 @@ impl TypoState {
             }
             if w.floor != want.floor {
                 w.floor = want.floor;
+                changed = true;
+            }
+            let track = if reduced { &[][..] } else { typos.track(id) };
+            if w.track != track {
+                w.track = track.to_vec();
                 changed = true;
             }
             for c in 0..CHANNELS {
@@ -365,7 +410,11 @@ impl TypoState {
     /// Word `id`'s values at `t`, before any envelope; plain type for a word without channels.
     pub fn sample(&self, id: WordId, t: f64) -> Option<Typo> {
         let w = self.words.iter().find(|w| w.id == id)?;
-        Some(Typo::from_array(std::array::from_fn(|c| w.ch[c].value(t) as f32)))
+        let mut v = Typo::from_array(std::array::from_fn(|c| w.ch[c].value(t) as f32));
+        if let Some(fill) = track_at(&w.track, t) {
+            v.fill = fill;
+        }
+        Some(v)
     }
 
     /// Word `id`'s fill floor; [`FILL_FLOOR`] for a word without channels.
@@ -374,7 +423,8 @@ impl TypoState {
     }
 
     pub fn settled_at(&self) -> f64 {
-        self.words.iter().flat_map(|w| w.ch.iter()).map(Channel::settled_at).fold(f64::NEG_INFINITY, f64::max)
+        let tracks = self.words.iter().filter_map(|w| w.track.last().map(|k| k.0));
+        self.words.iter().flat_map(|w| w.ch.iter()).map(Channel::settled_at).chain(tracks).fold(f64::NEG_INFINITY, f64::max)
     }
 }
 
@@ -491,5 +541,27 @@ mod tests {
         assert_eq!(s.floor(2), FILL_FLOOR);
         assert_eq!(s.floor(3), FILL_FLOOR);
         assert_eq!(WordTypo::default().floor, FILL_FLOOR);
+    }
+
+    #[test]
+    fn a_fill_track_drives_the_fill_between_views() {
+        let mut s = TypoState::default();
+        let keys = vec![(1.0, 0.0), (1.2, 0.5), (1.6, 1.0)];
+        let typos = Typos::new().word(1, WordTypo::rest(Typo::REST).floor(0.7)).fill_track(1, keys.clone());
+        assert!(s.sync(0.0, &[1], Some(&typos), false, 1.0));
+        assert_eq!(s.sample(1, 0.5).unwrap().fill, 0.0);
+        assert!((s.sample(1, 1.1).unwrap().fill - 0.25).abs() < 1e-5);
+        assert!((s.sample(1, 1.4).unwrap().fill - 0.75).abs() < 1e-5);
+        assert_eq!(s.sample(1, 2.0).unwrap().fill, 1.0);
+        // The scene keeps drawing until the track ends.
+        assert!(s.settled_at() >= 1.6);
+        // The same track again is no change; dropping it gives the channel back.
+        assert!(!s.sync(0.1, &[1], Some(&typos), false, 1.0));
+        s.sync(0.2, &[1], Some(&Typos::new().word(1, WordTypo::rest(Typo::REST))), false, 1.0);
+        assert_eq!(s.sample(1, 0.5).unwrap().fill, 1.0);
+        // Reduced motion ignores it.
+        let mut r = TypoState::default();
+        r.sync(0.0, &[1], Some(&typos), true, 1.0);
+        assert_eq!(r.sample(1, 1.1).unwrap().fill, 1.0);
     }
 }
