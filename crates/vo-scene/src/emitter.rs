@@ -490,6 +490,11 @@ impl LevelTrack {
         }
     }
 
+    /// The time of the newest entry, or `None` before the first.
+    pub fn last(&self) -> Option<f64> {
+        self.points.last().map(|p| p.0)
+    }
+
     /// The eased level at `t`.
     pub fn at(&self, t: f64) -> f32 {
         self.state(t).0

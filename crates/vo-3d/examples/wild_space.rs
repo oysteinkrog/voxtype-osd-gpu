@@ -122,7 +122,7 @@ fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool) -> Element<()> {
         .iter()
         .map(|&(_, pause, loud)| {
             at_s += pause as f64;
-            LatticeWord { pause, loud, at: at_s }
+            LatticeWord::new(pause, loud, at_s)
         })
         .collect();
     let layout = ShapedLayout::new(fonts.clone());
