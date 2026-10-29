@@ -358,6 +358,39 @@ impl<M> Scene<M> {
         Insets::outside(ink, self.node_box(root, Point::ZERO, t))
     }
 
+    /// How far the ink of node `id` and its children reaches outside that node's box at `t`.
+    /// For a root wrapped in a transparent margin (vo's `SurfaceMargin`): the reach of the
+    /// app's own root, which the margin's padding does not hide. Zero for a node not in the
+    /// scene or not born yet.
+    pub fn effect_reach_of(&self, id: NodeId, t: f64) -> Insets {
+        if !self.nodes.contains_key(id) {
+            return Insets::ZERO;
+        }
+        // The node's parent's top-left in root parent space.
+        let mut chain = Vec::new();
+        let mut cur = self.nodes[id].parent;
+        while let Some(p) = cur {
+            chain.push(p);
+            cur = self.nodes[p].parent;
+        }
+        let mut origin = Point::ZERO;
+        for &p in chain.iter().rev() {
+            let b = self.node_box(p, origin, t);
+            origin = Point::new(b.x, b.y);
+        }
+        let mut ink: Option<Rect> = None;
+        self.ink_walk(id, origin, t, &mut ink);
+        ink.map_or(Insets::ZERO, |ink| Insets::outside(ink, self.node_box(id, origin, t)))
+    }
+
+    /// How far the ink of each of the root's children reaches outside that child's own box at
+    /// `t`, the widest on each side. For a root that is only a transparent margin round the
+    /// app's view (vo's `SurfaceMargin`): the margin that view needs.
+    pub fn inner_reach(&self, t: f64) -> Insets {
+        let Some(root) = self.root else { return Insets::ZERO };
+        self.nodes[root].children.iter().fold(Insets::ZERO, |acc, &c| acc.max(self.effect_reach_of(c, t)))
+    }
+
     /// How far the ink at `t` crosses the edges of a surface of `size` with the root at its
     /// layout position. Zero when everything fits.
     pub fn clipped(&self, t: f64, size: Size) -> Insets {
@@ -498,6 +531,27 @@ mod tests {
         let look = EmitterLook { size: 2.0, ..Default::default() };
         // 10 for the disc, 50 / 2 = 25 of coasting, 4 for the sprite.
         assert!((particle_reach(&sim, &look) - 39.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn reach_of_a_node_ignores_the_padding_around_it() {
+        // A margin wrapper with 20 of padding round a panel whose glow reaches about 50.
+        let glow = glow_reach(8.0, 1.0);
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(140.0, 80.0), 1.0);
+        scene.apply(
+            Element::column("wrap")
+                .pad_edges(20.0, 20.0, 20.0, 20.0)
+                .child(Element::panel("p").size(100.0, 40.0).fill(Color::WHITE).glow(Color::WHITE, 8.0, 1.0)),
+            0.0,
+        );
+        let p = scene.find(&["wrap", "p"]).unwrap();
+        let r = scene.effect_reach_of(p, 1.0);
+        assert!((r.left - glow).abs() < 1e-3 && (r.bottom - glow).abs() < 1e-3, "{r:?}");
+        // From the padded root, only what crosses the padding shows.
+        assert!((scene.effect_reach(1.0).top - (glow - 20.0)).abs() < 1e-3);
+        assert_eq!(scene.effect_reach_of(scene.root().unwrap(), 1.0), scene.effect_reach(1.0));
+        assert_eq!(scene.inner_reach(1.0), r);
     }
 
     #[test]

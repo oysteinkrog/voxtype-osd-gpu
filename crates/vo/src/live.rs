@@ -11,10 +11,100 @@ use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, InputRegion};
 
 use crate::app::{App, Driver, EXIT_MOTION_MAX};
-use crate::{Options, Tokens};
+use crate::surfaces::PanelAnchor;
+use crate::{Options, SurfaceMargin, Tokens};
 
 /// Channel history kept by a live overlay, in seconds. Seeking is an offline need.
 const LIVE_RETENTION: f64 = 10.0;
+
+/// A margin that follows the show grows in steps of this many logical pixels a side, so a
+/// reach that creeps up does not resize the surface every frame.
+const MARGIN_STEP: f32 = 8.0;
+
+/// How long a smaller margin must be enough before the surface shrinks to it, in seconds.
+const MARGIN_HOLD: f64 = 0.5;
+
+/// While the scene moves without a new view, the margin is checked this often, in seconds:
+/// a particle's reach grows with time, and an effect that fades out lets the margin shrink.
+const MARGIN_RECHECK: f64 = 0.5;
+
+/// The transparent margin round the main view while it follows the show (EG-08). It grows at
+/// once when the view reaches further, and shrinks back once a smaller one has been enough
+/// for `MARGIN_HOLD`, never below the first view's. On an axis where the host centres the
+/// surface, both sides grow by the same amount, so the panel stays where it is on screen.
+#[derive(Clone, Debug, PartialEq)]
+struct MarginFollow {
+    /// The first view's margin: the least it ever is.
+    base: vo_scene::Insets,
+    /// The margin the surface has (or was last asked for).
+    now: vo_scene::Insets,
+    /// The host centres the surface across (`x`) or down (`y`) the output.
+    paired: (bool, bool),
+    /// Since when a smaller margin has been enough.
+    below: Option<f64>,
+}
+
+impl MarginFollow {
+    fn new(base: vo_scene::Insets, placement: Placement) -> Option<MarginFollow> {
+        let paired = match placement {
+            Placement::Centered => (true, true),
+            Placement::Anchored { edges, .. } => (edges.left == edges.right, edges.top == edges.bottom),
+            Placement::FromTop { .. } | Placement::LineAt { .. } => (true, false),
+            Placement::Fullscreen => return None,
+        };
+        Some(MarginFollow { base, now: base, paired, below: None })
+    }
+
+    /// The margin for a view that reaches `need`: the first view's, plus whole steps.
+    fn want(&self, need: vo_scene::Insets) -> vo_scene::Insets {
+        let extra = |need: f32, base: f32| {
+            if need <= base + 0.01 {
+                0.0
+            } else {
+                ((need - base) / MARGIN_STEP).ceil() * MARGIN_STEP
+            }
+        };
+        let (b, n) = (self.base, need);
+        let (mut l, mut t, mut r, mut bo) =
+            (extra(n.left, b.left), extra(n.top, b.top), extra(n.right, b.right), extra(n.bottom, b.bottom));
+        if self.paired.0 {
+            l = l.max(r);
+            r = l;
+        }
+        if self.paired.1 {
+            t = t.max(bo);
+            bo = t;
+        }
+        vo_scene::Insets::new(b.left + l, b.top + t, b.right + r, b.bottom + bo)
+    }
+
+    /// The new margin at `t` for a view that reaches `need`, or `None` to keep the one there.
+    fn step(&mut self, need: vo_scene::Insets, t: f64) -> Option<vo_scene::Insets> {
+        let want = self.want(need);
+        let n = self.now;
+        if want.left > n.left || want.top > n.top || want.right > n.right || want.bottom > n.bottom {
+            self.now = n.max(want);
+            self.below = None;
+            return Some(self.now);
+        }
+        if want == n {
+            self.below = None;
+            return None;
+        }
+        let since = *self.below.get_or_insert(t);
+        if t - since >= MARGIN_HOLD {
+            self.now = want;
+            self.below = None;
+            return Some(want);
+        }
+        None
+    }
+
+    /// When a waiting shrink is due.
+    fn wake(&self) -> Option<f64> {
+        self.below.map(|b| b + MARGIN_HOLD)
+    }
+}
 
 /// The host side of an extra surface (`App::surfaces`); its scene is in the driver.
 struct LiveExtra {
@@ -55,8 +145,18 @@ struct Live<A: App> {
     /// The main surface's size and place as the app last asked for them, before the margin
     /// (`App::main_surface`).
     asked: (vo_scene::geom::Size, Placement),
-    /// The transparent margin round the view, from the first view (`Options::margin`).
+    /// The transparent margin round the view (`Options::margin`): the first view's, or the
+    /// one the surface was last resized for while it follows the show.
     insets: vo_scene::Insets,
+    /// The margin following the show (`SurfaceMargin::Auto` and `AtLeast`).
+    follow: Option<MarginFollow>,
+    /// A margin the surface was resized for: the view moves into it with the compositor's
+    /// configure, so the panel stays still on screen.
+    pending_margin: Option<vo_scene::Insets>,
+    /// The main scene's view count (`Driver::views`) when the margin was last checked.
+    margin_checked: u64,
+    /// When the margin was last checked.
+    margin_at: f64,
     list: DisplayList,
     /// The list `list` held before the last `prepare_frame` sampled into it: the frame on
     /// screen when that frame is kept. A spare buffer otherwise.
@@ -110,9 +210,17 @@ impl<A: App> Live<A> {
         }
         let next = d.timers.next_at();
         let paced = paced.filter(|&w| w > now);
+        // A new view may reach further: check it before its frame.
+        let fresh = !self.driver().stale() && self.driver().views != self.margin_checked;
+        let shrink_due = self.follow.as_ref().and_then(MarginFollow::wake).is_some_and(|w| w <= now);
+        if fresh || shrink_due {
+            self.follow_margin(host, now);
+        }
         let extra_paced = self.sync_extras(host, now);
         let deadline = self.driver().exit_deadline();
-        let wake = [next, paced, extra_paced, deadline].into_iter().flatten().min_by(f64::total_cmp);
+        let fly_out = self.driver().extras.fly_out_deadline().filter(|&w| w > now);
+        let shrink = self.follow.as_ref().and_then(MarginFollow::wake).filter(|&w| w > now);
+        let wake = [next, paced, extra_paced, deadline, fly_out, shrink].into_iter().flatten().min_by(f64::total_cmp);
         host.wake_at(wake);
         let d = self.driver();
         let drawn = !d.dirty && !d.stale() && !d.extras.list.iter().any(|e| e.dirty);
@@ -139,6 +247,50 @@ impl<A: App> Live<A> {
             .and_then(|()| host.update(id, SurfaceChange::Placement(self.spec.placement)));
         if let Err(e) = result {
             eprintln!("vo: cannot resize the surface: {e}");
+        }
+        self.set_anchor();
+    }
+
+    /// Checks the margin the view needs at `t` against the one the surface has, and resizes
+    /// the surface when the margin follows the show and needs to change (EG-08).
+    fn follow_margin(&mut self, host: &mut dyn HostCtl, t: f64) {
+        if self.follow.is_none() {
+            return;
+        }
+        self.margin_checked = self.driver().views;
+        self.margin_at = t;
+        let mut need = self.driver().scene.inner_reach(t);
+        if let Some(SurfaceMargin::AtLeast(m)) = self.options_rest.as_ref().map(|o| o.margin) {
+            need = need.max(m);
+        }
+        let Some(m) = self.follow.as_mut().and_then(|f| f.step(need, t)) else { return };
+        self.insets = m;
+        let fit = vo_scene::surface_for(self.asked.0, m);
+        self.spec.size = fit.size;
+        self.spec.placement = inset_placement(self.asked.1, m);
+        self.pending_margin = Some(m);
+        let id = self.surface;
+        let result = host
+            .update(id, SurfaceChange::Size(fit.size))
+            .and_then(|()| host.update(id, SurfaceChange::Placement(self.spec.placement)));
+        if let Err(e) = result {
+            eprintln!("vo: cannot resize the surface for its margin: {e}");
+        }
+        if surface_log() {
+            eprintln!(
+                "vo: surface {}x{} at t {t:.3}, margin {} {} {} {}",
+                fit.size.w, fit.size.h, m.left, m.top, m.right, m.bottom
+            );
+        }
+        self.set_anchor();
+    }
+
+    /// Tells fly-outs where the panel now sits on its output.
+    fn set_anchor(&mut self) {
+        let inset = vo_scene::geom::Point::new(self.insets.left, self.insets.top);
+        let anchor = PanelAnchor::of(self.spec.placement, self.spec.size, inset);
+        if let Some(d) = self.driver.as_mut() {
+            d.extras.anchor = anchor;
         }
     }
 
@@ -269,7 +421,11 @@ impl<A: App> Live<A> {
         scene.set_viewport(t, self.spec.size, 1.0);
         let mut driver = Driver::with_surfaces(app, scene, self.tokens.clone(), t, options.scene_maker());
         driver.lazy = true;
-        if let Some(m) = options.margin.reach(&driver.scene, t) {
+        driver.extras.reduced = options.reduced_motion;
+        let follows = matches!(options.margin, SurfaceMargin::Auto | SurfaceMargin::AtLeast(_))
+            && self.spec.placement != Placement::Fullscreen;
+        let first = options.margin.reach(&driver.scene, t);
+        if let Some(m) = first {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
             self.spec.size = fit.size;
@@ -279,6 +435,17 @@ impl<A: App> Live<A> {
             self.spec.placement = inset_placement(self.spec.placement, insets);
             self.insets = insets;
             driver.set_margin(insets, t);
+        } else if follows {
+            // No margin yet, but one may come: the view sits in an empty one from the start,
+            // so a later margin is a padding change, not a new tree.
+            driver.set_margin(vo_scene::Insets::ZERO, t);
+        }
+        if follows {
+            self.follow = MarginFollow::new(self.insets, self.asked.1);
+        }
+        if surface_log() {
+            let (s, m) = (self.spec.size, self.insets);
+            eprintln!("vo: surface {}x{} at t {t:.3}, margin {} {} {} {}", s.w, s.h, m.left, m.top, m.right, m.bottom);
         }
         if options.cpu_first_frame && host.gpu_in_background() {
             self.cpu = Some(CpuRenderer::new(options.fonts.clone()));
@@ -294,6 +461,8 @@ impl<A: App> Live<A> {
         }
         self.driver = Some(driver);
         self.options_rest = Some(options);
+        self.set_anchor();
+        self.margin_at = t;
         self.drain_inbox(t);
         self.after_change(host);
         Ok(())
@@ -314,6 +483,12 @@ impl<A: App> Live<A> {
     /// Samples the scene at `t` into `self.list` and sends a changed input region.
     fn sample(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) {
         self.driver().flush();
+        if let Some(below) = self.follow.as_ref().map(|f| f.below.is_some()) {
+            let check = self.driver().views != self.margin_checked || below || t - self.margin_at >= MARGIN_RECHECK;
+            if check && self.pending_margin.is_none() {
+                self.follow_margin(host, t);
+            }
+        }
         let mut list = std::mem::take(&mut self.list);
         self.driver().scene.sample_into(t, &mut list);
         if matches!(self.spec.input, InputMode::Regions(_)) {
@@ -359,6 +534,15 @@ impl<A: App> Live<A> {
         let host_diag = host.diag().clone();
         let moving = self.driver().moving(t) && !self.driver().overdue(t);
         self.driver().dirty = false;
+        // The scene settled: what it needs now is what it keeps needing, so a margin grown for
+        // an effect that has gone can start to shrink.
+        let grown = self.follow.as_ref().is_some_and(|f| f.now != f.base);
+        if !moving && grown && self.pending_margin.is_none() {
+            self.follow_margin(host, t);
+            if let Some(w) = self.follow.as_ref().and_then(MarginFollow::wake) {
+                host.wake_at(Some(w));
+            }
+        }
         self.last_frame = Some(t);
         let pace = self.driver().app.frame_pace();
         if let Some(d) = self.diag() {
@@ -416,6 +600,11 @@ impl<A: App> HostApp for Live<A> {
         match event {
             HostEvent::Configured { id, t, size, scale } if id == self.surface => {
                 self.driver().flush();
+                // A margin the surface was resized for: the view moves into it now, with the
+                // size that makes room for it.
+                if let Some(m) = self.pending_margin.take() {
+                    self.driver().set_margin(m, t);
+                }
                 self.driver().scene.set_viewport(t, size, scale);
                 self.driver().dirty = true;
                 self.host_asked = true;
@@ -601,6 +790,10 @@ impl<A: App> Live<A> {
             surface: 0,
             asked,
             insets: vo_scene::Insets::ZERO,
+            follow: None,
+            pending_margin: None,
+            margin_checked: 0,
+            margin_at: 0.0,
             list: DisplayList::default(),
             shown: DisplayList::default(),
             prepared: None,
@@ -799,6 +992,13 @@ fn trim_heap() {
 
 #[cfg(all(feature = "wayland", not(all(target_os = "linux", target_env = "gnu"))))]
 fn trim_heap() {}
+
+/// Whether to log the main surface's size and margin at the start and at each margin change
+/// (`VO_SURFACE_LOG=1`).
+fn surface_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VO_SURFACE_LOG").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")))
+}
 
 /// The placement once the effect margin has grown the surface by `insets` around the content:
 /// the content stays where it was without the margin. `Centered` is left as it is.
@@ -1161,5 +1361,192 @@ mod pace_tests {
         assert_eq!(pace_period(Some(0.0)), None);
         assert_eq!(pace_period(None), None);
         assert_eq!(pace_slot(None, Some(30.0)), None);
+    }
+}
+
+#[cfg(test)]
+mod margin_tests {
+    use vo_host::{Edges, Gpu, HostCaps, HostDiag, Waker};
+    use vo_scene::element::Element;
+    use vo_scene::geom::{Color, Size};
+    use vo_scene::Insets;
+
+    use super::*;
+    use crate::app::Cx;
+
+    const BASE: Insets = Insets::new(4.0, 4.0, 4.0, 4.0);
+
+    fn follow(placement: Placement) -> MarginFollow {
+        MarginFollow::new(BASE, placement).expect("follows")
+    }
+
+    #[test]
+    fn grows_at_once_in_whole_steps() {
+        let mut f = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
+        assert_eq!(f.step(Insets::uniform(3.0), 0.0), None, "the first view's margin is enough");
+        // 5 more than the base on the left: one step of 8.
+        assert_eq!(f.step(Insets::new(9.0, 0.0, 0.0, 0.0), 0.1), Some(Insets::new(12.0, 4.0, 4.0, 4.0)));
+        // A little more, still inside that step: no resize.
+        assert_eq!(f.step(Insets::new(11.0, 0.0, 0.0, 0.0), 0.2), None);
+        assert_eq!(f.step(Insets::new(13.0, 0.0, 0.0, 0.0), 0.3), Some(Insets::new(20.0, 4.0, 4.0, 4.0)));
+    }
+
+    #[test]
+    fn shrinks_after_the_hold_and_never_below_the_first_view() {
+        let mut f = follow(Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] });
+        let big = f.step(Insets::uniform(60.0), 1.0).expect("grows");
+        assert_eq!(big, Insets::uniform(60.0));
+        // The effect is gone: the smaller margin waits for the hold.
+        assert_eq!(f.step(Insets::ZERO, 2.0), None);
+        assert_eq!(f.wake(), Some(2.0 + MARGIN_HOLD));
+        assert_eq!(f.step(Insets::ZERO, 2.0 + MARGIN_HOLD * 0.5), None);
+        // Back up within the hold: the wait starts again.
+        assert_eq!(f.step(Insets::uniform(60.0), 2.3), None);
+        assert_eq!(f.wake(), None);
+        assert_eq!(f.step(Insets::ZERO, 3.0), None);
+        assert_eq!(f.step(Insets::ZERO, 3.0 + MARGIN_HOLD), Some(BASE), "back to the first view's");
+        assert_eq!(f.step(Insets::ZERO, 9.0), None);
+    }
+
+    #[test]
+    fn a_centred_axis_grows_on_both_sides() {
+        // `LineAt` centres across: left and right grow together, top and bottom on their own.
+        let mut f = follow(Placement::LineAt { fraction: 0.5, y: 40.0 });
+        let m = f.step(Insets::new(0.0, 0.0, 20.0, 30.0), 0.0).expect("grows");
+        assert_eq!(m, Insets::new(20.0, 4.0, 20.0, 36.0));
+        assert!(MarginFollow::new(BASE, Placement::Fullscreen).is_none(), "a full-screen surface has no margin");
+    }
+
+    /// A card that glows with radius 40 between the messages `true` and `false`.
+    struct Glow(bool);
+
+    impl App for Glow {
+        type Msg = bool;
+        fn update(&mut self, on: bool, _: &mut Cx<bool>) {
+            self.0 = on;
+        }
+        fn view(&self, _: &Tokens) -> Element<bool> {
+            let card = Element::panel("card").size(200.0, 60.0).fill(Color::WHITE);
+            if self.0 {
+                card.glow(Color::WHITE, 40.0, 1.0)
+            } else {
+                card
+            }
+        }
+    }
+
+    /// A host with a clock the test sets, that records size changes and draws on the CPU.
+    #[derive(Default)]
+    struct Host {
+        caps: HostCaps,
+        diag: HostDiag,
+        now: f64,
+        sizes: Vec<Size>,
+        wake: Option<f64>,
+    }
+
+    impl HostCtl for Host {
+        fn caps(&self) -> &HostCaps {
+            &self.caps
+        }
+        fn diag(&self) -> &HostDiag {
+            &self.diag
+        }
+        fn now(&self) -> f64 {
+            self.now
+        }
+        fn gpu(&mut self) -> Result<Gpu, HostError> {
+            Err(HostError::Gpu("none in tests".into()))
+        }
+        fn gpu_in_background(&mut self) -> bool {
+            true
+        }
+        fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
+            self.sizes.push(spec.size);
+            Ok(7)
+        }
+        fn update(&mut self, _: SurfaceId, change: SurfaceChange) -> Result<(), HostError> {
+            if let SurfaceChange::Size(s) = change {
+                self.sizes.push(s);
+            }
+            Ok(())
+        }
+        fn close(&mut self, _: SurfaceId) {}
+        fn request_frame(&mut self, _: SurfaceId) {}
+        fn wake_at(&mut self, t: Option<f64>) {
+            self.wake = t;
+        }
+        fn waker(&self) -> Waker {
+            Waker::new(|| {})
+        }
+        fn exit(&mut self) {}
+    }
+
+    /// Runs the glow app at 60 fps for 5 s, the glow on from 1 s to 2 s, and checks that no
+    /// frame clips. Returns the surface size at each frame.
+    fn run(margin: SurfaceMargin) -> Vec<(f64, Size)> {
+        let spec = OverlaySpec {
+            size: Size::new(200.0, 60.0),
+            placement: Placement::LineAt { fraction: 0.8, y: 30.0 },
+            ..OverlaySpec::default()
+        };
+        let options = crate::Options { cpu_first_frame: true, margin, ..crate::Options::default() };
+        let mut live = Live::new(Glow(false), spec, options, None);
+        let mut host = Host::default();
+        live.start(&mut host);
+        assert!(live.error.is_none());
+        let mut out = Vec::new();
+        let mut size = live.spec.size;
+        let mut configured = host.sizes.len();
+        for i in 0..300 {
+            let t = i as f64 / 60.0;
+            host.now = t;
+            for (at, on) in [(1.0, true), (2.0, false)] {
+                if (t - at).abs() < 1e-9 {
+                    live.driver().dispatch(on, t);
+                    live.after_change(&mut host);
+                }
+            }
+            if host.wake.is_some_and(|w| w <= t) {
+                live.event(&mut host, HostEvent::Timer { t });
+            }
+            // The compositor confirms each new size before the next frame.
+            if host.sizes.len() > configured {
+                configured = host.sizes.len();
+                size = *host.sizes.last().unwrap();
+                live.event(&mut host, HostEvent::Configured { id: 7, t, size, scale: 1.0 });
+            }
+            live.sample(&mut host, 7, t);
+            let clipped = live.driver().scene.clipped(t, size);
+            assert!(clipped.is_zero(), "clipped {clipped:?} at {t} on {size:?}");
+            live.after_frame(&mut host, 7, t, true);
+            out.push((t, size));
+        }
+        out
+    }
+
+    #[test]
+    fn a_glow_that_comes_later_grows_the_surface_while_it_shows() {
+        let sizes = run(SurfaceMargin::Auto);
+        let first = sizes[0].1;
+        assert_eq!(first, Size::new(200.0, 60.0), "no effect in the first view: no margin");
+        let at = |t: f64| sizes.iter().find(|(ft, _)| *ft >= t - 1e-9).unwrap().1;
+        assert_eq!(at(0.9), first);
+        let grown = at(1.5);
+        let reach = vo_scene::reach::glow_reach(40.0, 1.0);
+        assert!(grown.w >= 200.0 + 2.0 * reach && grown.h >= 60.0 + 2.0 * reach, "{grown:?}");
+        // Back to the first view's size once the glow has faded and the hold has passed.
+        let back = sizes.iter().find(|(t, s)| *t > 2.0 && *s == first).map(|(t, _)| *t);
+        assert!(back.is_some_and(|t| t < 4.0), "shrinks back: {back:?}");
+        assert!(sizes.iter().filter(|(t, _)| *t >= 4.0).all(|(_, s)| *s == first));
+        // Only a few resizes: grow once, shrink once (or a step or two while it fades).
+        let changes = sizes.windows(2).filter(|w| w[0].1 != w[1].1).count();
+        assert!((2..=6).contains(&changes), "{changes} resizes");
+    }
+
+    #[test]
+    fn a_fixed_margin_does_not_follow() {
+        let sizes = run(SurfaceMargin::Fixed(Insets::uniform(400.0)));
+        assert!(sizes.iter().all(|(_, s)| *s == sizes[0].1));
     }
 }

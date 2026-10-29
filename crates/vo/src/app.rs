@@ -210,6 +210,9 @@ pub(crate) struct Driver<A: App> {
     pub(crate) lazy: bool,
     /// The time of the newest message whose view `lazy` put off (`flush` builds it).
     stale: Option<f64>,
+    /// How many views were applied to the main scene, so a live overlay checks the margin
+    /// a new view needs once per view (EG-08).
+    pub(crate) views: u64,
 }
 
 impl<A: App> Driver<A> {
@@ -245,6 +248,7 @@ impl<A: App> Driver<A> {
             extras,
             lazy: false,
             stale: None,
+            views: 1,
         };
         let view = d.view();
         d.scene.apply(view, t);
@@ -256,7 +260,12 @@ impl<A: App> Driver<A> {
     fn view(&self) -> Element<A::Msg> {
         let view = self.app.view(&self.tokens);
         match self.margin {
-            Some(m) => Element::column("vo-margin").pad_edges(m.top, m.right, m.bottom, m.left).child(view),
+            // A margin that grows mid-show moves the view inside the surface while the surface
+            // moves the other way on screen: a jump, so the panel stays still (EG-08).
+            Some(m) => Element::column("vo-margin")
+                .pad_edges(m.top, m.right, m.bottom, m.left)
+                .motion(vo_scene::element::Prop::Size, vo_scene::element::Motion::Snap)
+                .child(view.motion(vo_scene::element::Prop::Position, vo_scene::element::Motion::Snap)),
             None => view,
         }
     }
@@ -265,6 +274,7 @@ impl<A: App> Driver<A> {
     pub(crate) fn set_margin(&mut self, m: vo_scene::Insets, t: f64) {
         self.margin = Some(m);
         self.stale = None;
+        self.views += 1;
         let view = self.view();
         self.dirty |= self.scene.apply(view, t);
     }
@@ -290,6 +300,7 @@ impl<A: App> Driver<A> {
 
     /// Builds the view and applies it to the scenes at `t`.
     fn rebuild(&mut self, t: f64) {
+        self.views += 1;
         let view = self.view();
         // A message that changes nothing drawn, such as a hover that only stops a timer,
         // costs no frame.

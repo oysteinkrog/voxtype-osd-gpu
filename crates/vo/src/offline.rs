@@ -241,7 +241,10 @@ pub fn exit_check<A: App>(
 pub(crate) fn start<A: App>(app: A, scenario: &Scenario<A::Msg>, options: &mut Options<A::Msg>) -> Driver<A> {
     let mut scene = options.scene();
     scene.set_viewport(0.0, scenario.size, scenario.scale);
-    Driver::with_surfaces(app, scene, options.tokens.clone(), 0.0, options.scene_maker())
+    let mut driver = Driver::with_surfaces(app, scene, options.tokens.clone(), 0.0, options.scene_maker());
+    // Under reduced motion no fly-out opens (EG-08).
+    driver.extras.reduced = options.reduced_motion;
+    driver
 }
 
 /// Applies the scenario inputs from `inputs[*next..]` and the app's timers up to and including

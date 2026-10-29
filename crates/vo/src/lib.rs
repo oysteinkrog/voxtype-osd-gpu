@@ -86,12 +86,14 @@ pub struct Options<M> {
 /// How a live overlay sizes the transparent margin around its view.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum SurfaceMargin {
-    /// From the first view: how far its glows, shadows, blooms, strokes, particles and
-    /// motion reach outside the root box (`Scene::effect_reach`). A view that already keeps
-    /// its effects inside its root gets no margin.
+    /// How far the view's glows, shadows, blooms, strokes, particles and motion reach
+    /// outside its root box (`Scene::effect_reach`), following the show: the first view sets
+    /// the margin, a later view that reaches further grows the surface at once, and it
+    /// shrinks back to the first view's margin once that is enough again (EG-08). The panel
+    /// keeps its place on screen. `VO_SURFACE_LOG=1` logs each size.
     #[default]
     Auto,
-    /// `Auto`, and at least this on every side.
+    /// `Auto`, and at least this on every side. Follows the show too.
     AtLeast(vo_scene::Insets),
     /// Exactly this.
     Fixed(vo_scene::Insets),
