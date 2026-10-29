@@ -5,8 +5,8 @@
 //! [`SurfaceText`] draws a text display list into a texture with the normal 2D renderer, the
 //! way [`crate::TextField`] does (no backdrop capture), then builds its mipmaps. A mesh draw
 //! shows it through [`crate::Material::texture`] after [`crate::Renderer3d::add_texture`].
-//! The texture is drawn again only when the text, the page size or the texel scale changes,
-//! so settled text costs one draw.
+//! The texture is drawn again only when the text or the page size changes, or the texel
+//! scale grows past it or falls below half of it, so settled text costs one draw.
 //!
 //! Texel density ([`texel_scale`]): one texel per device pixel at the surface's nearest
 //! point ([`magnification`]), at most twice the output scale and at most 2048 texels a side.
@@ -183,7 +183,8 @@ impl SurfaceText {
     /// logical pixel ([`texel_scale`]), then its mipmaps, into `enc`, and returns true. The
     /// renderer's buffers are written now, so submit `enc` before the renderer encodes
     /// another list. Records nothing and returns false when the texture already shows this
-    /// list at this page size and scale.
+    /// list at this page size, at `k` or at up to twice `k` (so a surface that comes nearer
+    /// and goes back again, as a turning page does, does not draw the text each time).
     pub fn update(
         &mut self,
         renderer: &mut Renderer,
@@ -192,7 +193,7 @@ impl SurfaceText {
         k: f32,
         enc: &mut wgpu::CommandEncoder,
     ) -> bool {
-        if self.drawn.as_ref().is_some_and(|(l, p, s)| l == text && *p == page && *s == k) {
+        if self.drawn.as_ref().is_some_and(|(l, p, s)| l == text && *p == page && *s >= k && *s <= 2.0 * k) {
             return false;
         }
         self.resize(texel_size(page, k));
@@ -410,8 +411,8 @@ impl Scroll {
 }
 
 /// A page bent around a cylinder whose axis lies in the page and sweeps from the right edge
-/// (`turn` 0, flat) across to the left (`turn` 1, the page lies turned over on its left half
-/// side, its back up). The part past the axis curls up toward the viewer (+z) over a cylinder
+/// (`turn` 0, flat) to just past the left edge (`turn` 1: the whole page lies turned over,
+/// back up, mirrored to the left of where it was, the way a book page lands on the left). The part past the axis curls up toward the viewer (+z) over a cylinder
 /// of `radius`, and past half a turn lies flat again, upside down, `2 * radius` above. The
 /// page lies in the plane z = 0 facing +z, centred on the origin, length along x.
 #[derive(Clone, Copy, Debug, PartialEq)]
