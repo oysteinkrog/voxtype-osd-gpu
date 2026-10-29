@@ -194,7 +194,7 @@ impl LatticeLook {
                 (-bow.abs().min(room), bow.abs().min(room))
             }
         };
-        let s = if skip { 1 } else if g.is_some_and(|g| g.height < 6.0) { 1 } else { self.strands.max(1) };
+        let s = if skip || g.is_some_and(|g| g.height < 6.0) { 1 } else { self.strands.max(1) };
         let mut out = Vec::with_capacity(s);
         for k in 0..s {
             if skip {
@@ -404,9 +404,9 @@ mod tests {
 
     #[test]
     fn newest_line_strands_stay_below_the_glyphs_and_in_the_gutter() {
-        let mut l = LatticeLook::default();
         let (baseline, descent) = (20.0, 6.0);
-        l.gutters = vec![LineGutter { top: baseline + descent, height: 14.0, newest: true, descent }];
+        let gutters = vec![LineGutter { top: baseline + descent, height: 14.0, newest: true, descent }];
+        let l = LatticeLook { gutters, ..LatticeLook::default() };
         let a = Anchor { x: 0.0, width: 40.0, baseline, line: 0 };
         let b = Anchor { x: 60.0, width: 40.0, baseline, line: 0 };
         for ms in (0..=30).map(|i| i as f32 * 0.1) {
@@ -426,8 +426,8 @@ mod tests {
 
     #[test]
     fn older_line_bow_is_clamped_and_thin_gutters_use_one_strand() {
-        let mut l = LatticeLook::default();
-        l.gutters = vec![LineGutter { top: 26.0, height: 8.0, newest: false, descent: 6.0 }];
+        let gutters = vec![LineGutter { top: 26.0, height: 8.0, newest: false, descent: 6.0 }];
+        let mut l = LatticeLook { gutters, ..LatticeLook::default() };
         let a = Anchor { x: 0.0, width: 40.0, baseline: 20.0, line: 0 };
         let b = Anchor { x: 60.0, width: 40.0, baseline: 20.0, line: 0 };
         for bow in [0.0, 5.0, 40.0] {
