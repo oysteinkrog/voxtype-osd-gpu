@@ -7,8 +7,17 @@
 //! is sent again with every surface commit, which tests per-frame region updates.
 //!
 //!   blur_probe [--secs S] [--move] [--no-blur] [--steps N] [--backdrop-only]
+//!              [--octagon C] [--turn DEG] [--checker N]
 //!
 //! `--backdrop-only` shows just the test pattern, as a busy desktop behind another overlay.
+//!
+//! EG-07: `--octagon C` makes the panel an octagon with corners chamfered C pixels, and
+//! `--turn DEG` turns the panel (octagon or rounded) about its centre. Either one sends the
+//! blur region `vo_scene::glass::outline_blur_rects` makes for the outline, which must keep
+//! the blur inside it. `--checker N` draws a plain black and white checkerboard of N pixel
+//! squares as the backdrop, for the screenshot check in `scripts/blur-outline-check.sh`.
+//! When the compositor offers no blur the probe still draws and prints "no compositor blur"
+//! once.
 //!
 //! Prints the compositor's capabilities, then one line per second with frames and region
 //! updates sent.
@@ -56,6 +65,9 @@ struct App {
     moving: bool,
     backdrop_only: bool,
     steps: u32,
+    /// The panel's outline in overlay pixels when it is an octagon or turned (EG-07).
+    outline: Option<Vec<vo_scene::geom::Point>>,
+    checker: u32,
     start: Instant,
     frames: u64,
     region_sends: u64,
@@ -94,6 +106,37 @@ fn rounded_rects(x: f32, y: f32, w: f32, h: f32, r: f32, steps: u32) -> Vec<(i32
     out
 }
 
+/// Whether `p` lies inside the polygon `pts` (even-odd).
+fn inside(pts: &[vo_scene::geom::Point], x: f32, y: f32) -> bool {
+    let n = pts.len();
+    let mut odd = false;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        if (a.y <= y) != (b.y <= y) && x < a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// The panel as a polygon: the same 22% white fill, its coverage from 4x4 samples a pixel.
+fn draw_outline(canvas: &mut [u8], pts: &[vo_scene::geom::Point]) {
+    let (x0, y0, x1, y1) = pts.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(a, b, c, d), p| {
+        (a.min(p.x), b.min(p.y), c.max(p.x), d.max(p.y))
+    });
+    for (i, px) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = ((i as u32 % OW) as f32, (i as u32 / OW) as f32);
+        let mut hits = 0;
+        if x + 1.0 >= x0 && x <= x1 && y + 1.0 >= y0 && y <= y1 {
+            for k in 0..16 {
+                hits += inside(pts, x + 0.125 + 0.25 * (k % 4) as f32, y + 0.125 + 0.25 * (k / 4) as f32) as u32;
+            }
+        }
+        let v = (hits as f32 / 16.0 * 0.22 * 255.0) as u8;
+        px.copy_from_slice(&[v, v, v, v]);
+    }
+}
+
 fn sd_round_box(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
     let qx = (px - cx).abs() - hw + r;
     let qy = (py - cy).abs() - hh + r;
@@ -127,6 +170,12 @@ impl App {
         for (i, px) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = (i as u32 % w) as f32;
             let y = (i as u32 / w) as f32;
+            if self.checker > 0 {
+                let on = ((i as u32 % w) / self.checker + (i as u32 / w) / self.checker).is_multiple_of(2);
+                let v = if on { 255 } else { 0 };
+                px.copy_from_slice(&[v, v, v, 255]);
+                continue;
+            }
             // Wide colour bars, thin black and white lines, and a checker: blur smears all three.
             let bar = ((x / 96.0) as u32 + (y / 160.0) as u32) % 6;
             let (mut r, mut g, mut b) =
@@ -160,7 +209,10 @@ impl App {
         let (buf, canvas) =
             self.pool.create_buffer(OW as i32, OH as i32, stride, wl_shm::Format::Argb8888).expect("buffer");
         let (cx, cy) = (px0 + PW * 0.5, py0 + PH * 0.5);
-        for (i, px) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        if let Some(pts) = &self.outline {
+            draw_outline(canvas, pts);
+        }
+        for (i, px) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate().filter(|_| self.outline.is_none()) {
             let x = (i as u32 % OW) as f32 + 0.5;
             let y = (i as u32 / OW) as f32 + 0.5;
             let d = sd_round_box(x, y, cx, cy, PW * 0.5, PH * 0.5, R);
@@ -174,8 +226,19 @@ impl App {
         let wl = self.over.wl_surface().clone();
         if let Some(e) = &self.effect {
             let region = Region::new(&self.compositor).expect("region");
-            for (x, y, w, h) in rounded_rects(px0, py0, PW, PH, R, self.steps) {
-                region.add(x, y, w, h);
+            if let Some(pts) = &self.outline {
+                let mut rects = Vec::new();
+                vo_scene::glass::outline_blur_rects(pts, 1.0, &mut rects);
+                for r in &rects {
+                    region.add(r.x, r.y, r.w, r.h);
+                }
+                if self.region_sends == 0 {
+                    println!("blur_probe: outline region {} rects", rects.len());
+                }
+            } else {
+                for (x, y, w, h) in rounded_rects(px0, py0, PW, PH, R, self.steps) {
+                    region.add(x, y, w, h);
+                }
             }
             e.set_blur_region(Some(region.wl_region()));
             self.region_sends += 1;
@@ -211,6 +274,9 @@ impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
             };
             app.caps = Some(bits);
             println!("blur_probe: capabilities 0x{bits:x} (blur {})", if bits & 1 != 0 { "yes" } else { "no" });
+            if bits & 1 == 0 {
+                println!("blur_probe: no compositor blur; the panel draws its plain tint");
+            }
         }
     }
 }
@@ -319,6 +385,22 @@ fn main() {
         |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<f64>().ok());
     let secs = val("--secs").unwrap_or(6.0);
     let steps = val("--steps").unwrap_or(4.0) as u32;
+    let turn = val("--turn").unwrap_or(0.0) as f32;
+    let octagon = val("--octagon").map(|c| c as f32);
+    let checker = val("--checker").unwrap_or(0.0) as u32;
+    // The still panel's outline in overlay pixels (EG-07): an octagon, or the rounded panel
+    // turned. `--move` keeps the rounded panel.
+    let outline = (octagon.is_some() || turn != 0.0).then(|| {
+        use vo_scene::geom::{Affine, Point};
+        use vo_scene::glass::GlassShape;
+        let (px0, py0) = ((OW as f32 - PW) * 0.5, (OH as f32 - PH) * 0.5);
+        let rect = [px0, py0, PW, PH];
+        let shape = octagon.map_or(GlassShape::Corners([vo_scene::frame::Corner::Round(R); 4]), GlassShape::chamfer);
+        let pts = shape.points(rect, R).expect("the panel has an outline");
+        let (cx, cy) = (px0 + PW * 0.5, py0 + PH * 0.5);
+        let m = Affine::translate(-cx, -cy).then(&Affine::rotate(turn.to_radians())).then(&Affine::translate(cx, cy));
+        pts.into_iter().map(|p| m.apply(Point::new(p.x, p.y))).collect::<Vec<_>>()
+    });
 
     let conn = Connection::connect_to_env().expect("no Wayland display");
     let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("registry");
@@ -331,6 +413,9 @@ fn main() {
         "blur_probe: ext_background_effect_manager_v1 {}",
         if manager.is_some() { "bound" } else { "NOT advertised" }
     );
+    if manager.is_none() {
+        println!("blur_probe: no compositor blur; the panel draws its plain tint");
+    }
 
     let back = layer_shell.create_layer_surface(
         &qh,
@@ -381,6 +466,8 @@ fn main() {
         moving: flag("--move"),
         backdrop_only: flag("--backdrop-only"),
         steps,
+        outline,
+        checker,
         start: Instant::now(),
         frames: 0,
         region_sends: 0,
