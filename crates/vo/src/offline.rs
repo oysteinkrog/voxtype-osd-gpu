@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use vo_core::time::FrameTime;
-use vo_host::{Point, PointerEvent, PointerKind, Size};
+use vo_host::{Placement, Point, PointerEvent, PointerKind, Size};
 use vo_render::offscreen::{write_png, Frame};
 use vo_render::Offscreen;
 
@@ -242,8 +242,11 @@ pub(crate) fn start<A: App>(app: A, scenario: &Scenario<A::Msg>, options: &mut O
     let mut scene = options.scene();
     scene.set_viewport(0.0, scenario.size, scenario.scale);
     let mut driver = Driver::with_surfaces(app, scene, options.tokens.clone(), 0.0, options.scene_maker());
-    // Under reduced motion no fly-out opens (EG-08).
+    // Under reduced motion no fly-out opens (EG-08). A fly-out puts the panel where a popup
+    // sits: centred across, its middle 85% of the way down.
     driver.extras.reduced = options.reduced_motion;
+    let popup = Placement::LineAt { fraction: 0.85, y: 0.5 * scenario.size.h };
+    driver.extras.anchor = crate::surfaces::PanelAnchor::of(popup, scenario.size, Default::default());
     driver
 }
 
