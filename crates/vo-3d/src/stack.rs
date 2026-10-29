@@ -209,10 +209,8 @@ impl Stack {
                         continue;
                     };
                     let k = g.size / face.units_per_em() as f32;
-                    // Em space has y up; the list has y down.
-                    let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];
-                    let o = m.apply(g.pos);
-                    glyphs.push(GlyphInstance::with_matrix(&entry, lin, [o.x, o.y], color, NO_WORD));
+                    let (lin, o) = vo_render::text::slug_gpu::place(m, g, k, entry.extents);
+                    glyphs.push(GlyphInstance::with_matrix(&entry, lin, o, color, NO_WORD));
                 }
             }
         }

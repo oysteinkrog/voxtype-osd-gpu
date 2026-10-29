@@ -196,7 +196,15 @@ fn run(font: &FontRef, text: &str, x: f32, y: f32, size: f32, color: Color, firs
             word += 1;
         }
         let w = if ch == ' ' { NO_WORD } else { word };
-        out.push(GlyphInstance { pos: Point::new(pen, y), size, font: 0, glyph: gid.to_u32(), word: w, color });
+        out.push(GlyphInstance {
+            pos: Point::new(pen, y),
+            size,
+            font: 0,
+            glyph: gid.to_u32(),
+            word: w,
+            color,
+            xform: vo_scene::display::GlyphXform::IDENTITY,
+        });
         pen += adv.advance_width(gid).unwrap_or(0.0) * size / upem;
     }
     out

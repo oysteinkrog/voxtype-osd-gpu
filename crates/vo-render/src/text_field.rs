@@ -601,6 +601,7 @@ mod tests {
             glyph: 5,
             word: 4,
             color: Color::WHITE,
+            xform: vo_scene::display::GlyphXform::IDENTITY,
         });
         l.glyph_fx.push((0, GlyphFx { material: 2, blur: 1.0, ..Default::default() }));
         l.materials.push(vo_scene::material::Material::custom(64).reads_text());

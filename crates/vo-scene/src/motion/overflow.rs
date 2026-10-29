@@ -264,6 +264,7 @@ pub(crate) fn emit(
                 glyph: g.glyph,
                 word: g.word,
                 color: at.color.fade(alpha * g.opacity),
+                xform: crate::display::GlyphXform::IDENTITY,
             });
         }
         out.layers[index as usize].items = crate::scene::close_items(&mut own, out);

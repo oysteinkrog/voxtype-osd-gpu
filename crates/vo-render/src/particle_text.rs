@@ -209,7 +209,15 @@ mod tests {
     use super::*;
 
     fn g(word: u32, glyph: u32, x: f32) -> GlyphInstance {
-        GlyphInstance { pos: Point::new(x, 20.0), size: 16.0, font: 0, glyph, word, color: Color::WHITE }
+        GlyphInstance {
+            pos: Point::new(x, 20.0),
+            size: 16.0,
+            font: 0,
+            glyph,
+            word,
+            color: Color::WHITE,
+            xform: vo_scene::display::GlyphXform::IDENTITY,
+        }
     }
 
     #[test]

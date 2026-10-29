@@ -853,10 +853,62 @@ pub struct GlyphInstance {
     /// particles key on it.
     pub word: u32,
     pub color: Color,
+    /// Turn, lean and nudge of this glyph alone (EG-15), about the centre of its ink box.
+    /// [`GlyphXform::IDENTITY`] draws it as before.
+    pub xform: GlyphXform,
 }
 
 /// `GlyphInstance::word` for glyphs outside live text.
 pub const NO_WORD: u32 = u32::MAX;
+
+/// A transform of one glyph (EG-15), so thousands of letters can each move on their own in
+/// one draw. The glyph turns and leans about the centre of its ink box, then moves by
+/// `offset`. The pen position, the advance and the layer's transform do not change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[repr(C)]
+pub struct GlyphXform {
+    /// Turn in degrees, clockwise on screen.
+    pub rot_deg: f32,
+    /// Lean in degrees: positive moves the top of the glyph to the right, as an italic does.
+    pub skew_deg: f32,
+    /// Move in layer units, after the turn and lean.
+    pub offset: Point,
+}
+
+impl GlyphXform {
+    pub const IDENTITY: GlyphXform = GlyphXform { rot_deg: 0.0, skew_deg: 0.0, offset: Point { x: 0.0, y: 0.0 } };
+
+    pub fn is_identity(&self) -> bool {
+        *self == GlyphXform::IDENTITY
+    }
+
+    /// A turn by `deg` degrees, clockwise on screen.
+    pub fn rotate(deg: f32) -> GlyphXform {
+        GlyphXform { rot_deg: deg, ..GlyphXform::IDENTITY }
+    }
+
+    /// The linear part in layer space (y down): the lean, then the turn.
+    pub fn linear(&self) -> Affine {
+        let lean = Affine { c: -self.skew_deg.to_radians().tan(), ..Affine::IDENTITY };
+        lean.then(&Affine::rotate(self.rot_deg.to_radians()))
+    }
+
+    /// The layer-space transform that takes the upright glyph to this one, with `pivot` the
+    /// centre of the glyph's ink box in layer space. Renderers put it before the layer's
+    /// transform.
+    pub fn about(&self, pivot: Point) -> Affine {
+        let mut a = Affine::translate(-pivot.x, -pivot.y).then(&self.linear());
+        a.e += pivot.x + self.offset.x;
+        a.f += pivot.y + self.offset.y;
+        a
+    }
+
+    /// The ink box centre in layer space for a glyph with pen position `pos`, `k` layer
+    /// units per outline unit and ink box `ext` (x0, y0, x1, y1) in outline units, y up.
+    pub fn pivot(pos: Point, k: f32, ext: [f32; 4]) -> Point {
+        Point { x: pos.x + k * 0.5 * (ext[0] + ext[2]), y: pos.y - k * 0.5 * (ext[1] + ext[3]) }
+    }
+}
 
 /// Effects on one glyph (TY17), drawn from its coverage in the glyph shader with no extra
 /// pass. Lengths are in layer units. The default is no effect.
@@ -1207,5 +1259,47 @@ mod tests {
         let slide = TrailDrift { offset_px_per_s: [60.0, 0.0], ..TrailDrift::default() };
         let [x, _] = src(slide.source_map(0.5, 2.0), p);
         assert!((x - (40.0 - 60.0)).abs() < 1e-3, "{x}");
+    }
+
+    fn near(p: Point, x: f32, y: f32) -> bool {
+        (p.x - x).abs() < 1e-4 && (p.y - y).abs() < 1e-4
+    }
+
+    #[test]
+    fn identity_glyph_xform_leaves_every_point() {
+        let a = GlyphXform::IDENTITY.about(Point::new(7.0, -3.0));
+        assert_eq!(a, Affine::IDENTITY);
+        assert!(GlyphXform::default().is_identity());
+    }
+
+    #[test]
+    fn a_quarter_turn_spins_about_the_ink_centre_clockwise() {
+        let pivot = Point::new(10.0, 20.0);
+        let a = GlyphXform::rotate(90.0).about(pivot);
+        assert!(near(a.apply(pivot), 10.0, 20.0));
+        // A point right of the centre ends up below it: clockwise with y down.
+        assert!(near(a.apply(Point::new(14.0, 20.0)), 10.0, 24.0));
+    }
+
+    #[test]
+    fn a_lean_moves_the_top_right_and_keeps_the_centre_line() {
+        let x = GlyphXform { skew_deg: 45.0, ..GlyphXform::IDENTITY };
+        let a = x.about(Point::new(0.0, 0.0));
+        assert!(near(a.apply(Point::new(0.0, -2.0)), 2.0, -2.0));
+        assert!(near(a.apply(Point::new(3.0, 0.0)), 3.0, 0.0));
+    }
+
+    #[test]
+    fn the_offset_comes_after_the_turn() {
+        let x = GlyphXform { rot_deg: 180.0, offset: Point::new(5.0, 1.0), ..GlyphXform::IDENTITY };
+        let a = x.about(Point::new(1.0, 1.0));
+        assert!(near(a.apply(Point::new(2.0, 1.0)), 5.0, 2.0));
+    }
+
+    #[test]
+    fn the_pivot_is_the_ink_box_centre_with_y_flipped() {
+        // Ink box 100..300 wide, 0..500 tall in font units, 0.01 layer units per unit.
+        let p = GlyphXform::pivot(Point::new(10.0, 50.0), 0.01, [100.0, 0.0, 300.0, 500.0]);
+        assert!(near(p, 12.0, 47.5));
     }
 }

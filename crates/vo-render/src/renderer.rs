@@ -1871,10 +1871,8 @@ impl Renderer {
             let fonts = &self.fonts;
             let entry = self.atlas.path_in(g.font, g.glyph, || fonts.path(g.glyph))?;
             let k = g.size / slug_gpu::PATH_UNITS as f32;
-            let m = &st.to_px;
-            let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];
-            let o = m.apply(g.pos);
-            return Some(GlyphInstance::with_matrix(&entry, lin, [o.x, o.y], color, g.word));
+            let (lin, o) = slug_gpu::place(&st.to_px, g, k, entry.extents);
+            return Some(GlyphInstance::with_matrix(&entry, lin, o, color, g.word));
         }
         if g.font as usize >= self.faces.len() {
             let more = self.fonts.faces_from(self.faces.len());
@@ -1883,11 +1881,8 @@ impl Renderer {
         let face = self.faces.get(g.font as usize)?;
         let entry = self.atlas.glyph_in_at(g.font, || (face.skrifa(), face.location()), GlyphId::new(g.glyph))?;
         let k = g.size / face.units_per_em() as f32;
-        let m = &st.to_px;
-        // Em space has y up; layer space has y down.
-        let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];
-        let o = m.apply(g.pos);
-        Some(GlyphInstance::with_matrix(&entry, lin, [o.x, o.y], color, g.word))
+        let (lin, o) = slug_gpu::place(&st.to_px, g, k, entry.extents);
+        Some(GlyphInstance::with_matrix(&entry, lin, o, color, g.word))
     }
 
     /// Appends a layer block and returns its byte offset. The texture size and origin are

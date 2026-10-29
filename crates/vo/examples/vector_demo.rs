@@ -309,6 +309,7 @@ fn act_panel(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
                     glyph: g,
                     word: NO_WORD,
                     color: ink().fade(lab),
+                    xform: vo_scene::display::GlyphXform::IDENTITY,
                 });
             }
         }
@@ -376,6 +377,7 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
                     glyph: g,
                     word: NO_WORD,
                     color: mix(cool(), ink(), (x / a.ride_width).clamp(0.0, 1.0)),
+                    xform: vo_scene::display::GlyphXform::IDENTITY,
                 });
             });
         }
@@ -392,6 +394,7 @@ fn act_text(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
                 glyph: g,
                 word: NO_WORD,
                 color: ink().fade(inn),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
             });
         }
     });
@@ -438,6 +441,7 @@ fn act_widgets(a: &Assets, t: f64, fade: f32, b: &mut Painter) {
                 glyph: g,
                 word: NO_WORD,
                 color: ink(),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
             });
         }
         let word = |i: usize| (x0 + a.words[i].0 * k, x0 + a.words[i].1 * k);

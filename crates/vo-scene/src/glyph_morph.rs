@@ -53,7 +53,15 @@ pub struct GlyphOutline {
 impl GlyphOutline {
     /// The real glyph, to draw over (or instead of) the outline.
     pub fn instance(&self, color: Color) -> GlyphInstance {
-        GlyphInstance { pos: self.pos, size: self.size, font: self.font, glyph: self.glyph, word: NO_WORD, color }
+        GlyphInstance {
+            pos: self.pos,
+            size: self.size,
+            font: self.font,
+            glyph: self.glyph,
+            word: NO_WORD,
+            color,
+            xform: crate::display::GlyphXform::IDENTITY,
+        }
     }
 
     /// Whether the glyph has any outline (a space has none).

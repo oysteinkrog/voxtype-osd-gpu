@@ -55,7 +55,15 @@ fn run(font: &FontRef, text: &str, x: f32, y: f32, size: f32, color: Color) -> (
     let mut out = Vec::new();
     for ch in text.chars() {
         let gid = cmap.map(ch).unwrap_or_default();
-        out.push(GlyphInstance { pos: Point::new(pen, y), size, font: 0, glyph: gid.to_u32(), word: NO_WORD, color });
+        out.push(GlyphInstance {
+            pos: Point::new(pen, y),
+            size,
+            font: 0,
+            glyph: gid.to_u32(),
+            word: NO_WORD,
+            color,
+            xform: vo_scene::display::GlyphXform::IDENTITY,
+        });
         pen += adv.advance_width(gid).unwrap_or(0.0) * size / upem;
     }
     (out, pen)

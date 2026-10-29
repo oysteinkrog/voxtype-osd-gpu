@@ -675,7 +675,15 @@ pub fn push_blob(list: &mut DisplayList, a: (Point, f32), b: (Point, f32), k: f3
 /// A filled path from `FontRegistry::add_path`, with its path origin at `pos` and `scale`
 /// logical units per path unit.
 pub fn fill_glyph(path: u32, pos: Point, scale: f32, color: Color) -> GlyphInstance {
-    GlyphInstance { pos, size: scale, font: PATH_FONT, glyph: path, word: NO_WORD, color }
+    GlyphInstance {
+        pos,
+        size: scale,
+        font: PATH_FONT,
+        glyph: path,
+        word: NO_WORD,
+        color,
+        xform: crate::display::GlyphXform::IDENTITY,
+    }
 }
 
 /// Contours made from numbers: arcs, waves, sparklines, ribbons, and the closed-form motion of
@@ -1237,7 +1245,8 @@ mod tests {
     #[test]
     fn widen_cuts_at_knots_and_keeps_steps() {
         let c = make::underline(0.0, 20.0, 0.0);
-        let knots = [WidthKnot::new(0.0, 1.0), WidthKnot::new(5.0, 3.0), WidthKnot::new(10.0, 3.0), WidthKnot::new(10.0, 0.5)];
+        let knots =
+            [WidthKnot::new(0.0, 1.0), WidthKnot::new(5.0, 3.0), WidthKnot::new(10.0, 3.0), WidthKnot::new(10.0, 0.5)];
         let w = c.widen(&knots);
         assert_eq!(w.segs.len(), 3);
         assert_eq!(w.segs[0].w, [1.0, 3.0]);

@@ -431,10 +431,11 @@ impl CpuRenderer {
         let outline = self.outlines.entry((g.font, g.glyph)).or_insert_with(|| glyph_path(&face, g.glyph));
         let Some(path) = outline.as_ref() else { return };
         let k = g.size / face.units_per_em() as f32;
-        let m = &st.to_px;
-        // Em space has y up; layer space has y down.
-        let o = m.apply(g.pos);
-        let t = tiny_skia::Transform::from_row(m.a * k, m.b * k, -m.c * k, -m.d * k, o.x, o.y);
+        // The glyph's own turn (EG-15) about its ink box centre, as `slug_gpu::place` does.
+        let b = path.bounds();
+        let ext = [b.left(), b.top(), b.right(), b.bottom()];
+        let (lin, o) = crate::text::slug_gpu::place(&st.to_px, g, k, ext);
+        let t = tiny_skia::Transform::from_row(lin[0], lin[1], lin[2], lin[3], o[0], o[1]);
         let Some(b) = path.bounds().transform(t) else { return };
         let x0 = (b.left().floor() - 1.0).max(0.0) as u32;
         let y0 = (b.top().floor() - 1.0).max(0.0) as u32;

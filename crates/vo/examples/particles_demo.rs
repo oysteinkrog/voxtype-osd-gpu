@@ -196,6 +196,7 @@ impl Demo {
                     glyph: g.glyph,
                     word: slot as u32,
                     color: Color::hex(0xeef3ff, a),
+                    xform: vo_scene::display::GlyphXform::IDENTITY,
                 });
             }
         }

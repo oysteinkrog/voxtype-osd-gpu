@@ -2237,6 +2237,7 @@ impl<M> Scene<M> {
                                 })
                                 .unwrap_or_else(|| m.tint(color))
                                 .fade(k),
+                            xform: crate::display::GlyphXform::IDENTITY,
                         });
                     }
                     for gh in n.live.ghosts(t) {
@@ -2253,6 +2254,7 @@ impl<M> Scene<M> {
                             glyph: gh.glyph,
                             word: gh.word,
                             color: color.fade(k),
+                            xform: crate::display::GlyphXform::IDENTITY,
                         });
                     }
                     // The liquid goes over the word's glyphs: the old letters ride with it.
@@ -2616,6 +2618,7 @@ impl<M> Scene<M> {
                 glyph: g.glyph,
                 word: word_of(g.cluster),
                 color,
+                xform: crate::display::GlyphXform::IDENTITY,
             });
         }
     }

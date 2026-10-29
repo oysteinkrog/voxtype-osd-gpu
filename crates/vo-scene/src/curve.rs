@@ -87,7 +87,15 @@ pub fn draw_turned(
     if color.a <= 0.0 || scale <= 0.0 {
         return;
     }
-    let instance = GlyphInstance { pos: Point::ZERO, size: size * scale, font, glyph, word: NO_WORD, color };
+    let instance = GlyphInstance {
+        pos: Point::ZERO,
+        size: size * scale,
+        font,
+        glyph,
+        word: NO_WORD,
+        color,
+        xform: crate::display::GlyphXform::IDENTITY,
+    };
     if angle.abs() < 1e-4 {
         p.glyph(GlyphInstance { pos: pen, ..instance });
         return;

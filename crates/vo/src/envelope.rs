@@ -46,8 +46,12 @@ pub struct Envelope {
     /// Largest change of the em size against rest, as a fraction. Scale is not allowed; this
     /// only absorbs rounding.
     pub scale: f32,
-    /// Largest turn against rest, in degrees.
+    /// Largest turn against rest, in degrees. A glyph's own turn (`GlyphXform::rot_deg`)
+    /// counts in full, also at rest: a letter left tilted on the reading line is a breach.
     pub rotation_deg: f32,
+    /// Largest lean of a glyph (`GlyphXform::skew_deg`) either way, in degrees. The default is
+    /// the reading range of the slant axis (`READING_SLNT`, 0 to 5 degrees).
+    pub skew_deg: f32,
     /// Largest blur beyond rest, in logical pixels (glyph blur plus layer motion blur).
     pub blur_px: f32,
     /// Only frames sampled in `from..=until` are checked; the rest still count for finding
@@ -77,6 +81,7 @@ impl Default for Envelope {
             ink: 0.7,
             scale: 0.01,
             rotation_deg: 0.5,
+            skew_deg: -vo_scene::font::var_axes::READING_SLNT.0,
             blur_px: 0.1,
             from: f64::NEG_INFINITY,
             until: f64::INFINITY,
@@ -103,6 +108,8 @@ pub enum Breach {
     Scale(f32),
     /// Degrees turned against rest.
     Rotation(f32),
+    /// Degrees of lean.
+    Skew(f32),
     /// Pixels of blur beyond rest.
     Blur(f32),
 }
@@ -116,6 +123,7 @@ impl Breach {
             Breach::Ink(_) => "ink",
             Breach::Scale(_) => "scale",
             Breach::Rotation(_) => "rotation",
+            Breach::Skew(_) => "skew",
             Breach::Blur(_) => "blur",
         }
     }
@@ -128,6 +136,7 @@ impl Breach {
             | Breach::Ink(v)
             | Breach::Scale(v)
             | Breach::Rotation(v)
+            | Breach::Skew(v)
             | Breach::Blur(v) => v,
         }
     }
@@ -136,6 +145,7 @@ impl Breach {
     fn badness(&self) -> f32 {
         match *self {
             Breach::Baseline(v) | Breach::OffRow(v) | Breach::Rotation(v) | Breach::Blur(v) => v,
+            Breach::Skew(v) => v.abs(),
             Breach::Tracking(v) | Breach::Scale(v) => (v - 1.0).abs(),
             Breach::Ink(v) => 1.0 - v,
         }
@@ -227,7 +237,7 @@ impl fmt::Display for Report {
             let worst = match w.breach {
                 Breach::Baseline(v) | Breach::OffRow(v) => format!("{v:.2} px"),
                 Breach::Blur(v) => format!("{v:.2} px blur"),
-                Breach::Rotation(v) => format!("{v:.2} deg"),
+                Breach::Rotation(v) | Breach::Skew(v) => format!("{v:.2} deg"),
                 Breach::Tracking(v) | Breach::Ink(v) | Breach::Scale(v) => format!("{:.0} %", v * 100.0),
             };
             writeln!(
@@ -253,8 +263,11 @@ struct Sample {
     pos: Point,
     /// Em size after every transform.
     em: f32,
-    /// Degrees of the glyph's x axis.
+    /// Degrees of the glyph's x axis, from the layers.
     rot: f32,
+    /// The glyph's own turn and lean in degrees (EG-15).
+    tilt: f32,
+    skew: f32,
     /// Alpha after layer opacity, dissolve and wipe.
     ink: f32,
     blur: f32,
@@ -406,9 +419,12 @@ impl Tracker {
                 if r.em > 0.0 && (s.em / r.em - 1.0).abs() > env.scale {
                     flag(Breach::Scale(s.em / r.em));
                 }
-                let turn = angle_diff(s.rot, r.rot);
+                let turn = angle_diff(s.rot + s.tilt, r.rot);
                 if turn > env.rotation_deg {
                     flag(Breach::Rotation(turn));
+                }
+                if s.skew.abs() > env.skew_deg {
+                    flag(Breach::Skew(s.skew));
                 }
                 if s.blur - r.blur > env.blur_px {
                     flag(Breach::Blur(s.blur - r.blur));
@@ -562,7 +578,9 @@ fn collect(list: &DisplayList, out: &mut Vec<(Key, Sample)>) {
                 if ink <= 1e-3 {
                     continue;
                 }
-                let p = map(g.pos);
+                // The glyph's own move counts; its turn and lean are kept apart (`tilt`,
+                // `skew`), so the axes below are the layers' only.
+                let p = map(Point::new(g.pos.x + g.xform.offset.x, g.pos.y + g.xform.offset.y));
                 let px = map(Point::new(g.pos.x + g.size, g.pos.y));
                 let py = map(Point::new(g.pos.x, g.pos.y + g.size));
                 let (ax, ay) = (px.x - p.x, px.y - p.y);
@@ -571,6 +589,8 @@ fn collect(list: &DisplayList, out: &mut Vec<(Key, Sample)>) {
                     pos: p,
                     em,
                     rot: ay.atan2(ax).to_degrees(),
+                    tilt: g.xform.rot_deg,
+                    skew: g.xform.skew_deg,
                     ink,
                     blur: fx.blur * em / g.size.max(1e-6) + blur[li],
                 };
@@ -761,6 +781,7 @@ mod tests {
                 glyph: 10 + k,
                 word: id,
                 color: Color::rgba(1.0, 1.0, 1.0, alpha),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
             })
             .collect()
     }
@@ -980,5 +1001,49 @@ mod tests {
         }
         let env = Envelope { from: 3.0 / 60.0, ..Envelope::default() };
         tr.check(&env).assert_ok();
+    }
+
+    /// Kinds of breach for word 1 held still with every glyph given `xform`.
+    fn with_xform(xform: vo_scene::display::GlyphXform) -> Vec<&'static str> {
+        let mut tr = Tracker::new();
+        for n in 0..10 {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            for g in &mut g {
+                g.xform = xform;
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        let r = tr.check(&Envelope::default());
+        assert!(r.glyphs_checked > 0);
+        r.by_kind().iter().map(|s| s.kind).collect()
+    }
+
+    #[test]
+    fn a_glyph_turned_on_its_own_breaks_rotation_even_at_rest() {
+        let kinds = with_xform(vo_scene::display::GlyphXform::rotate(2.0));
+        assert_eq!(kinds, vec!["rotation"]);
+    }
+
+    #[test]
+    fn a_lean_inside_the_slant_range_passes_and_past_it_breaks() {
+        let lean = |deg| vo_scene::display::GlyphXform { skew_deg: deg, ..Default::default() };
+        assert!(with_xform(lean(4.0)).is_empty());
+        assert!(with_xform(lean(-4.0)).is_empty());
+        assert_eq!(with_xform(lean(6.0)), vec!["skew"]);
+    }
+
+    #[test]
+    fn a_glyph_moved_on_its_own_counts_for_the_baseline() {
+        let mut tr = Tracker::new();
+        for n in 0..10 {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if n < 3 {
+                g[1].xform.offset = Point::new(0.0, 5.0);
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        let r = tr.check(&Envelope::default());
+        let kinds: Vec<_> = r.by_kind().iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, vec!["baseline"], "{r}");
     }
 }

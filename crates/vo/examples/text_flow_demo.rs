@@ -148,6 +148,7 @@ impl Demo {
                     glyph,
                     word: NO_WORD,
                     color,
+                    xform: vo_scene::display::GlyphXform::IDENTITY,
                 });
             }
             let flight = Flight::new(

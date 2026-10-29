@@ -352,6 +352,7 @@ fn erase_golden() {
                             glyph: g.glyph,
                             word: i as u32,
                             color: Color::hex(0xe5e7eb, s.opacity),
+                            xform: vo_scene::display::GlyphXform::IDENTITY,
                         });
                     }
                 }

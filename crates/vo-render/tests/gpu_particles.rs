@@ -211,6 +211,7 @@ fn word_list(rig: &Rig, parts: &Particles, word: &Word, t: f64, solid_only: bool
             glyph: g.glyph,
             word: 0,
             color: Color::hex(0xf2f4ff, a),
+            xform: vo_scene::display::GlyphXform::IDENTITY,
         });
     }
     list.items.push(Item { kind: ItemKind::Glyphs, start: 0, len: list.glyphs.len() as u32 });
@@ -713,6 +714,7 @@ fn a_word_of_sparks_keeps_its_light_through_the_hand_over() {
                 glyph: g.glyph,
                 word: 0,
                 color: color.fade(a),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
             });
         }
         l.items.push(Item { kind: ItemKind::Glyphs, start: 0, len: l.glyphs.len() as u32 });
@@ -857,6 +859,7 @@ fn held_glyphs_stay_dots_until_released() {
                 glyph: g.glyph,
                 word: 0,
                 color: color.fade(a),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
             });
         }
         l.items.push(Item { kind: ItemKind::Glyphs, start: 0, len: l.glyphs.len() as u32 });

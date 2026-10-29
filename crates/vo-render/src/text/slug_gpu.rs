@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use skrifa::GlyphId;
+use vo_scene::display::GlyphXform;
+use vo_scene::geom::Affine;
 
 use super::slug_encode::{EncodedGlyph, Encoder};
 
@@ -183,6 +185,24 @@ impl GlyphInstance {
             attributes: &ATTRS,
         }
     }
+}
+
+/// The em-to-pixel matrix (by columns) and pixel origin of a display-list glyph drawn
+/// through `to_px`, with `k` layer units per outline unit and ink box `ext` in outline
+/// units. The glyph's own transform (EG-15) turns it about the centre of `ext` before
+/// `to_px`; the identity takes the same arithmetic as before, so plain text is unchanged.
+pub fn place(to_px: &Affine, g: &vo_scene::display::GlyphInstance, k: f32, ext: [f32; 4]) -> ([f32; 4], [f32; 2]) {
+    let turned;
+    let m = if g.xform.is_identity() {
+        to_px
+    } else {
+        turned = g.xform.about(GlyphXform::pivot(g.pos, k, ext)).then(to_px);
+        &turned
+    };
+    // Em space has y up; layer space has y down.
+    let lin = [m.a * k, m.b * k, -m.c * k, -m.d * k];
+    let o = m.apply(g.pos);
+    (lin, [o.x, o.y])
 }
 
 /// Atlas units per path unit for filled paths ([`Atlas::path_in`]). The blob holds
