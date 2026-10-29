@@ -2133,9 +2133,10 @@ impl<M> Scene<M> {
                         let ws = word_spans.iter().find(|w| w.0 == word).copied();
                         let mut weight = 0.0;
                         if let Some(v) = n.typo.sample(word, t) {
-                            let v = if n.live.on_reading_line(word) { Envelope::READING.clamp(v) } else { v };
+                            let floor = n.typo.floor(word);
+                            let v = if n.live.on_reading_line(word) { Envelope::READING.clamp_over(v, floor) } else { v };
                             let (count, middle) = ws.map_or((1, g.pos.x), |w| (w.3, 0.5 * (w.4 + w.5)));
-                            k *= v.letter_ink(letter.1, count);
+                            k *= v.letter_ink_over(letter.1, count, floor);
                             // Tracking spreads the letters about the word's middle.
                             dx += (v.tracking - 1.0) * (g.pos.x + 0.5 * g.advance - middle);
                             dy -= v.baseline;

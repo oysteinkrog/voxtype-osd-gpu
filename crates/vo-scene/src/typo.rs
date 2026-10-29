@@ -14,7 +14,9 @@
 //! - `tracking`: the word's letters spread about its middle by this factor; 1 is normal.
 //! - `baseline`: the word moves up by this many logical pixels.
 //! - `fill`: the share of the word's letters, from the left, at full ink; letters past it are
-//!   at `ink * FILL_FLOOR`, with a soft front one letter wide.
+//!   at `ink * floor`, with a soft front one letter wide. The floor is [`FILL_FLOOR`] unless
+//!   the word sets its own ([`WordTypo::floor`]): a pen that darkens a faint readable copy
+//!   (SW-02) uses 0.70.
 //!
 //! Rule 1 of the motion language, the reading-line envelope, is enforced at draw time: a word
 //! on the newest line draws with its values clamped by [`Envelope::READING`] (baseline within
@@ -71,8 +73,15 @@ impl Typo {
         Typo { ink: a[0], weight: a[1], tracking: a[2], baseline: a[3], fill: a[4] }
     }
 
-    /// Opacity factor of letter `i` of `n` from `ink` and `fill`.
+    /// Opacity factor of letter `i` of `n` from `ink` and `fill`, with [`FILL_FLOOR`].
     pub fn letter_ink(&self, i: usize, n: usize) -> f32 {
+        self.letter_ink_over(i, n, FILL_FLOOR)
+    }
+
+    /// Opacity factor of letter `i` of `n` from `ink` and `fill`; letters past the fill are at
+    /// `ink * floor`.
+    pub fn letter_ink_over(&self, i: usize, n: usize, floor: f32) -> f32 {
+        let floor = floor.clamp(0.0, 1.0);
         let ink = self.ink.clamp(0.0, 1.0);
         if self.fill >= 1.0 || n == 0 {
             return ink;
@@ -80,7 +89,7 @@ impl Typo {
         // The front sits at fill * n letters; the letter it crosses is part filled.
         let front = self.fill.max(0.0) * n as f32;
         let k = (front - i as f32).clamp(0.0, 1.0);
-        ink * (FILL_FLOOR + (1.0 - FILL_FLOOR) * k)
+        ink * (floor + (1.0 - floor) * k)
     }
 }
 
@@ -108,11 +117,13 @@ pub struct WordTypo {
     /// Seconds the word holds its `arrive` or `kick` values before it springs to `rest`:
     /// for words that settle in spoken order (MO-05, `vo_core::timeline::spoken_offsets`).
     pub delay: f64,
+    /// Share of the word's ink that letters past its fill keep. Not sprung: it applies at once.
+    pub floor: f32,
 }
 
 impl WordTypo {
     pub fn rest(rest: Typo) -> WordTypo {
-        WordTypo { rest, arrive: None, kick: None, motion: None, delay: 0.0 }
+        WordTypo { rest, arrive: None, kick: None, motion: None, delay: 0.0, floor: FILL_FLOOR }
     }
 
     pub fn arrive(self, from: Typo) -> WordTypo {
@@ -129,6 +140,11 @@ impl WordTypo {
 
     pub fn delay(self, secs: f64) -> WordTypo {
         WordTypo { delay: secs.max(0.0), ..self }
+    }
+
+    /// Letters past the fill keep this share of the ink (0 to 1), instead of [`FILL_FLOOR`].
+    pub fn floor(self, floor: f32) -> WordTypo {
+        WordTypo { floor: floor.clamp(0.0, 1.0), ..self }
     }
 }
 
@@ -193,15 +209,20 @@ impl Envelope {
     pub const FREE: Envelope =
         Envelope { baseline: f32::INFINITY, tracking: f32::INFINITY, ink: 0.0, weight: f32::INFINITY };
 
-    /// `v` within the limits.
+    /// `v` within the limits, with [`FILL_FLOOR`].
     pub fn clamp(&self, v: Typo) -> Typo {
+        self.clamp_over(v, FILL_FLOOR)
+    }
+
+    /// `v` within the limits for a word whose letters past the fill keep `floor` of its ink.
+    pub fn clamp_over(&self, v: Typo, floor: f32) -> Typo {
         Typo {
             ink: v.ink.clamp(self.ink, 1.0),
             weight: v.weight.clamp(-self.weight, self.weight),
             tracking: v.tracking.clamp(1.0 - self.tracking, 1.0 + self.tracking),
             baseline: v.baseline.clamp(-self.baseline, self.baseline),
             // A letter past the fill must still reach the ink floor.
-            fill: if self.ink > 0.0 && v.ink.clamp(self.ink, 1.0) * FILL_FLOOR < self.ink { 1.0 } else { v.fill },
+            fill: if self.ink > 0.0 && v.ink.clamp(self.ink, 1.0) * floor.clamp(0.0, 1.0) < self.ink { 1.0 } else { v.fill },
         }
     }
 
@@ -257,6 +278,7 @@ struct WordChannels {
     id: WordId,
     ch: [Channel; CHANNELS],
     kick: Option<u32>,
+    floor: f32,
 }
 
 /// The channels the scene keeps for one live text node.
@@ -297,12 +319,16 @@ impl TypoState {
                     });
                     changed = true;
                     // A word that arrives with a kick takes it as already seen.
-                    WordChannels { id, ch, kick: want.kick.map(|k| k.0) }
+                    WordChannels { id, ch, kick: want.kick.map(|k| k.0), floor: want.floor }
                 }
             };
             let kick = want.kick.filter(|k| Some(k.0) != w.kick);
             if let Some((n, _)) = want.kick {
                 w.kick = Some(n);
+            }
+            if w.floor != want.floor {
+                w.floor = want.floor;
+                changed = true;
             }
             for c in 0..CHANNELS {
                 let ch = &mut w.ch[c];
@@ -340,6 +366,11 @@ impl TypoState {
     pub fn sample(&self, id: WordId, t: f64) -> Option<Typo> {
         let w = self.words.iter().find(|w| w.id == id)?;
         Some(Typo::from_array(std::array::from_fn(|c| w.ch[c].value(t) as f32)))
+    }
+
+    /// Word `id`'s fill floor; [`FILL_FLOOR`] for a word without channels.
+    pub fn floor(&self, id: WordId) -> f32 {
+        self.words.iter().find(|w| w.id == id).map_or(FILL_FLOOR, |w| w.floor)
     }
 
     pub fn settled_at(&self) -> f64 {
@@ -435,5 +466,30 @@ mod tests {
         assert_eq!(v.letter_ink(1, 4), 1.0);
         assert!((v.letter_ink(3, 4) - FILL_FLOOR).abs() < 1e-6);
         assert_eq!(Typo::REST.letter_ink(3, 4), 1.0);
+    }
+
+    #[test]
+    fn a_word_floor_holds_letters_ahead_of_the_pen() {
+        // SW-02: the pen is in letter 2 of 5; letter 4 is ahead of it, letter 0 behind it.
+        let v = Typo::REST.fill(2.5 / 5.0);
+        let c = Envelope::READING.clamp_over(v, 0.70);
+        assert_eq!(c.fill, v.fill, "a 0.70 floor keeps the fill on the reading line");
+        assert!((c.letter_ink_over(4, 5, 0.70) - 0.70).abs() <= 0.02);
+        assert!((c.letter_ink_over(0, 5, 0.70) - 1.00).abs() <= 0.02);
+        let mid = c.letter_ink_over(2, 5, 0.70);
+        assert!(mid > 0.70 && mid < 1.0);
+        // The default floor still drops the fill on the reading line.
+        assert_eq!(Envelope::READING.clamp(v).fill, 1.0);
+    }
+
+    #[test]
+    fn the_word_floor_reaches_the_state() {
+        let mut s = TypoState::default();
+        let typos = Typos::new().word(1, WordTypo::rest(Typo::REST.fill(0.0)).floor(0.7));
+        s.sync(0.0, &[1, 2], Some(&typos), false, 1.0);
+        assert_eq!(s.floor(1), 0.7);
+        assert_eq!(s.floor(2), FILL_FLOOR);
+        assert_eq!(s.floor(3), FILL_FLOOR);
+        assert_eq!(WordTypo::default().floor, FILL_FLOOR);
     }
 }
