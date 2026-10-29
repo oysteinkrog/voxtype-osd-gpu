@@ -154,13 +154,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "glow" => card = card.glow(Color::hex(0x4cc9f0, 0.9), 14.0 * k, 1.2),
         "shadow" => card = card.shadow(Color::rgba(0.0, 0.0, 0.0, 0.6), 0.0, 8.0 * k, 18.0 * k),
         "motion blur" => card = card.motion_blur(1.0 / 30.0),
-        "grid-words" => {
-            let m = Material::custom(GRID)
-                .reads_text()
-                .color(0, Color::hex(0x38e8ff, 1.0))
-                .param(1, [1.3, 22.0 * k, 0.0, 0.0]);
-            card = card.material(m)
-        }
+        // The grid is drawn behind the card (below); the card lets it show through.
+        "grid-words" => card = card.fill(Color::hex(0x10141c, 0.35)),
         "material backdrop" => {
             card = card.fill(Color::hex(0x10141c, 0.55)).material(Material::custom(FROST).reads_backdrop())
         }
@@ -241,6 +236,18 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     }
     if case == "water pool" {
         return root.child(layer).child(water_pool(size, t).view("water"));
+    }
+    if case == "grid-words" {
+        // A material on a panel also paints its children, so the grid is a sibling under the
+        // card, across the whole surface.
+        let m =
+            Material::custom(GRID).reads_text().color(0, Color::hex(0x38e8ff, 1.0)).param(1, [1.3, 22.0 * k, 0.0, 0.0]);
+        let grid = Element::panel("grid")
+            .size(size.w, size.h)
+            .fill(Color::WHITE)
+            .material(m)
+            .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+        return root.child(grid).child(layer);
     }
     let refracts = matches!(case, "glass lens" | "glass prism");
     if !case.contains("backdrop") && !case.starts_with("frost") && !case.starts_with("displace") && !refracts {

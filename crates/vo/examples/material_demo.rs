@@ -336,9 +336,16 @@ fn grid_view(t: f64, reduced: bool) -> Element<()> {
     model.update(&text.join(" "));
     let speed = if reduced { 0.0 } else { 1.3 };
     let grid = Material::custom(GRID).reads_text().color(0, hex(0x38e8ff)).param(1, [speed, 22.0, 0.0, 0.0]);
-    Element::panel("grid").size(W, H).fill(Color::WHITE).material(grid).pad_edges(70.0, 40.0, 0.0, 40.0).child(
-        Element::live_text("live", model.words()).text_style(TextStyle::new(BOLD, 40.0, 54.0)).color(Color::WHITE),
-    )
+    // The grid is a sibling under the text, out of the flow: a material on a panel also
+    // paints the panel's children.
+    let back = Element::panel("grid").size(W, H).fill(Color::WHITE).material(grid).layout(|s| {
+        s.position = vo::scene::taffy::style::Position::Absolute;
+        s.inset.left = vo::scene::taffy::style::LengthPercentageAuto::length(0.0);
+        s.inset.top = vo::scene::taffy::style::LengthPercentageAuto::length(0.0);
+    });
+    let words =
+        Element::live_text("live", model.words()).text_style(TextStyle::new(BOLD, 40.0, 54.0)).color(Color::WHITE);
+    Element::panel("root").size(W, H).fill(hex(0x02030a)).pad_edges(70.0, 40.0, 0.0, 40.0).child(back).child(words)
 }
 
 /// Relative luminance of an sRGB byte pixel.
