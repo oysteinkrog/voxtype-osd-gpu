@@ -25,6 +25,7 @@ use vo::scene::geom::{Color, Point, Rect, Size};
 use vo::scene::glass::{Glass, GlassKind, GlassShape};
 use vo::scene::material::Material;
 use vo::scene::path::{Contour, StrokeStyle, WidthKnot};
+use vo::scene::text::TextLayout;
 use vo::scene::water::{PoolDrop, WaterPool};
 use vo::scene::Scene;
 use vo::{App, Cx, FontRegistry, Options, Scenario, ShapedLayout};
@@ -71,6 +72,7 @@ const CASES: &[&str] = &[
     "tapered strokes",
     "shape-group-8",
     "grid-words",
+    "glyphs-2000-rotating",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -183,6 +185,14 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
         return root.child(blob).child(Element::layer("fx").child(card));
     }
+    if case == "glyphs-2000-rotating" {
+        // EG-15: 2000 letters at 14 px over the card, each turning on its own, in one draw.
+        let letters = Element::canvas("letters", f64::INFINITY, move |t, rect, p| rotating_glyphs(t, rect, k, p))
+            .size(size.w, size.h)
+            .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+        let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+        return root.child(Element::layer("fx").child(card)).child(letters);
+    }
     if case == "tapered strokes" {
         // SW-04: 200 letter-sized strokes over the card, each tapering from 1 to 4 px.
         let strokes = Element::canvas("strokes", f64::INFINITY, move |t, rect, p| tapered_strokes(t, rect, k, p))
@@ -285,6 +295,37 @@ fn shape_group_8(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painter)
     p.shape(
         ShapeInstance { fill: Paint::solid(Color::hex(0x16233a, 0.9)), ..g }.with_stroke(Paint::solid(accent), 1.5 * k),
     );
+}
+
+/// The glyph ids of a to z in the case font, shaped once.
+fn alphabet() -> &'static [(u32, u32)] {
+    static IDS: std::sync::OnceLock<Vec<(u32, u32)>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let shaped =
+            ShapedLayout::new(fonts()).layout("abcdefghijklmnopqrstuvwxyz", &TextStyle::new(0, 14.0, 18.0), None);
+        shaped.glyphs.iter().map(|g| (g.font, g.glyph)).collect()
+    })
+}
+
+/// 2000 letters at 14 px in a 50 x 40 grid, each turning at its own rate about its own
+/// centre (EG-15): one glyph instance each, no layer per letter.
+fn rotating_glyphs(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painter) {
+    use vo::scene::display::{GlyphInstance, GlyphXform, NO_WORD};
+    let ids = alphabet();
+    let (cw, ch) = (rect.w / 50.0, rect.h / 40.0);
+    for i in 0..2000 {
+        let (font, glyph) = ids[i % ids.len()];
+        let speed = 60.0 + (i % 7) as f64 * 25.0;
+        p.glyph(GlyphInstance {
+            pos: Point::new(rect.x + cw * (i % 50) as f32 + 0.2 * cw, rect.y + ch * (i / 50 + 1) as f32),
+            size: 14.0 * k,
+            font,
+            glyph,
+            word: NO_WORD,
+            color: Color::hex(0x9be7ff, 0.85),
+            xform: GlyphXform::rotate(((t * speed + i as f64 * 11.0) % 360.0) as f32),
+        });
+    }
 }
 
 /// 200 short pen strokes in a 20 x 10 grid, each a five-segment hook 1 px wide at its start

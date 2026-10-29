@@ -7,10 +7,12 @@
 //!   alone and with a glow.
 //! - `labels` (FX-005, FX-049, FX-037): vertical side labels in Japanese and Latin, the
 //!   same box autofitting short, medium and long text, and live text with a gradient caret.
+//! - `turn` (EG-15): letters turned, leaned and moved one by one in a single glyph draw: a
+//!   line on a wave, a word tumbling in, leaning digits and a ring of letters.
 //!
 //!   cargo run --release -p vo --example type_demo -- [--out DIR] [--bench]
 //!
-//! Writes `DIR/type-demo.png`, `DIR/type-fx.png` and `DIR/type-labels.png` (default DIR
+//! Writes `DIR/type-demo.png`, `DIR/type-fx.png`, `DIR/type-labels.png` and `DIR/type-turn.png` (default DIR
 //! `/var/tmp/claude/fw-fonts`).
 //! `--bench` times each page's frame on the GPU at 600x300 and 1920x1080.
 
@@ -19,6 +21,7 @@ use std::path::PathBuf;
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::flow::Caret;
 use vo::scene::geom::{Color, Size};
+use vo::scene::text::TextLayout;
 use vo::scene::{DisplayList, Scene};
 use vo::{FontRegistry, ShapedLayout};
 use vo_core::words::Word;
@@ -61,12 +64,14 @@ enum Page {
     Shadow,
     Outline,
     Labels,
+    Turn,
 }
 
 fn view(fonts: &FontRegistry, page: Page) -> Element<()> {
     match page {
         Page::Fonts => fonts_page(fonts),
         Page::Labels => labels_page(fonts),
+        Page::Turn => turn_page(fonts),
         fx => fx_page(fonts, fx),
     }
 }
@@ -184,6 +189,72 @@ fn fonts_page(fonts: &FontRegistry) -> Element<()> {
     Element::panel("bg").size(SURFACE.w, SURFACE.h).fill(Color::hex(0x0b0806, 1.0)).child(col)
 }
 
+/// Per-glyph transforms (EG-15), drawn with the glyphs of shaped lines.
+fn turn_page(fonts: &FontRegistry) -> Element<()> {
+    use vo::scene::display::{GlyphInstance, GlyphXform, NO_WORD};
+    use vo::scene::geom::Point;
+    let sans = fonts.asset("sans").unwrap();
+    let shape = |text: &str, size: f32| {
+        ShapedLayout::new(fonts.clone()).layout(text, &TextStyle::new(sans, size, size * 1.25), None)
+    };
+    let wave = shape("letters riding a wave, each one turned to the slope", 18.0);
+    let tumble = shape("tumbling in", 26.0);
+    let digits = shape("0123456789", 24.0);
+    let ring = shape("ROUND AND ROUND · ", 15.0);
+    let ink = Color::hex(0xe8ebf0, 1.0);
+    let accent = Color::hex(0x7dd3fc, 1.0);
+    let canvas = Element::canvas("turn", f64::INFINITY, move |_, rect, p| {
+        let mut put = |g: &vo::scene::text::PlacedGlyph, pos: Point, size: f32, color: Color, xform: GlyphXform| {
+            p.glyph(GlyphInstance { pos, size, font: g.font, glyph: g.glyph, word: NO_WORD, color, xform });
+        };
+        // A line on a wave: each letter rides the curve and turns to its slope.
+        let (x0, y0) = (rect.x + 20.0, rect.y + 46.0);
+        for g in &wave.glyphs {
+            let x = g.pos.x;
+            let lift = (x * 0.035).sin() * 10.0;
+            let slope = (x * 0.035).cos() * 0.35;
+            let xf = GlyphXform {
+                rot_deg: -slope.atan().to_degrees(),
+                offset: Point::new(0.0, -lift),
+                ..GlyphXform::IDENTITY
+            };
+            put(g, Point::new(x0 + x, y0), 18.0, ink, xf);
+        }
+        // A word tumbling in: the later the letter, the further it still has to turn and fall.
+        let (x0, y0) = (rect.x + 20.0, rect.y + 130.0);
+        let n = tumble.glyphs.len().max(1) as f32;
+        for (i, g) in tumble.glyphs.iter().enumerate() {
+            let left = i as f32 / n;
+            let xf = GlyphXform {
+                rot_deg: left * left * 200.0,
+                offset: Point::new(left * 30.0, -left * left * 50.0),
+                ..GlyphXform::IDENTITY
+            };
+            put(g, Point::new(x0 + g.pos.x, y0), 26.0, accent.fade(1.0 - 0.6 * left), xf);
+        }
+        // Leaning digits, from a left lean to an italic.
+        let (x0, y0) = (rect.x + 20.0, rect.y + 190.0);
+        for (i, g) in digits.glyphs.iter().enumerate() {
+            let xf = GlyphXform { skew_deg: -14.0 + i as f32 * 3.5, ..GlyphXform::IDENTITY };
+            put(g, Point::new(x0 + g.pos.x * 1.3, y0), 24.0, ink, xf);
+        }
+        // A ring: each letter placed on a circle and turned to face out.
+        let c = Point::new(rect.x + rect.w - 120.0, rect.y + 170.0);
+        let r = 80.0;
+        let total = ring.size.w.max(1.0);
+        for g in &ring.glyphs {
+            let a = (g.pos.x + 0.5 * g.advance) / total * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let at = Point::new(c.x + r * a.cos(), c.y + r * a.sin());
+            // The pen sits half an advance left of the centre; the turn is about the ink centre.
+            let pos = Point::new(at.x - 0.5 * g.advance, at.y + 5.0);
+            let xf = GlyphXform::rotate(a.to_degrees() + 90.0);
+            put(g, pos, 15.0, accent, xf);
+        }
+    })
+    .size(SURFACE.w, SURFACE.h);
+    Element::panel("bg").size(SURFACE.w, SURFACE.h).fill(Color::hex(0x0b0806, 1.0)).child(canvas)
+}
+
 fn sample(fonts: &FontRegistry, page: Page, size: Size, scale: f32) -> DisplayList {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, size, scale);
@@ -223,7 +294,7 @@ fn bench() {
     };
     let resolve = buffer(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-    for (page, (w, h, scale)) in [Page::Fonts, Page::Fx, Page::Shadow, Page::Outline, Page::Labels]
+    for (page, (w, h, scale)) in [Page::Fonts, Page::Fx, Page::Shadow, Page::Outline, Page::Labels, Page::Turn]
         .into_iter()
         .flat_map(|p| [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)].map(|s| (p, s)))
     {
@@ -279,7 +350,12 @@ fn main() {
     let (device, queue) = device();
     let mut off = Offscreen::with_fonts(&device, &queue, fonts.clone());
     std::fs::create_dir_all(&out).expect("create the output directory");
-    for (page, file) in [(Page::Fonts, "type-demo.png"), (Page::Fx, "type-fx.png"), (Page::Labels, "type-labels.png")] {
+    for (page, file) in [
+        (Page::Fonts, "type-demo.png"),
+        (Page::Fx, "type-fx.png"),
+        (Page::Labels, "type-labels.png"),
+        (Page::Turn, "type-turn.png"),
+    ] {
         let list = sample(&fonts, page, SURFACE, scale);
         let (w, h) = ((SURFACE.w * scale) as u32, (SURFACE.h * scale) as u32);
         let rgba = off.render_to_rgba(&list, [w, h], scale);
