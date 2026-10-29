@@ -24,7 +24,7 @@
 //!
 //! Lengths are logical pixels (layout units), the same at any surface scale.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use vo_scene::display::{DisplayList, ItemKind, NO_WORD};
@@ -326,18 +326,35 @@ impl Tracker {
         collect(list, &mut now);
         let steps = self.word_steps(&now);
         let moves = self.word_moves(n, &now);
+        let replaced = self.replaced(n, &now);
         let mut open: HashMap<Key, Vec<usize>> = HashMap::new();
         let mut drawn = Vec::with_capacity(now.len());
-        for (key, s) in now {
-            // The nearest glyph with the same key in the last frame, within an em and a half,
-            // after the step its whole word took (`word_steps`) or, for a repeated letter, the
-            // move its word's single letters made (`word_moves`).
-            let best = match (steps.get(&key.0), moves.get(&key)) {
-                (Some(&d), _) => self.nearest(n, &key, &s, d),
-                (None, Some(None)) => None,
-                (None, Some(&Some(d))) => self.nearest(n, &key, &s, d),
-                (None, None) => self.nearest(n, &key, &s, Point::new(0.0, 0.0)),
+        // The nearest glyph with the same key in the last frame, within an em and a half,
+        // after the step its whole word took (`word_steps`) or, for a repeated letter, the
+        // move its word's single letters made (`word_moves`). A word put on another row on
+        // its own starts new tracks (`replaced`). Each track goes on in one glyph at most,
+        // nearest first: a word's old copy fading where it was and its new copy close by
+        // share keys, and the new copy then starts a track of its own.
+        let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+        for (j, (key, s)) in now.iter().enumerate() {
+            let d = match (steps.get(&key.0), moves.get(key)) {
+                _ if replaced.contains(&key.0) => continue,
+                (Some(&d), _) => d,
+                (None, Some(None)) => continue,
+                (None, Some(&Some(d))) => d,
+                (None, None) => Point::new(0.0, 0.0),
             };
+            pairs.extend(self.near(n, key, s, d).into_iter().map(|(i, dist)| (dist, j, i)));
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut best: Vec<Option<usize>> = vec![None; now.len()];
+        let mut taken = HashSet::new();
+        for (_, j, i) in pairs {
+            if best[j].is_none() && taken.insert(i) {
+                best[j] = Some(i);
+            }
+        }
+        for ((key, s), best) in now.into_iter().zip(best) {
             let i = match best {
                 Some(i) => {
                     self.tracks[i].samples.push(s);
@@ -400,22 +417,69 @@ impl Tracker {
         steps
     }
 
+    /// Words put on another row on their own since the last frame: their single letters
+    /// moved up or down at least half an em away from the text's move, the move most words
+    /// made (each word by the median of its single letters; the smaller one on a tie). A
+    /// word that rewraps onto the next row in one frame is a new placement there, not a
+    /// move: matched as a move, its letters on the old row would take their rest on the new
+    /// one and read as off their row. A scroll moves the whole text, so its words are not
+    /// put anywhere new.
+    fn replaced(&self, n: usize, now: &[(Key, Sample)]) -> HashSet<u32> {
+        let mut count: HashMap<Key, u32> = HashMap::new();
+        for (key, _) in now {
+            *count.entry(*key).or_default() += 1;
+        }
+        let mut words: HashMap<u32, (Vec<f32>, f32)> = HashMap::new();
+        for (key, s) in now {
+            if count[key] != 1 {
+                continue;
+            }
+            if let Some(i) = self.nearest(n, key, s, Point::new(0.0, 0.0)) {
+                let dy = s.pos.y - self.tracks[i].samples.last().unwrap().pos.y;
+                let w = words.entry(key.0).or_insert((Vec::new(), s.em));
+                w.0.push(dy);
+            }
+        }
+        let moved: Vec<(u32, f32, f32)> = words
+            .into_iter()
+            .map(|(w, (mut d, em))| {
+                d.sort_by(f32::total_cmp);
+                (w, d[d.len() / 2], 0.5 * em)
+            })
+            .collect();
+        let with = |dy: f32, near: f32| moved.iter().filter(|m| (m.1 - dy).abs() < near).count();
+        let Some(text) = moved
+            .iter()
+            .max_by(|a, b| with(a.1, a.2).cmp(&with(b.1, b.2)).then(b.1.abs().total_cmp(&a.1.abs())))
+            .map(|m| m.1)
+        else {
+            return HashSet::new();
+        };
+        moved.iter().filter(|m| (m.1 - text).abs() >= m.2).map(|m| m.0).collect()
+    }
+
     /// The track in the last frame nearest to `s` with its key, within an em and a half of
     /// where it would be after moving by `d`.
     fn nearest(&self, n: usize, key: &Key, s: &Sample, d: Point) -> Option<usize> {
-        self.open.get(key).and_then(|cands| {
-            cands
-                .iter()
-                .copied()
-                .filter(|&i| self.tracks[i].last_frame() + 1 == n)
-                .map(|i| {
-                    let p = self.tracks[i].samples.last().unwrap();
-                    (i, (p.pos.x + d.x - s.pos.x).hypot(p.pos.y + d.y - s.pos.y), p.em)
-                })
-                .filter(|&(_, dist, em)| dist <= 1.5 * em.max(s.em))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(i, _, _)| i)
-        })
+        self.near(n, key, s, d).into_iter().min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+    }
+
+    /// Every track in the last frame with `key` within an em and a half of where it would
+    /// be after moving by `d`, with how far.
+    fn near(&self, n: usize, key: &Key, s: &Sample, d: Point) -> Vec<(usize, f32)> {
+        let Some(cands) = self.open.get(key) else {
+            return Vec::new();
+        };
+        cands
+            .iter()
+            .copied()
+            .filter(|&i| self.tracks[i].last_frame() + 1 == n)
+            .filter_map(|i| {
+                let p = self.tracks[i].samples.last().unwrap();
+                let dist = (p.pos.x + d.x - s.pos.x).hypot(p.pos.y + d.y - s.pos.y);
+                (dist <= 1.5 * p.em.max(s.em)).then_some((i, dist))
+            })
+            .collect()
     }
 
     /// How each repeated letter of a word is matched: after the move its word's single
@@ -553,16 +617,27 @@ impl Tracker {
             glyphs.retain(|g| env.transcript.contains(&self.tracks[g.0].key.0));
             // Words drawn now, and words about to show, with where each glyph comes to rest.
             let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
-            let pending = soon.flat_map(|(i, f)| {
-                f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(|&ti| {
-                    let tr = &self.tracks[ti];
-                    let r = rests[ti][0]?;
-                    env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y))
+            // (word, rest y, frames from now until it shows)
+            let rests = &rests;
+            let pending: Vec<(u32, f32, usize)> = soon
+                .flat_map(|(i, f)| {
+                    f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(move |&ti| {
+                        let tr = &self.tracks[ti];
+                        let r = rests[ti][0]?;
+                        env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y, i))
+                    })
                 })
-            });
+                .collect();
             let rests_now = glyphs.iter().map(|g| (self.tracks[g.0].key.0, g.2.pos.y));
-            let all: Vec<(u32, f32)> = rests_now.chain(pending).collect();
-            let Some(newest) = all.iter().map(|a| a.0).max() else {
+            let all: Vec<(u32, f32)> = rests_now.clone().chain(pending.iter().map(|p| (p.0, p.1))).collect();
+            // The reading line is the next new word to show, not the furthest one within
+            // `pending`: a later word can rest where a later scroll puts its line, which is
+            // where the line before is still scrolling to now. Words can show out of order
+            // (one waits for its place while the next shows), so the next one is the first
+            // to show, not the lowest id.
+            let drawn = rests_now.map(|a| a.0).max();
+            let next = pending.iter().filter(|p| drawn.is_none_or(|d| p.0 > d)).min_by_key(|p| (p.2, p.0)).map(|p| p.0);
+            let Some(newest) = next.or(drawn) else {
                 continue;
             };
             let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == newest).map(|a| a.1).collect();
@@ -1264,6 +1339,59 @@ mod tests {
     fn a_word_that_drops_from_a_row_above_is_off_its_row() {
         let r = run(|k| (-20.0 + k as f32 * 3.0, 1.0, 9.0));
         assert!(r.by_kind().iter().any(|s| s.kind == "off-row"), "{r}");
+    }
+
+    #[test]
+    fn the_reading_line_is_the_next_word_to_show_not_the_furthest() {
+        // As `held` (word 2 shows once word 1 has left its row), and word 3 shows in frame
+        // 12 on the row word 1 scrolls up to, as a word that rests where a later scroll puts
+        // its line does. While word 2 is held,
+        // the reading line is word 2's row, not word 3's, so word 1 on its way up is not
+        // on it.
+        let mut tr = Tracker::new();
+        for n in 0..24usize {
+            let up = (n.saturating_sub(4).min(6) as f32) * 4.0;
+            let mut g = word(1, 10.0, 64.0 - up, 9.0, 1.0);
+            if n >= 10 {
+                g.extend(word(2, 10.0, 64.0, 9.0, 1.0));
+            }
+            if n >= 12 {
+                g.extend(word(3, 100.0, 40.0, 9.0, 1.0));
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default()).assert_ok();
+    }
+
+    /// Word 1 rests on its row; word 2 shows after it in frame 5 and in frame 6 rewraps onto
+    /// the row below, at an x within an em and a half of where it was (a narrow
+    /// card, "confi" growing into "configuration"). With `ghost`, its old copy also fades
+    /// out where it was over 3 frames.
+    fn rewrap(ghost: bool) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..20usize {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            if n == 5 {
+                g.extend(word(2, 50.0, 40.0, 9.0, 1.0));
+            } else if n > 5 {
+                g.extend(word(2, 44.0, 60.0, 9.0, 1.0));
+                if ghost && n < 9 {
+                    g.extend(word(2, 50.0, 40.0, 9.0, 0.6 - 0.2 * (n - 6) as f32));
+                }
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default())
+    }
+
+    #[test]
+    fn a_word_that_rewraps_onto_the_next_row_is_a_new_placement() {
+        // Matched as a 20 px move, word 2's letters on its old row would take their rest
+        // on the new row and read as off their row.
+        let r = rewrap(false);
+        assert!(r.is_ok(), "no ghost: {r}");
+        let r = rewrap(true);
+        assert!(r.is_ok(), "with its ghost: {r}");
     }
 
     #[test]
