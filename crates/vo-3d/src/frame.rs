@@ -12,6 +12,7 @@ use vo_scene::geom::Color;
 
 use crate::camera::Camera;
 use crate::math::{Mat4, Vec3};
+use crate::shadow::Shadows;
 
 /// A mesh uploaded with [`crate::Renderer3d::add_mesh`]. In a [`crate::Source3d`] frame,
 /// `MeshId(i)` names the `i`th mesh of the source's own list instead.
@@ -40,6 +41,9 @@ pub struct Frame3d {
     /// Draw on the scene's stage camera instead of `camera` (inside a 2D scene only, see
     /// [`OnStage`]).
     pub on_stage: Option<OnStage>,
+    /// Soft shadows from the key light (EG-18): the meshes cast onto the meshes and the
+    /// floor. `None` draws no shadows and makes no shadow map.
+    pub shadows: Option<Shadows>,
 }
 
 /// A 3D item drawn with the 2D scene's stage camera (`vo_scene::stage`), so it lines up

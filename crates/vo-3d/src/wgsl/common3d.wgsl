@@ -26,6 +26,14 @@ struct Globals {
   field: vec4f,
   // Floor (D305): height, fade distance below it, reflection strength, 1 when there is one.
   floor: vec4f,
+  // Shadows (EG-18): world to the light's clip space.
+  light_view_proj: mat4x4f,
+  // 1 when shadows are on, 1 / map size, softness in target pixels, strength.
+  shadow: vec4f,
+  // World size of a target pixel: x + y times view depth (x for orthographic cameras, y for
+  // perspective ones). Then the world size of a map texel, and the largest disc radius in
+  // map uv (the free margin round the casters).
+  shadow_k: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -34,6 +42,9 @@ struct Globals {
 // field is bound.
 @group(0) @binding(1) var field_tex: texture_2d<f32>;
 @group(0) @binding(2) var field_smp: sampler;
+// The key light's shadow map (EG-18), a 1x1 cleared map when shadows are off.
+@group(0) @binding(3) var shadow_map: texture_depth_2d;
+@group(0) @binding(4) var shadow_smp: sampler_comparison;
 
 const TAU: f32 = 6.283185307;
 
@@ -105,4 +116,43 @@ fn clip_to_px (c: vec4f) -> vec2f {
 // Moves a clip position by `d` target pixels.
 fn clip_offset_px (c: vec4f, d: vec2f) -> vec4f {
   return c + vec4f (d.x * 2.0 / g.viewport.x, -d.y * 2.0 / g.viewport.y, 0.0, 0.0) * c.w;
+}
+
+// A Poisson disc of 16 taps in the unit circle.
+const POISSON = array<vec2f, 16> (
+  vec2f (-0.94201624, -0.39906216), vec2f (0.94558609, -0.76890725),
+  vec2f (-0.09418410, -0.92938870), vec2f (0.34495938, 0.29387760),
+  vec2f (-0.91588581, 0.45771432), vec2f (-0.81544232, -0.87912464),
+  vec2f (-0.38277543, 0.27676845), vec2f (0.97484398, 0.75648379),
+  vec2f (0.44323325, -0.97511554), vec2f (0.53742981, -0.47373420),
+  vec2f (-0.26496911, -0.41893023), vec2f (0.79197514, 0.19090188),
+  vec2f (-0.24188840, 0.99706507), vec2f (-0.81409955, 0.91437590),
+  vec2f (0.19984126, 0.78641367), vec2f (0.14383161, -0.14100790),
+);
+
+// How much key light reaches world point `p` (1 lit, 1 - strength in full shadow). `n` is
+// the surface normal for a mesh, zero for the floor (which casts nothing, so needs no
+// offset). `px` is the fragment's pixel, which turns the disc so its steps become fine
+// grain; the same pixel always gets the same turn.
+fn shadow_at (p: vec3f, n: vec3f, px: vec2f) -> f32 {
+  if (g.shadow.x == 0.0) {
+    return 1.0;
+  }
+  let depth = max (-(g.view * vec4f (p, 1.0)).z, 0.0);
+  let radius = g.shadow.z * (g.shadow_k.x + g.shadow_k.y * depth);
+  // Lift a mesh off its own map by a texel plus the disc, so a wide disc does not shade it.
+  let q = g.light_view_proj * vec4f (p + n * (1.5 * g.shadow_k.z + radius), 1.0);
+  let uv = vec2f (q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+  if (any (uv < vec2f (0.0)) || any (uv > vec2f (1.0))) {
+    return 1.0;
+  }
+  let r = min (radius / g.shadow_k.z * g.shadow.y, g.shadow_k.w);
+  let z = clamp (q.z, 0.0, 1.0);
+  let a = TAU * fract (52.9829189 * fract (dot (px, vec2f (0.06711056, 0.00583715))));
+  let rot = mat2x2f (cos (a), sin (a), -sin (a), cos (a));
+  var lit = 0.0;
+  for (var i = 0u; i < 16u; i++) {
+    lit += textureSampleCompareLevel (shadow_map, shadow_smp, uv + rot * POISSON[i] * r, z);
+  }
+  return 1.0 - g.shadow.w * (1.0 - lit / 16.0);
 }

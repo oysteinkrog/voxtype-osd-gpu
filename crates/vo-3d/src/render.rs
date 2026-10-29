@@ -7,6 +7,9 @@
 //! the pools of light, so the copy shows only below the floor line and the real scene draws
 //! over it as usual.
 //!
+//! With [`crate::Shadows`] (EG-18), a depth-only pass from the key light draws the meshes
+//! into a shadow map first; the meshes and the floor then read it (see [`crate::shadow`]).
+//!
 //! The pass resolves into the caller's view, so it is a layer like any other for whatever
 //! comes after it (2D display lists, text, post effects).
 
@@ -20,6 +23,7 @@ use vo_scene::geom::Color;
 use crate::frame::{Background, CloudShape, Frame3d, MeshId, TextureId, MAX_POOLS};
 use crate::math::{Mat4, Vec3};
 use crate::mesh::{Mesh, Vertex};
+use crate::shadow::{fit_light, world_box, SHADOW_FORMAT};
 
 const COMMON: &str = include_str!("wgsl/common3d.wgsl");
 const MESH: &str = include_str!("wgsl/mesh.wgsl");
@@ -28,6 +32,8 @@ const ORBS: &str = include_str!("wgsl/orbs.wgsl");
 const BACKGROUND: &str = include_str!("wgsl/background.wgsl");
 const FLOOR: &str = include_str!("wgsl/floor.wgsl");
 const CONE: &str = include_str!("wgsl/cone.wgsl");
+/// The shadow caster pass; standalone, not prepended with `common3d.wgsl`.
+pub const SHADOW_CASTER: &str = include_str!("wgsl/shadow.wgsl");
 
 pub const SAMPLES: u32 = 4;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -56,6 +62,9 @@ struct Globals {
     bg_bottom: [f32; 4],
     field: [f32; 4],
     floor: [f32; 4],
+    light_view_proj: [[f32; 4]; 4],
+    shadow: [f32; 4],
+    shadow_k: [f32; 4],
 }
 
 #[repr(C)]
@@ -112,6 +121,14 @@ struct GpuMesh {
     count: u32,
     /// Vertex count.
     len: usize,
+    /// Local bounds, for fitting the shadow map.
+    bounds: (Vec3, Vec3),
+}
+
+/// The key light's shadow map (EG-18), made on the first frame with shadows.
+struct ShadowMap {
+    size: u32,
+    view: wgpu::TextureView,
 }
 
 /// Textures that follow the target size.
@@ -132,6 +149,15 @@ struct Pipelines {
     orbs: wgpu::RenderPipeline,
     floor: wgpu::RenderPipeline,
     cone: wgpu::RenderPipeline,
+}
+
+/// The pipelines only shadows use (EG-18), made on the first frame with shadows.
+struct ShadowPipelines {
+    format: wgpu::TextureFormat,
+    /// Depth only, into the shadow map.
+    caster: wgpu::RenderPipeline,
+    /// The floor's shadow: `fs_floor_shadow`, premultiplied over, no depth write.
+    floor: wgpu::RenderPipeline,
 }
 
 /// Where [`Renderer3d::encode_with`] resolves to.
@@ -192,6 +218,15 @@ pub struct Renderer3d {
     orbs: Option<wgpu::Buffer>,
     attachments: Option<Attachments>,
     staging: Vec<u8>,
+    shadow_sampler: wgpu::Sampler,
+    /// Bound in place of the shadow map when shadows are off.
+    no_shadow: wgpu::TextureView,
+    shadow: Option<ShadowMap>,
+    shadow_pipelines: Option<ShadowPipelines>,
+    /// The caster pass: its layout, the light matrix buffer and its bind group.
+    caster_layout: wgpu::PipelineLayout,
+    light_buf: wgpu::Buffer,
+    light_bind: wgpu::BindGroup,
     /// Wall time spent compiling shader modules and pipelines, for cold-start reports.
     pub pipeline_time: Duration,
 }
@@ -227,6 +262,22 @@ impl Renderer3d {
                     binding: 2,
                     visibility: vf,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: vf,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: vf,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
             ],
@@ -299,6 +350,46 @@ impl Renderer3d {
                 view_formats: &[],
             })
             .create_view(&Default::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vo3d-shadow"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        // Never drawn into or read while shadows are off: `shadow.x` is 0 then.
+        let no_shadow = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("vo3d-no-shadow"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SHADOW_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo3d-light"),
+            entries: &[uniform(0, wgpu::ShaderStages::VERTEX, false, 64)],
+        });
+        let caster_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vo3d-caster"),
+            bind_group_layouts: &[Some(&light_layout), Some(&draw_layout)],
+            immediate_size: 0,
+        });
+        let light_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vo3d-light"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let light_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vo3d-light"),
+            layout: &light_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() }],
+        });
         Renderer3d {
             device: device.clone(),
             queue: queue.clone(),
@@ -319,6 +410,13 @@ impl Renderer3d {
             orbs: None,
             attachments: None,
             staging: Vec::new(),
+            shadow_sampler,
+            no_shadow,
+            shadow: None,
+            shadow_pipelines: None,
+            caster_layout,
+            light_buf,
+            light_bind,
             pipeline_time: Duration::ZERO,
         }
     }
@@ -336,7 +434,13 @@ impl Renderer3d {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        self.meshes.push(GpuMesh { vertices, indices, count: mesh.indices.len() as u32, len: mesh.vertices.len() });
+        self.meshes.push(GpuMesh {
+            vertices,
+            indices,
+            count: mesh.indices.len() as u32,
+            len: mesh.vertices.len(),
+            bounds: bounds_of(&mesh.vertices),
+        });
         MeshId(self.meshes.len() as u32 - 1)
     }
 
@@ -344,9 +448,15 @@ impl Renderer3d {
     /// frame). The count must match the mesh as added; the indices stay. Like the other
     /// buffers, the write lands at submit, so one update per mesh per submit.
     pub fn update_mesh(&mut self, id: MeshId, vertices: &[Vertex]) {
-        let mesh = &self.meshes[id.0 as usize];
+        let mesh = &mut self.meshes[id.0 as usize];
         assert_eq!(mesh.len, vertices.len(), "update_mesh: the vertex count must stay the same");
         self.queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(vertices));
+        mesh.bounds = bounds_of(vertices);
+    }
+
+    /// The shadow map's size in texels, or `None` while no frame has asked for shadows.
+    pub fn shadow_map_size(&self) -> Option<u32> {
+        self.shadow.as_ref().map(|s| s.size)
     }
 
     /// Registers a texture for [`crate::Material::texture`]: a 2D view of premultiplied,
@@ -488,6 +598,91 @@ impl Renderer3d {
         self.pipeline_time += start.elapsed();
     }
 
+    /// Makes the shadow map of `size` texels and the shadow pipelines, once.
+    fn prepare_shadows(&mut self, size: u32, format: wgpu::TextureFormat) {
+        if self.shadow.as_ref().is_none_or(|s| s.size != size) {
+            let view = self
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("vo3d-shadow"),
+                    size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: SHADOW_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            self.shadow = Some(ShadowMap { size, view });
+        }
+        if self.shadow_pipelines.as_ref().is_some_and(|p| p.format == format) {
+            return;
+        }
+        let start = Instant::now();
+        let caster_module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_CASTER.into()),
+        });
+        let caster = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vo3d-caster"),
+            layout: Some(&self.caster_layout),
+            vertex: wgpu::VertexState {
+                module: &caster_module,
+                entry_point: Some("vs_caster"),
+                compilation_options: Default::default(),
+                buffers: &[Some(Vertex::layout())],
+            },
+            fragment: None,
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                // Keeps a surface from shading itself where it slopes away from the light.
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let floor_module = &self.modules.as_ref().expect("prepare first")[4];
+        let floor = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vo3d-floor-shadow"),
+            layout: Some(&self.pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: floor_module,
+                entry_point: Some("vs_floor"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: floor_module,
+                entry_point: Some("fs_floor_shadow"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(PREMULTIPLIED_OVER),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
+            multiview_mask: None,
+            cache: None,
+        });
+        self.shadow_pipelines = Some(ShadowPipelines { format, caster, floor });
+        self.pipeline_time += start.elapsed();
+    }
+
     /// Records the 3D pass into `enc`, resolving into `target` (a single-sample view of
     /// `size` and `format`) at scale 1. With `field`, clouds with a reach react to the text
     /// field.
@@ -533,6 +728,39 @@ impl Renderer3d {
         let lc = lin(l.color);
         let eye = cam.eye();
         let fog = frame.fog.map_or([0.0, 0.0, 0.0, scale], |(a, b)| [a, b, 1.0, scale]);
+
+        // Shadows (EG-18): fit the light's box to the casters' bounds in this pose.
+        let casters: Vec<usize> =
+            (0..frame.meshes.len()).filter(|&i| frame.meshes[i].material.color.a >= 0.5).collect();
+        let fit = frame.shadows.and_then(|sh| {
+            let boxes: Vec<(Vec3, Vec3)> = casters
+                .iter()
+                .map(|&i| {
+                    let d = &frame.meshes[i];
+                    world_box(&d.model, self.meshes[d.mesh.0 as usize].bounds)
+                })
+                .collect();
+            fit_light(l.dir, &boxes, sh.size.max(64)).map(|f| (sh, f))
+        });
+        if let Some((sh, _)) = fit {
+            self.prepare_shadows(sh.size.max(64), format);
+        }
+        let focal = cam.focal_px(h);
+        let (shadow, shadow_k, light_view_proj) = match &fit {
+            Some((sh, f)) => {
+                let size = sh.size.max(64) as f32;
+                let per_px = match cam.projection {
+                    crate::camera::Projection::Orthographic { .. } => [1.0 / focal, 0.0],
+                    _ => [0.0, 1.0 / focal],
+                };
+                (
+                    [1.0, 1.0 / size, sh.softness.max(0.0) * scale, sh.strength.clamp(0.0, 1.0)],
+                    [per_px[0], per_px[1], f.texel, (f.margin as f32 - 1.5) / size],
+                    f.view_proj.cols,
+                )
+            }
+            None => ([0.0; 4], [0.0; 4], Mat4::IDENTITY.cols),
+        };
         let globals = Globals {
             view_proj: cam.view_proj(w / h).cols,
             view: cam.view().cols,
@@ -547,6 +775,9 @@ impl Renderer3d {
             bg_bottom,
             field: field.as_ref().map_or([1.0, 1.0, 1.0, 0.0], |f| [f.size[0] as f32, f.size[1] as f32, f.scale, 0.0]),
             floor: frame.floor.map_or([0.0; 4], |f| [f.y, f.fade, f.reflect, 1.0]),
+            light_view_proj,
+            shadow,
+            shadow_k,
         };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -559,6 +790,14 @@ impl Renderer3d {
                     resource: wgpu::BindingResource::TextureView(field.as_ref().map_or(&self.no_field, |f| f.view)),
                 },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(match (&fit, &self.shadow) {
+                        (Some(_), Some(s)) => &s.view,
+                        _ => &self.no_shadow,
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
             ],
         });
 
@@ -688,6 +927,33 @@ impl Renderer3d {
             self.queue.write_buffer(self.orbs.as_ref().unwrap(), 0, bytes);
         }
 
+        // The caster pass: the meshes' depth from the key light, into the shadow map.
+        if let (Some((_, f)), Some(map), Some(sp)) = (&fit, &self.shadow, &self.shadow_pipelines) {
+            self.queue.write_buffer(&self.light_buf, 0, bytemuck::bytes_of(&f.view_proj.cols));
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vo3d-shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &map.view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&sp.caster);
+            pass.set_bind_group(0, &self.light_bind, &[]);
+            let draws = &self.draws.as_ref().unwrap().1;
+            for &i in &casters {
+                let mesh = &self.meshes[frame.meshes[i].mesh.0 as usize];
+                pass.set_bind_group(1, draws, &[i as u32 * SLOT as u32]);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.count, 0, 0..1);
+            }
+        }
+
         let att = self.attachments.as_ref().unwrap();
         let p = self.pipelines.as_ref().unwrap();
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -756,6 +1022,10 @@ impl Renderer3d {
             pass.set_pipeline(&p.floor);
             pass.set_bind_group(1, draws, &at(next));
             pass.draw(0..3, 0..1);
+            if let (Some(_), Some(sp)) = (&fit, &self.shadow_pipelines) {
+                pass.set_pipeline(&sp.floor);
+                pass.draw(0..3, 0..1);
+            }
             next += 1;
         }
         draw_scene(&mut pass, 0);
@@ -820,6 +1090,20 @@ fn mirror_y(floor: f32) -> Mat4 {
         .then(&Mat4::translation(Vec3::new(0.0, floor, 0.0)))
 }
 
+fn bounds_of(vertices: &[Vertex]) -> (Vec3, Vec3) {
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for v in vertices {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v.pos[k]);
+            hi[k] = hi[k].max(v.pos[k]);
+        }
+    }
+    if vertices.is_empty() {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+    (Vec3::new(lo[0], lo[1], lo[2]), Vec3::new(hi[0], hi[1], hi[2]))
+}
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -838,7 +1122,7 @@ mod tests {
 
     #[test]
     fn shaders_validate_in_naga() {
-        for (name, src) in shader_sources() {
+        for (name, src) in shader_sources().into_iter().chain([("shadow", SHADOW_CASTER.to_string())]) {
             let module =
                 naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&src)));
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())

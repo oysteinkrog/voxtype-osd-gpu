@@ -20,6 +20,8 @@
 //! - `surface_text`: [`SurfaceText`], text drawn into a mipmapped texture for a textured mesh
 //!   ([`Material::texture`]), and two surfaces to print it on: a [`Scroll`] that unrolls and
 //!   a [`PageTurn`] (EG-14).
+//! - `shadow`: [`Shadows`], soft shadows from the key light: a shadow map fit to the meshes
+//!   each frame, read with a Poisson disc (EG-18).
 //! - `stack`: [`Stack`], the fixed depth order of D304, with Slug text planes in the scene.
 //! - `sculpture`: [`Sculpture`], extruded letters behind flat text whose depth follows
 //!   loudness (MO-88).
@@ -46,6 +48,7 @@ pub mod render;
 pub mod ribbon3d;
 pub mod sculpture;
 pub mod sdf;
+pub mod shadow;
 pub mod stack;
 pub mod surface_text;
 pub mod text3d;
@@ -65,6 +68,7 @@ pub use painter::{install, item, Item3d, Painter3d};
 pub use render::{ExtraDraw, FieldBinding, Output, PassInfo, Renderer3d};
 pub use ribbon3d::{Ribbon3d, RibbonItem, RibbonLook};
 pub use sculpture::{Letter, SculptLook, Sculpture};
+pub use shadow::Shadows;
 pub use sdf::{hero, HeroFrame, HeroItem, HeroLook, HeroPainter, HeroShape, HeroSource};
 pub use stack::{Layers, Stack, TextPlane};
 pub use surface_text::{PageTurn, Scroll, SurfaceText};

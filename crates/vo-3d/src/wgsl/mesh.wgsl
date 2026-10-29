@@ -4,7 +4,8 @@
 // along a ribbon's length from `uv.y` (both off by default: back = color, no fibres). A mirrored draw (the floor reflection, D305) is
 // lit as the original seen from the mirrored eye, and fades with depth below the floor.
 // `fs_mesh_tex` (EG-14) puts a premultiplied texture over the front face, for text on curved
-// surfaces. `common3d.wgsl` is prepended.
+// surfaces. With shadows on (EG-18) the key light's diffuse and specular terms take
+// `shadow_at`; a mirrored draw looks it up at the original's place. `common3d.wgsl` is prepended.
 
 struct Draw {
   model: mat4x4f,
@@ -103,9 +104,19 @@ fn shade (in: MeshOut, front: bool, fibre: f32, front_col: vec4f, back_col: vec4
   let c = select (front_col, back_col, back_face);
   let a = max (c.a, 1e-6);
   let base = c.rgb / a;
-  let diffuse = max (dot (n, l), 0.0);
+  var sh = 1.0;
+  if (g.shadow.x != 0.0) {
+    var p = in.world;
+    var sn = n;
+    if (mirrored) {
+      p.y = 2.0 * g.floor.x - p.y;
+      sn.y = -sn.y;
+    }
+    sh = shadow_at (p, sn, in.clip.xy);
+  }
+  let diffuse = max (dot (n, l), 0.0) * sh;
   let h = normalize (l + v);
-  let spec = pow (max (dot (n, h), 0.0), d.params.z) * d.params.y * step (0.0, dot (n, l));
+  let spec = pow (max (dot (n, h), 0.0), d.params.z) * d.params.y * step (0.0, dot (n, l)) * sh;
   let rim = g.light_dir.w * pow (1.0 - max (dot (n, v), 0.0), 3.0);
   // The rim takes the surface colour, half way to white, so grazing faces do not wash out.
   let lit = base * (g.ambient.rgb + g.light_color.rgb * diffuse)
