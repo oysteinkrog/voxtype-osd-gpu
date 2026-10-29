@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 use vo::scene::element::{Element, Prop, TextStyle, Transition};
 use vo::scene::geom::{Color, Point, Size};
-use vo::{App, Cx, FontRegistry, InputMode, LogDiagnostics, Options, OverlaySpec, Placement, Scenario, SurfaceView, Tokens};
+use vo::{
+    App, Cx, FontRegistry, InputMode, LogDiagnostics, Options, OverlaySpec, Placement, Scenario, SurfaceView, Tokens,
+};
 use vo_core::spring::Spring;
 
 const PANEL: Size = Size::new(320.0, 96.0);
@@ -46,7 +48,11 @@ impl Demo {
             .radius(12.0)
             .fill(Color::hex(0x101319, 0.96))
             .stroke(accent().fade(0.4), 1.0)
-            .child(Element::label("text", "Sent to the editor").text_style(TextStyle::new(0, 18.0, 24.0)).color(Color::WHITE));
+            .child(
+                Element::label("text", "Sent to the editor")
+                    .text_style(TextStyle::new(0, 18.0, 24.0))
+                    .color(Color::WHITE),
+            );
         if self.glow {
             card.glow(accent(), 40.0, 1.0)
         } else {
