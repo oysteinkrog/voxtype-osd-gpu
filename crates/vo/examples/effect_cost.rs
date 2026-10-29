@@ -74,6 +74,7 @@ const CASES: &[&str] = &[
     "shape-group-8",
     "grid-words",
     "glyphs-2000-rotating",
+    "panes-20",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -200,6 +201,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
         return root.child(Element::layer("fx").child(card)).child(letters);
     }
+    if case == "panes-20" {
+        return panes_20(size, t);
+    }
     if case == "tapered strokes" {
         // SW-04: 200 letter-sized strokes over the card, each tapering from 1 to 4 px.
         let strokes = Element::canvas("strokes", f64::INFINITY, move |t, rect, p| tapered_strokes(t, rect, k, p))
@@ -302,6 +306,46 @@ fn shape_group_8(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painter)
     p.shape(
         ShapeInstance { fill: Paint::solid(Color::hex(0x16233a, 0.9)), ..g }.with_stroke(Paint::solid(accent), 1.5 * k),
     );
+}
+
+/// 20 word frames in four rows of five (EG-33), each a layer of its own turned toward the
+/// middle and pushed further back than the one before it, the turn swaying. Drawn straight
+/// into the target: no pane takes a texture.
+fn panes_20(size: Size, t: f64) -> Element<Msg> {
+    const WORDS: [&str; 20] = [
+        "so", "the", "plan", "for", "tomorrow", "is", "to", "open", "the", "file", "and", "set", "the", "theme",
+        "then", "read", "the", "live", "words", "back",
+    ];
+    let k = size.h / 300.0;
+    let sway = 1.0 + 0.2 * (t * 1.7).sin() as f32;
+    let pane = |i: usize| {
+        let (col, row) = ((i % 5) as f32, (i / 5) as f32);
+        Element::layer(format!("pane{i}"))
+            .translate_z(-40.0 * k * i as f32)
+            .rotate_y(0.35 * (col - 2.0) * sway)
+            .rotate_x(0.25 * (row - 1.5))
+            .child(
+                Element::panel(format!("frame{i}"))
+                    .size(100.0 * k, 46.0 * k)
+                    .radius(9.0 * k)
+                    .fill(Color::hex(0x10141c, 0.85))
+                    .border(Color::hex(0x4cc9f0, 0.8), 1.5 * k)
+                    .align_items(vo::scene::taffy::AlignItems::CENTER)
+                    .justify(vo::scene::taffy::JustifyContent::CENTER)
+                    .child(
+                        Element::label(format!("word{i}"), WORDS[i])
+                            .text_style(TextStyle::new(0, 20.0 * k, 24.0 * k))
+                            .color(Color::hex(0xc8d3e0, 1.0)),
+                    ),
+            )
+    };
+    let row = |r: usize| Element::row(format!("row{r}")).gap(12.0 * k).children((0..5).map(move |c| pane(r * 5 + c)));
+    Element::column("root")
+        .size(size.w, size.h)
+        .gap(14.0 * k)
+        .align_items(vo::scene::taffy::AlignItems::CENTER)
+        .justify(vo::scene::taffy::JustifyContent::CENTER)
+        .children((0..4).map(row))
 }
 
 /// The glyph ids of a to z in the case font, shaped once.
@@ -599,6 +643,11 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
                 f.builds(),
                 frames + 10
             );
+        }
+        if *name == "panes-20" {
+            let report = r.frame_report();
+            let offscreen = report.surfaces.iter().filter(|s| s.kind == vo_render::profile::SurfaceKind::Layer).count();
+            println!("effect_cost: panes-20 at {w}x{h}: {offscreen} offscreen layers, {} draws", report.surfaces[0].draws);
         }
         sections.sort_by(|a, b| b.1.total_cmp(&a.1));
         let slowest =

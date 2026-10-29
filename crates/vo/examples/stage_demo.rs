@@ -5,11 +5,16 @@
 //!
 //!   cargo run --release -p vo --example stage_demo -- [--out DIR]
 //!   cargo run --release -p vo --example stage_demo -- --bench
+//!   cargo run --release -p vo --example stage_demo -- --panes [--out DIR]
 //!
 //! The default writes `DIR/stage_demo.png` (default DIR `/var/tmp/claude/fw-stage`): the
 //! same view flat, half turned and fully turned, and the turn springing in over time.
 //! `--bench` prints GPU time per frame (timestamp queries) for the flat and the turned view,
-//! filling a 600x300 and a 1920x1080 frame.
+//! filling a 600x300 and a 1920x1080 frame, and for the 20 panes below.
+//!
+//! `--panes` writes `DIR/stage_panes.png`: 20 receding word frames (EG-33), each its own turned
+//! layer, flat, half turned and turned, and the turn springing in. A turned layer of shapes and
+//! glyphs takes no texture: the run prints the frame report's offscreen layer count, 0.
 
 use std::path::PathBuf;
 
@@ -19,6 +24,7 @@ use vo::scene::taffy::{AlignItems, JustifyContent};
 use vo::scene::{DisplayList, Scene};
 use vo::{FontRegistry, ShapedLayout};
 use vo_render::offscreen::{write_png, FORMAT};
+use vo_render::profile::SurfaceKind;
 use vo_render::{Offscreen, Renderer, Target};
 
 const CYAN: u32 = 0x6fe8ff;
@@ -74,8 +80,54 @@ fn view(fonts: &FontRegistry, size: Size, tilt: f32) -> Element<()> {
         .child(Element::column("stack").align_items(AlignItems::CENTER).child(panes).child(words).child(rings))
 }
 
+const WORDS: [&str; 20] = [
+    "so", "the", "plan", "for", "tomorrow", "is", "to", "open", "the", "file", "and", "set", "the", "theme", "then",
+    "read", "the", "live", "words", "back",
+];
+
+/// 20 word frames in four rows of five (EG-33), each a layer of its own turned toward the
+/// middle and pushed further back than the one before it.
+fn panes_view(fonts: &FontRegistry, size: Size, tilt: f32) -> Element<()> {
+    let k = size.h / 300.0;
+    let font = fonts.asset("condensed").unwrap();
+    let pane = |i: usize| {
+        let (col, row) = ((i % 5) as f32, (i / 5) as f32);
+        Element::layer(format!("pane{i}"))
+            .translate_z(-40.0 * k * i as f32 * tilt)
+            .rotate_y(0.35 * (col - 2.0) * tilt)
+            .rotate_x(0.25 * (row - 1.5) * tilt)
+            .child(
+                Element::panel(format!("frame{i}"))
+                    .size(100.0 * k, 46.0 * k)
+                    .radius(9.0 * k)
+                    .fill(Color::hex(0x1d5f7a, 0.45))
+                    .stroke(Color::hex(CYAN, 0.9), 1.5 * k)
+                    .align_items(AlignItems::CENTER)
+                    .justify(JustifyContent::CENTER)
+                    .child(
+                        Element::label(format!("word{i}"), WORDS[i])
+                            .text_style(TextStyle::new(font, 24.0 * k, 28.0 * k))
+                            .color(Color::hex(0xdffaff, 1.0)),
+                    ),
+            )
+    };
+    let row = |r: usize| Element::row(format!("row{r}")).gap(12.0 * k).children((0..5).map(move |c| pane(r * 5 + c)));
+    Element::panel("root")
+        .size(size.w, size.h)
+        .fill(Color::hex(0x05080e, 1.0))
+        .align_items(AlignItems::CENTER)
+        .justify(JustifyContent::CENTER)
+        .child(Element::column("grid").gap(14.0 * k).align_items(AlignItems::CENTER).children((0..4).map(row)))
+}
+
+type View = fn(&FontRegistry, Size, f32) -> Element<()>;
+
 /// The view applied flat at 0 and turned to `tilt` at 1 s, sampled at `t`.
 fn sample(fonts: &FontRegistry, size: Size, tilt: f32, t: f64) -> DisplayList {
+    sample_view(view, fonts, size, tilt, t)
+}
+
+fn sample_view(view: View, fonts: &FontRegistry, size: Size, tilt: f32, t: f64) -> DisplayList {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, size, 1.0);
     scene.apply(view(fonts, size, 0.0), 0.0);
@@ -113,10 +165,12 @@ fn bench(fonts: FontRegistry) {
     };
     let resolve = buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
     let read = buf(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-    for (name, tilt) in [("flat", 0.0), ("turned", 1.0)] {
-        let mut line = format!("stage_demo bench: {name:7}");
+    let cases: [(&str, View, f32); 4] =
+        [("flat", view, 0.0), ("turned", view, 1.0), ("panes-0", panes_view, 0.0), ("panes-20", panes_view, 1.0)];
+    for (name, v, tilt) in cases {
+        let mut line = format!("stage_demo bench: {name:8}");
         for (w, h) in [(600u32, 300u32), (1920, 1080)] {
-            let list = sample(&fonts, Size::new(w as f32, h as f32), tilt, 10.0);
+            let list = sample_view(v, &fonts, Size::new(w as f32, h as f32), tilt, 10.0);
             let target = Target::new(&device, w, h, FORMAT);
             let mut times = Vec::new();
             for i in 0..120 {
@@ -139,20 +193,28 @@ fn bench(fonts: FontRegistry) {
             let (median, p95) = (times[times.len() / 2], times[times.len() * 95 / 100]);
             line += &format!("  {w}x{h}: {median:.3} ms median, {p95:.3} ms p95;");
         }
-        let layers =
-            sample(&fonts, Size::new(600.0, 300.0), tilt, 10.0).layers.iter().filter(|l| l.warp.is_some()).count();
-        println!("{line} {layers} turned layers");
+        let list = sample_view(v, &fonts, Size::new(600.0, 300.0), tilt, 10.0);
+        let layers = list.layers.iter().filter(|l| l.warp.is_some()).count();
+        renderer.render(&list, &mut Target::new(&device, 600, 300, FORMAT));
+        println!("{line} {layers} turned layers, {} offscreen", offscreen_layers(&renderer));
     }
+}
+
+/// Layers the last frame drew into textures of their own.
+fn offscreen_layers(r: &Renderer) -> usize {
+    r.frame_report().surfaces.iter().filter(|s| s.kind == SurfaceKind::Layer).count()
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut out = PathBuf::from("/var/tmp/claude/fw-stage");
     let fonts = fonts();
+    let (mut v, mut name): (View, &str) = (view, "stage_demo");
     while let Some(a) = args.next() {
         match a.as_str() {
             "--out" => out = args.next().expect("--out needs a directory").into(),
             "--bench" => return bench(fonts),
+            "--panes" => (v, name) = (panes_view, "stage_panes"),
             _ => panic!("unknown option {a}"),
         }
     }
@@ -166,7 +228,10 @@ fn main() {
     let (sw, sh) = (cols * w + (cols + 1) * gap, 2 * h + 3 * gap);
     let mut sheet = vec![0u8; (sw * sh * 4) as usize];
     for (i, &(tilt, t)) in frames.iter().enumerate() {
-        let rgba = off.render_to_rgba(&sample(&fonts, size, tilt, t), [w, h], 1.0);
+        let rgba = off.render_to_rgba(&sample_view(v, &fonts, size, tilt, t), [w, h], 1.0);
+        if i == 2 {
+            println!("{name}: turned, {} offscreen layers", offscreen_layers(&off.renderer));
+        }
         let (x0, y0) = (gap + (i as u32 % cols) * (w + gap), gap + (i as u32 / cols) * (h + gap));
         for y in 0..h {
             let src = (y * w * 4) as usize;
@@ -175,7 +240,7 @@ fn main() {
         }
     }
     std::fs::create_dir_all(&out).unwrap();
-    let path = out.join("stage_demo.png");
+    let path = out.join(format!("{name}.png"));
     write_png(&path, sw, sh, &sheet).unwrap();
-    println!("stage_demo: wrote {}", path.display());
+    println!("{name}: wrote {}", path.display());
 }
