@@ -23,7 +23,7 @@ use vo_scene::depth_stack::{DepthStack, Place, Sheet};
 use vo_scene::element::{Element, Key, TextStyle};
 use vo_scene::font::FontRegistry;
 use vo_scene::geom::{Color, Point, Size};
-use vo_scene::lattice::{anchors, LatticeLook, LatticeWord, LineGutter};
+use vo_scene::lattice::{anchors, LatticeLook, LatticeStyle, LatticeWord, LineGutter};
 use vo_scene::text::{ShapedLayout, TextLayout};
 use vo_scene::{DisplayList, Scene};
 
@@ -113,7 +113,7 @@ const LATTICE: [(&str, f32, f32); 7] = [
     ("day", 0.34, 0.75),
 ];
 
-fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool) -> Element<()> {
+fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool, preset: Option<LatticeStyle>) -> Element<()> {
     let font = fonts.asset("sans").unwrap();
     let style = TextStyle::new(font, 28.0, 34.0);
     let words: Vec<&str> = LATTICE[..n].iter().map(|w| w.0).collect();
@@ -130,7 +130,13 @@ fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool) -> Element<()> {
     let mono = TextStyle::new(fonts.asset("mono").unwrap_or(font), 10.0, 12.0);
     let base = nodes.first().map_or(28.0, |a| a.baseline);
     let gutters = vec![LineGutter { top: base + 8.0, height: 34.0, newest: true, descent: 8.0 }];
-    let look = LatticeLook { label: Some(mono), gutters, ..LatticeLook::default() };
+    let look = match preset {
+        None => LatticeLook { label: Some(mono), gutters, ..LatticeLook::default() },
+        Some(st) => LatticeLook {
+            gutters,
+            ..st.look(Color::rgba(0.62, 0.72, 0.82, 0.8), Color::hex(0x2de2c8, 1.0), 1.0, Some(mono))
+        },
+    };
     let size = Size::new(560.0, 120.0);
     let text = Element::label("words", words.join(" ")).text_style(style).color(Color::hex(TEXT, 1.0));
     let lattice = look.view("lattice", size, timed.into(), nodes.into(), reduced);
@@ -141,12 +147,12 @@ fn lattice_view(fonts: &FontRegistry, n: usize, reduced: bool) -> Element<()> {
     ))
 }
 
-fn lattice_frame(fonts: &FontRegistry, t: f64, reduced: bool) -> DisplayList {
+fn lattice_frame(fonts: &FontRegistry, t: f64, reduced: bool, preset: Option<LatticeStyle>) -> DisplayList {
     let mut at_s = 0.0;
     let views = (1..=LATTICE.len())
         .map(|n| {
             at_s += LATTICE[n - 1].1 as f64;
-            (at_s, lattice_view(fonts, n, reduced))
+            (at_s, lattice_view(fonts, n, reduced, preset))
         })
         .collect();
     play(fonts, views, t)
@@ -257,7 +263,7 @@ fn bench(fonts: FontRegistry) {
     sculpt_events(&fonts, &sculpt, 10.0);
     let lists: [(&str, Frames); 3] = [
         ("depth stack", Box::new(|t| stack_frame(&fonts, 1.0 + t, false))),
-        ("lattice", Box::new(|t| lattice_frame(&fonts, 1.5 + t, false))),
+        ("lattice", Box::new(|t| lattice_frame(&fonts, 1.5 + t, false, None))),
         ("sculpture", Box::new(|t| sculpt_view(&fonts, &sculpt, 0.5 + t))),
     ];
     for (name, list) in lists {
@@ -290,20 +296,52 @@ fn bench(fonts: FontRegistry) {
     }
 }
 
+/// One row per [`LatticeStyle`], three frames each, written to `DIR/lattice_styles.png`.
+fn style_sheet(fonts: &FontRegistry, device: &wgpu::Device, queue: &wgpu::Queue, out: &std::path::Path, reduced: bool) {
+    let times = [1.2, 2.0, 3.5];
+    let (cols, gap) = (times.len() as u32, 8u32);
+    let rows = LatticeStyle::ALL.len() as u32;
+    let (sw, sh) = (cols * W + (cols + 1) * gap, rows * H + (rows + 1) * gap);
+    let mut sheet = vec![0u8; (sw * sh * 4) as usize];
+    for (r, st) in LatticeStyle::ALL.into_iter().enumerate() {
+        for (c, &t) in times.iter().enumerate() {
+            let mut off = Offscreen::with_fonts(device, queue, fonts.clone());
+            install(&mut off.renderer);
+            let list = lattice_frame(fonts, t, reduced, Some(st));
+            let rgba = off.render_to_rgba(&list, [W, H], 1.0);
+            let (x0, y0) = (gap + c as u32 * (W + gap), gap + r as u32 * (H + gap));
+            for y in 0..H {
+                let src = (y * W * 4) as usize;
+                let dst = (((y0 + y) * sw + x0) * 4) as usize;
+                sheet[dst..dst + (W * 4) as usize].copy_from_slice(&rgba[src..src + (W * 4) as usize]);
+            }
+        }
+    }
+    std::fs::create_dir_all(out).unwrap();
+    let path = out.join("lattice_styles.png");
+    write_png(&path, sw, sh, &sheet).unwrap();
+    println!("wild_space: wrote {}", path.display());
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut out = PathBuf::from("/var/tmp/claude/fw-wild-space");
     let mut reduced = false;
+    let mut styles = false;
     let fonts = fonts();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--out" => out = args.next().expect("--out needs a directory").into(),
             "--reduced" => reduced = true,
             "--bench" => return bench(fonts),
+            "--lattice-styles" => styles = true,
             _ => panic!("unknown option {a}"),
         }
     }
     let (device, queue) = gpu();
+    if styles {
+        return style_sheet(&fonts, &device, &queue, &out, reduced);
+    }
     let rows: [Vec<f64>; 3] =
         [vec![0.9, 1.06, 1.12, 1.25, 2.5], vec![1.18, 1.56, 1.62, 1.9, 3.5], vec![0.3, 0.95, 1.6, 2.4, 3.5]];
     let (cols, gap) = (5u32, 8u32);
@@ -316,7 +354,7 @@ fn main() {
             install(&mut off.renderer);
             let list = match r {
                 0 => stack_frame(&fonts, t, reduced),
-                1 => lattice_frame(&fonts, t, reduced),
+                1 => lattice_frame(&fonts, t, reduced, None),
                 _ => sculpt_frame(&fonts, t, reduced),
             };
             let rgba = off.render_to_rgba(&list, [W, H], 1.0);

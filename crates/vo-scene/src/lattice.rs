@@ -192,6 +192,75 @@ pub struct LatticeLook {
     pub live_tremble: f32,
     /// The live strand to the caret, or `None` for none.
     pub live: Option<LiveStrand>,
+    /// Half-length of the dimension-line tick drawn across each node, or 0 for none.
+    pub tick: f32,
+    /// Strength (0 to 1) of a wide faint halo drawn under every strand, or 0 for none.
+    pub glow: f32,
+}
+
+/// A named look for the lattice (LT-06): [`LatticeStyle::look`] builds a [`LatticeLook`] from
+/// the preset, the palette colours and a scale, so one engine gives several looks without
+/// copied parameter blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatticeStyle {
+    /// Four strands with millisecond labels, the default drawing.
+    Technical,
+    /// Three thin strands, dimension-line ticks at the nodes, labels.
+    Blueprint,
+    /// Six fine strands, a soft glow and no labels.
+    Silk,
+    /// Two very fine strands and no labels.
+    Hairline,
+    /// Three heavier strands with labels, for light backgrounds.
+    Light,
+}
+
+impl LatticeStyle {
+    pub const ALL: [LatticeStyle; 5] = [Self::Technical, Self::Blueprint, Self::Silk, Self::Hairline, Self::Light];
+
+    /// Strands per bundle.
+    pub fn strands(self) -> usize {
+        match self {
+            Self::Technical => 4,
+            Self::Blueprint | Self::Light => 3,
+            Self::Silk => 6,
+            Self::Hairline => 2,
+        }
+    }
+
+    /// Whether the style shows the pause labels.
+    pub fn has_labels(self) -> bool {
+        matches!(self, Self::Technical | Self::Blueprint | Self::Light)
+    }
+
+    /// The look for this style in `color` (strands) and `accent` (newest node and strands),
+    /// with lengths and widths times `scale`. `label` is used only by styles with labels.
+    pub fn look(self, color: Color, accent: Color, scale: f32, label: Option<TextStyle>) -> LatticeLook {
+        let base = LatticeLook { color, accent, label_color: color.fade(1.0), ..LatticeLook::default() };
+        let (width, tick, glow) = match self {
+            Self::Technical => ((0.6, 2.2), 0.0, 0.0),
+            Self::Blueprint => ((0.5, 1.2), 3.5, 0.0),
+            Self::Silk => ((0.4, 1.4), 0.0, 0.8),
+            Self::Hairline => ((0.35, 0.8), 0.0, 0.0),
+            Self::Light => ((0.9, 2.8), 0.0, 0.0),
+        };
+        LatticeLook {
+            strands: self.strands(),
+            width: (width.0 * scale, width.1 * scale),
+            bow: (base.bow.0 * scale, base.bow.1 * scale),
+            bow_per_sec: base.bow_per_sec * scale,
+            drop: base.drop * scale,
+            node_radius: base.node_radius * scale,
+            stem: base.stem * scale,
+            comma_slack: base.comma_slack * scale,
+            revision_amp: base.revision_amp * scale,
+            live_tremble: base.live_tremble * scale,
+            tick: tick * scale,
+            glow,
+            label: if self.has_labels() { label } else { None },
+            ..base
+        }
+    }
 }
 
 impl Default for LatticeLook {
@@ -220,6 +289,8 @@ impl Default for LatticeLook {
             revision_amp: 5.0,
             live_tremble: 1.2,
             live: None,
+            tick: 0.0,
+            glow: 0.0,
         }
     }
 }
@@ -530,6 +601,9 @@ impl LatticeLook {
             for (c, edge) in self.strands(&nodes[a], &nodes[b], bow, false) {
                 let c = c.trim(0.0, grow * c.length());
                 let style = StrokeStyle::solid(width * edge, color.fade(edge));
+                if self.glow > 0.0 && !dashed {
+                    p.stroke(&c, &StrokeStyle::solid(width * edge * 4.0, color.fade(0.18 * self.glow * edge)));
+                }
                 if dashed {
                     for d in c.dash(&[3.0, 2.0], 0.0) {
                         p.stroke(&d, &style);
@@ -588,6 +662,13 @@ impl LatticeLook {
                     );
                     p.stroke(&ring, &StrokeStyle::solid(1.0, self.accent.fade(1.0 - u)));
                 }
+            }
+            if self.tick > 0.0 {
+                let tick = Contour::polyline(
+                    &[Point::new(at.x, at.y - self.tick * fresh), Point::new(at.x, at.y + self.tick * fresh)],
+                    false,
+                );
+                p.stroke(&tick, &StrokeStyle::solid(0.6, self.color.fade(0.9)));
             }
             let stem = Contour::polyline(&[at, Point::new(at.x, at.y + self.stem * fresh)], false);
             for dash in stem.dash(&[1.5, 2.0], 0.0) {
@@ -675,6 +756,50 @@ mod tests {
     use super::*;
     use crate::display::DisplayList;
     use crate::text::EstimateText;
+
+    fn style_look(s: LatticeStyle) -> LatticeLook {
+        let font = crate::font::FontRegistry::new().asset("sans").ok();
+        let label = font.map(|f| TextStyle::new(f, 10.0, 12.0));
+        s.look(Color::hex(0x9fb4c8, 1.0), Color::hex(0x2de2c8, 1.0), 1.0, label)
+    }
+
+    fn style_list(s: LatticeStyle) -> DisplayList {
+        let (_, words, nodes) = plucked();
+        draw_list(&style_look(s), &words, &nodes, 2.0, false)
+    }
+
+    #[test]
+    fn each_preset_has_its_strand_count_and_labels() {
+        let want = [
+            (LatticeStyle::Technical, 4, true),
+            (LatticeStyle::Blueprint, 3, true),
+            (LatticeStyle::Silk, 6, false),
+            (LatticeStyle::Hairline, 2, false),
+            (LatticeStyle::Light, 3, true),
+        ];
+        for (s, n, labels) in want {
+            let l = style_look(s);
+            assert_eq!(l.strands, n, "{s:?}");
+            assert_eq!(s.has_labels(), labels, "{s:?}");
+            assert_eq!(l.label.is_some(), labels, "{s:?}");
+            let (_, _, nodes) = plucked();
+            let a = Anchor { baseline: 20.0, ..nodes[0] };
+            assert_eq!(l.strands(&a, &nodes[1], 4.0, false).len(), n, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn blueprint_ticks_and_silk_glows_and_every_preset_draws() {
+        assert!(style_look(LatticeStyle::Blueprint).tick > 0.0);
+        assert!(style_look(LatticeStyle::Silk).glow > 0.0);
+        assert_eq!(style_look(LatticeStyle::Technical).tick, 0.0);
+        let plain = format!("{:?}", style_list(LatticeStyle::Hairline));
+        for s in LatticeStyle::ALL {
+            let _ = style_list(s);
+            assert_eq!(format!("{:?}", style_list(s)), format!("{:?}", style_list(s)), "{s:?} is pure");
+        }
+        assert_ne!(plain, format!("{:?}", style_list(LatticeStyle::Silk)));
+    }
 
     #[test]
     fn a_longer_pause_bows_further_up_to_the_most() {
