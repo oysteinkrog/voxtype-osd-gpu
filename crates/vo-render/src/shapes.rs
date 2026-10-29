@@ -6,9 +6,11 @@
 //! - `SHAPE_HAIRLINE` becomes a stroke one physical pixel wide. When the layer maps axes to
 //!   axes, the outline is moved by under half a pixel so the hairline's centre sits on a pixel
 //!   centre, which gives one row of full coverage with no partial neighbours.
+//! - A shape group's members (EG-22) go into a storage buffer of `vec4f`, three per member
+//!   ([`push_group_prims`]); the instance's `radii.x` is rebased to where they start there.
 
 use bytemuck::{Pod, Zeroable};
-use vo_scene::display::{Paint, PaintKind, ShapeInstance, ShapeKind, SHAPE_HAIRLINE};
+use vo_scene::display::{GroupPrim, Paint, PaintKind, ShapeInstance, ShapeKind, SHAPE_HAIRLINE};
 use vo_scene::geom::Affine;
 
 use crate::color::oklab_alpha;
@@ -76,6 +78,9 @@ impl GpuShape {
         if opacity <= 0.0 || !(fill.is_visible() || stroke.is_visible()) {
             return None;
         }
+        if s.kind == ShapeKind::Group && s.radii[1] < 1.0 {
+            return None;
+        }
         let mut geom = s.geom;
         if hairline && stroke.is_visible() && to_px.is_axis_aligned() {
             snap_hairline(s.kind, &mut geom, to_px);
@@ -125,6 +130,29 @@ impl GpuShape {
     }
 }
 
+/// One group member as the shader reads it: `geom`, `radii`, then kind, ripple amplitude,
+/// wavelength and phase.
+pub fn prim_texels(p: &GroupPrim) -> [[f32; 4]; 3] {
+    let [a, w, ph] = p.ripple;
+    [p.geom, p.radii, [p.kind as u32 as f32, a.max(0.0), w, ph]]
+}
+
+/// Appends the members of group `g` (made from `s` in `list`) to `out` and points `g` at
+/// them: `radii.x` becomes their first index in `out`, in members.
+pub fn push_group_prims(
+    g: &mut GpuShape,
+    s: &ShapeInstance,
+    list: &vo_scene::display::DisplayList,
+    out: &mut Vec<[f32; 4]>,
+) {
+    let prims = s.group_prims(list);
+    g.radii[0] = (out.len() / 3) as f32;
+    g.radii[1] = prims.len() as f32;
+    for p in prims {
+        out.extend_from_slice(&prim_texels(p));
+    }
+}
+
 /// `x` in physical pixels moved to the nearest pixel centre.
 fn to_centre(x: f32) -> f32 {
     x.floor() + 0.5
@@ -163,8 +191,8 @@ fn snap_hairline(kind: ShapeKind, geom: &mut [f32; 4], to_px: &Affine) {
             geom[0] = back_x(to_centre(px_x(geom[0])));
             geom[1] = back_y(to_centre(px_y(geom[1])));
         }
-        // A band has no stroke worth snapping.
-        ShapeKind::Band => {}
+        // A band has no stroke worth snapping; a group's members keep their own places.
+        ShapeKind::Band | ShapeKind::Group => {}
         ShapeKind::Line => {
             if geom[1] == geom[3] {
                 let y = back_y(to_centre(px_y(geom[1])));
@@ -208,6 +236,36 @@ mod tests {
             }
             assert!((g.stroke_width * scale - 1.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn group_members_are_rebased_into_the_frame_buffer() {
+        use vo_scene::display::{DisplayList, GroupPrim};
+        let mut list = DisplayList::default();
+        let a =
+            ShapeInstance::group(&mut list, &[GroupPrim::circle(Point::ZERO, 3.0)], 0.0, Paint::solid(Color::WHITE));
+        let prims = [
+            GroupPrim::capsule(Rect::new(0.0, 0.0, 40.0, 10.0)),
+            GroupPrim::bulge(Rect::new(0.0, 0.0, 40.0, 10.0), 20.0, 12.0, 16.0).with_ripple(1.0, 8.0, 0.5),
+        ];
+        let b = ShapeInstance::group(&mut list, &prims, 6.0, Paint::solid(Color::WHITE));
+        let mut out = Vec::new();
+        // Drawn in the other order: b's members land first in the frame's buffer.
+        let mut gb = GpuShape::new(&b, &Affine::IDENTITY, 1.0, 1.0).unwrap();
+        push_group_prims(&mut gb, &b, &list, &mut out);
+        let mut ga = GpuShape::new(&a, &Affine::IDENTITY, 1.0, 1.0).unwrap();
+        push_group_prims(&mut ga, &a, &list, &mut out);
+        assert_eq!(gb.radii, [0.0, 2.0, 6.0, 0.0]);
+        assert_eq!(ga.radii, [2.0, 1.0, 0.0, 0.0]);
+        assert_eq!(out.len(), 9);
+        assert_eq!(out[3..6], prim_texels(&prims[1]));
+        assert_eq!(out[5], [ShapeKind::Capsule as u32 as f32, 1.0, 8.0, 0.5]);
+        assert_eq!(out[6][0], 0.0);
+        assert_eq!(out[8][0], ShapeKind::Circle as u32 as f32);
+        assert_eq!(ga.kinds & 0xff, ShapeKind::Group as u32);
+        // A group with no members draws nothing.
+        let none = ShapeInstance::group(&mut list, &[], 6.0, Paint::solid(Color::WHITE));
+        assert_eq!(GpuShape::new(&none, &Affine::IDENTITY, 1.0, 1.0), None);
     }
 
     #[test]

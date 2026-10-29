@@ -1,5 +1,5 @@
-// SDF primitive uber-shader: rounded rect (per-corner radii), circle, capsule, line and band in one
-// instanced draw. Fill and stroke, solid, linear-gradient, conic-band or sheen-band paint
+// SDF primitive uber-shader: rounded rect (per-corner radii), circle, capsule, line, band and
+// shape group in one instanced draw. Fill and stroke, solid, linear-gradient, conic-band or sheen-band paint
 // interpolated in OKLab, analytic antialiasing with a one-pixel box filter. `common.wgsl` is
 // prepended.
 //
@@ -10,6 +10,10 @@
 // An instance with a material (FX15) hands its paint, coverage and distances to `material`
 // (`materials.wgsl`, appended) instead: the stroke's where it has one, else the fill's.
 //
+// A shape group (EG-22) melts up to eight members (rounded rects, circles, capsules, each with an
+// optional edge ripple) together by a smooth union; its members are three `vec4f` each in
+// `shape_prims`, and every paint, halo and material uses the combined distance.
+//
 // The CPU side (`shapes.rs`) has already resolved hairlines to a stroke width of one physical
 // pixel, snapped their geometry to the pixel grid, and folded layer opacity into the alpha
 // of every paint.
@@ -19,6 +23,13 @@ const KIND_CIRCLE: u32 = 1u;
 const KIND_CAPSULE: u32 = 2u;
 const KIND_LINE: u32 = 3u;
 const KIND_BAND: u32 = 4u;
+const KIND_GROUP: u32 = 5u;
+const MAX_GROUP: u32 = 8u;
+// Ripple amplitude cap in physical pixels (`display::MAX_RIPPLE_PX`).
+const MAX_RIPPLE_PX: f32 = 2.0;
+
+// Shape group members: geom, radii, then kind, ripple amplitude, wavelength, phase (turns).
+@group(0) @binding(0) var<storage, read> shape_prims: array<vec4f>;
 
 const PAINT_NONE: u32 = 0u;
 const PAINT_SOLID: u32 = 1u;
@@ -183,10 +194,53 @@ fn sd_segment (p: vec2f, a: vec2f, b: vec2f) -> f32 {
   return length (pa - ba * h);
 }
 
+// Polynomial smooth minimum: `min (a, b)` rounded over a width `k`, at most `k / 4` below it.
+fn smin (a: f32, b: f32, k: f32) -> f32 {
+  if (k <= 0.0) {
+    return min (a, b);
+  }
+  let h = max (k - abs (a - b), 0.0) / k;
+  return min (a, b) - h * h * k * 0.25;
+}
+
+// Signed distance to group member `i`, ripple included.
+fn sd_member (p: vec2f, i: u32) -> f32 {
+  let g = shape_prims[3u * i];
+  let e = shape_prims[3u * i + 2u];
+  var d: f32;
+  if (u32 (e.x) == KIND_CIRCLE) {
+    d = length (p - g.xy) - g.z;
+  } else {
+    d = sd_rrect (p, g, shape_prims[3u * i + 1u]);
+  }
+  let amp = min (e.y, MAX_RIPPLE_PX / layer.t.z);
+  if (amp > 0.0 && e.z > 0.0) {
+    // The ripple fades away from the edge over about a sixth of a wavelength, so a glow
+    // around it stays smooth.
+    let w = 6.2831853 / e.z;
+    d -= amp * sin (w * (p.x + p.y) + 6.2831853 * e.w) * exp (-w * abs (d));
+  }
+  return d;
+}
+
+// Signed distance to a shape group: `info` is the instance's radii, start, count and k.
+fn sd_group (p: vec2f, info: vec4f) -> f32 {
+  let start = u32 (info.x);
+  let n = min (u32 (info.y), MAX_GROUP);
+  var d = 1e9;
+  for (var i = 0u; i < n; i++) {
+    let di = sd_member (p, start + i);
+    d = select (smin (d, di, info.z), di, i == 0u);
+  }
+  return d;
+}
+
 // Signed distance to the shape at `p` (layer units); `frag_x` is the pixel centre in target
 // pixels, for bands.
 fn sd_shape (kind: u32, p: vec2f, frag_x: f32, in: ShapeOut) -> f32 {
-  if (kind == KIND_CIRCLE) {
+  if (kind == KIND_GROUP) {
+    return sd_group (p, in.radii);
+  } else if (kind == KIND_CIRCLE) {
     return length (p - in.geom.xy) - in.geom.z;
   } else if (kind == KIND_LINE) {
     return sd_segment (p, in.geom.xy, in.geom.zw);
@@ -253,13 +307,27 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
     let sigma = max (in.fill_p.z, 0.25 / layer.t.z);
     let spread = in.fill_p.w;
     let p = in.p - in.fill_p.xy;
-    if (kind == KIND_LINE || kind == KIND_BAND) {
+    // A group of one member with no ripple casts its member's exact box shadow; other groups
+    // blur their combined distance across the edge.
+    var skind = kind;
+    var sgeom = in.geom;
+    var sradii = in.radii;
+    if (kind == KIND_GROUP) {
+      let i = u32 (in.radii.x);
+      let e = shape_prims[3u * i + 2u];
+      if (u32 (in.radii.y) == 1u && e.y <= 0.0) {
+        skind = u32 (e.x);
+        sgeom = shape_prims[3u * i];
+        sradii = shape_prims[3u * i + 1u];
+      }
+    }
+    if (skind == KIND_LINE || skind == KIND_BAND || skind == KIND_GROUP) {
       let ds = sd_shape (kind, p, frag_target (in.clip.xy).x - in.fill_p.x * layer.t.z, in) - hw - spread;
       v = 0.5 - 0.5 * erf2 (vec2f (ds * 0.70710678 / sigma)).x;
     } else {
-      var rect = in.geom;
-      if (kind == KIND_CIRCLE) {
-        rect = vec4f (in.geom.xy - in.geom.z, vec2f (2.0 * in.geom.z));
+      var rect = sgeom;
+      if (skind == KIND_CIRCLE) {
+        rect = vec4f (sgeom.xy - sgeom.z, vec2f (2.0 * sgeom.z));
       }
       rect = vec4f (rect.xy - spread - hw, rect.zw + 2.0 * (spread + hw));
       // A negative spread can shrink the box past zero: then nothing casts a shadow (the CPU
@@ -270,9 +338,9 @@ fn halo (in: ShapeOut, fill_kind: u32, d: f32) -> vec4f {
         let q = p - (rect.xy + 0.5 * rect.zw);
         var r: f32;
         if (q.y < 0.0) {
-          r = select (in.radii.x, in.radii.y, q.x >= 0.0);
+          r = select (sradii.x, sradii.y, q.x >= 0.0);
         } else {
-          r = select (in.radii.w, in.radii.z, q.x >= 0.0);
+          r = select (sradii.w, sradii.z, q.x >= 0.0);
         }
         let corner = clamp (r + spread + hw, 0.0, 0.5 * min (rect.z, rect.w));
         v = box_shadow (rect, corner, p, sigma);
@@ -293,16 +361,7 @@ fn shade (in: ShapeOut, p: vec2f, frag_x: f32) -> vec4f {
     let d = sd_shape (kind, p, frag_x, in);
     return halo (in, fill_kind, d);
   }
-  var d: f32;
-  if (kind == KIND_CIRCLE) {
-    d = length (p - in.geom.xy) - in.geom.z;
-  } else if (kind == KIND_LINE) {
-    d = sd_segment (p, in.geom.xy, in.geom.zw);
-  } else if (kind == KIND_BAND) {
-    d = sd_band (p, in.geom, in.radii.xy, frag_x, in.band_px);
-  } else {
-    d = sd_rrect (p, in.geom, in.radii);
-  }
+  let d = sd_shape (kind, p, frag_x, in);
   // Distance and half stroke width in physical pixels. Coverage is the overlap of the pixel's
   // one-pixel box with the filled half-plane or the stroke band, exact for straight edges
   // and for strokes thinner than a pixel.

@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::display::{DisplayList, GlyphInstance, Item, ItemKind, Layer, ShapeInstance};
+use crate::display::{DisplayList, GlyphInstance, GroupPrim, Item, ItemKind, Layer, Paint, ShapeInstance};
 use crate::geom::{Affine, Color, Point, Rect};
 use crate::path::{push_blob, push_fill, push_stroke, Contour, Outline, StrokeStyle, WidthKnot};
 
@@ -82,6 +82,14 @@ impl Painter<'_> {
         self.push(item);
     }
 
+    /// A shape group (EG-22): up to 8 members melted together by a smooth union of radius
+    /// `k` (`ShapeInstance::group`). Returns the instance without paint: give it a fill,
+    /// stroke, glow or shadow and draw it with [`Painter::shape`], as often as needed (the
+    /// copies share the members).
+    pub fn shape_group(&mut self, prims: &[GroupPrim], k: f32) -> ShapeInstance {
+        ShapeInstance::group(self.list, prims, k, Paint::NONE)
+    }
+
     pub fn glyph(&mut self, g: GlyphInstance) {
         let g = GlyphInstance { color: g.color.fade(self.alpha), ..g };
         let item = Item { kind: ItemKind::Glyphs, start: self.list.glyphs.len() as u32, len: 1 };
@@ -135,5 +143,35 @@ impl Painter<'_> {
     pub fn blob(&mut self, a: (Point, f32), b: (Point, f32), k: f32, c0: Color, c1: Color) {
         let item = push_blob(self.list, a, b, k, c0.fade(self.alpha), c1.fade(self.alpha));
         self.push(item);
+    }
+}
+
+/// How far a bulge (EG-22, `GroupPrim::bulge`) has grown `age` seconds after its word
+/// arrived: 0 before, then a quick swell with a small overshoot that settles at 1 in about
+/// 0.4 s. Under reduced motion it is the settled size at once. Pure in `age`.
+pub fn bulge_grow(age: f64, reduced: bool) -> f32 {
+    if age < 0.0 {
+        return 0.0;
+    }
+    if reduced {
+        return 1.0;
+    }
+    (1.0 - (-age * 11.0).exp() * (age * 16.0).cos()) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bulge_swells_overshoots_and_settles() {
+        assert_eq!(bulge_grow(-0.1, false), 0.0);
+        assert_eq!(bulge_grow(0.0, false), 0.0);
+        let peak = (1..60).map(|i| bulge_grow(i as f64 / 120.0, false)).fold(0.0, f32::max);
+        assert!(peak > 1.0 && peak < 1.25, "overshoot {peak}");
+        assert!((bulge_grow(0.6, false) - 1.0).abs() < 0.01);
+        // Reduced motion: no swell, the settled size from the start.
+        assert_eq!(bulge_grow(0.0, true), 1.0);
+        assert_eq!(bulge_grow(-0.1, true), 0.0);
     }
 }

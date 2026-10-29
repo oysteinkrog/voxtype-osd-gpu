@@ -78,7 +78,7 @@ use crate::hot::wgsl;
 use crate::material::{materials_source, with_textures, GpuMaterial, MaterialFn};
 use crate::particle_layer::ParticleLayer;
 use crate::profile::{BloomReport, FrameReport, FrameTimings, Profiler, Section, SurfaceKind, SurfaceReport};
-use crate::shapes::{pixels_per_unit, GpuShape};
+use crate::shapes::{pixels_per_unit, push_group_prims, GpuShape};
 use crate::text::slug_gpu::{self, Atlas, GlyphInstance, SlugAtlasGpu, Uniforms, PREMULTIPLIED_OVER};
 use crate::vector::{vector_shader_source_with, GpuVector};
 
@@ -681,6 +681,8 @@ pub struct Renderer {
     uniform_stride: u32,
     // Per frame, cleared each time.
     shapes: Vec<GpuShape>,
+    /// Shape group members (EG-22), three texels each, at group 0 of the shape pipelines.
+    shape_prims: Vec<[f32; 4]>,
     glyphs: Vec<GlyphInstance>,
     dots: Vec<GpuDot>,
     vectors: Vec<GpuVector>,
@@ -701,6 +703,9 @@ pub struct Renderer {
     vector_buf: Option<wgpu::Buffer>,
     vector_layout: wgpu::BindGroupLayout,
     vector_segs_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// `shape_prims` on the GPU, bound through `vector_layout` (one storage buffer of
+    /// `vec4f`).
+    shape_prims_buf: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     /// Material blocks (FX15) for this frame, their storage buffer at group 2 of the shape,
     /// glyph and vector pipelines, and the app's material functions.
     materials: Vec<GpuMaterial>,
@@ -835,6 +840,7 @@ impl Renderer {
             pipelines: Vec::new(),
             uniform_stride,
             shapes: Vec::new(),
+            shape_prims: Vec::new(),
             glyphs: Vec::new(),
             dots: Vec::new(),
             vectors: Vec::new(),
@@ -864,6 +870,7 @@ impl Renderer {
                 }],
             }),
             vector_segs_buf: None,
+            shape_prims_buf: None,
             materials: Vec::new(),
             material_layout: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("vo-materials"),
@@ -1102,6 +1109,7 @@ impl Renderer {
         let format = if effects { EFFECT_FORMAT } else { target.format() };
         let encode_srgb = !format.is_srgb() && !matches!(format, wgpu::TextureFormat::Rgba16Float);
         self.shapes.clear();
+        self.shape_prims.clear();
         self.glyphs.clear();
         self.dots.clear();
         self.glass.clear();
@@ -1338,6 +1346,9 @@ impl Renderer {
                         if let Some(mut g) = GpuShape::new(s, &to_px, ppu, opacity) {
                             if !f.effects {
                                 g.clamp_glow();
+                            }
+                            if s.kind == vo_scene::display::ShapeKind::Group {
+                                push_group_prims(&mut g, s, f.list, &mut self.shape_prims);
                             }
                             if let Some(m) = f.list.material(s.material()).filter(|_| !s.fill.is_halo()) {
                                 g.material = s.material();
@@ -2159,6 +2170,24 @@ impl Renderer {
         if !self.vector_segs.is_empty() {
             queue.write_buffer(&self.vector_segs_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.vector_segs));
         }
+        let need = (self.shape_prims.len() * 16).max(256) as u64;
+        if self.shape_prims_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo-shape-prims"),
+                size: need.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vo-shape-prims"),
+                layout: &self.vector_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+            });
+            self.shape_prims_buf = Some((buf, bind));
+        }
+        if !self.shape_prims.is_empty() {
+            queue.write_buffer(&self.shape_prims_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.shape_prims));
+        }
         let need = (self.materials.len() * std::mem::size_of::<GpuMaterial>()).max(256) as u64;
         if self.material_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2553,6 +2582,7 @@ impl Renderer {
             }
             match c.pipe.base() {
                 Pipe::Shape => {
+                    pass.set_bind_group(0, &self.shape_prims_buf.as_ref().unwrap().1, &[]);
                     pass.set_vertex_buffer(0, self.shape_buf.as_ref().unwrap().slice(..));
                     pass.draw(0..4, c.range.clone());
                 }
@@ -2704,7 +2734,8 @@ impl Renderer {
         let textured = pipe.is_textured();
         let pipe = pipe.base();
         let groups: [Option<&wgpu::BindGroupLayout>; 2] = match pipe {
-            Pipe::Shape => [None, Some(&self.layer_layout)],
+            // Group 0 holds the shape group members (EG-22).
+            Pipe::Shape => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Dot => [None, Some(&self.layer_layout)],
             Pipe::Vector | Pipe::Glass => [Some(&self.vector_layout), Some(&self.layer_layout)],
             Pipe::Glyph => [Some(self.atlas_gpu.layout()), Some(&self.layer_layout)],

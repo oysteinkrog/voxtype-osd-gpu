@@ -8,6 +8,7 @@
 //!   Edges can differ by a fraction of a pixel.
 //! - Compositing is in linear light with premultiplied alpha, then sRGB encoded, as the GPU
 //!   writes to an sRGB swapchain.
+//! - Shape groups (EG-22) run the shader's smooth union and edge ripple per pixel.
 //! - Glows and drop shadows run the shape shader's halo maths per pixel. A bloom layer is
 //!   drawn alone and its blurred copy added, through the same pyramid as the GPU (13-tap
 //!   downsample with a Karis average, tent upsample, bilinear reads), at the GPU's levels.
@@ -26,7 +27,9 @@ use std::sync::Arc;
 use skrifa::instance::Size;
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
-use vo_scene::display::{BlendMode, Bloom, DisplayList, GlyphInstance, ItemKind, LayerTarget, Paint, ShapeInstance};
+use vo_scene::display::{
+    BlendMode, Bloom, DisplayList, GlyphInstance, GroupPrim, ItemKind, LayerTarget, Paint, ShapeInstance, MAX_RIPPLE_PX,
+};
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Point, RRect};
 
@@ -40,6 +43,7 @@ use vo_scene::path::{VectorInstance, VectorKind};
 const KIND_CIRCLE: u32 = vo_scene::display::ShapeKind::Circle as u32;
 const KIND_LINE: u32 = vo_scene::display::ShapeKind::Line as u32;
 const KIND_BAND: u32 = vo_scene::display::ShapeKind::Band as u32;
+const KIND_GROUP: u32 = vo_scene::display::ShapeKind::Group as u32;
 const PAINT_NONE: u32 = vo_scene::display::PaintKind::None as u32;
 const PAINT_SOLID: u32 = vo_scene::display::PaintKind::Solid as u32;
 const PAINT_GLOW: u32 = vo_scene::display::PaintKind::Glow as u32;
@@ -189,7 +193,7 @@ impl CpuRenderer {
                             if !self.effects {
                                 g.clamp_glow();
                             }
-                            self.shape(&g, &st);
+                            self.shape(&g, s.group_prims(list), &st);
                         }
                     }
                 }
@@ -210,7 +214,7 @@ impl CpuRenderer {
                         let centre = crate::dots::snap(d.centre, d.radius, d.snap, &to_px, ppu);
                         let s = ShapeInstance::circle(centre, d.radius, Paint::solid(d.color));
                         if let Some(g) = GpuShape::new(&s, &to_px, ppu, opacity) {
-                            self.shape(&g, &st);
+                            self.shape(&g, &[], &st);
                         }
                     }
                 }
@@ -222,7 +226,7 @@ impl CpuRenderer {
                         let rect = vo_scene::geom::RRect::new(vo_scene::geom::Rect::new(x, y, w, h), g.radius);
                         let s = ShapeInstance::rrect(rect, Paint::solid(g.glass.tint).fade(g.alpha));
                         if let Some(gs) = GpuShape::new(&s, &to_px, ppu, opacity) {
-                            self.shape(&gs, &st);
+                            self.shape(&gs, &[], &st);
                         }
                     }
                 }
@@ -297,10 +301,11 @@ impl CpuRenderer {
         (x1 > x0 && y1 > y0).then_some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
     }
 
-    fn shape(&mut self, s: &GpuShape, st: &State) {
+    /// Draws `s`; `prims` are its members when it is a shape group.
+    fn shape(&mut self, s: &GpuShape, prims: &[GroupPrim], st: &State) {
         let fill = (s.kinds >> 8) & 0xff;
         if fill == PAINT_GLOW || fill == PAINT_SHADOW {
-            self.halo(s, st);
+            self.halo(s, prims, st);
             return;
         }
         let kind = s.kinds & 0xff;
@@ -329,12 +334,7 @@ impl CpuRenderer {
             for x in x0..x1 {
                 let frag = Point::new(x as f32 + 0.5, y as f32 + 0.5);
                 let p = st.from_px.apply(frag);
-                let d = match kind {
-                    KIND_CIRCLE => (p.x - g[0]).hypot(p.y - g[1]) - g[2],
-                    KIND_LINE => sd_segment(p, Point::new(g[0], g[1]), Point::new(g[2], g[3])),
-                    KIND_BAND => sd_band(p, g, s.radii, frag.x, ends),
-                    _ => sd_rrect(p, g, s.radii),
-                };
+                let d = sd_shape(kind, p, g, s.radii, frag.x, ends, prims, st.ppu);
                 let dp = d * st.ppu;
                 let hw = 0.5 * s.stroke_width * st.ppu;
                 let fill_cov = if kind == KIND_LINE { 0.0 } else { (0.5 - dp).clamp(0.0, 1.0) };
@@ -352,9 +352,15 @@ impl CpuRenderer {
     }
 
     /// A glow or a drop shadow: the shape shader's `halo`, pixel by pixel.
-    fn halo(&mut self, s: &GpuShape, st: &State) {
+    fn halo(&mut self, s: &GpuShape, prims: &[GroupPrim], st: &State) {
         let Some([x0, y0, x1, y1]) = self.px_box(s.quad(st.ppu), &st.to_px) else { return };
         let kind = s.kinds & 0xff;
+        // A group of one member with no ripple casts its member's exact box shadow, as the
+        // shader does; other groups blur their combined distance.
+        let (skind, sg, sradii) = match prims {
+            [one] if kind == KIND_GROUP && one.ripple[0] <= 0.0 => (one.kind as u32, one.geom, one.radii),
+            _ => (kind, s.geom, s.radii),
+        };
         let glow = (s.kinds >> 8) & 0xff == PAINT_GLOW;
         let (g, e, hw) = (s.geom, s.fill.ends, 0.5 * s.stroke_width);
         let ends = (st.to_px.apply(Point::new(g[0], g[1])).x, st.to_px.apply(Point::new(g[2], g[1])).x);
@@ -366,7 +372,7 @@ impl CpuRenderer {
                 let p = st.from_px.apply(frag);
                 let v = if glow {
                     // Around a stroke the glow falls off on both sides of it.
-                    let d = sd_shape(kind, p, g, s.radii, frag.x, ends);
+                    let d = sd_shape(kind, p, g, s.radii, frag.x, ends, prims, st.ppu);
                     let dd = if hw > 0.0 { d.abs() } else { d } - hw;
                     e[1] * (-dd.max(0.0) / e[0].max(1e-4)).exp()
                 } else {
@@ -374,13 +380,14 @@ impl CpuRenderer {
                     let sigma = e[2].max(0.25 / st.ppu);
                     let spread = e[3];
                     let q = Point::new(p.x - e[0], p.y - e[1]);
-                    if kind == KIND_LINE || kind == KIND_BAND {
-                        let ds = sd_shape(kind, q, g, s.radii, frag.x - e[0] * st.ppu, ends) - hw - spread;
+                    if skind == KIND_LINE || skind == KIND_BAND || skind == KIND_GROUP {
+                        let ds =
+                            sd_shape(kind, q, g, s.radii, frag.x - e[0] * st.ppu, ends, prims, st.ppu) - hw - spread;
                         0.5 - 0.5 * erf(ds * std::f32::consts::FRAC_1_SQRT_2 / sigma)
                     } else {
-                        let mut rect = g;
-                        if kind == KIND_CIRCLE {
-                            rect = [g[0] - g[2], g[1] - g[2], 2.0 * g[2], 2.0 * g[2]];
+                        let mut rect = sg;
+                        if skind == KIND_CIRCLE {
+                            rect = [sg[0] - sg[2], sg[1] - sg[2], 2.0 * sg[2], 2.0 * sg[2]];
                         }
                         let grow = spread + hw;
                         let rect = [rect[0] - grow, rect[1] - grow, rect[2] + 2.0 * grow, rect[3] + 2.0 * grow];
@@ -391,10 +398,10 @@ impl CpuRenderer {
                         }
                         let (qx, qy) = (q.x - (rect[0] + 0.5 * rect[2]), q.y - (rect[1] + 0.5 * rect[3]));
                         let r = match (qy < 0.0, qx >= 0.0) {
-                            (true, false) => s.radii[0],
-                            (true, true) => s.radii[1],
-                            (false, true) => s.radii[2],
-                            (false, false) => s.radii[3],
+                            (true, false) => sradii[0],
+                            (true, true) => sradii[1],
+                            (false, true) => sradii[2],
+                            (false, false) => sradii[3],
                         };
                         let corner = (r + grow).clamp(0.0, 0.5 * rect[2].min(rect[3]));
                         box_shadow(rect, corner, q, sigma)
@@ -474,7 +481,8 @@ impl CpuRenderer {
         let clamp_x = |v: f32| v.clamp(0.0, self.width as f32) as u32;
         let clamp_y = |v: f32| v.clamp(0.0, self.height as f32) as u32;
         let b = g.bbox;
-        let (x0, y0, x1, y1) = (clamp_x(b[0].floor()), clamp_y(b[1].floor()), clamp_x(b[2].ceil()), clamp_y(b[3].ceil()));
+        let (x0, y0, x1, y1) =
+            (clamp_x(b[0].floor()), clamp_y(b[1].floor()), clamp_x(b[2].ceil()), clamp_y(b[3].ceil()));
         if x1 <= x0 || y1 <= y0 {
             return;
         }
@@ -616,10 +624,52 @@ fn sd_rrect(p: Point, rect: [f32; 4], radii: [f32; 4]) -> f32 {
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
+/// The shader's `smin`: `min(a, b)` rounded over a width `k`, at most `k / 4` below it.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.min(b);
+    }
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
+}
+
+/// The shader's `sd_member`: one group member at `p`, ripple capped at 2 physical pixels at
+/// `ppu` pixels per layer unit.
+fn sd_member(p: Point, m: &GroupPrim, ppu: f32) -> f32 {
+    let g = m.geom;
+    let mut d =
+        if m.kind as u32 == KIND_CIRCLE { (p.x - g[0]).hypot(p.y - g[1]) - g[2] } else { sd_rrect(p, g, m.radii) };
+    let [amp, wave, phase] = m.ripple;
+    let amp = amp.min(MAX_RIPPLE_PX / ppu);
+    if amp > 0.0 && wave > 0.0 {
+        let w = std::f32::consts::TAU / wave;
+        d -= amp * (w * (p.x + p.y) + std::f32::consts::TAU * phase).sin() * (-w * d.abs()).exp();
+    }
+    d
+}
+
+/// The shader's `sd_group`: the members melted by a smooth union of radius `k`.
+fn sd_group(p: Point, prims: &[GroupPrim], k: f32, ppu: f32) -> f32 {
+    let mut members = prims.iter().take(vo_scene::display::MAX_GROUP_PRIMS).map(|m| sd_member(p, m, ppu));
+    let Some(first) = members.next() else { return 1e9 };
+    members.fold(first, |d, di| smin(d, di, k))
+}
+
 /// The shader's `sd_shape`: signed distance to the shape at `p`; `frag_x` is the pixel centre
-/// in target pixels, for bands.
-fn sd_shape(kind: u32, p: Point, g: [f32; 4], radii: [f32; 4], frag_x: f32, ends: (f32, f32)) -> f32 {
+/// in target pixels, for bands. `prims` are a group's members.
+#[allow(clippy::too_many_arguments)]
+fn sd_shape(
+    kind: u32,
+    p: Point,
+    g: [f32; 4],
+    radii: [f32; 4],
+    frag_x: f32,
+    ends: (f32, f32),
+    prims: &[GroupPrim],
+    ppu: f32,
+) -> f32 {
     match kind {
+        KIND_GROUP => sd_group(p, prims, radii[2], ppu),
         KIND_CIRCLE => (p.x - g[0]).hypot(p.y - g[1]) - g[2],
         KIND_LINE => sd_segment(p, Point::new(g[0], g[1]), Point::new(g[2], g[3])),
         KIND_BAND => sd_band(p, g, radii, frag_x, ends),

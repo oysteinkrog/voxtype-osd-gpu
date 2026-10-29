@@ -40,6 +40,9 @@ pub struct DisplayList {
     pub layers: Vec<Layer>,
     pub items: Vec<Item>,
     pub shapes: Vec<ShapeInstance>,
+    /// The members of shape groups (EG-22): a `ShapeKind::Group` instance points at a run of
+    /// them (`ShapeInstance::group`).
+    pub shape_prims: Vec<GroupPrim>,
     pub glyphs: Vec<GlyphInstance>,
     /// Glyph effects (TY17) for some glyphs, as `(index into glyphs, effects)`, sorted by
     /// index. A glyph not listed has none.
@@ -446,6 +449,90 @@ pub enum ShapeKind {
     /// the band when its centre is in `[x0, x1)` measured in pixels along x, so bands that share
     /// an end tile with no seam. Meant for layers that map x to pixel x.
     Band,
+    /// A shape group (EG-22): up to [`MAX_GROUP_PRIMS`] members (`DisplayList::shape_prims`)
+    /// melted together by a smooth union. `geom` is the box `x, y, w, h` that holds the
+    /// result; `radii` is `start, count, k, 0`: the members' range and the union's radius `k`
+    /// in layer units (0 is a plain union). Fill, stroke, glow and shadow all use the combined
+    /// distance. Made by [`ShapeInstance::group`]. An element of this kind draws its box as a
+    /// rounded rect: groups come from canvases.
+    Group,
+}
+
+/// Most members in one shape group.
+pub const MAX_GROUP_PRIMS: usize = 8;
+
+/// The ripple amplitude cap in physical pixels: the renderer clamps `GroupPrim::ripple[0]`
+/// to this.
+pub const MAX_RIPPLE_PX: f32 = 2.0;
+
+/// One member of a shape group (EG-22): a rounded rect, circle or capsule, with an optional
+/// ripple along its edge.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct GroupPrim {
+    /// `RRect`, `Circle` or `Capsule`; `geom` and `radii` as for a plain shape of that kind.
+    pub kind: ShapeKind,
+    pub geom: [f32; 4],
+    pub radii: [f32; 4],
+    /// Edge ripple: amplitude in layer units (the renderer caps it at [`MAX_RIPPLE_PX`]
+    /// physical pixels), wavelength along the edge in layer units, and phase in turns. The
+    /// edge moves out by `amp * sin(2 pi ((x + y) / wavelength + phase))`; the offset fades
+    /// away from the edge as `exp(-2 pi |d| / wavelength)`, so a glow around it stays smooth.
+    /// Amplitude 0 for none.
+    pub ripple: [f32; 3],
+}
+
+impl GroupPrim {
+    pub fn rrect(r: RRect) -> GroupPrim {
+        GroupPrim {
+            kind: ShapeKind::RRect,
+            geom: [r.rect.x, r.rect.y, r.rect.w, r.rect.h],
+            radii: r.radii,
+            ripple: [0.0; 3],
+        }
+    }
+
+    pub fn circle(centre: Point, radius: f32) -> GroupPrim {
+        GroupPrim {
+            kind: ShapeKind::Circle,
+            geom: [centre.x, centre.y, radius, 0.0],
+            radii: [radius; 4],
+            ripple: [0.0; 3],
+        }
+    }
+
+    pub fn capsule(r: Rect) -> GroupPrim {
+        GroupPrim {
+            kind: ShapeKind::Capsule,
+            geom: [r.x, r.y, r.w, r.h],
+            radii: [0.5 * r.w.min(r.h); 4],
+            ripple: [0.0; 3],
+        }
+    }
+
+    /// A bulge on the capsule `on`: a capsule `w` wide and `h` high centred at `cx` on its
+    /// centre line. In a group with `on` and a smooth union it swells the capsule there.
+    pub fn bulge(on: Rect, cx: f32, w: f32, h: f32) -> GroupPrim {
+        let cy = on.y + 0.5 * on.h;
+        GroupPrim::capsule(Rect::new(cx - 0.5 * w, cy - 0.5 * h, w.max(0.0), h.max(0.0)))
+    }
+
+    /// Ripples the edge by `amp` (capped at 2 physical pixels) with `wavelength` along it,
+    /// shifted by `phase` turns. Move the phase with time for a travelling ripple.
+    pub fn with_ripple(mut self, amp: f32, wavelength: f32, phase: f32) -> GroupPrim {
+        self.ripple = [amp.max(0.0), wavelength, phase];
+        self
+    }
+
+    /// The member's box, ripple included.
+    pub fn bounds(&self) -> Rect {
+        let g = self.geom;
+        let r = match self.kind {
+            ShapeKind::Circle => Rect::new(g[0] - g[2], g[1] - g[2], 2.0 * g[2], 2.0 * g[2]),
+            _ => Rect::new(g[0], g[1], g[2], g[3]),
+        };
+        let a = self.ripple[0].max(0.0);
+        Rect::new(r.x - a, r.y - a, r.w + 2.0 * a, r.h + 2.0 * a)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -641,6 +728,47 @@ impl ShapeInstance {
         }
     }
 
+    /// A shape group (EG-22): the first [`MAX_GROUP_PRIMS`] of `prims`, added to
+    /// `list.shape_prims`, melted together by a smooth union of radius `k`. Where two members
+    /// meet, the outline rounds into a neck up to `k / 4` outside their plain union. A copy of
+    /// the instance with a glow or shadow fill shares the same members.
+    pub fn group(list: &mut DisplayList, prims: &[GroupPrim], k: f32, fill: Paint) -> ShapeInstance {
+        let prims = &prims[..prims.len().min(MAX_GROUP_PRIMS)];
+        let start = list.shape_prims.len();
+        list.shape_prims.extend_from_slice(prims);
+        let k = k.max(0.0);
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in prims {
+            let r = p.bounds();
+            b = [b[0].min(r.x), b[1].min(r.y), b[2].max(r.right()), b[3].max(r.bottom())];
+        }
+        let geom = if prims.is_empty() {
+            [0.0; 4]
+        } else {
+            let m = if prims.len() > 1 { 0.25 * k } else { 0.0 };
+            [b[0] - m, b[1] - m, b[2] - b[0] + 2.0 * m, b[3] - b[1] + 2.0 * m]
+        };
+        ShapeInstance {
+            kind: ShapeKind::Group,
+            flags: 0,
+            geom,
+            radii: [start as f32, prims.len() as f32, k, 0.0],
+            fill,
+            stroke: Paint::NONE,
+            stroke_width: 0.0,
+        }
+    }
+
+    /// The members of a group instance in `list`; empty for other kinds.
+    pub fn group_prims<'a>(&self, list: &'a DisplayList) -> &'a [GroupPrim] {
+        if self.kind != ShapeKind::Group {
+            return &[];
+        }
+        let start = self.radii[0] as usize;
+        let n = (self.radii[1] as usize).min(MAX_GROUP_PRIMS);
+        list.shape_prims.get(start..start + n).unwrap_or(&[])
+    }
+
     pub fn with_stroke(mut self, stroke: Paint, width: f32) -> ShapeInstance {
         self.stroke = stroke;
         self.stroke_width = width;
@@ -787,6 +915,7 @@ impl DisplayList {
         self.layers.clear();
         self.items.clear();
         self.shapes.clear();
+        self.shape_prims.clear();
         self.glyphs.clear();
         self.glyph_fx.clear();
         self.emitters.clear();
@@ -958,5 +1087,48 @@ mod tests {
     #[test]
     fn no_hits_is_click_through() {
         assert!(DisplayList::default().input_region().rects.is_empty());
+    }
+
+    #[test]
+    fn a_group_packs_its_members_and_box() {
+        let mut list = DisplayList::default();
+        // Something already in the arena, so the range does not start at 0.
+        list.shape_prims.push(GroupPrim::circle(Point::ZERO, 1.0));
+        let pill = Rect::new(10.0, 20.0, 100.0, 24.0);
+        let prims = [GroupPrim::capsule(pill), GroupPrim::bulge(pill, 60.0, 30.0, 36.0).with_ripple(1.5, 20.0, 0.25)];
+        let g = ShapeInstance::group(&mut list, &prims, 8.0, Paint::solid(Color::WHITE));
+        assert_eq!(g.kind, ShapeKind::Group);
+        assert_eq!(g.radii, [1.0, 2.0, 8.0, 0.0]);
+        assert_eq!(g.group_prims(&list), &prims);
+        // The bulge is 36 high around y 32 with a 1.5 ripple, and the union may round out 2.
+        let b = g.geom;
+        assert_eq!(b[0], 10.0 - 2.0);
+        assert_eq!(b[1], 32.0 - 18.0 - 1.5 - 2.0);
+        assert_eq!(b[0] + b[2], 110.0 + 2.0);
+        assert_eq!(b[1] + b[3], 32.0 + 18.0 + 1.5 + 2.0);
+        assert_eq!(prims[1].ripple, [1.5, 20.0, 0.25]);
+        // A plain shape has no members.
+        assert!(ShapeInstance::circle(Point::ZERO, 2.0, Paint::NONE).group_prims(&list).is_empty());
+    }
+
+    #[test]
+    fn a_group_keeps_at_most_eight_members() {
+        let mut list = DisplayList::default();
+        let prims: Vec<_> = (0..11).map(|i| GroupPrim::circle(Point::new(i as f32 * 10.0, 0.0), 4.0)).collect();
+        let g = ShapeInstance::group(&mut list, &prims, 4.0, Paint::NONE);
+        assert_eq!(g.radii[1] as usize, MAX_GROUP_PRIMS);
+        assert_eq!(list.shape_prims.len(), MAX_GROUP_PRIMS);
+        assert_eq!(g.group_prims(&list), &prims[..MAX_GROUP_PRIMS]);
+        // One member: the box is the member's own, no union margin.
+        let one = ShapeInstance::group(&mut list, &prims[..1], 10.0, Paint::NONE);
+        assert_eq!(one.geom, [-4.0, -4.0, 8.0, 8.0]);
+        // None: nothing to draw, an empty box.
+        let none = ShapeInstance::group(&mut list, &[], 10.0, Paint::NONE);
+        assert_eq!((none.radii[1], none.geom), (0.0, [0.0; 4]));
+        // A negative radius is a plain union; a negative ripple is none.
+        assert_eq!(ShapeInstance::group(&mut list, &prims[..2], -3.0, Paint::NONE).radii[2], 0.0);
+        assert_eq!(prims[0].with_ripple(-1.0, 10.0, 0.0).ripple[0], 0.0);
+        list.clear();
+        assert!(list.shape_prims.is_empty());
     }
 }

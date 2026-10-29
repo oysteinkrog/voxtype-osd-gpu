@@ -1958,7 +1958,7 @@ impl<M> Scene<M> {
         let shape = match &n.kind {
             Kind::Panel | Kind::Layer { .. } => Some(ShapeInstance::rrect(boxed(), fill())),
             Kind::Shape(kind) => Some(match kind {
-                ShapeKind::RRect => ShapeInstance::rrect(boxed(), fill()),
+                ShapeKind::RRect | ShapeKind::Group => ShapeInstance::rrect(boxed(), fill()),
                 ShapeKind::Circle => {
                     let centre = Point::new(origin.x + 0.5 * size.w, origin.y + 0.5 * size.h);
                     ShapeInstance::circle(centre, 0.5 * size.w.min(size.h), fill())
