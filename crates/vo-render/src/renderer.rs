@@ -851,7 +851,7 @@ impl Renderer {
             queue: queue.clone(),
             particles: ParticleLayer::new(fonts.clone()),
             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            painters: Vec::new(),
+            painters: vec![Box::new(crate::image::ImagePainter::new())],
             gpu_items: Vec::new(),
             profiler: None,
             compose: None,
@@ -1134,7 +1134,8 @@ impl Renderer {
     }
 
     /// Adds a painter for GPU elements (`vo_scene::gpu`). Painters are asked in the order they
-    /// were added; an item no painter knows is skipped.
+    /// were added, after the built-in image painter (`crate::image`); an item no painter knows
+    /// is skipped.
     pub fn add_painter(&mut self, painter: Box<dyn GpuPainter>) {
         self.painters.push(painter);
     }

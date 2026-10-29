@@ -18,8 +18,11 @@
 //!   widths, paint, glow), visiting each segment's own box only. Vector fills, blobs and
 //!   strokes with a material are left to the GPU.
 //! - Not exact: offscreen layers draw as direct layers (group opacity per instance), only the
-//!   nearest clip applies, and emitters are skipped. Masks are not applied: a layer under an
-//!   alpha mask is hidden, one under an inverted mask unmasked.
+//!   nearest clip applies, and emitters are skipped.
+//! - Images (EG-24) are drawn only when their raster is already decoded; other GPU elements
+//!   are skipped.
+//! - Masks are not applied: a layer under an alpha mask is hidden, one under an inverted mask
+//!   unmasked.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -207,8 +210,14 @@ impl CpuRenderer {
                         self.vector(list, v, &st);
                     }
                 }
-                // The CPU first frame draws no emitters or app GPU content.
-                ItemKind::Emitters | ItemKind::Gpu => {}
+                // The CPU first frame draws no emitters or app GPU content; images only when
+                // already decoded (EG-24).
+                ItemKind::Emitters => {}
+                ItemKind::Gpu => {
+                    for g in &list.gpu[range] {
+                        self.image(g, &st);
+                    }
+                }
                 ItemKind::Dots => {
                     for d in &list.dots[range] {
                         let centre = crate::dots::snap(d.centre, d.radius, d.snap, &to_px, ppu);
@@ -549,6 +558,50 @@ impl CpuRenderer {
     }
 
     /// Premultiplied `src` onto the buffer at `(x, y)`, as the GPU's fixed-function blend does.
+    /// Draws a GPU item that is an image (`vo_scene::image`) if its raster is in the cache,
+    /// sampled bilinear in linear light like the GPU's texture.
+    fn image(&mut self, g: &vo_scene::gpu::GpuItem, st: &State) {
+        use vo_scene::image::{fit, srgb_decode, ImageCache, ImageSource};
+        let Some(src) = g.source.0.as_any().downcast_ref::<ImageSource>() else { return };
+        let want = [(g.rect.w * st.ppu).round() as u32, (g.rect.h * st.ppu).round() as u32];
+        let raster = {
+            let mut cache = ImageCache::global().lock().unwrap_or_else(|e| e.into_inner());
+            cache.peek(src, want)
+        };
+        let Some(raster) = raster else { return };
+        let r = fit(g.rect, raster.w, raster.h);
+        let Some([x0, y0, x1, y1]) = self.px_box([r.x, r.y, r.x + r.w, r.y + r.h], &st.to_px) else { return };
+        let opacity = (st.opacity * g.opacity).min(1.0);
+        let (w, h) = (raster.w as i32, raster.h as i32);
+        let texel = |x: i32, y: i32| -> [f32; 4] {
+            let i = 4 * (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize;
+            let p = &raster.px[i..i + 4];
+            let a = p[3] as f32 / 255.0;
+            [srgb_decode(p[0] as f32 / 255.0) * a, srgb_decode(p[1] as f32 / 255.0) * a, srgb_decode(p[2] as f32 / 255.0) * a, a]
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let frag = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                let p = st.from_px.apply(frag);
+                let (u, v) = ((p.x - r.x) / r.w, (p.y - r.y) / r.h);
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let (tx, ty) = (u * w as f32 - 0.5, v * h as f32 - 0.5);
+                let (ix, iy) = (tx.floor() as i32, ty.floor() as i32);
+                let (fx, fy) = (tx - ix as f32, ty - iy as f32);
+                let (a, b, c, d) = (texel(ix, iy), texel(ix + 1, iy), texel(ix, iy + 1), texel(ix + 1, iy + 1));
+                let k = opacity * clip_coverage(st.clip.as_ref(), frag);
+                let px = [0, 1, 2, 3].map(|i| {
+                    let top = a[i] + (b[i] - a[i]) * fx;
+                    let bottom = c[i] + (d[i] - c[i]) * fx;
+                    (top + (bottom - top) * fy) * k
+                });
+                self.blend(x, y, px, st.blend);
+            }
+        }
+    }
+
     fn blend(&mut self, x: u32, y: u32, s: [f32; 4], mode: BlendMode) {
         let d = &mut self.acc[(y * self.width + x) as usize];
         let out = match mode {
@@ -1134,5 +1187,32 @@ mod tests {
         cpu.draw_bgra(&list, 1.0, 4, 4, 16, &mut out);
         let want = (linear_to_srgb(0.5) * 255.0 + 0.5) as u8;
         assert_eq!(&out[20..24], &[want, want, want, 128]);
+    }
+
+    #[test]
+    fn an_image_draws_once_decoded_and_is_skipped_before() {
+        use vo_scene::image::ImageSource;
+        // 2 x 2 pixels: red, green; blue, white.
+        let px = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+        let src = ImageSource::rgba(2, 2, px);
+        let root = vo_scene::Element::<()>::panel("root")
+            .size(8.0, 8.0)
+            .child(vo_scene::Element::image("img", src.clone()).size(8.0, 8.0));
+        let mut scene: vo_scene::Scene<()> = vo_scene::Scene::new();
+        scene.set_viewport(0.0, LSize::new(8.0, 8.0), 1.0);
+        scene.apply(root, 0.0);
+        let list = scene.sample(0.0);
+        let mut cpu = CpuRenderer::new(FontRegistry::new());
+        let mut out = vec![0u8; 8 * 8 * 4];
+        cpu.draw_bgra(&list, 1.0, 8, 8, 32, &mut out);
+        assert!(out.iter().all(|&b| b == 0), "not decoded yet: nothing drawn");
+        src.warm(LSize::new(8.0, 8.0), 1.0).unwrap();
+        cpu.draw_bgra(&list, 1.0, 8, 8, 32, &mut out);
+        let px = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+        // BGRA: the corners keep their colours.
+        assert_eq!(px(0, 0), [0, 0, 255, 255]);
+        assert_eq!(px(7, 0), [0, 255, 0, 255]);
+        assert_eq!(px(0, 7), [255, 0, 0, 255]);
+        assert_eq!(px(7, 7), [255, 255, 255, 255]);
     }
 }

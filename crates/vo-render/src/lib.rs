@@ -11,6 +11,7 @@
 //! - `displace`: a layer's backdrop drawn back with each pixel moved (EG-03).
 //! - `blur`: layer blur and frost, a two-pass Gaussian (EG-04).
 //! - `gpu`: painters for GPU elements, app GPU code drawn between two passes.
+//! - `image`: the built-in painter for images (EG-24), PNG and SVG in a box.
 //! - `offscreen`: readback to CPU memory for goldens and export.
 //! - `hot`: WGSL read from disk when `VO_SHADER_DIR` is set, for live shader reload.
 //! - `color`: sRGB, linear and OKLab conversions.
@@ -26,6 +27,7 @@ pub mod glass;
 pub mod glyph_points;
 pub mod gpu;
 pub mod hot;
+pub mod image;
 pub mod material;
 pub mod offscreen;
 pub mod particle_layer;

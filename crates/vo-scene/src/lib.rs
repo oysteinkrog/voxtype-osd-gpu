@@ -87,6 +87,7 @@ pub mod glyph_morph;
 pub mod gpu;
 pub mod graticule;
 pub mod hearing;
+pub mod image;
 pub mod inline;
 pub mod input;
 pub mod inspect;

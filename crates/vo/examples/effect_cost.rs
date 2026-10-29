@@ -76,6 +76,7 @@ const CASES: &[&str] = &[
     "grid-words-moving",
     "glyphs-2000-rotating",
     "panes-20",
+    "image-icon",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -182,6 +183,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         // Refracting glass (EG-05) over the stripes: a lens disc and a prism.
         "glass lens" => card = card.fill(Color::TRANSPARENT).glass(Glass::lens(GlassKind::Dark)),
         "glass prism" => card = card.fill(Color::TRANSPARENT).glass(Glass::prism(GlassKind::Dark)),
+        // EG-24: an app icon at text height, a full-colour SVG through the image painter.
+        "image-icon" => card = card.child(Element::image("icon", icon()).size(24.0 * k, 24.0 * k)),
         _ => {}
     }
     if case == "frost stack" {
@@ -287,6 +290,16 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
     root.child(stripes).child(layer)
 }
+
+/// The "image-icon" case's icon: one source for the whole run, so it decodes once per size.
+fn icon() -> std::sync::Arc<vo::scene::image::ImageSource> {
+    static ICON: std::sync::OnceLock<std::sync::Arc<vo::scene::image::ImageSource>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| vo::scene::image::ImageSource::bytes(ICON_SVG.as_bytes().to_vec())).clone()
+}
+
+const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+<defs><linearGradient id="g" x2="1" y2="1"><stop offset="0" stop-color="#4cc9f0"/><stop offset="1" stop-color="#7b2ff7"/></linearGradient></defs>
+<rect x="2" y="3" width="20" height="18" rx="4" fill="url(#g)"/><path d="M6 9l4 3-4 3M12 16h6" stroke="#fff" stroke-width="2" fill="none"/></svg>"##;
 
 /// A capsule across the surface with seven bulges travelling along it, melted into one shape
 /// group of eight members (EG-22), drawn as a shadow, a glow and a stroked fill.
