@@ -364,15 +364,44 @@ impl Tracker {
         let last_frame = self.frames.len().saturating_sub(1);
         // Per track, per sample: the sample index where it next comes to rest.
         let rests: Vec<Vec<Option<usize>>> = self.tracks.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
+        // The same with the scroll of the glyph's row ([`Tracker::row_scroll`]) taken out, so
+        // a word that scrolls with its line rests on that line. Text that scrolls a line every
+        // few frames is never still long enough to rest where it is drawn.
+        let scroll = self.row_scroll(env);
+        let level: Vec<Track> = self
+            .tracks
+            .iter()
+            .zip(&scroll)
+            .map(|(tr, sc)| Track {
+                key: tr.key,
+                first: tr.first,
+                samples: tr
+                    .samples
+                    .iter()
+                    .zip(sc)
+                    .map(|(s, d)| Sample { pos: Point::new(s.pos.x, s.pos.y - d), ..*s })
+                    .collect(),
+            })
+            .collect();
+        let level_rests: Vec<Vec<Option<usize>>> = level.iter().map(|tr| rests_of(tr, env, last_frame)).collect();
+        // Where sample `k` of track `ti` rests on its row, carried along by the row's scroll to
+        // that sample's frame.
+        let on_row = |ti: usize, k: usize| {
+            level_rests[ti][k].map(|r| {
+                let mut at = level[ti].samples[r];
+                at.pos.y += scroll[ti][k];
+                at
+            })
+        };
 
         for (n, fr) in self.frames.iter().enumerate() {
             // (track, sample, rest sample)
-            let mut glyphs: Vec<(usize, &Sample, &Sample)> = Vec::new();
+            let mut glyphs: Vec<(usize, &Sample, Sample)> = Vec::new();
             for &ti in &fr.tracks {
                 let tr = &self.tracks[ti];
                 let k = n - tr.first;
                 match rests[ti][k] {
-                    Some(r) => glyphs.push((ti, &tr.samples[k], &tr.samples[r])),
+                    Some(r) => glyphs.push((ti, &tr.samples[k], tr.samples[r])),
                     None => report.leaving += 1,
                 }
             }
@@ -399,11 +428,19 @@ impl Tracker {
                 continue;
             }
             report.frames_checked += 1;
-            let mut words: HashMap<u32, Vec<(&Sample, &Sample)>> = HashMap::new();
+            let mut words: HashMap<u32, Vec<(&Sample, Sample)>> = HashMap::new();
             for &(ti, s, r) in &glyphs {
                 if (r.pos.y - line_y).abs() >= 0.5 * r.em {
                     continue;
                 }
+                // A glyph whose rest is off its row from here, while its row scrolls on the way
+                // there, is measured against its rest on the row instead. Nearer than that, the
+                // scroll itself is still reported, as for text that rests between scrolls.
+                let off = (s.pos.y - r.pos.y).abs();
+                let r = match on_row(ti, n - self.tracks[ti].first) {
+                    Some(o) if off >= 0.5 * r.em && (s.pos.y - o.pos.y).abs() < off => o,
+                    _ => r,
+                };
                 let word = self.tracks[ti].key.0;
                 report.glyphs_checked += 1;
                 let mut flag = |breach| report.violations.push(Violation { frame: n as u64, t: fr.t, word, breach });
@@ -438,7 +475,7 @@ impl Tracker {
                 if gs.len() < 2 {
                     continue;
                 }
-                let span = |f: fn(&(&Sample, &Sample)) -> f32| {
+                let span = |f: fn(&(&Sample, Sample)) -> f32| {
                     let (lo, hi) = gs.iter().map(f).fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
                     hi - lo
                 };
@@ -456,7 +493,73 @@ impl Tracker {
         }
         report
     }
+
+    /// Per track, per sample: how far the glyph's row has scrolled down since the track's first
+    /// sample (negative is up). The row scrolls in a frame by a move that at least
+    /// [`ROW_MATES`] glyphs on other rows share, within [`ROW_TOGETHER_PX`], and that the row
+    /// shares too: as many glyphs of other words on it, or the glyph itself (a word whose only
+    /// row-mate jumps still scrolls with the block). A glyph with no other word on its row (it
+    /// left the row, or starts one) takes the block's move. Of several such moves, the one
+    /// nearest the glyph's own (a word put in place while the block still eases up moves
+    /// apart from the words that scroll). The glyph's own word never counts, so a word that
+    /// leaves its row while the row holds still keeps all of its move, and so does a row that
+    /// rises on its own (an arrival, not a scroll).
+    fn row_scroll(&self, env: &Envelope) -> Vec<Vec<f32>> {
+        let mut out: Vec<Vec<f32>> = self.tracks.iter().map(|tr| vec![0.0; tr.samples.len()]).collect();
+        for n in 1..self.frames.len() {
+            // Transcript glyphs drawn in this frame and the last: (track, word, height in the
+            // last frame, move, em).
+            let both: Vec<(usize, u32, f32, f32, f32)> = self.frames[n]
+                .tracks
+                .iter()
+                .filter_map(|&ti| {
+                    let tr = &self.tracks[ti];
+                    if tr.first >= n || !env.transcript.contains(&tr.key.0) {
+                        return None;
+                    }
+                    let (a, b) = (&tr.samples[n - tr.first - 1], &tr.samples[n - tr.first]);
+                    Some((ti, tr.key.0, a.pos.y, b.pos.y - a.pos.y, a.em))
+                })
+                .collect();
+            for &(ti, word, y, own, em) in &both {
+                let near = |m: f32, row: bool| {
+                    both.iter()
+                        .filter(|o| {
+                            o.1 != word && ((o.2 - y).abs() < 0.5 * em) == row && (o.3 - m).abs() <= ROW_TOGETHER_PX
+                        })
+                        .count()
+                };
+                let alone = !both.iter().any(|o| o.1 != word && (o.2 - y).abs() < 0.5 * em);
+                let mut step = 0.0;
+                let mut best = f32::MAX;
+                // The moves of the other words, each once: glyphs that scroll together move alike.
+                let mut moves: Vec<f32> = Vec::new();
+                for o in both.iter().filter(|o| o.1 != word) {
+                    if !moves.iter().any(|m| (m - o.3).abs() <= 0.01) {
+                        moves.push(o.3);
+                    }
+                }
+                for m in moves {
+                    let off = (m - own).abs();
+                    let row = near(m, true) >= ROW_MATES || off <= ROW_TOGETHER_PX || alone;
+                    if off < best && row && near(m, false) >= ROW_MATES {
+                        best = off;
+                        step = m;
+                    }
+                }
+                let k = n - self.tracks[ti].first;
+                out[ti][k] = out[ti][k - 1] + step;
+            }
+        }
+        out
+    }
 }
+
+/// Glyphs of other words a row needs before its move counts as a scroll ([`Tracker::row_scroll`]).
+const ROW_MATES: usize = 2;
+
+/// How far a glyph's move can be from its row's and still move with the row, in logical pixels.
+const ROW_TOGETHER_PX: f32 = 0.5;
 
 /// Per sample, where the glyph comes to rest. That is the next still sample ([`rest_of`]),
 /// unless the sample is part of a hold on one row (at least `still_frames` samples, each
@@ -901,6 +1004,73 @@ mod tests {
             tr.push(n as f64 / 60.0, &list(g));
         }
         tr.check(&Envelope::default())
+    }
+
+    /// Two rows of two words each, the block scrolling up a row (24 px) every 8 frames for
+    /// five scrolls, so no glyph is ever still for three frames until it stops. Word 4, the
+    /// newest, is drawn `own(n)` px below its place in frame `n`.
+    fn scrolling(own: impl Fn(usize) -> f32) -> Report {
+        scrolling_into(&mut Tracker::new(), own)
+    }
+
+    fn scrolling_into(tr: &mut Tracker, own: impl Fn(usize) -> f32) -> Report {
+        // One scroll: fast, then a creep that never settles before the next one.
+        const STEP: [f32; 8] = [9.0, 7.0, 4.0, 2.4, 1.0, 0.3, 0.2, 0.1];
+        for n in 0..56usize {
+            let up: f32 = (0..n.min(40)).map(|i| STEP[i % 8]).sum();
+            let mut g = word(1, 10.0, 40.0 - up, 9.0, 1.0);
+            g.extend(word(2, 50.0, 40.0 - up, 9.0, 1.0));
+            g.extend(word(3, 10.0, 64.0 - up, 9.0, 1.0));
+            g.extend(word(4, 50.0, 64.0 - up + own(n), 9.0, 1.0));
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        tr.check(&Envelope::default())
+    }
+
+    #[test]
+    fn a_line_that_scrolls_every_few_frames_rests_on_its_row() {
+        // The last scroll ends where the text rests, and its own move is reported as for any
+        // scroll; the four before it never come to rest and are clean.
+        let mut tr = Tracker::new();
+        let r = scrolling_into(&mut tr, |_| 0.0);
+        let before_last = r.violations.iter().filter(|v| v.frame < 32).count();
+        assert_eq!(before_last, 0, "{r}");
+        assert!(!r.by_kind().iter().any(|s| s.kind == "off-row" || s.kind == "tracking"), "{r}");
+        let env = Envelope { until: 31.5 / 60.0, ..Envelope::default() };
+        let r = tr.check(&env);
+        r.assert_ok();
+        assert!(r.glyphs_checked > 0);
+    }
+
+    #[test]
+    fn a_word_that_leaves_its_scrolling_row_is_still_off_its_row() {
+        // Sinks 4 px a frame to 16 px below its row during the second scroll and comes back.
+        let away = |n: usize| (4.0 * (4.0 - (n as f32 - 13.0).abs())).max(0.0);
+        let r = scrolling(away);
+        assert!(r.violations.iter().any(|v| v.word == 4 && matches!(v.breach, Breach::OffRow(_))), "{r}");
+        // Nothing else before the last scroll.
+        assert!(r.violations.iter().all(|v| v.frame >= 32 || (v.word == 4 && (10..17).contains(&v.frame))), "{r}");
+        // The same in text that holds still is caught the same way.
+        let mut tr = Tracker::new();
+        for n in 0..30usize {
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            g.extend(word(2, 50.0, 40.0 + away(n), 9.0, 1.0));
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        let still = tr.check(&Envelope::default());
+        let mut kinds: Vec<_> = still.by_kind().iter().map(|s| s.kind).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["baseline", "off-row"], "{still}");
+    }
+
+    #[test]
+    fn a_word_held_below_its_scrolling_row_breaks_the_baseline() {
+        // Held about 6 px below its row, creeping up 0.1 px a frame, through the second and
+        // third scrolls, then back on its row.
+        let r = scrolling(|n| if (8..24).contains(&n) { 6.0 - 0.1 * (n - 8) as f32 } else { 0.0 });
+        let base = r.by_kind().into_iter().find(|s| s.kind == "baseline").expect("baseline");
+        assert!(base.worst.word == 4 && base.worst.breach.value() > 5.9, "{r}");
+        assert!(r.violations.iter().all(|v| v.frame >= 32 || (v.word == 4 && (8..24).contains(&v.frame))), "{r}");
     }
 
     #[test]
