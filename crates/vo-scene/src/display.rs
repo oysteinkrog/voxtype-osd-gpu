@@ -80,6 +80,11 @@ pub struct DisplayList {
     pub width_knots: Vec<WidthKnot>,
     /// Hit shapes in paint order, for `input_region`. Not drawn.
     pub hits: Vec<HitShape>,
+    /// Where the edit caret of a live text (`Element::edit`) meets its baseline, in surface
+    /// space, also while it blinks off. Not drawn: the envelope check reads the caret line
+    /// from it. Not serialized.
+    #[serde(skip)]
+    pub edit_caret: Option<Point>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1033,6 +1038,7 @@ impl DisplayList {
         self.width_tables.clear();
         self.width_knots.clear();
         self.hits.clear();
+        self.edit_caret = None;
     }
 
     /// True when drawing this list would give the same pixels as drawing `other`, so a host
@@ -1073,6 +1079,7 @@ impl DisplayList {
             width_tables,
             width_knots,
             hits,
+            edit_caret: _,
         } = self;
         still(self)
             && still(other)

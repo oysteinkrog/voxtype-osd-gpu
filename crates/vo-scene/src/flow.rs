@@ -228,6 +228,8 @@ pub(crate) struct EditFrame {
     pub marks: Vec<Rect>,
     /// The caret bar and its blink opacity.
     pub caret: Option<(Rect, f32)>,
+    /// Where the caret meets the baseline, moved as the bar is.
+    pub foot: Option<Point>,
 }
 
 /// Places `decor` on `shaped`, laid out with caret stops, for the frame at `t`. `moved(i)`
@@ -276,10 +278,11 @@ pub(crate) fn edit_frame(
         let stop = shaped.stop_at(byte, decor.affinity)?;
         let baseline = shaped.lines.get(stop.line)?.baseline;
         let w = decor.caret_style.width;
-        let bar = Rect::new(stop.x - 0.5 * w, baseline - 0.78 * size, w, size);
-        Some((shift(bar, byte, stop.line), decor.caret_alpha(t)))
+        let bar = shift(Rect::new(stop.x - 0.5 * w, baseline - 0.78 * size, w, size), byte, stop.line);
+        Some((bar, decor.caret_alpha(t)))
     });
-    EditFrame { selection, marks, caret }
+    let foot = caret.map(|(bar, _)| Point::new(bar.x + 0.5 * bar.w, bar.y + 0.78 * size));
+    EditFrame { selection, marks, caret, foot }
 }
 
 /// The glyph that a decor at `byte` on `line` moves with: the glyph that starts at `byte`,
@@ -2323,6 +2326,24 @@ mod tests {
             assert!((mark[0] - big[0].0).abs() < 1.0, "under \"big\": {mark:?} {big:?}");
             assert!(mark[1] > big[0].1 && mark[1] < big[0].1 + 0.3 * SIZE, "just under the baseline");
             assert!(mark[0] + mark[2] < glyph(3).map(|(_, g)| g.pos.x).fold(f32::MAX, f32::min));
+        }
+
+        /// The display list says where the caret meets its baseline, in surface space, for
+        /// the envelope check, also while the caret blinks off.
+        #[test]
+        fn the_caret_foot_is_in_the_display_list() {
+            let mut s = scene();
+            let decor = EditDecor { caret: Some(9), since: 0.0, ..EditDecor::default() };
+            s.apply(view(&[(1, "hello"), (2, "big"), (3, "world")], decor.clone(), 0.0, 1.0), 0.0);
+            let off = (0..400).map(|k| 1.0 + k as f64 * 0.005).find(|&t| decor.caret_alpha(t) == 0.0).unwrap();
+            for t in [0.2, off] {
+                let dl = s.sample(t);
+                let foot = dl.edit_caret.expect("the caret foot");
+                let g = dl.glyphs.iter().filter(|g| g.word == 2).max_by(|a, b| a.pos.x.total_cmp(&b.pos.x)).unwrap();
+                assert!((foot.y - g.pos.y).abs() < 0.01 && foot.x > g.pos.x, "{t}: {foot:?} {:?}", g.pos);
+            }
+            s.apply(Element::column("root"), 2.0);
+            assert_eq!(s.sample(2.0).edit_caret, None);
         }
 
         /// R43: once the text is at rest, the scene wakes only at the caret's blink edges,

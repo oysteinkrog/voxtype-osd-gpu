@@ -1974,7 +1974,7 @@ impl<M> Scene<M> {
             if let Some(at) = &leaving {
                 crate::flow::overflow::emit(n.live.leaving(), t, at, &self.stage, self.viewport, items, out);
             }
-            self.draw(n, t, Point::new(m.e, m.f), size, alpha, items, out);
+            self.draw(n, t, Point::new(m.e, m.f), size, alpha, layer, items, out);
             if let Some(at) = &leaving {
                 crate::flow::overflow::emit_shadows(n.live.leaving(), t, at, items, out);
                 crate::flow::margin::emit(&n.live, t, at, alpha, items, out);
@@ -2000,6 +2000,7 @@ impl<M> Scene<M> {
         origin: Point,
         size: Size,
         alpha: f32,
+        layer: u32,
         items: &mut Vec<Item>,
         out: &mut DisplayList,
     ) {
@@ -2452,6 +2453,12 @@ impl<M> Scene<M> {
                     out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(color.fade(m.alpha))));
                 }
                 if let Some((d, f)) = &edit {
+                    // The caret line, for the envelope check: in surface space, as it maps glyphs.
+                    if let Some(foot) = f.foot {
+                        let l = &out.layers[layer as usize];
+                        let p = l.transform.apply(Point::new(origin.x + foot.x * z, origin.y + foot.y * z));
+                        out.edit_caret = Some(l.warp.as_ref().map_or(p, |w| w.apply(p)));
+                    }
                     let ink = d.mark_color.map_or(color, |c| c.fade(alpha));
                     for &r in &f.marks {
                         push_item(items, ItemKind::Shapes, out.shapes.len() as u32);

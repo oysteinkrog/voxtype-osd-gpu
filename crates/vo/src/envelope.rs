@@ -2,7 +2,9 @@
 //! GPU budget of a look.
 //!
 //! The envelope (motion plan, section 2, rule 1) holds on the newest line of live text: the
-//! glyphs of the newest word and every glyph that comes to rest on the same row.
+//! glyphs of the newest word and every glyph that comes to rest on the same row. While live
+//! text shows an edit caret (`Element::edit`, `DisplayList::edit_caret`), the reading line is
+//! the caret's line instead, wherever it is (R35).
 //!
 //! - baseline shift at most 3 px from where the glyph comes to rest, and no glyph off its row
 //!   (more than half an em away);
@@ -331,6 +333,8 @@ struct FrameRec {
     t: f64,
     /// Tracks drawn in this frame, by index.
     tracks: Vec<usize>,
+    /// The edit caret on its baseline, in surface space, if the frame has one.
+    caret: Option<Point>,
 }
 
 /// Follows live-text glyphs through frames and checks them against an [`Envelope`].
@@ -400,7 +404,7 @@ impl Tracker {
             drawn.push(i);
         }
         self.open = open;
-        self.frames.push(FrameRec { t, tracks: drawn });
+        self.frames.push(FrameRec { t, tracks: drawn, caret: list.edit_caret });
     }
 
     /// Words that moved whole along their row since the last frame, by how far: the same
@@ -760,6 +764,9 @@ impl Tracker {
     /// next new word to show within `pending` when there is one. `None` with no transcript word
     /// drawn or about to show.
     fn reading_line(&self, n: usize, rests: &[Vec<Option<usize>>], env: &Envelope) -> Option<f32> {
+        if let Some(y) = self.caret_line(n, env) {
+            return Some(y);
+        }
         let fr = &self.frames[n];
         // Words drawn now, with where each glyph comes to rest.
         let rests_now: Vec<(u32, f32)> = fr
@@ -818,6 +825,22 @@ impl Tracker {
             Some(w) => line(w),
             None => shown.and_then(|w| line(w).or_else(|| drawn_at(w))),
         }
+    }
+
+    /// The height of the caret line in frame `n`, when the frame has an edit caret: where the
+    /// caret comes to rest from this frame on, since it moves with its line when the text
+    /// reflows or scrolls. Where it is last drawn when it never holds still.
+    fn caret_line(&self, n: usize, env: &Envelope) -> Option<f32> {
+        let mut at = self.frames[n].caret?;
+        for k in n + 1..self.frames.len() {
+            let Some(next) = self.frames[k].caret else { break };
+            let frames = ((self.frames[k].t - self.frames[k - 1].t) * STILL_FPS).max(1e-3) as f32;
+            if (next.y - at.y).abs() <= env.still_px * frames {
+                break;
+            }
+            at = next;
+        }
+        Some(at.y)
     }
 
     /// Per track, per sample: how far the glyph's row has scrolled down since the track's first
@@ -1260,6 +1283,52 @@ mod tests {
             tr.push(n as f64 / 60.0, &list(g));
         }
         tr.check(&Envelope::default())
+    }
+
+    /// Word 1 rests on line 1 (y 40), word 2 is the newest, on line 2 (y 64). In frames 6
+    /// to 9 word 1's ink dips to 30 %. An edit caret sits on the line at `caret`, if any.
+    fn upper_line_dips(caret: Option<f32>) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..20 {
+            let a = if (6..10).contains(&n) { 0.3 } else { 1.0 };
+            let mut g = word(1, 10.0, 40.0, 9.0, a);
+            g.extend(word(2, 10.0, 64.0, 9.0, 1.0));
+            let mut l = list(g);
+            l.edit_caret = caret.map(|y| Point::new(40.0, y));
+            tr.push(n as f64 / 60.0, &l);
+        }
+        tr.check(&Envelope::default())
+    }
+
+    /// R35: with the caret on the upper line, rule 1 is checked there, with the same numbers.
+    #[test]
+    fn the_caret_line_is_the_reading_line() {
+        upper_line_dips(None).assert_ok();
+        upper_line_dips(Some(64.0)).assert_ok();
+        let r = upper_line_dips(Some(40.0));
+        let ink = r.by_kind().into_iter().find(|s| s.kind == "ink").expect("the dip on the caret line");
+        assert!((ink.worst.breach.value() - 0.3).abs() < 1e-4, "{r}");
+        assert!(r.violations.iter().all(|v| v.word == 1 && (6..10).contains(&v.frame)), "{r}");
+    }
+
+    /// The caret moves with its line as the text scrolls up a row: the caret line is where
+    /// it comes to rest, so the line it is on stays checked while it moves.
+    #[test]
+    fn the_caret_line_follows_a_scroll_to_its_rest() {
+        let mut tr = Tracker::new();
+        for n in 0..30usize {
+            let up = (n.saturating_sub(5).min(6) as f32) * 4.0;
+            // Word 1 dips in ink in frames 6 and 7, while its line scrolls from 64 to 40.
+            let a = if (6..8).contains(&n) { 0.2 } else { 1.0 };
+            let mut g = word(1, 10.0, 64.0 - up, 9.0, a);
+            g.extend(word(2, 10.0, 88.0 - up, 9.0, 1.0));
+            let mut l = list(g);
+            l.edit_caret = Some(Point::new(40.0, 64.0 - up));
+            tr.push(n as f64 / 60.0, &l);
+        }
+        let r = tr.check(&Envelope::default());
+        assert!(r.violations.iter().any(|v| v.word == 1 && v.breach.kind() == "ink"), "{r}");
+        assert!(r.violations.iter().all(|v| v.word == 1), "{r}");
     }
 
     #[test]
