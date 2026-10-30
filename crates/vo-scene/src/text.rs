@@ -20,11 +20,11 @@ use harfrust::{Direction, Feature, ShaperFont};
 use skrifa::instance::Size as FontSize;
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
-use vo_core::edit::{is_grapheme_boundary, next_grapheme};
+use vo_core::edit::{is_grapheme_boundary, next_grapheme, Affinity, Lines};
 
 use crate::element::TextStyle;
 use crate::font::{Face, FontId, FontRegistry};
-use crate::geom::{Point, Size};
+use crate::geom::{Point, Rect, Size};
 use crate::inline::{OBJECT_CHAR, OBJECT_GLYPH, OBJECT_TEXT};
 
 /// One placed glyph. `pos` is the pen position on the baseline, relative to the text box.
@@ -119,6 +119,114 @@ impl ShapedText {
             }
             self.size.w = width;
         }
+    }
+
+    /// The height of one line: lines are evenly spaced.
+    fn line_height(&self) -> f32 {
+        if self.lines.is_empty() {
+            0.0
+        } else {
+            self.size.h / self.lines.len() as f32
+        }
+    }
+
+    /// The stops of `line`, left to right.
+    fn line_stops(&self, line: usize) -> &[CaretStop] {
+        let lo = self.stops.partition_point(|s| s.line < line);
+        let hi = self.stops.partition_point(|s| s.line <= line);
+        &self.stops[lo..hi]
+    }
+
+    /// The line that holds the caret at `byte`. At a soft wrap the break byte ends one line
+    /// and starts the next: `Upstream` is the earlier line, `Downstream` the later. A byte
+    /// past every line is on the last. Needs `TextStyle::stops`; 0 without it.
+    pub fn line_of(&self, byte: usize, affinity: Affinity) -> usize {
+        let mut found = None;
+        for (i, l) in self.lines.iter().enumerate() {
+            if l.bytes.start <= byte && byte <= l.bytes.end {
+                if affinity == Affinity::Upstream {
+                    return i;
+                }
+                found = Some(i);
+            } else if l.bytes.start > byte {
+                break;
+            }
+        }
+        found.unwrap_or(self.lines.len().saturating_sub(1))
+    }
+
+    /// The caret stop for `byte` on the line `affinity` picks, or `None` when the byte is no
+    /// caret position (inside a cluster) or the text has no stops.
+    pub fn stop_at(&self, byte: usize, affinity: Affinity) -> Option<CaretStop> {
+        let line = self.line_of(byte, affinity);
+        self.line_stops(line).iter().find(|s| s.byte == byte).copied()
+    }
+
+    /// The caret position nearest to `p` (text box coordinates): the line under `p.y`
+    /// (clamped to the first and last), then the stop on it nearest to `p.x`. The end of a
+    /// soft-wrapped line comes back `Upstream`, so the caret stays on that line.
+    pub fn hit(&self, p: Point) -> (usize, Affinity) {
+        let lh = self.line_height();
+        let line = if lh > 0.0 { (p.y / lh).floor().clamp(0.0, (self.lines.len() - 1) as f32) as usize } else { 0 };
+        self.nearest_on(line, p.x)
+    }
+
+    fn nearest_on(&self, line: usize, x: f32) -> (usize, Affinity) {
+        let stops = self.line_stops(line);
+        let Some(best) = stops.iter().min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs())) else {
+            return (0, Affinity::Downstream);
+        };
+        let wraps_on = self.lines.get(line + 1).is_some_and(|next| next.bytes.start == best.byte);
+        (best.byte, if wraps_on { Affinity::Upstream } else { Affinity::Downstream })
+    }
+
+    /// The rectangles that show the selection of `range`, one per line it touches, a whole
+    /// line tall, in text box coordinates. A selection that runs on past a line's end covers
+    /// that line's trailing space too.
+    pub fn selection_rects(&self, range: std::ops::Range<usize>) -> Vec<Rect> {
+        let lh = self.line_height();
+        let mut out = Vec::new();
+        if range.is_empty() {
+            return out;
+        }
+        for (i, l) in self.lines.iter().enumerate() {
+            if range.end < l.bytes.start || range.start > l.bytes.end {
+                continue;
+            }
+            let (lo, hi) = (range.start.max(l.bytes.start), range.end.min(l.bytes.end));
+            let stops = self.line_stops(i);
+            let x_at = |b: usize| stops.iter().find(|s| s.byte >= b).or(stops.last()).map_or(l.x, |s| s.x);
+            let x0 = x_at(lo);
+            let x1 = x_at(hi);
+            if x1 > x0 {
+                out.push(Rect::new(x0, i as f32 * lh, x1 - x0, lh));
+            }
+        }
+        out
+    }
+}
+
+/// The wrapped layout for the edit model's Up, Down, Home and End, in the text's own
+/// coordinates. Needs `TextStyle::stops`.
+impl Lines for ShapedText {
+    fn line_count(&self) -> usize {
+        self.lines.len().max(1)
+    }
+
+    fn line_of(&self, byte: usize, affinity: Affinity) -> usize {
+        ShapedText::line_of(self, byte, affinity)
+    }
+
+    fn line_range(&self, line: usize) -> std::ops::Range<usize> {
+        self.lines.get(line).map_or(0..0, |l| l.bytes.clone())
+    }
+
+    fn x_of(&self, byte: usize, affinity: Affinity) -> f32 {
+        self.stop_at(byte, affinity).map_or(0.0, |s| s.x)
+    }
+
+    fn stop_at_x(&self, line: usize, x: f32) -> (usize, Affinity) {
+        self.nearest_on(line, x)
     }
 }
 
@@ -1664,5 +1772,66 @@ mod tests {
                 assert!((first.x - l.x).abs() < 1e-3, "{align:?}: {first:?} vs line at {}", l.x);
             }
         }
+    }
+
+    #[test]
+    fn soft_wrap_affinity() {
+        // "ab " / "cd": byte 3 ends line 0 (x 14, after the space) and starts line 1 (x 0).
+        let t = EstimateText::default().layout("ab cd", &TextStyle::new(0, 10.0, 12.0).with_stops(), Some(20.0));
+        assert_eq!(t.line_of(3, Affinity::Upstream), 0);
+        assert_eq!(t.line_of(3, Affinity::Downstream), 1);
+        assert_eq!(t.line_of(1, Affinity::Upstream), 0);
+        assert_eq!(t.stop_at(3, Affinity::Upstream).map(|s| (s.line, s.x)), Some((0, 14.0)));
+        assert_eq!(t.stop_at(3, Affinity::Downstream).map(|s| (s.line, s.x)), Some((1, 0.0)));
+        // A click past the end of line 0 stays on line 0; one at the start of line 1 is there.
+        assert_eq!(t.hit(Point::new(50.0, 5.0)), (3, Affinity::Upstream));
+        assert_eq!(t.hit(Point::new(-5.0, 17.0)), (3, Affinity::Downstream));
+        assert_eq!(t.hit(Point::new(6.0, 17.0)), (4, Affinity::Downstream));
+        // Above and below the text clamp to the first and last line.
+        assert_eq!(t.hit(Point::new(0.0, -40.0)), (0, Affinity::Downstream));
+        assert_eq!(t.hit(Point::new(99.0, 99.0)), (5, Affinity::Downstream));
+    }
+
+    #[test]
+    fn selection_rects_per_line() {
+        let t = EstimateText::default().layout("ab cd", &TextStyle::new(0, 10.0, 12.0).with_stops(), Some(20.0));
+        // "b cd": the end of line 0 with its space, and all of line 1.
+        assert_eq!(t.selection_rects(1..5), [Rect::new(5.5, 0.0, 8.5, 12.0), Rect::new(0.0, 12.0, 11.0, 12.0)]);
+        // Ending at the wrap draws nothing on line 1; starting there nothing on line 0.
+        assert_eq!(t.selection_rects(0..3), [Rect::new(0.0, 0.0, 14.0, 12.0)]);
+        assert_eq!(t.selection_rects(3..4), [Rect::new(0.0, 12.0, 5.5, 12.0)]);
+        assert!(t.selection_rects(2..2).is_empty());
+    }
+
+    #[test]
+    fn shaped_text_drives_the_edit_model() {
+        use vo_core::edit::{EditAction, EditBuffer, Selection};
+        let s = shaped();
+        let text = "one two three four five six seven";
+        let style = STYLE.with_stops();
+        let layout = s.layout(text, &style, Some(120.0));
+        assert!(layout.lines.len() >= 3);
+        let mut b = EditBuffer::new(text);
+        b.set_selection(Selection::caret(2));
+        let x0 = layout.stop_at(2, Affinity::Downstream).unwrap().x;
+        // Down keeps x: the caret lands on the stop nearest to it on each next line.
+        for line in 1..layout.lines.len() {
+            b.apply(EditAction::MoveLine { down: true, extend: false }, &layout, 0.0);
+            let sel = b.selection();
+            assert_eq!(layout.line_of(sel.focus, sel.affinity), line);
+            let x = layout.stop_at(sel.focus, sel.affinity).unwrap().x;
+            let best = layout.line_stops(line).iter().map(|s| (s.x - x0).abs()).fold(f32::MAX, f32::min);
+            assert!(((x - x0).abs() - best).abs() < 1e-3, "line {line}: x {x} for {x0}");
+        }
+        // End on a wrapped line stays on it, upstream of the break.
+        b.set_selection(Selection::caret(0));
+        b.apply(
+            EditAction::MoveBy { dir: vo_core::edit::Dir::Forward, unit: vo_core::edit::Unit::Line, extend: false },
+            &layout,
+            0.0,
+        );
+        let sel = b.selection();
+        assert_eq!(sel.focus, layout.lines[0].bytes.end);
+        assert_eq!(layout.line_of(sel.focus, sel.affinity), 0);
     }
 }
