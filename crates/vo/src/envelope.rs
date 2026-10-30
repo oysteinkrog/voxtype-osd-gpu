@@ -362,6 +362,7 @@ impl Tracker {
         let steps = self.word_steps(&now);
         let moves = self.word_moves(n, &now);
         let replaced = self.replaced(n, &now);
+        let retyped = self.retyped(&now);
         let mut open: HashMap<Key, Vec<usize>> = HashMap::new();
         let mut drawn = Vec::with_capacity(now.len());
         // The nearest glyph with the same key in the last frame, within an em and a half,
@@ -372,14 +373,19 @@ impl Tracker {
         // share keys, and the new copy then starts a track of its own.
         let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
         for (j, (key, s)) in now.iter().enumerate() {
+            // A word whose letters changed (`retyped`): a letter that stayed goes on, and one
+            // that moved is a new placement, put one letter along by the key.
+            let typed = retyped.contains(&key.0);
             let d = match (steps.get(&key.0), moves.get(key)) {
                 _ if replaced.contains(&key.0) => continue,
+                _ if typed => Point::new(0.0, 0.0),
                 (Some(&d), _) => d,
                 (None, Some(None)) => continue,
                 (None, Some(&Some(d))) => d,
                 (None, None) => Point::new(0.0, 0.0),
             };
-            pairs.extend(self.near(n, key, s, d).into_iter().map(|(i, dist)| (dist, j, i)));
+            let cands = self.near(n, key, s, d).into_iter().filter(|&(_, dist)| !typed || dist <= RETYPED_STAY_PX);
+            pairs.extend(cands.map(|(i, dist)| (dist, j, i)));
         }
         pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut best: Vec<Option<usize>> = vec![None; now.len()];
@@ -450,6 +456,32 @@ impl Tracker {
             }
         }
         steps
+    }
+
+    /// Words drawn in the last frame and in this one with other letters: a letter came in or
+    /// went. A letter typed inside a word moves the letters after it along by its width in
+    /// one frame. Matched as moves, those letters would take their rest from where the
+    /// typing ends, letters further along, and the word would read as stretched meanwhile.
+    fn retyped(&self, now: &[(Key, Sample)]) -> HashSet<u32> {
+        let Some(last) = self.frames.last() else {
+            return HashSet::new();
+        };
+        let mut letters: HashMap<u32, (Vec<Key>, Vec<Key>)> = HashMap::new();
+        for &ti in &last.tracks {
+            let key = self.tracks[ti].key;
+            letters.entry(key.0).or_default().0.push(key);
+        }
+        for (key, _) in now {
+            letters.entry(key.0).or_default().1.push(*key);
+        }
+        letters
+            .into_iter()
+            .filter_map(|(word, (mut before, mut after))| {
+                before.sort_unstable();
+                after.sort_unstable();
+                (!before.is_empty() && !after.is_empty() && before != after).then_some(word)
+            })
+            .collect()
     }
 
     /// Words put on another row on their own since the last frame: their single letters
@@ -902,6 +934,10 @@ impl Tracker {
         out
     }
 }
+
+/// How far a letter of a word whose letters changed can be from where it was and still be the
+/// same letter ([`Tracker::retyped`]), in logical pixels.
+const RETYPED_STAY_PX: f32 = 0.5;
 
 /// Glyphs of other words a row needs before its move counts as a scroll ([`Tracker::row_scroll`]).
 const ROW_MATES: usize = 2;
@@ -1815,6 +1851,34 @@ mod tests {
             tr.push(n as f64 / 10.0, &list(l));
         }
         tr.check(&Envelope::default()).assert_ok();
+    }
+
+    /// Typing inside a word, a key every 2 frames for 16 frames: each new letter goes in
+    /// after the first, and the letters after it jump along by its width. They never hold
+    /// still for a rest until the typing ends, and must not take that late rest, further
+    /// along, as where they are going: the word would read as up to twice as wide.
+    #[test]
+    fn letters_a_key_pushes_along_are_not_stretched() {
+        let mut tr = Tracker::new();
+        for n in 0..60usize {
+            let typed = (n / 2).min(8) as u32;
+            let mut g = word(1, 10.0, 40.0, 9.0, 1.0);
+            // Typed letters after the first glyph, then the other two glyphs after them.
+            for (k, gl) in g.iter_mut().enumerate().skip(1) {
+                gl.pos.x += 9.0 * typed as f32;
+                gl.glyph = 10 + k as u32;
+            }
+            for k in 0..typed {
+                let mut l = word(1, 19.0 + 9.0 * k as f32, 40.0, 9.0, 1.0);
+                l.truncate(1);
+                l[0].glyph = 30 + k;
+                g.push(l[0]);
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        let r = tr.check(&Envelope::default());
+        assert!(!r.by_kind().iter().any(|s| s.kind == "tracking"), "{r}");
+        r.assert_ok();
     }
 
     #[test]
