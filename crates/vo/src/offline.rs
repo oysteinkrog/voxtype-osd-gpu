@@ -5,7 +5,9 @@
 use std::path::Path;
 
 use vo_core::time::FrameTime;
-use vo_host::{Placement, Point, PointerEvent, PointerKind, Size};
+use vo_host::{
+    KeyEvent, KeyState, LogicalKey, Mods, NamedKey, Placement, Point, PointerEvent, PointerKind, RepeatInfo, Size,
+};
 use vo_render::offscreen::{write_png, Frame};
 use vo_render::Offscreen;
 
@@ -16,7 +18,32 @@ use crate::Options;
 #[derive(Clone, Debug)]
 pub enum Input<M> {
     Msg(M),
-    Pointer { pos: Point, kind: PointerKind },
+    Pointer {
+        pos: Point,
+        kind: PointerKind,
+    },
+    /// A key, as the host sends it (`Down` and `Up`; the driver makes the repeats). Its `t`
+    /// is replaced by the input's time.
+    Key(KeyEvent),
+    /// Keyboard focus came or went (`App::keyboard_focus`). Offline, focus comes only from
+    /// these inputs: `Cx::take_keyboard_focus` opens nothing.
+    KeyboardFocus {
+        gained: bool,
+        requested: bool,
+    },
+    /// The modifier state changed.
+    Modifiers(Mods),
+    /// The compositor's key repeat rate and delay. Without it nothing repeats.
+    RepeatInfo(RepeatInfo),
+}
+
+/// Seconds between the press and the release of a scripted key, and between scripted keys.
+pub const KEY_STEP: f64 = 0.03;
+
+/// The evdev code scripted text uses for a character: the same for its press and release,
+/// and outside the codes of a real keyboard.
+fn char_code(c: char) -> u32 {
+    0x1_0000 + c as u32
 }
 
 /// What an offline render feeds the app.
@@ -30,6 +57,54 @@ pub struct Scenario<M> {
     pub duration: f64,
     /// `(t, input)` in time order.
     pub inputs: Vec<(f64, Input<M>)>,
+}
+
+impl<M> Scenario<M> {
+    /// Adds `input` at `t`, after any input already at or before `t`, so the inputs stay in
+    /// time order.
+    pub fn push(&mut self, t: f64, input: Input<M>) {
+        let at = self.inputs.partition_point(|(it, _)| *it <= t);
+        self.inputs.insert(at, (t, input));
+    }
+
+    /// A press and release of `key` with `mods` held, at `t`. Returns when it ends.
+    pub fn key(&mut self, t: f64, key: LogicalKey, text: Option<&str>, mods: Mods) -> f64 {
+        let code = match key {
+            LogicalKey::Char(c) => char_code(c),
+            LogicalKey::Named(n) => 0x2_0000 + n as u32,
+            LogicalKey::Other(sym) => 0x3_0000 + sym,
+        };
+        let ev = KeyEvent { surface: 1, t, state: KeyState::Down, key, code, text: text.map(str::to_owned), mods };
+        self.push(t, Input::Key(ev.clone()));
+        self.push(t + KEY_STEP, Input::Key(KeyEvent { state: KeyState::Up, text: None, ..ev }));
+        t + KEY_STEP
+    }
+
+    /// Types `text` from `t`, one key every `2 * KEY_STEP` seconds: each character a press
+    /// and release with that text, upper-case letters with Shift, and a line break as
+    /// Shift+Enter (the text box's newline). Returns when the last key is released.
+    pub fn type_text(&mut self, t: f64, text: &str) -> f64 {
+        let mut at = t;
+        for c in text.chars() {
+            at = if c == '\n' {
+                self.chord(at, Mods::SHIFT, LogicalKey::Named(NamedKey::Enter))
+            } else {
+                let mods = if c.is_uppercase() { Mods::SHIFT } else { Mods::NONE };
+                self.key(at, LogicalKey::Char(c), Some(c.encode_utf8(&mut [0; 4])), mods)
+            } + KEY_STEP;
+        }
+        at - KEY_STEP
+    }
+
+    /// `key` pressed with `mods` held, at `t`: the modifier state changes first, then the
+    /// key is pressed and released with no text, then the modifiers are let go. For Ctrl+Z,
+    /// Ctrl+Left, Shift+Enter. Returns when the modifiers are let go.
+    pub fn chord(&mut self, t: f64, mods: Mods, key: LogicalKey) -> f64 {
+        self.push(t, Input::Modifiers(mods));
+        let up = self.key(t + KEY_STEP, key, None, mods);
+        self.push(up + KEY_STEP, Input::Modifiers(Mods::NONE));
+        up + KEY_STEP
+    }
 }
 
 /// How an offline run ended.
@@ -261,7 +336,7 @@ pub(crate) fn advance<A: App>(
     let (mut applied, mut last) = (0, None);
     loop {
         let input_t = inputs.get(*next).map(|(t, _)| *t).filter(|it| *it <= t);
-        let timer_t = driver.timers.next_at().filter(|tm| *tm <= t);
+        let timer_t = driver.next_timer_at().filter(|tm| *tm <= t);
         let at = match (input_t, timer_t) {
             (Some(i), Some(tm)) if tm <= i => {
                 driver.fire_timer(tm);
@@ -275,7 +350,13 @@ pub(crate) fn advance<A: App>(
                     Input::Pointer { pos, kind } => {
                         driver.pointer(&PointerEvent { surface: 1, t: *at, pos: *pos, kind: *kind })
                     }
+                    Input::Key(ev) => driver.key(&KeyEvent { t: *at, ..ev.clone() }),
+                    Input::KeyboardFocus { gained, requested } => driver.keyboard_focus(*at, *gained, *requested),
+                    Input::Modifiers(mods) => driver.modifiers(*at, *mods),
+                    Input::RepeatInfo(info) => driver.repeat_info(*info),
                 }
+                // Offline, focus comes from the inputs; a request opens nothing.
+                driver.focus = None;
                 *at
             }
             (None, Some(tm)) => {
@@ -425,7 +506,94 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
 mod tests {
     use super::*;
     use crate::app::{Cx, Tokens};
+    use vo_core::edit::{EditAction, EditBuffer};
     use vo_scene::Element;
+
+    /// A tiny text box: typed text goes in, Backspace deletes, Ctrl+Z undoes, Escape exits.
+    struct TextBox {
+        buf: EditBuffer,
+        focused: bool,
+        repeats: u32,
+    }
+
+    impl App for TextBox {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> Element<()> {
+            Element::label("text", self.buf.text())
+        }
+        fn key(&mut self, ev: &KeyEvent, cx: &mut Cx<()>) -> bool {
+            if !self.focused || ev.state == KeyState::Up {
+                return false;
+            }
+            self.repeats += u32::from(ev.state == KeyState::Repeat);
+            let action = match (ev.key, &ev.text) {
+                (LogicalKey::Char('z'), _) if ev.mods.ctrl => EditAction::Undo,
+                (LogicalKey::Named(NamedKey::Enter), _) if ev.mods.shift => EditAction::Insert("\n".into()),
+                (LogicalKey::Named(NamedKey::Backspace), _) => {
+                    EditAction::Delete(vo_core::edit::Dir::Back, vo_core::edit::Unit::Grapheme)
+                }
+                (LogicalKey::Named(NamedKey::Escape), _) => {
+                    cx.exit();
+                    return true;
+                }
+                (_, Some(t)) => EditAction::Insert(t.clone()),
+                _ => return false,
+            };
+            self.buf.apply_plain(action, ev.t);
+            true
+        }
+        fn keyboard_focus(&mut self, gained: bool, _: bool, _: &mut Cx<()>) {
+            self.focused = gained;
+        }
+    }
+
+    /// Runs a scenario through the driver with no GPU, as `exit_check` does.
+    fn run_keys(scenario: &Scenario<()>) -> Driver<TextBox> {
+        let app = TextBox { buf: EditBuffer::new(""), focused: false, repeats: 0 };
+        let mut driver = start(app, scenario, &mut Options::default());
+        let mut next = 0;
+        advance(&mut driver, &scenario.inputs, &mut next, scenario.duration);
+        driver
+    }
+
+    #[test]
+    fn type_text_and_chord_run_headless() {
+        let mut s = Scenario { size: Size::new(300.0, 80.0), scale: 1.0, duration: 10.0, inputs: Vec::new() };
+        s.push(0.5, Input::KeyboardFocus { gained: true, requested: false });
+        let t = s.type_text(1.0, "Hei på\ndeg");
+        // A pause, so the next word is its own undo step.
+        let t = s.type_text(t + 2.0, " du");
+        let t = s.chord(t + 0.5, Mods::CTRL, LogicalKey::Char('z'));
+        s.key(t + 0.5, LogicalKey::Named(NamedKey::Escape), None, Mods::NONE);
+        assert!(s.inputs.windows(2).all(|w| w[0].0 <= w[1].0), "inputs stay in time order");
+        let d = run_keys(&s);
+        assert_eq!(d.app.buf.text(), "Hei på\ndeg");
+        assert!(d.exit_at().is_some());
+    }
+
+    #[test]
+    fn a_held_key_repeats_offline() {
+        let mut s = Scenario { size: Size::new(300.0, 80.0), scale: 1.0, duration: 3.0, inputs: Vec::new() };
+        s.push(0.0, Input::RepeatInfo(RepeatInfo { rate_hz: 20.0, delay_s: 0.5 }));
+        s.push(0.1, Input::KeyboardFocus { gained: true, requested: false });
+        s.type_text(0.2, "abc");
+        let bs = KeyEvent {
+            surface: 1,
+            t: 0.0,
+            state: KeyState::Down,
+            key: LogicalKey::Named(NamedKey::Backspace),
+            code: 14,
+            text: None,
+            mods: Mods::NONE,
+        };
+        // Held from 1.0 to 1.62: the press, then repeats at 1.5, 1.55 and 1.6.
+        s.push(1.0, Input::Key(bs.clone()));
+        s.push(1.62, Input::Key(KeyEvent { state: KeyState::Up, ..bs }));
+        let d = run_keys(&s);
+        assert_eq!(d.app.repeats, 3);
+        assert_eq!(d.app.buf.text(), "");
+    }
 
     /// An app that fades out when told to exit: its fade settles.
     struct FadeOut {
