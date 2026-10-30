@@ -2456,6 +2456,8 @@ impl<M> Scene<M> {
                     push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                     out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(color.fade(m.alpha))));
                 }
+                // A decor hides the end-of-text caret, unless it has no caret and asks for it.
+                let end_caret = edit.as_ref().is_none_or(|(d, _)| d.end_caret && d.caret.is_none());
                 if let Some((d, f)) = &edit {
                     // The caret line, for the envelope check: in surface space, as it maps glyphs.
                     if let Some(foot) = f.foot {
@@ -2483,7 +2485,8 @@ impl<M> Scene<M> {
                         };
                         out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * r.w), paint));
                     }
-                } else if let Some((bar, tint, blink)) = n.live.caret(t) {
+                }
+                if let Some((bar, tint, blink)) = n.live.caret(t).filter(|_| end_caret) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {
                         let r = Rect::new(origin.x + bar.x * z, origin.y + bar.y * z, bar.w * z, bar.h * z);

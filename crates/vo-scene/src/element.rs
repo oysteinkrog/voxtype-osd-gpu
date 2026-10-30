@@ -1486,8 +1486,8 @@ impl<M> Element<M> {
     /// Live text: draws a caret, a selection and edit marks with the words, at their sprung
     /// places (`flow::EditDecor`). Pass the buffer with `Element::live_source` so the decor's
     /// bytes match the text. While a node has a decor it lays out with caret stops and does
-    /// not draw its end-of-text caret. Changing the decor alone does not lay the text out
-    /// again.
+    /// not draw its end-of-text caret, unless the decor has no caret and sets `end_caret`.
+    /// Changing the decor alone does not lay the text out again.
     pub fn edit(mut self, decor: EditDecor) -> Element<M> {
         match &mut self.kind {
             Kind::LiveText { edit, .. } => *edit = Some(Box::new(decor)),

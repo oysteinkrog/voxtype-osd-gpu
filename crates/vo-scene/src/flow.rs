@@ -167,6 +167,11 @@ pub struct EditDecor {
     pub selection_color: Option<Color>,
     /// The underline colour; `None` is the text colour.
     pub mark_color: Option<Color>,
+    /// With no `caret`, the node still draws its own end-of-text caret (`Element::caret`)
+    /// as it would with no decor: for marks shown after an edit while the text grows again.
+    /// Off by default, so a decor with no caret, such as a line that does not hold the edit
+    /// caret, draws no caret at all.
+    pub end_caret: bool,
 }
 
 impl Default for EditDecor {
@@ -180,6 +185,7 @@ impl Default for EditDecor {
             caret_style: Caret::default(),
             selection_color: None,
             mark_color: None,
+            end_caret: false,
         }
     }
 }
@@ -2333,6 +2339,27 @@ mod tests {
             assert!((mark[0] - big[0].0).abs() < 1.0, "under \"big\": {mark:?} {big:?}");
             assert!(mark[1] > big[0].1 && mark[1] < big[0].1 + 0.3 * SIZE, "just under the baseline");
             assert!(mark[0] + mark[2] < glyph(3).map(|(_, g)| g.pos.x).fold(f32::MAX, f32::min));
+        }
+
+        /// A decor with no caret hides the node's end-of-text caret unless it asks for it
+        /// with `end_caret`; with an edit caret, the end caret never shows.
+        #[test]
+        fn a_marks_only_decor_keeps_the_end_caret_when_asked() {
+            let end = Caret { width: 3.0, ..Caret::default() };
+            let carets = |decor: EditDecor| {
+                let mut s = scene();
+                let root = view(&[(1, "hello"), (2, "big")], decor, 0.0, 1.0);
+                s.apply(root.map_live_texts(&mut |e| e.caret(end)), 0.0);
+                let dl = s.sample(0.2);
+                // Bars as tall as the text: the carets (a mark is 1 or 2 px high).
+                dl.shapes.iter().filter(|s| s.geom[3] > 0.5 * SIZE).map(|s| s.geom[2]).collect::<Vec<_>>()
+            };
+            let hello = std::ops::Range { start: 0, end: 5 };
+            let marks = EditDecor { marks: vec![hello], since: 0.0, ..EditDecor::default() };
+            assert_eq!(carets(marks.clone()), Vec::<f32>::new(), "no caret by default");
+            assert_eq!(carets(EditDecor { end_caret: true, ..marks.clone() }), vec![3.0], "the end caret");
+            let edit = EditDecor { caret: Some(2), end_caret: true, ..marks };
+            assert_eq!(carets(edit), vec![2.0], "only the edit caret");
         }
 
         /// The display list says where the caret meets its baseline, in surface space, for
