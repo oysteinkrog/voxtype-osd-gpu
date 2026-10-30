@@ -68,6 +68,12 @@
 // a smear sample outside it is empty.
 fn glyph_coverage (tc: vec2f, loc: u32, ppe: vec2f, k: f32, smear_em: vec2f, ext: vec4f) -> f32 {
   if (all (layer.smear.zw == vec2f (0.0))) {
+    // An effect's reach grows the quad past the ink box; out there, past the antialiasing
+    // window and the small-size supersampling taps (a third of a pixel out), there is no ink.
+    let margin = (0.5 * k + 1.0) / ppe;
+    if (any (tc < ext.xy - margin) || any (tc > ext.zw + margin)) {
+      return 0.0;
+    }
     return _hb_gpu_slug (tc, ppe / k, loc);
   }
   let margin = 0.5 * (k - 1.0) / ppe;
@@ -95,6 +101,12 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   let r = 0.5 * width;
   let margin = 0.5 * k / ppe;
   let n = clamp (i32 (ceil (width / 2.0)), 12, 24);
+  // The disc's reach in em units along each axis: when it misses the grown ink box, every tap
+  // would be skipped.
+  let reach = r * sqrt (px_x * px_x + px_y * px_y);
+  if (any (tc + reach < ext.xy - margin) || any (tc - reach > ext.zw + margin)) {
+    return 0.0;
+  }
   var cov = 0.0;
   for (var i = 0; i < n; i++) {
     let d = r * sqrt ((f32 (i) + 0.5) / f32 (n));
@@ -170,7 +182,7 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
     mi.seed = in.fx2.z;
     c = material (mat, mi);
   }
-  if (in.fx2.x > 0.0 && in.halo.a > 0.0) {
+  if (in.fx2.x > 0.0 && in.halo.a > 0.0 && c.a < 1.0) {
     let at = in.tc - px_em * in.fx3.x - py_em * in.fx3.y;
     let h = soft_coverage (at, in.loc, ppe, 2.0 * in.fx2.x, px_em, py_em, ext, turn);
     c = c + in.halo * h * (1.0 - c.a);

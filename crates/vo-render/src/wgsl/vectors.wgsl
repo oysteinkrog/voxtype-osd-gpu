@@ -12,6 +12,8 @@
 const KIND_STROKE: u32 = 0u;
 const KIND_BLOB: u32 = 1u;
 const KIND_FILL: u32 = 2u;
+// A tile well inside a fill (`vector::push_tiled`): coverage 1, no segments to look at.
+const KIND_SOLID: u32 = 3u;
 
 const PAINT_ALONG: u32 = 0u;
 const PAINT_LINEAR: u32 = 1u;
@@ -302,7 +304,12 @@ fn paint_pos (kind: u32, p: vec2f, s: f32, g: vec4f, h: vec4f) -> f32 {
   var centre = 0.0;
   var half_w = 0.0;
   var along = 0.0;
-  if (in.head.x == KIND_BLOB) {
+  if (in.head.x == KIND_SOLID) {
+    cov = 1.0;
+    outside = 0.0;
+    k = ramp (paint_pos (in.head.w, p, 0.0, in.a, in.b), in.params.zw);
+    edge = -1e9;
+  } else if (in.head.x == KIND_BLOB) {
     let d1 = length (p - in.a.xy) - in.a.z;
     let d2 = length (p - in.b.xy) - in.b.z;
     let kb = max (in.a.w, 1e-3);

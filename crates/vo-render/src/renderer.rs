@@ -1496,7 +1496,7 @@ impl Renderer {
                                 tex |= self.reads_textures(f, m, bd);
                             }
                             grow(&mut self.surfaces[draw_surface].bounds, intersect(seen(g.bbox), scissor));
-                            self.vectors.push(g);
+                            crate::vector::push_tiled(g, &self.vector_segs, &mut self.vectors);
                         }
                     }
                     let (pipe, b) = if tex { (Pipe::VectorTex, bd) } else { (Pipe::Vector, NO_BACKDROP) };
