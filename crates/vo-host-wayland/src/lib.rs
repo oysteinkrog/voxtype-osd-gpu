@@ -56,8 +56,9 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
-    ClickThrough, CpuFrame, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError, HostEvent, InputMode,
-    InputRegion, Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId, SurfaceKind, Waker,
+    ClickThrough, CpuFrame, FocusProxySpec, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError,
+    HostEvent, InputMode, InputRegion, Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId,
+    SurfaceKind, Waker,
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_shm::Format;
@@ -159,6 +160,18 @@ struct ShmStage {
     /// The buffer on the role surface: the last CPU frame, then a clear one.
     buffer: Option<Buffer>,
     handed_over: bool,
+}
+
+/// A focus proxy (`HostCtl::open_focus_proxy`): a 1x1 transparent Overlay layer surface with
+/// on-demand keyboard interactivity and an empty input region. KWin activates a layer surface
+/// like this when it is mapped with a buffer, and gives focus back to the previous window
+/// when it is destroyed (M0.1, `examples/focus_probe.rs`). The visible surfaces never take
+/// focus themselves: KWin does not let a mapped surface give it back.
+pub(crate) struct FocusProxy {
+    pub(crate) id: SurfaceId,
+    layer: LayerSurface,
+    pool: SlotPool,
+    buffer: Option<Buffer>,
 }
 
 pub(crate) struct Surf {
@@ -429,6 +442,7 @@ pub struct State {
     gpu_failed: Option<String>,
     loop_handle: calloop::LoopHandle<'static, State>,
     pub(crate) surfaces: Vec<Surf>,
+    pub(crate) proxies: Vec<FocusProxy>,
     next_id: SurfaceId,
     pub(crate) pointers: Vec<WlPointer>,
     pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
@@ -496,6 +510,9 @@ impl WaylandHost {
             (Ok(m), Ok(v)) => Some((m, v)),
             _ => None,
         };
+        // The seat again, at version 9 at most, for the keyboard (see `handlers.rs`). The
+        // object lives on in the connection; its capabilities event brings the keyboard.
+        let _ = globals.bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(&qh, 1..=9, ());
         let caps = HostCaps {
             per_pixel_alpha: true,
             click_through: ClickThrough::Regions,
@@ -507,7 +524,7 @@ impl WaylandHost {
             fractional_scale: fractional.is_some(),
             present_feedback: has("wp_presentation"),
             cpu_first_frame: subcompositor.is_some() && shm.is_some(),
-            keyboard: false,
+            keyboard: layer_shell.is_some() && shm.is_some(),
         };
         let presentation = PresentationTimeState::bind(&globals, &qh);
         let blur = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()).ok();
@@ -554,6 +571,7 @@ impl WaylandHost {
             next_id: 1,
             pointers: Vec::new(),
             keyboards: Vec::new(),
+            proxies: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
             events: Vec::new(),
             timer: None,
@@ -615,6 +633,41 @@ impl State {
     /// The surface `wl` belongs to: its role surface or its GPU sub-surface.
     pub(crate) fn surface_index(&self, wl: &WlSurface) -> Option<usize> {
         self.surfaces.iter().position(|s| s.role.wl() == wl || s.is_child(wl))
+    }
+
+    /// The id of the surface or focus proxy `wl` belongs to.
+    pub(crate) fn focus_target(&self, wl: &WlSurface) -> Option<SurfaceId> {
+        self.surface_index(wl)
+            .map(|i| self.surfaces[i].id)
+            .or_else(|| self.proxies.iter().find(|p| p.layer.wl_surface() == wl).map(|p| p.id))
+    }
+
+    /// Maps a focus proxy at its first configure: a transparent 1x1 buffer, so the
+    /// compositor treats it as shown and gives it focus. False when `wl` is no proxy.
+    pub(crate) fn proxy_configured(&mut self, wl: &WlSurface) -> bool {
+        let Some(p) = self.proxies.iter_mut().find(|p| p.layer.wl_surface() == wl) else { return false };
+        if p.buffer.is_none() {
+            match p.pool.create_buffer(1, 1, 4, Format::Argb8888) {
+                Ok((buffer, canvas)) => {
+                    canvas.fill(0);
+                    wl.damage_buffer(0, 0, 1, 1);
+                    if buffer.attach_to(wl).is_ok() {
+                        p.buffer = Some(buffer);
+                    }
+                }
+                Err(e) => self.diag.notes.push(format!("focus proxy {}: no shm buffer ({e})", p.id)),
+            }
+        }
+        wl.commit();
+        let _ = self.conn.flush();
+        true
+    }
+
+    /// The compositor closed a focus proxy. Its keyboard leave comes on its own.
+    pub(crate) fn proxy_closed(&mut self, wl: &WlSurface) -> bool {
+        let Some(i) = self.proxies.iter().position(|p| p.layer.wl_surface() == wl) else { return false };
+        self.proxies.remove(i);
+        true
     }
 
     fn display_handle(&self) -> DisplayHandle {
@@ -1127,9 +1180,6 @@ impl HostCtl for State {
         self.spawn_gpu(None)
     }
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
-        if spec.keyboard != Keyboard::None {
-            return Err(HostError::Unsupported("keyboard interactivity other than None (M1)".into()));
-        }
         let wl = self.compositor.create_surface(&self.qh);
         let (w, h) = (spec.size.w.round().max(1.0) as u32, spec.size.h.round().max(1.0) as u32);
         let role = match (&self.layer_shell, &self.xdg, spec.kind) {
@@ -1145,7 +1195,13 @@ impl HostCtl for State {
                     _ => l.set_size(w, h),
                 }
                 place_layer(&l, spec.placement, self.output_height(), h as i32);
-                l.set_keyboard_interactivity(KeyboardInteractivity::None);
+                // Mapped with anything but None, KWin keeps focus on the surface until it is
+                // destroyed; take focus through a focus proxy instead.
+                l.set_keyboard_interactivity(match spec.keyboard {
+                    Keyboard::None => KeyboardInteractivity::None,
+                    Keyboard::OnDemand => KeyboardInteractivity::OnDemand,
+                    Keyboard::Exclusive => KeyboardInteractivity::Exclusive,
+                });
                 Role::Layer(l)
             }
             (_, Some(xdg), _) => {
@@ -1320,6 +1376,46 @@ impl HostCtl for State {
         Ok(())
     }
 
+    fn open_focus_proxy(&mut self, spec: &FocusProxySpec) -> Result<SurfaceId, HostError> {
+        let (Some(shell), Some(shm)) = (&self.layer_shell, &self.shm) else {
+            return Err(HostError::Unsupported("a focus proxy needs a layer shell and wl_shm".into()));
+        };
+        let output = spec.output.as_deref().and_then(|name| {
+            self.outputs.outputs().find(|o| self.outputs.info(o).and_then(|i| i.name).as_deref() == Some(name))
+        });
+        if let (Some(name), None) = (&spec.output, &output) {
+            self.diag.notes.push(format!("focus proxy: no output named {name}, the compositor picks one"));
+        }
+        let pool = SlotPool::new(4, shm).map_err(|e| HostError::Io(std::io::Error::other(e)))?;
+        let wl = self.compositor.create_surface(&self.qh);
+        let layer =
+            shell.create_layer_surface(&self.qh, wl, Layer::Overlay, Some(spec.app_id.clone()), output.as_ref());
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        layer.set_size(1, 1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        // Click-through: the proxy only takes keys.
+        if let Ok(empty) = Region::new(&self.compositor) {
+            layer.set_input_region(Some(empty.wl_region()));
+        }
+        layer.commit();
+        let _ = self.conn.flush();
+        let id = self.next_id;
+        self.next_id += 1;
+        self.proxies.push(FocusProxy { id, layer, pool, buffer: None });
+        Ok(id)
+    }
+
+    fn close_focus_proxy(&mut self, id: SurfaceId) {
+        let Some(i) = self.proxies.iter().position(|p| p.id == id) else { return };
+        if self.keyboard.leave_if(id) {
+            let t = self.now();
+            self.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: true });
+        }
+        // Dropping the layer surface destroys it; the compositor then picks the next window.
+        self.proxies.remove(i);
+        let _ = self.conn.flush();
+    }
+
     fn close(&mut self, id: SurfaceId) {
         if self.in_frame == Some(id) {
             // Closed from inside its own frame: the host still holds the frame's texture.
@@ -1380,6 +1476,12 @@ impl HostCtl for WaylandHost {
     }
     fn close(&mut self, id: SurfaceId) {
         self.state.close(id)
+    }
+    fn open_focus_proxy(&mut self, spec: &FocusProxySpec) -> Result<SurfaceId, HostError> {
+        self.state.open_focus_proxy(spec)
+    }
+    fn close_focus_proxy(&mut self, id: SurfaceId) {
+        self.state.close_focus_proxy(id)
     }
     fn request_frame(&mut self, id: SurfaceId) {
         self.state.request_frame(id)

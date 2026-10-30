@@ -143,7 +143,9 @@ impl CompositorHandler for State {
 
 impl LayerShellHandler for State {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
-        State::closed(self, &layer.wl_surface().clone());
+        if !self.proxy_closed(&layer.wl_surface().clone()) {
+            State::closed(self, &layer.wl_surface().clone());
+        }
     }
 
     fn configure(
@@ -154,7 +156,9 @@ impl LayerShellHandler for State {
         c: LayerSurfaceConfigure,
         _: u32,
     ) {
-        self.configured(&layer.wl_surface().clone(), Some(c.new_size));
+        if !self.proxy_configured(&layer.wl_surface().clone()) {
+            self.configured(&layer.wl_surface().clone(), Some(c.new_size));
+        }
     }
 }
 
@@ -240,24 +244,12 @@ impl SeatHandler for State {
                 self.pointers.push(p);
             }
         }
-        if cap == Capability::Keyboard && self.keyboards.is_empty() {
-            self.keyboards.push(seat.get_keyboard(qh, ()));
-        }
     }
 
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
             for p in self.pointers.drain(..) {
                 p.release();
-            }
-        }
-        if cap == Capability::Keyboard {
-            for k in self.keyboards.drain(..) {
-                k.release();
-            }
-            if let Some(id) = self.keyboard.leave() {
-                let t = self.now();
-                self.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
             }
         }
     }
@@ -352,6 +344,34 @@ impl Dispatch<WpFractionalScaleV1, wl_surface::WlSurface> for State {
     }
 }
 
+/// The seat the keyboard comes from, bound at version 9 or lower: from version 10 KWin
+/// repeats keys itself and sends a repeat rate of 0, and the driver needs the real rate to
+/// repeat on its own clock (R38). Only its capabilities are read.
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        state: &mut State,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<State>,
+    ) {
+        let wl_seat::Event::Capabilities { capabilities: WEnum::Value(caps) } = event else { return };
+        let has = caps.contains(wl_seat::Capability::Keyboard);
+        if has && state.keyboards.is_empty() {
+            state.keyboards.push(seat.get_keyboard(qh, ()));
+        } else if !has && !state.keyboards.is_empty() {
+            for k in state.keyboards.drain(..) {
+                k.release();
+            }
+            if let Some(id) = state.keyboard.leave() {
+                let t = state.now();
+                state.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
+            }
+        }
+    }
+}
+
 impl Dispatch<WlKeyboard, ()> for State {
     fn event(
         state: &mut State,
@@ -368,8 +388,7 @@ impl Dispatch<WlKeyboard, ()> for State {
             }
             wl_keyboard::Event::Enter { surface, .. } => {
                 // Keys held at enter are ignored, so the key list is not read.
-                if let Some(i) = state.surface_index(&surface) {
-                    let id = state.surfaces[i].id;
+                if let Some(id) = state.focus_target(&surface) {
                     state.keyboard.enter(id, t, &mut state.events);
                 }
             }

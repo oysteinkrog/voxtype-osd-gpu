@@ -183,6 +183,11 @@ impl Keyboard {
         self.focus.take()
     }
 
+    /// As `leave`, only when `id` has focus. True when it had.
+    pub(crate) fn leave_if(&mut self, id: SurfaceId) -> bool {
+        self.focus == Some(id) && self.leave().is_some()
+    }
+
     pub(crate) fn key(&mut self, t: f64, code: u32, pressed: bool, events: &mut Vec<HostEvent>) {
         let (Some(surface), Some(x)) = (self.focus, self.xkb.as_mut()) else { return };
         let mods = self.mods;
