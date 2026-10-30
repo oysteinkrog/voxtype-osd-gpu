@@ -697,6 +697,15 @@ struct Ghost {
     slide: Channel,
 }
 
+/// A ghost under this opacity counts as gone when lines are kept apart.
+const GHOST_GONE: f64 = 0.02;
+
+/// A fixed ghost's pen at `t`. Every ghost a front drop leaves is fixed.
+fn ghost_pen(g: &Ghost, t: f64) -> (f64, f64) {
+    let (x, y) = g.fixed.unwrap_or_default();
+    ((x + g.x) as f64 + g.slide.value(t), (y + g.y) as f64 + g.rise.value(t))
+}
+
 /// One glyph as the new layout placed it.
 #[derive(Clone, Copy)]
 struct Placed {
@@ -898,14 +907,16 @@ fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32, whole: &[u32]) -> bool {
 /// where the newcomer lands. On the newest line it then shows whole, in the frame its old
 /// copy goes (reading-line envelope); on older lines it fades in. A word whose place is
 /// clear at once keeps its fade. A newest-line word lands at rest, so it also waits for
-/// the line scrolling up out of its row (within 0.9 `line_height`). Returns when each
-/// newest-line word shows.
+/// the line scrolling up out of its row (within 0.9 `line_height`). On a front drop it also
+/// waits for the old copies the drop left (`ghost_at`: whether one shows over a span and
+/// baseline at a time, other than the word's own). Returns when each newest-line word shows.
 fn show_when_clear(
     next: &mut [FlowWord],
     rewrapped: &[usize],
     newest: u32,
     line_height: f32,
     make: &Make,
+    ghost_at: Option<&dyn Fn(f64, f64, f64, f64, WordId) -> bool>,
 ) -> Vec<(WordId, f64)> {
     const STEP: f64 = 1.0 / 240.0;
     let t = make.t;
@@ -924,7 +935,7 @@ fn show_when_clear(
                 let in_row =
                     o.line == line || (line == newest && (o.y.value(at) + o.roll.value(at) - row).abs() < near);
                 i != s && in_row && !rewrapped.contains(&i) && x < b && x + o.width.value(at) > a
-            })
+            }) || ghost_at.is_some_and(|hit| hit(at, a, b, next[s].y.value(at) + next[s].roll.value(at), next[s].id))
         };
         let mut at = t;
         while at < t + REWRAP_WAIT_MAX && busy(at) {
@@ -1105,6 +1116,9 @@ impl Flow {
         // Words that rewrapped onto the newest line, with where their old copies start in
         // `self.ghosts`: the old copy goes in the frame the new one shows.
         let mut handed: Vec<(WordId, usize)> = Vec::new();
+        // On a front drop, the words whose old copies stay behind as ghosts: they go before
+        // any word of the new layout reaches them, so the two layouts never overlap.
+        let mut dropped: Vec<WordId> = Vec::new();
         // How far the last kept word's line moved, `(line, from old x to new x)`. A new word
         // on that line starts as far back and moves with it, so a line that shifts (a centred
         // line that grows, words after a revised one) slides as one piece instead of the old
@@ -1248,6 +1262,17 @@ impl Flow {
                     handed.push((o.id, self.ghosts.len()));
                 }
                 self.ghost_word(&o, t, retention);
+                if front_drop && !reduced {
+                    dropped.push(o.id);
+                    // The old copy is part of the old block: it scrolls up with it, so the
+                    // lines moving up never pass over it.
+                    if let Some(dy) = scroll {
+                        for g in self.ghosts.iter_mut().filter(|g| g.word == o.id) {
+                            let rise = g.rise.value(t) as f32;
+                            g.rise = make.to(rise, rise - dy, SCROLL, Rest::PIXELS);
+                        }
+                    }
+                }
                 if !reduced && !front_drop && scroll.is_none() {
                     let a = o.x.value(t);
                     left.push((o.id, o.line, a, a + o.width.value(t)));
@@ -1296,6 +1321,9 @@ impl Flow {
                 continue;
             }
             self.ghost_word(&o, t, retention);
+            if front_drop && !reduced {
+                dropped.push(id);
+            }
             if let Some(dy) = scroll.filter(|_| front.contains(&id) && !reduced) {
                 for g in self.ghosts.iter_mut().filter(|g| g.word == id) {
                     let rise = g.rise.value(t) as f32;
@@ -1303,7 +1331,24 @@ impl Flow {
                 }
             }
         }
-        let shown = show_when_clear(&mut next, &rewrapped, stage.newest, line_height, &make);
+        let near = 0.9 * line_height as f64;
+        let ghosts = &self.ghosts;
+        let ghost_at = |at: f64, a: f64, b: f64, row: f64, own: WordId| {
+            ghosts.iter().any(|g| {
+                g.word != own && dropped.contains(&g.word) && g.opacity.value(at) > GHOST_GONE && {
+                    let (x, y) = ghost_pen(g, at);
+                    (y - row).abs() < near && x < b && x + g.advance as f64 > a
+                }
+            })
+        };
+        let shown = show_when_clear(
+            &mut next,
+            &rewrapped,
+            stage.newest,
+            line_height,
+            &make,
+            (!dropped.is_empty()).then_some(&ghost_at as &dyn Fn(f64, f64, f64, f64, WordId) -> bool),
+        );
         for &(id, from) in &handed {
             let at = shown.iter().find(|s| s.0 == id).map_or(t, |s| s.1);
             for g in self.ghosts[from..].iter_mut().filter(|g| g.word == id) {
@@ -1313,6 +1358,7 @@ impl Flow {
             }
         }
         self.clear_ghosts(&next, &rewrapped, &left, t);
+        self.clear_dropped(&next, &dropped, line_height, t);
         self.words = next;
         self.index = index;
         self.update_margin(t, motion.margin, reduced);
@@ -1689,6 +1735,47 @@ impl Flow {
             if at < t + REWRAP_WAIT_MAX {
                 for g in self.ghosts.iter_mut().filter(|g| g.word == id) {
                     g.opacity.snap(at, 0.0);
+                }
+            }
+        }
+    }
+
+    /// On a front drop, each old copy in `dropped` goes in the frame a word of the new
+    /// layout first shows over it, so the leaving and the reflowed lines never draw over
+    /// each other.
+    fn clear_dropped(&mut self, next: &[FlowWord], dropped: &[WordId], line_height: f32, t: f64) {
+        if dropped.is_empty() {
+            return;
+        }
+        let near = 0.9 * line_height as f64;
+        for &id in dropped {
+            let mine: Vec<usize> = (0..self.ghosts.len()).filter(|&i| self.ghosts[i].word == id).collect();
+            let mut at = t;
+            let gone = loop {
+                let shown: Vec<&Ghost> =
+                    mine.iter().map(|&i| &self.ghosts[i]).filter(|g| g.opacity.value(at) > GHOST_GONE).collect();
+                if shown.is_empty() || at > t + 1.0 {
+                    break None;
+                }
+                let reached = shown.iter().any(|g| {
+                    let (x, y) = ghost_pen(g, at);
+                    next.iter().any(|o| {
+                        let a = o.x.value(at);
+                        o.id != id
+                            && (o.y.value(at) + o.roll.value(at) - y).abs() < near
+                            && a < x + g.advance as f64
+                            && a + o.width.value(at) > x
+                            && o.glyphs.iter().any(|f| f.opacity.value(at) > GHOST_GONE)
+                    })
+                });
+                if reached {
+                    break Some(at);
+                }
+                at += 1.0 / 240.0;
+            };
+            if let Some(at) = gone {
+                for &i in &mine {
+                    self.ghosts[i].opacity.snap(at, 0.0);
                 }
             }
         }

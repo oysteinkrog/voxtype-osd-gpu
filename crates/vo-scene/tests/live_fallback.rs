@@ -42,9 +42,11 @@ fn fallback_glyphs_keep_their_face_through_revisions_and_removal() {
     assert_eq!(w1.len(), 4, "two ghosts and two new glyphs");
     assert!(w1.iter().all(|&f| f == jp), "{w1:?}");
 
-    // A removed word fades out in its own face.
-    s.apply(view(&[(2, "ok")], latin), 3.0);
+    // A removed word fades out in its own face. It is the last word: a word dropped from the
+    // front goes as soon as the words sliding into its place reach it.
+    s.apply(view(&[(1, "入力"), (2, "ok"), (3, "音声")], latin), 2.0);
+    s.apply(view(&[(1, "入力"), (2, "ok")], latin), 3.0);
     let gone = s.sample(3.05);
-    let w1 = fonts_of(&gone, 1);
-    assert!(!w1.is_empty() && w1.iter().all(|&f| f == jp), "{w1:?}");
+    let w3 = fonts_of(&gone, 3);
+    assert!(!w3.is_empty() && w3.iter().all(|&f| f == jp), "{w3:?}");
 }

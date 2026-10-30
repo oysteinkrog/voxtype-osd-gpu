@@ -699,3 +699,88 @@ fn a_rewrapped_word_that_slides_with_the_words_before_it_crossfades_at_once() {
         assert!(up + down > 0.6, "popup at {:.2} + {:.2} ink at +{:.3}", up, down, t - 1.0);
     }
 }
+
+/// The boxes of the word copies that show in `list`: per word and baseline, from its first
+/// pen to a little past its last, `(word, x0, x1, baseline)`. A ghost and its word's new copy
+/// on another row are two boxes.
+fn word_boxes(list: &DisplayList) -> Vec<(u32, f32, f32, f32)> {
+    let mut out: Vec<(u32, f32, f32, f32)> = Vec::new();
+    for g in list.glyphs.iter().filter(|g| g.color.a > 0.05) {
+        match out.iter_mut().find(|b| b.0 == g.word && (b.3 - g.pos.y).abs() < 0.5) {
+            Some(b) => (b.1, b.2) = (b.1.min(g.pos.x), b.2.max(g.pos.x)),
+            None => out.push((g.word, g.pos.x, g.pos.x, g.pos.y)),
+        }
+    }
+    // The last glyph's ink reaches at least this far past its pen.
+    for b in &mut out {
+        b.2 += 0.3 * 20.0;
+    }
+    out
+}
+
+/// As `capped`, but the app drops whole lines: while the text takes more than `lines`
+/// lines, every word of the first line goes.
+fn capped_by_lines(all: &[(u32, &str)], width: f32, lines: usize) -> Vec<Word> {
+    let mut start = 0;
+    loop {
+        let mut shown = words(&all[start..]);
+        if start > 0 {
+            shown[0].text = format!("…{}", shown[0].text);
+        }
+        let mut probe = scene();
+        probe.apply(view(&shown, Some(width), false), 0.0);
+        let list = probe.sample(0.0);
+        let mut ys: Vec<f32> = list.glyphs.iter().map(|g| g.pos.y).collect();
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        if ys.len() <= lines {
+            return shown;
+        }
+        let on_first = shown.iter().filter(|w| first(&list, w.id).1 == ys[0]).count();
+        start += on_first.max(1);
+    }
+}
+
+#[test]
+fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
+    // A capped five-line popup: new words drop words from the front, the "…" moves the
+    // first line along and the lines below rewrap. The old copies of the dropped and
+    // rewrapped words and the reflowed lines never take the same pixels at the same time,
+    // whether the cap drops words one at a time or whole lines.
+    let text = "open the configuration file and set the popup theme to swiss so the dictation \
+                window shows the live words in the middle of the screen with the waveform above \
+                them then press the key again to stop and let the final pass punctuation land";
+    let all: Vec<(u32, &str)> = text.split(' ').enumerate().map(|(i, w)| (i as u32 + 1, w)).collect();
+    for by_lines in [false, true] {
+        let mut s = scene();
+        for n in 1..=all.len() {
+            let t = n as f64 * 0.3;
+            let shown = if by_lines { capped_by_lines(&all[..n], 300.0, 5) } else { capped(&all[..n], 300.0, 5) };
+            s.apply(view(&shown, Some(300.0), false), t);
+            for k in 0..36 {
+                let at = t + k as f64 / 120.0;
+                let boxes = word_boxes(&s.sample(at));
+                for (i, a) in boxes.iter().enumerate() {
+                    for b in &boxes[i + 1..] {
+                        let dx = a.2.min(b.2) - a.1.max(b.1);
+                        // Ascent 14, descent 4 at 20 px.
+                        let dy = (a.3 + 4.0).min(b.3 + 4.0) - (a.3 - 14.0).max(b.3 - 14.0);
+                        assert!(
+                            dx <= 2.0 || dy <= 2.0,
+                            "{n} words (whole lines {by_lines}) at +{:.3}: word {} at ({:.1}..{:.1}, {:.1}) over \
+                             word {} at ({:.1}..{:.1}, {:.1})",
+                            at - t,
+                            a.0,
+                            a.1,
+                            a.2,
+                            a.3,
+                            b.0,
+                            b.1,
+                            b.2,
+                            b.3
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
