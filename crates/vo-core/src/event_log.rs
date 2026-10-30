@@ -4,9 +4,17 @@
 //! `t` gives the same frame as the live run did at `t`. The payload type belongs to the app;
 //! this module only adds the envelope. Stored as JSON with a `version` field, so later
 //! versions can read old logs and refuse ones they do not understand.
+//!
+//! Keyboard input (keys, focus, modifiers, keymap and repeat info) goes in its own `input`
+//! list of [`InputRecord`]s beside `events`, still version 1: a version 1 reader ignores
+//! fields it does not know, so it skips them, and a log with no input writes exactly as
+//! before. Repeat info always comes before the first key, so a replay repeats keys as the
+//! live run did.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use crate::key::{KeyState, LogicalKey, Mods, RepeatInfo};
 
 /// The format version this build writes. Raise it on any change that an older reader would
 /// misread, and keep reading the old versions.
@@ -25,6 +33,39 @@ pub struct EventLog<E> {
     /// Seed for every `hash::rand` call the replay makes.
     pub seed: u32,
     events: Vec<Event<E>>,
+    /// Keyboard input, in time order (`push_input`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input: Vec<Event<InputRecord>>,
+}
+
+/// One keyboard input record. The surface is left out: the app has one keyboard focus.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputRecord {
+    /// A key as the host sent it. Repeats are not logged: the replay makes them again from
+    /// the repeat info.
+    Key {
+        state: KeyState,
+        key: LogicalKey,
+        code: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        mods: Mods,
+    },
+    KeyboardFocus {
+        gained: bool,
+        requested: bool,
+    },
+    Modifiers {
+        mods: Mods,
+    },
+    /// The compositor's keymap changed; `name` is its layout, when known.
+    Keymap {
+        name: String,
+    },
+    RepeatInfo {
+        info: RepeatInfo,
+    },
 }
 
 #[derive(Debug)]
@@ -36,6 +77,10 @@ pub enum EventLogError {
     },
     /// Written by a newer build.
     UnsupportedVersion(u32),
+    /// A key record before any repeat info: a replay would not know how the key repeats.
+    KeyBeforeRepeatInfo {
+        t: f64,
+    },
     Json(serde_json::Error),
 }
 
@@ -48,6 +93,9 @@ impl std::fmt::Display for EventLogError {
             EventLogError::UnsupportedVersion(v) => {
                 write!(f, "event log version {v} is newer than this build reads ({EVENT_LOG_VERSION}); update the tool")
             }
+            EventLogError::KeyBeforeRepeatInfo { t } => {
+                write!(f, "key at t = {t} s comes before any repeat info; log the repeat info first")
+            }
             EventLogError::Json(e) => write!(f, "event log is not valid JSON for this app: {e}"),
         }
     }
@@ -57,7 +105,19 @@ impl std::error::Error for EventLogError {}
 
 impl<E> EventLog<E> {
     pub fn new(seed: u32) -> EventLog<E> {
-        EventLog { version: EVENT_LOG_VERSION, seed, events: Vec::new() }
+        EventLog { version: EVENT_LOG_VERSION, seed, events: Vec::new(), input: Vec::new() }
+    }
+
+    /// Appends a keyboard input record. Times must be finite and never go backwards, and a
+    /// key needs repeat info logged before it.
+    pub fn push_input(&mut self, t: f64, record: InputRecord) -> Result<(), EventLogError> {
+        check_input(&self.input, t, &record)?;
+        self.input.push(Event { t, event: record });
+        Ok(())
+    }
+
+    pub fn input(&self) -> &[Event<InputRecord>] {
+        &self.input
     }
 
     /// Appends an event. Times must be finite and never go backwards; equal times keep
@@ -116,8 +176,24 @@ impl<E: DeserializeOwned> EventLog<E> {
             }
             previous = e.t;
         }
+        for (i, e) in log.input.iter().enumerate() {
+            check_input(&log.input[..i], e.t, &e.event)?;
+        }
         Ok(log)
     }
+}
+
+/// Whether `record` at `t` may follow `before`.
+fn check_input(before: &[Event<InputRecord>], t: f64, record: &InputRecord) -> Result<(), EventLogError> {
+    let previous = before.last().map_or(f64::NEG_INFINITY, |e| e.t);
+    if !t.is_finite() || t < previous {
+        return Err(EventLogError::BadTime { previous, t });
+    }
+    let has_repeat = || before.iter().any(|e| matches!(e.event, InputRecord::RepeatInfo { .. }));
+    if matches!(record, InputRecord::Key { .. }) && !has_repeat() {
+        return Err(EventLogError::KeyBeforeRepeatInfo { t });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -186,5 +262,60 @@ mod tests {
         }
         assert_eq!(log.between(0.3, 0.52).len(), 3);
         assert_eq!(log.end(), 1.75);
+    }
+
+    fn key(state: KeyState, c: char) -> InputRecord {
+        let text = (state == KeyState::Down).then(|| c.to_string());
+        InputRecord::Key { state, key: LogicalKey::Char(c), code: 18, text, mods: Mods::NONE }
+    }
+
+    fn with_keys() -> EventLog<Ev> {
+        let mut log = sample();
+        log.push_input(0.0, InputRecord::Keymap { name: "us(altgr-intl)".into() }).unwrap();
+        log.push_input(0.0, InputRecord::RepeatInfo { info: RepeatInfo { rate_hz: 25.0, delay_s: 0.6 } }).unwrap();
+        log.push_input(0.6, InputRecord::KeyboardFocus { gained: true, requested: false }).unwrap();
+        log.push_input(0.7, key(KeyState::Down, 'é')).unwrap();
+        log.push_input(0.75, InputRecord::Modifiers { mods: Mods::SHIFT }).unwrap();
+        log.push_input(0.8, key(KeyState::Up, 'é')).unwrap();
+        log.push_input(1.2, InputRecord::KeyboardFocus { gained: false, requested: true }).unwrap();
+        log
+    }
+
+    #[test]
+    fn key_records_round_trip() {
+        let log = with_keys();
+        let back: EventLog<Ev> = EventLog::from_json(&log.to_json()).unwrap();
+        assert_eq!(back, log);
+        assert_eq!(back.input().len(), 7);
+        // A log without input writes exactly as before: no `input` field.
+        assert!(!sample().to_json().contains("input"));
+    }
+
+    #[test]
+    fn version_1_readers_skip_key_records() {
+        /// The reader as it was before key records.
+        #[derive(Deserialize)]
+        struct V1<E> {
+            version: u32,
+            seed: u32,
+            events: Vec<Event<E>>,
+        }
+        let log = with_keys();
+        let old: V1<Ev> = serde_json::from_str(&log.to_json()).unwrap();
+        assert_eq!((old.version, old.seed), (1, 42));
+        assert_eq!(old.events, log.events());
+    }
+
+    #[test]
+    fn repeat_info_comes_before_the_first_key() {
+        let mut log = EventLog::<Ev>::new(1);
+        log.push_input(0.1, InputRecord::KeyboardFocus { gained: true, requested: false }).unwrap();
+        let err = log.push_input(0.2, key(KeyState::Down, 'a')).unwrap_err();
+        assert!(matches!(err, EventLogError::KeyBeforeRepeatInfo { .. }), "{err}");
+        // A file that breaks the rule is refused too.
+        let mut bad = EventLog::<Ev>::new(1);
+        bad.input.push(Event { t: 0.2, event: key(KeyState::Down, 'a') });
+        let err = EventLog::<Ev>::from_json(&bad.to_json()).unwrap_err();
+        assert!(matches!(err, EventLogError::KeyBeforeRepeatInfo { .. }), "{err}");
     }
 }

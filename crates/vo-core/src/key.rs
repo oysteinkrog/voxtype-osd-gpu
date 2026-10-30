@@ -8,6 +8,8 @@
 //!
 //! These types live here, below the scene and the host, so the pure edit model can read them.
 
+use serde::{Deserialize, Serialize};
+
 /// The surface a keyboard event is for. Same id space as the host's surfaces.
 pub type KeySurface = u32;
 
@@ -37,7 +39,7 @@ impl KeyEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyState {
     Down,
     /// Made by the driver while a key is held, never by a host.
@@ -46,7 +48,7 @@ pub enum KeyState {
 }
 
 /// A key as the layout reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogicalKey {
     Named(NamedKey),
     /// A key whose keysym is a character, with Shift and the layout applied ('a', 'A',
@@ -57,7 +59,7 @@ pub enum LogicalKey {
 }
 
 /// The non-character keys the framework knows by name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NamedKey {
     Escape,
     Enter,
@@ -108,7 +110,7 @@ impl NamedKey {
 }
 
 /// Modifier state. Locks are the latched state, the others are held or latched.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Mods {
     pub shift: bool,
     pub ctrl: bool,
@@ -132,7 +134,7 @@ impl Mods {
 }
 
 /// Key repeat as the compositor asks for it. `rate_hz` 0 means no repeat.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RepeatInfo {
     /// Repeats per second once repeat has started.
     pub rate_hz: f32,
