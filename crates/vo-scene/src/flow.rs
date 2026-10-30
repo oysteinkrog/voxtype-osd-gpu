@@ -462,7 +462,8 @@ pub struct LiveMotion {
     /// spaces and hard newlines (`Element::live_source`). See `live_spans`.
     pub source: Option<String>,
     /// The still profile (`Element::still_motion`), for editing: words that enter, change or
-    /// leave only change ink, within 80 ms (`STILL_FADE`), in place. Reflow and scroll move
+    /// leave only change ink, within 80 ms (`STILL_FADE`), in place; a letter that comes in
+    /// starts at arrival ink (`arrival::INK`), so it is readable in its first frame. Reflow and scroll move
     /// whole words in at most 150 ms (`STILL_REFLOW`). Revisions crossfade, rewraps fade,
     /// and settling ink, letter physics, the magnet and revision marks are off. Motion that
     /// is running when it turns on settles the same way.
@@ -1352,6 +1353,12 @@ impl Flow {
                 c.snap(t, c.target());
             }
             for g in &mut w.glyphs {
+                // A letter that comes in is readable in the frame it shows
+                // (reading-line envelope): its fade starts at arrival ink.
+                let ink = crate::arrival::INK as f64;
+                if g.opacity.target() >= 1.0 && g.opacity.value(t) < ink {
+                    g.opacity.snap(t, ink);
+                }
                 settle_with(&mut g.opacity, t, STILL_FADE);
                 for c in [&mut g.x, &mut g.rise, &mut g.scale] {
                     c.snap(t, c.target());
@@ -2415,7 +2422,9 @@ mod tests {
         /// Runs `from` then `to` at 1.0. Returns whether every frame drew each glyph only where
         /// it rests before or after, at its size and with no blur, and the first time from
         /// which every frame matches the end within 1 % ink (a glyph under 1 % counts as gone).
-        fn run(from: &[(WordId, &str)], to: &[(WordId, &str)], still: bool) -> (bool, f64) {
+        /// Also returns the lowest ink a new letter (one with a place only after the change) is
+        /// drawn with.
+        fn run(from: &[(WordId, &str)], to: &[(WordId, &str)], still: bool) -> (bool, f64, f32) {
             let mut s = scene();
             s.apply(view(from, still), 0.0);
             let before = glyphs(&s.sample(0.99));
@@ -2430,12 +2439,18 @@ mod tests {
                         && r.3 == g.3
                 })
             };
-            let (mut in_place, mut done) = (true, 1.0);
+            let near = |a: &(u32, u32, Point, f32, f32), b: &(u32, u32, Point, f32, f32)| {
+                a.0 == b.0 && a.1 == b.1 && (a.2.x - b.2.x).abs() < 0.01 && (a.2.y - b.2.y).abs() < 0.01
+            };
+            let (mut in_place, mut done, mut new_ink) = (true, 1.0, 1.0f32);
             let mut t = 1.0;
             while t < 1.5 {
                 let dl = s.sample(t);
                 let mut now = glyphs(&dl);
                 in_place &= now.iter().filter(|g| g.4 > 0.0).all(at_rest);
+                for g in now.iter().filter(|g| g.4 > 0.0 && !before.iter().any(|b| near(g, b))) {
+                    new_ink = new_ink.min(g.4);
+                }
                 // Under 1 % ink a glyph is gone.
                 now.retain(|g| g.4 >= 0.01);
                 in_place &= dl.glyph_fx.iter().all(|(_, fx)| fx.blur == 0.0);
@@ -2446,7 +2461,7 @@ mod tests {
                 }
                 t += STEP;
             }
-            (in_place, done)
+            (in_place, done, new_ink)
         }
 
         const HELLO: &[(WordId, &str)] = &[(1, "hello")];
@@ -2458,8 +2473,10 @@ mod tests {
             for (name, from, to) in
                 [("enter", HELLO, HELLO_WORLD), ("revise", HELLO_WORLD, HELLO_WORD), ("exit", HELLO_WORLD, HELLO)]
             {
-                let (in_place, done) = run(from, to, true);
+                let (in_place, done, new_ink) = run(from, to, true);
                 assert!(in_place, "{name}: a glyph left its place");
+                // Readable in the frame it shows (reading-line envelope, rule 1).
+                assert!(new_ink >= crate::arrival::INK - 1e-3, "{name}: a new letter at {new_ink}");
                 assert!(done > 1.0 && done <= 1.08 + 1e-9, "{name}: settled at {done}");
             }
         }
@@ -2469,7 +2486,7 @@ mod tests {
         #[test]
         fn without_the_profile_the_look_moves_words() {
             for (from, to) in [(HELLO, HELLO_WORLD), (HELLO_WORLD, HELLO_WORD)] {
-                let (in_place, done) = run(from, to, false);
+                let (in_place, done, _) = run(from, to, false);
                 assert!(!in_place && done > 1.15, "{done}");
             }
         }

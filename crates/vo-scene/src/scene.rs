@@ -492,14 +492,17 @@ impl<M> Node<M> {
                 Motion::Snap => Spring::SNAP,
             };
         let (fade, slide) = (spring(Prop::Opacity), spring(Prop::Offset));
-        // The still profile keeps a word's enter and change to its fade, within 80 ms.
+        // The still profile keeps a word's enter to its fade, within 80 ms, and drops its change.
         let still = live.still;
         let fade = if still { crate::flow::STILL_FADE } else { fade };
         let chan = |v: f64, s: Spring, rest: Rest| Channel::new(t, v, s).with_rest(rest).with_retention(retention);
         let reduced = self.reduced;
         let from = |tr: &Transition| {
             let tr = if reduced { tr.reduced() } else { *tr };
-            let tr = if still { Transition { opacity: tr.opacity, ..Transition::NONE } } else { tr };
+            // Under the still profile only the fade is left, from arrival ink at least, so a
+            // typed or changed word is readable in its first frame.
+            let ink = |o: f32| o.max(crate::arrival::INK);
+            let tr = if still { Transition { opacity: tr.opacity.map(ink), ..Transition::NONE } } else { tr };
             let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
             let fx = [tr.blur, tr.dissolve, tr.wipe].map(|v| v.unwrap_or(0.0) as f64);
             ([tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64], fx)
@@ -510,7 +513,8 @@ impl<M> Node<M> {
             let old = self.words.binary_search_by_key(&w.id, |a| a.id).ok();
             let start = match old {
                 None => Some(from(&live.arrival.apply(*enter))),
-                Some(i) if self.words[i].text != w.text && *change != Transition::NONE => Some(from(change)),
+                // Under the still profile a changed word's letters fade in the flow alone.
+                Some(i) if self.words[i].text != w.text && *change != Transition::NONE && !still => Some(from(change)),
                 Some(_) => None,
             };
             let mut anim = match old {
