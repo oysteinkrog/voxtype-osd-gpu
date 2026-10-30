@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use vo_core::signals::{Sig, SignalFrame, Signals};
 use vo_core::words::{WordId, WordModel};
 
+use crate::font::Fnv;
 use crate::typo::Typo;
 
 /// Without word times, the window read for a word reaches back at most this far.
@@ -56,7 +57,7 @@ impl WordVoice {
 /// Every word's reading, by id.
 #[derive(Clone, Debug, Default)]
 pub struct WordVoices {
-    voices: HashMap<WordId, WordVoice>,
+    voices: HashMap<WordId, WordVoice, Fnv>,
     /// The speaker's running pitch in semitones from 60 Hz, smoothed over words.
     pitch_ref: Option<f32>,
     /// When the newest word first appeared, for the untimed window.

@@ -173,13 +173,42 @@ pub struct FontRegistry {
     /// Font files already read, by path: the faces of one collection share its bytes.
     files: Arc<RwLock<HashMap<PathBuf, Bytes>>>,
     /// Instances made by `add_instance`, by base font and axis values in hundredths.
-    instances: Arc<RwLock<HashMap<InstanceKey, FontId>>>,
+    instances: Arc<RwLock<InstanceTable>>,
     /// Faces added by `system`, by pattern; `None` for a pattern fontconfig did not find.
     system: Arc<RwLock<HashMap<String, Option<FontId>>>>,
 }
 
-/// A variable font instance: its base font and its axis values (tag, hundredths).
-type InstanceKey = (FontId, Vec<([u8; 4], i32)>);
+/// Variable font instances by base font, then by axis values (tag, hundredths).
+type InstanceTable = HashMap<FontId, HashMap<Vec<([u8; 4], i32)>, FontId, Fnv>>;
+
+/// FNV-1a, for small tables looked up for every word in every frame (the instance table, the
+/// word voices): for keys of a few bytes SipHash costs more than the rest of the lookup.
+/// Not for keys an outsider chooses.
+#[derive(Clone, Copy)]
+pub(crate) struct FnvHasher(u64);
+
+impl std::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Fnv;
+
+impl std::hash::BuildHasher for Fnv {
+    type Hasher = FnvHasher;
+
+    fn build_hasher(&self) -> FnvHasher {
+        FnvHasher(0xcbf2_9ce4_8422_2325)
+    }
+}
 
 #[derive(Default)]
 struct Fallback {
@@ -273,8 +302,25 @@ impl FontRegistry {
     /// so a caller can ask every frame. Values are kept to a hundredth. `None` when there is
     /// no such font.
     pub fn add_instance(&self, base: FontId, axes: &[([u8; 4], f32)]) -> Option<FontId> {
-        let key: Vec<([u8; 4], i32)> = axes.iter().map(|&(t, v)| (t, (v * 100.0).round() as i32)).collect();
-        if let Some(&id) = self.instances.read().expect("instance lock").get(&(base, key.clone())) {
+        let hundredths = |&(t, v): &([u8; 4], f32)| (t, (v * 100.0).round() as i32);
+        // The key on the stack for the lookup every frame makes; a Vec only for a new one.
+        let mut stack = [([0u8; 4], 0i32); 8];
+        if axes.len() <= stack.len() {
+            for (k, a) in stack.iter_mut().zip(axes) {
+                *k = hundredths(a);
+            }
+            let found = self
+                .instances
+                .read()
+                .expect("instance lock")
+                .get(&base)
+                .and_then(|m| m.get(&stack[..axes.len()]).copied());
+            if found.is_some() {
+                return found;
+            }
+        }
+        let key: Vec<([u8; 4], i32)> = axes.iter().map(hundredths).collect();
+        if let Some(&id) = self.instances.read().expect("instance lock").get(&base).and_then(|m| m.get(&key)) {
             return Some(id);
         }
         let face = self.get(base)?;
@@ -287,7 +333,7 @@ impl FontRegistry {
         };
         let chain = self.fallbacks(base);
         self.fallback.write().expect("fallback lock").chains.insert(id, chain);
-        self.instances.write().expect("instance lock").insert((base, key), id);
+        self.instances.write().expect("instance lock").entry(base).or_default().insert(key, id);
         Some(id)
     }
 
