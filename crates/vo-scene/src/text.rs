@@ -20,6 +20,7 @@ use harfrust::{Direction, Feature, ShaperFont};
 use skrifa::instance::Size as FontSize;
 use skrifa::MetadataProvider;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
+use vo_core::edit::{is_grapheme_boundary, next_grapheme};
 
 use crate::element::TextStyle;
 use crate::font::{Face, FontId, FontRegistry};
@@ -45,6 +46,21 @@ pub struct ShapedText {
     pub glyphs: Vec<PlacedGlyph>,
     /// The lines, top to bottom.
     pub lines: Vec<Line>,
+    /// Where a caret can stand, line by line and left to right: one stop before every
+    /// grapheme cluster a line holds, spaces included, and one at the line's end. At a soft
+    /// wrap the break byte has two stops, the end of one line and the start of the next. Only
+    /// built when `TextStyle::stops` is set; empty otherwise. Text cut by `max_lines` or an
+    /// ellipsis has no stops.
+    pub stops: Vec<CaretStop>,
+}
+
+/// A place a caret can stand: before the grapheme cluster at `byte` (or at the line's end),
+/// on `line`, at `x` across the text box, after alignment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    pub byte: usize,
+    pub line: usize,
+    pub x: f32,
 }
 
 /// One laid-out line: its glyphs, where it sits across the box and its baseline.
@@ -56,6 +72,10 @@ pub struct Line {
     pub x: f32,
     pub width: f32,
     pub baseline: f32,
+    /// The source bytes the line holds, without the hard line break that ends it. A soft
+    /// wrapped line keeps its trailing spaces. Only filled when `TextStyle::stops` is set;
+    /// `0..0` otherwise.
+    pub bytes: Range<usize>,
 }
 
 /// Where each line of a paragraph sits across the text box (FX-002).
@@ -94,6 +114,9 @@ impl ShapedText {
             for l in &mut self.lines {
                 l.x += dx;
             }
+            for s in &mut self.stops {
+                s.x += dx;
+            }
             self.size.w = width;
         }
     }
@@ -110,9 +133,61 @@ fn align_lines(glyphs: &mut [PlacedGlyph], lines: &[(usize, f32, f32)], widest: 
         for g in &mut glyphs[start.min(end)..end] {
             g.pos.x += dx;
         }
-        out.push(Line { glyphs: start.min(end)..end, x: dx, width, baseline });
+        out.push(Line { glyphs: start.min(end)..end, x: dx, width, baseline, bytes: 0..0 });
     }
     out
+}
+
+/// Characters that end a line by themselves. A line's `bytes` stop before them.
+fn is_hard_break(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
+/// `end` moved back over the hard line break characters just before it.
+fn trim_break(text: &str, start: usize, mut end: usize) -> usize {
+    while end > start {
+        match text[..end].chars().next_back() {
+            Some(c) if is_hard_break(c) => end -= c.len_utf8(),
+            _ => break,
+        }
+    }
+    end
+}
+
+/// Pushes the stops of one line: for each span `(bytes, x0, x1)`, one stop per grapheme
+/// boundary in it, spread evenly from `x0` to `x1` (a ligature's advance is shared by its
+/// letters), then the end stop at `end`, `end_x`. Spans are in order and touch.
+fn push_stops(
+    text: &str,
+    line: usize,
+    spans: impl IntoIterator<Item = (Range<usize>, f32, f32)>,
+    (end, end_x): (usize, f32),
+    out: &mut Vec<CaretStop>,
+) {
+    let mut cuts = Vec::new();
+    for (r, x0, x1) in spans {
+        cuts.clear();
+        let mut b = r.start;
+        if !is_grapheme_boundary(text, b) {
+            b = next_grapheme(text, b);
+        }
+        while b < r.end {
+            cuts.push(b);
+            b = next_grapheme(text, b);
+        }
+        let n = cuts.len() as f32;
+        for (k, &b) in cuts.iter().enumerate() {
+            out.push(CaretStop { byte: b, line, x: x0 + (x1 - x0) * k as f32 / n });
+        }
+    }
+    out.push(CaretStop { byte: end, line, x: end_x });
+}
+
+/// Moves the stops of each line across by that line's alignment shift.
+fn align_stops(stops: &mut [CaretStop], lines: &[Line]) {
+    for s in stops {
+        s.x += lines[s.line].x;
+    }
 }
 
 /// `PlacedGlyph::cluster` of the glyphs of an ellipsis the layout added.
@@ -188,6 +263,8 @@ impl TextLayout for EstimateText {
         let mut any = false;
         let first_baseline = self.ascent * em;
         let mut starts: Vec<(usize, f32, f32)> = vec![(0, 0.0, first_baseline)];
+        // With stops: each word as (line, bytes, x, width).
+        let mut placed_words: Vec<(usize, Range<usize>, f32, f32)> = Vec::new();
         for (start, word) in words(text) {
             let object = (word == OBJECT_TEXT).then(|| objects.next().copied().unwrap_or(0.0));
             let w = object.unwrap_or(word.chars().count() as f32 * self.advance * em);
@@ -205,6 +282,9 @@ impl TextLayout for EstimateText {
                 }
             }
             let baseline = line as f32 * style.line_height + self.ascent * em;
+            if style.stops {
+                placed_words.push((line, start..start + word.len(), x, w));
+            }
             if let Some(w) = object {
                 glyphs.push(PlacedGlyph {
                     glyph: OBJECT_GLYPH,
@@ -239,11 +319,59 @@ impl TextLayout for EstimateText {
             placed.truncate(lines);
             glyphs.truncate(placed.last().map_or(0, |l| l.glyphs.end));
         }
-        ShapedText { size: Size::new(widest, lines as f32 * style.line_height), glyphs, lines: placed }
+        let mut out = ShapedText {
+            size: Size::new(widest, lines as f32 * style.line_height),
+            glyphs,
+            lines: placed,
+            stops: Vec::new(),
+        };
+        if style.stops {
+            self.stops(text, style, &placed_words, &mut out);
+        }
+        out
     }
 }
 
 impl EstimateText {
+    /// Fills `Line::bytes` and the caret stops from the placed words. The space between two
+    /// words, however many characters it holds, is one `space` wide, as the layout draws it.
+    fn stops(&self, text: &str, style: &TextStyle, words: &[(usize, Range<usize>, f32, f32)], out: &mut ShapedText) {
+        let space = self.space * style.size;
+        if out.lines.is_empty() {
+            // An empty or all-space text: one empty line, so a caret has somewhere to stand.
+            let end = trim_break(text, 0, text.len());
+            out.lines.push(Line {
+                glyphs: 0..0,
+                x: 0.0,
+                width: 0.0,
+                baseline: self.ascent * style.size,
+                bytes: 0..end,
+            });
+            out.size.h = style.line_height;
+            push_stops(text, 0, [(0..end, 0.0, 0.0)], (end, 0.0), &mut out.stops);
+            return;
+        }
+        for line in 0..out.lines.len() {
+            let on = words.iter().filter(|w| w.0 == line);
+            let start = if line == 0 { 0 } else { words.iter().find(|w| w.0 == line).map_or(0, |w| w.1.start) };
+            let end = words.iter().find(|w| w.0 == line + 1).map_or(text.len(), |w| w.1.start);
+            let end = trim_break(text, start, end);
+            let mut spans = Vec::new();
+            // The byte and x where the last word ended.
+            let mut at = (start, 0.0f32);
+            for (_, bytes, x, w) in on {
+                spans.push((at.0..bytes.start, at.1, *x));
+                spans.push((bytes.clone(), *x, x + w));
+                at = (bytes.end, x + w);
+            }
+            let end_x = if at.0 < end { at.1 + space } else { at.1 };
+            spans.push((at.0..end, at.1, end_x));
+            push_stops(text, line, spans, (end, end_x), &mut out.stops);
+            out.lines[line].bytes = start..end;
+        }
+        align_stops(&mut out.stops, &out.lines);
+    }
+
     /// Vertical text as `ShapedLayout::vertical` sets it, with every character one em tall
     /// and `advance` ems wide, hanging `ascent` ems from its top, and a space `space` ems
     /// tall. `style.max_lines` caps the number of characters.
@@ -338,7 +466,18 @@ impl TextLayout for ShapedLayout {
             return self.vertical(text, style);
         }
         if text.is_empty() {
-            return ShapedText::default();
+            if !style.stops {
+                return ShapedText::default();
+            }
+            // Editable and empty: one empty line, so a caret has somewhere to stand.
+            let m = face.skrifa().metrics(FontSize::new(style.size), face.location());
+            let baseline = 0.5 * (style.line_height - (m.ascent - m.descent)) + m.ascent;
+            return ShapedText {
+                size: Size::new(0.0, style.line_height),
+                glyphs: Vec::new(),
+                lines: vec![Line { glyphs: 0..0, x: 0.0, width: 0.0, baseline, bytes: 0..0 }],
+                stops: vec![CaretStop { byte: 0, line: 0, x: 0.0 }],
+            };
         }
         let upem = face.units_per_em();
         let k = style.size / upem as f32;
@@ -367,13 +506,16 @@ impl TextLayout for ShapedLayout {
         let mut ends: Vec<f32> = Vec::new();
         let mut widest = 0.0f32;
         let mut line_starts: Vec<(usize, f32, f32)> = Vec::with_capacity(lines.len());
+        let mut line_bytes: Vec<Range<usize>> = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             let baseline = first_baseline + i as f32 * style.line_height;
             let range = segments[line.start].glyphs.start..segments[line.end - 1].glyphs.end;
             let start = out.glyphs.len();
             ends.clear();
             let (mut x, mut width) = (0.0f32, 0.0f32);
-            for g in &glyphs[range] {
+            // The first cluster an ellipsis dropped, if one did.
+            let mut cut: Option<u32> = None;
+            for g in &glyphs[range.clone()] {
                 let advance = g.advance + style.tracking;
                 if !is_space(text, g.cluster) {
                     let at = Point::new(x + g.dx, baseline - g.dy);
@@ -394,6 +536,7 @@ impl TextLayout for ShapedLayout {
                     while !ends.is_empty() && out.glyphs[start + ends.len() - 1].cluster == cluster {
                         ends.pop();
                     }
+                    cut = Some(cluster);
                     out.glyphs.truncate(start + ends.len());
                 }
                 let x = ends.last().copied().unwrap_or(0.0);
@@ -413,11 +556,75 @@ impl TextLayout for ShapedLayout {
             }
             widest = widest.max(width);
             line_starts.push((start, width, baseline));
+            if style.stops {
+                let bytes =
+                    line_stops(text, &glyphs, (i, line, range), (&segments, style.tracking, cut), &mut out.stops);
+                line_bytes.push(bytes);
+            }
         }
         out.lines = align_lines(&mut out.glyphs, &line_starts, widest, style.align);
         out.size = Size::new(widest, lines.len() as f32 * style.line_height);
+        if style.stops {
+            for (l, bytes) in out.lines.iter_mut().zip(line_bytes) {
+                l.bytes = bytes;
+            }
+            align_stops(&mut out.stops, &out.lines);
+            // A text that ends in a line break has an empty last line for the caret.
+            if !dropped && text.chars().next_back().is_some_and(is_hard_break) {
+                let line = out.lines.len();
+                let x = style.align.factor() * widest;
+                let baseline = first_baseline + line as f32 * style.line_height;
+                let n = out.glyphs.len();
+                out.lines.push(Line { glyphs: n..n, x, width: 0.0, baseline, bytes: text.len()..text.len() });
+                out.stops.push(CaretStop { byte: text.len(), line, x });
+                out.size.h += style.line_height;
+            }
+        }
         out
     }
+}
+
+/// Pushes the caret stops of line `i` of a shaped layout, before alignment, and returns the
+/// line's bytes. `line` is its range of segments and `range` its range of shaped glyphs; `cut`
+/// is the first cluster an ellipsis dropped from it.
+fn line_stops(
+    text: &str,
+    glyphs: &[Shaped],
+    (i, line, range): (usize, &Range<usize>, Range<usize>),
+    (segments, tracking, cut): (&[Segment], f32, Option<u32>),
+    out: &mut Vec<CaretStop>,
+) -> Range<usize> {
+    let cluster_at = |g: usize| glyphs.get(g).map_or(text.len(), |g| g.cluster as usize);
+    let start = if i == 0 { 0 } else { cluster_at(range.start) };
+    let next = segments.get(line.end).map_or(text.len(), |s| cluster_at(s.glyphs.start));
+    let mut end = trim_break(text, start, next);
+    if let Some(c) = cut {
+        end = end.min(c as usize);
+    }
+    let mut spans: Vec<(Range<usize>, f32, f32)> = Vec::new();
+    let mut x = 0.0f32;
+    for g in &glyphs[range] {
+        let c = g.cluster as usize;
+        if c >= end {
+            break;
+        }
+        let advance = g.advance + tracking;
+        match spans.last_mut() {
+            Some(span) if span.0.start == c => span.2 += advance,
+            last => {
+                if let Some(span) = last {
+                    span.0.end = c;
+                }
+                spans.push((c..end, x, x + advance));
+            }
+        }
+        x += advance;
+    }
+    if let Some(first) = spans.first_mut() {
+        first.0.start = start;
+    }
+    push_stops(text, i, spans, (end, x), out);
+    start..end
 }
 
 /// One shaped glyph, scaled to logical units, before line fitting.
@@ -1298,5 +1505,164 @@ mod tests {
         assert_eq!(e.lines.len(), 2);
         assert_eq!(e.lines[1].glyphs, 2..4);
         assert_eq!(e.lines[1].baseline, 12.0 + 8.0);
+    }
+
+    fn stops_of(t: &ShapedText) -> Vec<(usize, usize, f32)> {
+        t.stops.iter().map(|s| (s.byte, s.line, s.x)).collect()
+    }
+
+    #[test]
+    fn estimate_stops_include_spaces_and_line_ends() {
+        let style = TextStyle::new(0, 10.0, 12.0).with_stops();
+        let t = EstimateText::default();
+        let one = t.layout("ab cd", &style, None);
+        assert_eq!(stops_of(&one), [(0, 0, 0.0), (1, 0, 5.5), (2, 0, 11.0), (3, 0, 14.0), (4, 0, 19.5), (5, 0, 25.0)]);
+        assert_eq!(one.lines[0].bytes, 0..5);
+        // Wrapped: the break byte 3 ends line 0 after its space and starts line 1.
+        let two = t.layout("ab cd", &style, Some(20.0));
+        assert_eq!(
+            stops_of(&two),
+            [(0, 0, 0.0), (1, 0, 5.5), (2, 0, 11.0), (3, 0, 14.0), (3, 1, 0.0), (4, 1, 5.5), (5, 1, 11.0)]
+        );
+        assert_eq!(two.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>(), [0..3, 3..5]);
+        // Empty text still has a line and a stop.
+        let empty = t.layout("", &style, None);
+        assert_eq!(stops_of(&empty), [(0, 0, 0.0)]);
+        assert_eq!(empty.size.h, 12.0);
+    }
+
+    #[test]
+    fn no_stops_unless_asked() {
+        let t = EstimateText::default();
+        let style = TextStyle::new(0, 10.0, 12.0);
+        let plain = t.layout("ab cd", &style, Some(20.0));
+        assert!(plain.stops.is_empty());
+        assert!(plain.lines.iter().all(|l| l.bytes == (0..0)));
+        let with = t.layout("ab cd", &style.with_stops(), Some(20.0));
+        assert_eq!((&plain.glyphs, plain.size), (&with.glyphs, with.size));
+
+        let s = shaped();
+        for text in ["", "hello world", "one two three four five", "a\nb"] {
+            let plain = s.layout(text, &STYLE, Some(90.0));
+            assert!(plain.stops.is_empty(), "{text:?}");
+            assert!(plain.lines.iter().all(|l| l.bytes == (0..0)), "{text:?}");
+            if !text.is_empty() {
+                let with = s.layout(text, &STYLE.with_stops(), Some(90.0));
+                assert_eq!((&plain.glyphs, plain.size), (&with.glyphs, with.size), "{text:?}");
+            }
+        }
+    }
+
+    /// Every stop sits where the glyph of its cluster starts, or for a space or the line end,
+    /// where the glyph before it ends.
+    fn assert_stops_on_glyphs(text: &str, t: &ShapedText) {
+        for s in &t.stops {
+            let line = &t.lines[s.line];
+            assert!(line.bytes.start <= s.byte && s.byte <= line.bytes.end, "{s:?} outside {line:?}");
+            if let Some(g) = t.glyphs[line.glyphs.clone()].iter().find(|g| g.cluster as usize == s.byte) {
+                assert!((g.pos.x - s.x).abs() < 1e-3, "{text:?}: {s:?} vs glyph at {}", g.pos.x);
+            } else if let Some(g) = t.glyphs[line.glyphs.clone()].iter().rev().find(|g| (g.cluster as usize) < s.byte) {
+                if s.byte == line.bytes.end || text[s.byte..].starts_with(char::is_whitespace) {
+                    assert!(s.x + 1e-3 >= g.pos.x + g.advance, "{text:?}: {s:?} before the end of {g:?}");
+                } else {
+                    // Inside a ligature: its letters share its advance.
+                    assert!(g.pos.x < s.x && s.x < g.pos.x + g.advance, "{text:?}: {s:?} outside {g:?}");
+                }
+            }
+        }
+        // Left to right on each line.
+        for w in t.stops.windows(2) {
+            if w[0].line == w[1].line {
+                assert!(w[0].byte < w[1].byte && w[0].x <= w[1].x + 1e-3, "{text:?}: {w:?}");
+            } else {
+                assert_eq!(w[0].line + 1, w[1].line);
+            }
+        }
+    }
+
+    #[test]
+    fn shaped_stops_on_one_line() {
+        let s = shaped();
+        let text = "hello  world";
+        let t = s.layout(text, &STYLE.with_stops(), None);
+        assert_eq!(t.stops.iter().map(|s| s.byte).collect::<Vec<_>>(), (0..=12).collect::<Vec<_>>());
+        assert_eq!(t.lines[0].bytes, 0..12);
+        assert_stops_on_glyphs(text, &t);
+        // The end stop is after the last glyph.
+        let last = t.glyphs.last().unwrap();
+        assert!((t.stops.last().unwrap().x - (last.pos.x + last.advance)).abs() < 1e-3);
+        // Two spaces take two stops, a space apart.
+        let space = advance(&s, ' ', 20.0);
+        assert!((t.stops[6].x - t.stops[5].x - space).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shaped_stops_at_a_soft_wrap() {
+        let s = shaped();
+        let text = "hello world";
+        // Wide enough for either word, not both.
+        let width = s.layout("world", &STYLE, None).size.w.max(s.layout("hello", &STYLE, None).size.w) + 1.0;
+        let t = s.layout(text, &STYLE.with_stops(), Some(width));
+        assert_eq!(t.lines.len(), 2);
+        assert_eq!(t.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>(), [0..6, 6..11]);
+        let at_break: Vec<_> = t.stops.iter().filter(|s| s.byte == 6).map(|s| (s.line, s.x)).collect();
+        assert_eq!(at_break.len(), 2);
+        assert_eq!(at_break[1], (1, 0.0));
+        // The end of line 0 is after its trailing space.
+        let hello_space = s.layout("hello", &STYLE, None).size.w + advance(&s, ' ', 20.0);
+        assert!((at_break[0].1 - hello_space).abs() < 1e-3, "{at_break:?}");
+        assert_stops_on_glyphs(text, &t);
+    }
+
+    #[test]
+    fn shaped_stops_at_hard_breaks() {
+        let s = shaped();
+        let t = s.layout("ab\ncd", &STYLE.with_stops(), None);
+        assert_eq!(t.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>(), [0..2, 3..5]);
+        assert_eq!(
+            t.stops.iter().map(|s| (s.byte, s.line)).collect::<Vec<_>>(),
+            [(0, 0), (1, 0), (2, 0), (3, 1), (4, 1), (5, 1)]
+        );
+        assert_eq!(t.stops[3].x, 0.0);
+        // A break at the end makes an empty last line for the caret.
+        let t = s.layout("ab\n", &STYLE.with_stops(), None);
+        assert_eq!(t.lines.len(), 2);
+        assert_eq!(t.lines[1].bytes, 3..3);
+        assert_eq!(t.stops.last().map(|s| (s.byte, s.line)), Some((3, 1)));
+        assert_eq!(t.size.h, 2.0 * STYLE.line_height);
+        // Empty text: one line, one stop.
+        let t = s.layout("", &STYLE.with_stops(), None);
+        assert_eq!(stops_of(&t), [(0, 0, 0.0)]);
+        assert_eq!(t.size.h, STYLE.line_height);
+    }
+
+    #[test]
+    fn shaped_stops_land_on_grapheme_clusters() {
+        let s = shaped();
+        // e + combining acute, a skin-tone emoji, a ZWJ family, then x.
+        let text = "e\u{301}a 👍🏽 👨\u{200d}👩\u{200d}👧x";
+        let t = s.layout(text, &STYLE.with_stops(), None);
+        let bytes: Vec<usize> = t.stops.iter().map(|s| s.byte).collect();
+        assert_eq!(bytes, [0, 3, 4, 5, 13, 14, 32, 33]);
+        assert_stops_on_glyphs(text, &t);
+    }
+
+    #[test]
+    fn shaped_stops_follow_alignment() {
+        let s = shaped();
+        let text = "one two three four five six";
+        for align in [Align::Start, Align::Center, Align::End] {
+            let style = STYLE.with_stops().align(align);
+            let mut t = s.layout(text, &style, Some(120.0));
+            assert!(t.lines.len() > 1);
+            assert_stops_on_glyphs(text, &t);
+            t.align_in(align, t.size.w + 40.0);
+            assert_stops_on_glyphs(text, &t);
+            for l in &t.lines {
+                let first =
+                    t.stops.iter().find(|s| s.byte == l.bytes.start && t.lines[s.line].bytes == l.bytes).unwrap();
+                assert!((first.x - l.x).abs() < 1e-3, "{align:?}: {first:?} vs line at {}", l.x);
+            }
+        }
     }
 }

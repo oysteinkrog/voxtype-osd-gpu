@@ -448,6 +448,10 @@ pub struct TextStyle {
     /// size minus step, and so on down to the min size, that fits its box. See
     /// [`fit_size`](crate::text::fit_size). Labels only.
     pub fit: Option<(f32, f32)>,
+    /// Build caret stops and line byte ranges ([`ShapedText::stops`](crate::text::ShapedText),
+    /// [`Line::bytes`](crate::text::Line)) for editable text. Off by default; layout costs
+    /// nothing extra then.
+    pub stops: bool,
 }
 
 impl TextStyle {
@@ -463,7 +467,13 @@ impl TextStyle {
             balance: false,
             vertical: false,
             fit: None,
+            stops: false,
         }
+    }
+
+    /// With caret stops and line byte ranges, for editable text.
+    pub fn with_stops(self) -> TextStyle {
+        TextStyle { stops: true, ..self }
     }
 
     /// Each line placed across the box by `align`.
