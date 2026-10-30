@@ -204,8 +204,12 @@ impl GpuVector {
     }
 }
 
-/// Side of the tiles a large stroke or fill is cut into, in pixels.
-const TILE: f32 = 64.0;
+/// Side of the tiles a large stroke is cut into, in pixels.
+const STROKE_TILE: f32 = 16.0;
+/// Side of the tiles a large fill is cut into, in pixels.
+const FILL_TILE: f32 = 64.0;
+/// A stroke or fill with a smaller box than this many square pixels is drawn whole.
+const TILED_AREA: f32 = 128.0 * 128.0;
 /// A fill's tile this far inside its edge, past the antialiasing ramp, is drawn solid.
 const SOLID_GAP: f32 = 16.0;
 /// `head[0]` of a fill tile that is all inside: the shader skips the segments.
@@ -223,25 +227,28 @@ enum Tile {
 }
 
 /// Pushes `g` to `out`, a large stroke or fill as several instances over the tiles of its
-/// bounding box: the tiles near its segments as they are, a fill's tiles well inside it as
-/// solid paint, and none where nothing draws. Each run of like tiles along a row is one
-/// instance. The shader gives each pixel the same value either way; this only skips work,
-/// such as the inside of a panel's border or the segment loop inside a big panel. The tiles
-/// share their edges exactly, so no pixel is drawn twice. `segs` is the segment buffer
-/// `GpuVector::new` appended to.
-pub fn push_tiled(g: GpuVector, segs: &[[f32; 4]], out: &mut Vec<GpuVector>) {
+/// bounding box: the tiles near its segments with the full shader, a fill's tiles well
+/// inside it as solid paint, and none where nothing draws. Each run of like tiles along a
+/// row is one instance, and a stroke's run reads only the segments that reach it (copied to
+/// the end of `segs`). The shader gives each pixel the same value either way: a pixel takes
+/// its distance from the nearest segment, and a segment that does not reach a tile is never
+/// the nearest there. This only skips work, such as the inside of a panel's border or the
+/// segment loop inside a big panel. The tiles share their edges exactly, so no pixel is
+/// drawn twice. `segs` is the segment buffer `GpuVector::new` appended to.
+pub fn push_tiled(g: GpuVector, segs: &mut Vec<[f32; 4]>, out: &mut Vec<GpuVector>) {
     let [x0, y0, x1, y1] = g.bbox;
-    let (cols, rows) = (((x1 - x0) / TILE).ceil(), ((y1 - y0) / TILE).ceil());
     let (first, count) = (g.head[1] as usize, g.head[2] as usize);
     let fill = g.head[0] == 2;
+    let size = if fill { FILL_TILE } else { STROKE_TILE };
+    let (cols, rows) = (((x1 - x0) / size).ceil(), ((y1 - y0) / size).ceil());
     // Blobs are small; a material's seed is per instance; a glowing fill draws outside its
     // edge and paint along a fill's edge needs the segments everywhere.
     let skip = !(g.head[0] == 0 || fill)
         || g.material[0] != 0
         || (fill && (g.params[1] > 0.0 || g.head[3] == 0))
-        || cols * rows <= 4.0
-        || cols * rows * count as f32 > 20_000.0;
-    let src = segs.get(first * SEG_TEXELS..(first + count) * SEG_TEXELS);
+        || (x1 - x0) * (y1 - y0) < TILED_AREA
+        || cols * rows * count as f32 > 400_000.0;
+    let src = segs.get(first * SEG_TEXELS..(first + count) * SEG_TEXELS).map(<[_]>::to_vec);
     let Some(src) = src.filter(|_| !skip) else {
         out.push(g);
         return;
@@ -268,46 +275,54 @@ pub fn push_tiled(g: GpuVector, segs: &[[f32; 4]], out: &mut Vec<GpuVector>) {
     });
     let pad = (inner[0] - x0).max(inner[1] - y0).max(x1 - inner[2]).max(y1 - inner[3]).max(0.0);
     let near = if fill { pad + SOLID_GAP } else { pad };
+    let reaches = |h: &[f32; 4], r: [f32; 4], by: f32| {
+        h[0] - by < r[2] && h[2] + by > r[0] && h[1] - by < r[3] && h[3] + by > r[1]
+    };
     let (cols, rows) = (cols as usize, rows as usize);
-    let edge = |i: usize, lo: f32, hi: f32| (lo + i as f32 * TILE).min(hi);
+    let edge = |i: usize, lo: f32, hi: f32| (lo + i as f32 * size).min(hi);
     let tile = |c: usize, r: usize| {
-        let (tx0, tx1, ty0, ty1) = (edge(c, x0, x1), edge(c + 1, x0, x1), edge(r, y0, y1), edge(r + 1, y0, y1));
-        if hulls.iter().any(|h| h[0] - near < tx1 && h[2] + near > tx0 && h[1] - near < ty1 && h[3] + near > ty0) {
+        let rect = [edge(c, x0, x1), edge(r, y0, y1), edge(c + 1, x0, x1), edge(r + 1, y0, y1)];
+        if hulls.iter().any(|h| reaches(h, rect, near)) {
             Tile::Edge
-        } else if fill && winding(&curves, [(tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0]) != 0 {
+        } else if fill && winding(&curves, [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0]) != 0 {
             Tile::Solid
         } else {
             Tile::Empty
         }
     };
-    let start = out.len();
-    let mut full = 0usize;
+    // A stroke's tile also lists the segments that reach it: a run keeps to one list.
+    let reach_list = |c: usize, r: usize| -> Vec<usize> {
+        let rect = [edge(c, x0, x1), edge(r, y0, y1), edge(c + 1, x0, x1), edge(r + 1, y0, y1)];
+        (0..count).filter(|&i| reaches(&hulls[i], rect, pad)).collect()
+    };
     for r in 0..rows {
         let (ty0, ty1) = (edge(r, y0, y1), edge(r + 1, y0, y1));
-        let mut run: Option<(usize, Tile)> = None;
+        let mut run: Option<(usize, Tile, Vec<usize>)> = None;
         for c in 0..=cols {
             let t = if c < cols { tile(c, r) } else { Tile::Empty };
-            if run.is_some_and(|(_, k)| k == t) {
+            let list = if t == Tile::Edge && !fill { reach_list(c, r) } else { Vec::new() };
+            if run.as_ref().is_some_and(|(_, k, l)| *k == t && *l == list) {
                 continue;
             }
-            if let Some((from, k)) = run.take() {
+            if let Some((from, k, mine)) = run.take() {
                 let mut piece = GpuVector { bbox: [edge(from, x0, x1), ty0, edge(c, x0, x1), ty1], ..g };
                 if k == Tile::Solid {
                     piece.head[0] = KIND_SOLID;
-                } else {
-                    full += c - from;
+                } else if !fill && mine.len() < count {
+                    // A fill's winding needs all its segments; a stroke's run only those
+                    // that reach it.
+                    piece.head[1] = (segs.len() / SEG_TEXELS) as u32;
+                    piece.head[2] = mine.len() as u32;
+                    for i in mine {
+                        segs.extend_from_slice(&src[i * SEG_TEXELS..(i + 1) * SEG_TEXELS]);
+                    }
                 }
                 out.push(piece);
             }
             if t != Tile::Empty {
-                run = Some((c, t));
+                run = Some((c, t, list));
             }
         }
-    }
-    // A stroke that comes near most of its box: one instance is cheaper than many.
-    if !fill && full * 10 >= cols * rows * 9 {
-        out.truncate(start);
-        out.push(g);
     }
 }
 
@@ -404,11 +419,16 @@ mod tests {
 
     #[test]
     fn a_large_stroke_skips_its_inside() {
-        let (g, segs) = square(0, 1, 4.0, 13.0);
+        let (g, mut segs) = square(0, 1, 4.0, 13.0);
         let mut out = Vec::new();
-        push_tiled(g, &segs, &mut out);
+        push_tiled(g, &mut segs, &mut out);
         assert!(out.len() > 1);
-        assert!(out.iter().all(|t| t.head == g.head && t.params == g.params));
+        assert!(out.iter().all(|t| t.head[0] == g.head[0] && t.head[3] == g.head[3] && t.params == g.params));
+        // A tile on the top edge reads only the top segment; its copy is the same texels.
+        let top = out.iter().find(|t| t.bbox[1] < 100.0 && t.bbox[0] <= 300.0 && t.bbox[2] > 300.0).unwrap();
+        assert_eq!(top.head[2], 1);
+        let at = top.head[1] as usize * SEG_TEXELS;
+        assert_eq!(segs[at..at + SEG_TEXELS], segs[0..SEG_TEXELS]);
         let drawn: f32 = out.iter().map(|t| area(t.bbox)).sum();
         assert!(drawn < 0.6 * area(g.bbox), "{drawn} of {}", area(g.bbox));
         check_tiles(&out, 13.0, false);
@@ -416,9 +436,9 @@ mod tests {
 
     #[test]
     fn a_large_fill_is_solid_inside() {
-        let (g, segs) = square(2, 1, 0.0, 1.0);
+        let (g, mut segs) = square(2, 1, 0.0, 1.0);
         let mut out = Vec::new();
-        push_tiled(g, &segs, &mut out);
+        push_tiled(g, &mut segs, &mut out);
         assert!(out.iter().any(|t| t.head[0] == KIND_SOLID));
         // Solid tiles keep well away from the edge.
         for t in out.iter().filter(|t| t.head[0] == KIND_SOLID) {
@@ -433,19 +453,19 @@ mod tests {
     fn small_glowing_or_material_vectors_stay_whole() {
         let mut out = Vec::new();
         // Paint along the edge needs the segments everywhere.
-        let (g, segs) = square(2, 0, 0.0, 1.0);
-        push_tiled(g, &segs, &mut out);
+        let (g, mut segs) = square(2, 0, 0.0, 1.0);
+        push_tiled(g, &mut segs, &mut out);
         // A glowing fill draws outside its edge.
-        let (g, segs) = square(2, 1, 3.0, 9.0);
-        push_tiled(g, &segs, &mut out);
+        let (g, mut segs) = square(2, 1, 3.0, 9.0);
+        push_tiled(g, &mut segs, &mut out);
         // A material's seed is per instance.
-        let (mut g, segs) = square(0, 1, 0.0, 2.0);
+        let (mut g, mut segs) = square(0, 1, 0.0, 2.0);
         g.material[0] = 1;
-        push_tiled(g, &segs, &mut out);
+        push_tiled(g, &mut segs, &mut out);
         // Small.
-        let (mut g, segs) = square(0, 1, 0.0, 2.0);
+        let (mut g, mut segs) = square(0, 1, 0.0, 2.0);
         g.bbox = [0.0, 0.0, 100.0, 100.0];
-        push_tiled(g, &segs, &mut out);
+        push_tiled(g, &mut segs, &mut out);
         assert_eq!(out.len(), 4);
     }
 
