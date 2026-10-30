@@ -174,6 +174,8 @@ pub struct FontRegistry {
     files: Arc<RwLock<HashMap<PathBuf, Bytes>>>,
     /// Instances made by `add_instance`, by base font and axis values in hundredths.
     instances: Arc<RwLock<HashMap<InstanceKey, FontId>>>,
+    /// Faces added by `system`, by pattern; `None` for a pattern fontconfig did not find.
+    system: Arc<RwLock<HashMap<String, Option<FontId>>>>,
 }
 
 /// A variable font instance: its base font and its axis values (tag, hundredths).
@@ -231,6 +233,23 @@ impl FontRegistry {
     pub fn add_system(&self, pattern: &str) -> Result<FontId, FontError> {
         let (path, index) = system_face(pattern).ok_or_else(|| FontError::NotFound(pattern.to_string()))?;
         self.add_file_face(&path, index)
+    }
+
+    /// `pattern` through fontconfig as `add_system` does, added on first use: asking again
+    /// gives the same id, or `None` again when fontconfig found nothing, without a second
+    /// lookup. Ids belong to this table, so a caller that serves several tables (tests each
+    /// load their own) asks the table it draws with instead of keeping the id in a static.
+    pub fn system(&self, pattern: &str) -> Option<FontId> {
+        if let Some(&id) = self.system.read().expect("system font lock").get(pattern) {
+            return id;
+        }
+        let mut known = self.system.write().expect("system font lock");
+        if let Some(&id) = known.get(pattern) {
+            return id;
+        }
+        let id = self.add_system(pattern).ok();
+        known.insert(pattern.to_string(), id);
+        id
     }
 
     /// The built-in font asset `name` (`assets::ASSETS`), added on first use. Asking again
@@ -455,6 +474,21 @@ mod tests {
         assert_eq!(fonts.len(), 2);
         assert!(matches!(fonts.asset("nope"), Err(FontError::NoAsset(_))));
         assert!(fonts.asset("nope").unwrap_err().to_string().contains("condensed-bold"));
+    }
+
+    #[test]
+    fn system_fonts_load_once_per_table() {
+        let fonts = FontRegistry::new();
+        fonts.add_file(&test_font_path()).unwrap();
+        let Some(a) = fonts.system("sans-serif") else {
+            return; // no fontconfig font on this machine
+        };
+        assert_eq!((a, fonts.system("sans-serif")), (1, Some(1)));
+        assert_eq!(fonts.len(), 2);
+        // Another table finds its own id.
+        let other = FontRegistry::new();
+        assert_eq!(other.system("sans-serif"), Some(0));
+        assert_eq!(fonts.clone().system("sans-serif"), Some(1));
     }
 
     #[test]
