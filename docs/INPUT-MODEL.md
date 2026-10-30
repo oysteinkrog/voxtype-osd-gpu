@@ -14,7 +14,8 @@ and M5 can implement them without changes to the core.
   draws the frame.
 - The input region handed to the host is the union of the interactive nodes' shapes. A scene with no
   interactive nodes is fully click-through, which is what the dictation popup is today.
-- Keyboard interactivity defaults to none. M1 delivers no key events.
+- Keyboard interactivity defaults to none. A popup that edits text takes focus through a separate
+  focus proxy surface and keeps its own surface at none (see "Keyboard and focus").
 
 ## Hit testing
 
@@ -116,9 +117,46 @@ Hosts:
 | `OnDemand` | `on_demand` | takes focus only when clicked |
 | `Exclusive` | `exclusive` | grabs the keyboard while mapped |
 
-M1 implements `None` only, and the other two return an error until an app needs them. Overlays must
-never steal focus from the window the user is dictating into. On macOS `None` maps to a non-activating
-`NSPanel` that refuses key status. On Windows it maps to `WS_EX_NOACTIVATE`.
+M1 implemented `None` only. The Wayland host now maps all three, but every visible overlay still uses
+`None`: overlays must never steal focus from the window the user is dictating into. Keyboard focus for
+editing comes from the focus proxy below. On macOS `None` maps to a non-activating `NSPanel` that
+refuses key status. On Windows it maps to `WS_EX_NOACTIVATE`.
+
+## Keyboard and focus
+
+Added 2026-10-30 for keyboard edits in the dictation popup: one editable text inside an overlay.
+
+**Focus proxy.** `HostCtl::open_focus_proxy(FocusProxySpec)` maps a second layer surface: 1x1,
+transparent, on the Overlay layer, `keyboard_interactivity: on_demand`, an empty input region and a
+buffer attached at its first configure. KWin activates an `on_demand` layer surface when it is mapped
+with a buffer, so the proxy gets the keyboard. `close_focus_proxy` sets a "requested" flag and destroys
+the surface, and KWin's focus chain gives focus back to the window that had it. A focus loss the app
+did not request (click-away, Alt+Tab, lock screen, output removal) arrives as
+`HostEvent::KeyboardFocus { gained: false, requested: false }`, and focus is never taken back by
+itself. `FocusProxySpec::output` puts the proxy on the output the target window is on.
+
+The visible popup stays at `Keyboard::None`, for this reason: KWin's `handleAcceptsFocusChanged` has
+no branch for a surface that switches back from `on_demand` to `none`, so a popup that turned
+`on_demand` for editing would keep it, and an `on_demand` popup takes focus every time it is mapped.
+That would steal focus from the dictation target on every recording. A separate surface that exists
+only while editing avoids both problems. Layer surfaces stay out of Alt+Tab, the pager and the
+taskbar, so the proxy is never seen.
+
+**Keys.** The Wayland host keeps its own xkbcommon state and compose table (locale from `LC_ALL`,
+`LC_CTYPE` or `LANG`) and sends `HostEvent::Key`, `Modifiers` and `KeyRepeatInfo`. It binds `wl_seat`
+at version 9 or lower for the keyboard: with `wl_keyboard` version 10 KWin repeats keys itself and
+reports a repeat rate of 0. Key repeat runs in the `Driver`, on the host clock, so offline runs and
+replays repeat the same way. Keys held when focus arrives are not replayed, and focus loss, a key up
+or a modifier change stops the repeat. Key events go into the event log's `input` records, which
+version 1 readers skip.
+
+**Routing.** A key goes to the focused node first (`Element::on_key`; the scene focuses the first
+such node, one per scene for now) and reaches `App::key` only when no node has focus.
+
+**Shortcuts.** v1 does not use `zwp_keyboard_shortcuts_inhibit_manager_v1`. KWin global shortcuts keep
+working while the popup has focus, as they do in any text box. The edit keys the popup uses (arrows,
+Home, End, Backspace, Delete, Ctrl+Z and the like) are not global shortcuts, so nothing needs to be
+inhibited.
 
 ## The three cases the plan needs
 
@@ -135,8 +173,8 @@ never steal focus from the window the user is dictating into. On macOS `None` ma
 
 ## Out of scope
 
-Text input and IME, key events of any kind in M1, focus and focus traversal, screen readers, touch and
-gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
+Text input and IME, focus traversal and more than one focusable node, clipboard, screen readers,
+touch and gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
 path, so accesskit can be added later as the plan says.
 
 ## Exact additions

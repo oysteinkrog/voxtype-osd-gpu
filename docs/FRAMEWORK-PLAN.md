@@ -13,8 +13,9 @@ internals (Slug text, SDF shapes, effects, particles); this file overrides them 
   (the same scenes rendered to video or frames), on Linux only. macOS and Windows are out of scope
   (decided 2026-10-26). The `Host` trait stays, so a port stays possible, but nothing is planned or
   tested for them.
-- Out: full desktop apps (text fields, focus, screen readers). Node ids stay stable so accesskit can be
-  added later.
+- Out: full desktop apps (more than one editable text, focus order, IME, screen readers). The one
+  exception, since 2026-10-30, is one editable text inside an overlay: keyboard edits in the dictation
+  popup (`INPUT-MODEL.md`, "Keyboard and focus"). Node ids stay stable so accesskit can be added later.
 
 ## Decisions
 
