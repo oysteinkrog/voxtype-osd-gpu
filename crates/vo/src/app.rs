@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use vo_host::{Placement, PointerEvent, Waker};
+use vo_host::{FocusProxySpec, KeyEvent, KeyState, LogicalKey, Mods, Placement, PointerEvent, RepeatInfo, Waker};
 use vo_scene::element::Element;
 use vo_scene::geom::{Color, Size};
 use vo_scene::Scene;
@@ -70,6 +70,51 @@ pub trait App {
     fn frame_pace(&self) -> Option<f64> {
         None
     }
+
+    /// A key went down, repeated or went up while the app held keyboard focus
+    /// ([`Cx::take_keyboard_focus`]). Repeats come from the driver, on the host clock, at the
+    /// compositor's rate. Return true when the key was used. The view is rebuilt after it
+    /// either way.
+    fn key(&mut self, ev: &KeyEvent, cx: &mut Cx<Self::Msg>) -> bool {
+        let _ = (ev, cx);
+        false
+    }
+
+    /// Keyboard focus came or went. `requested` is true for a loss the app asked for with
+    /// [`Cx::release_keyboard_focus`]; false when the compositor took focus away (a click
+    /// elsewhere, Alt+Tab, the lock screen).
+    fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Self::Msg>) {
+        let _ = (gained, requested, cx);
+    }
+}
+
+/// What the app asked for about keyboard focus during a callback.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FocusRequest {
+    Take(FocusProxySpec),
+    Release,
+}
+
+/// Keyboard state the driver keeps: modifiers, the repeat rate and the key repeating now.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Keys {
+    info: Option<RepeatInfo>,
+    mods: Mods,
+    /// The held key that repeats, and how many repeats it sent.
+    repeat: Option<(KeyEvent, u32)>,
+}
+
+impl Keys {
+    /// When the held key repeats next.
+    fn next_repeat(&self) -> Option<f64> {
+        let (ev, n) = self.repeat.as_ref()?;
+        self.info?.nth(ev.t, *n)
+    }
+}
+
+/// Keys that repeat while held: everything but modifiers.
+fn repeats(ev: &KeyEvent) -> bool {
+    !matches!(ev.key, LogicalKey::Named(k) if k.is_modifier())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,6 +156,7 @@ pub struct Cx<'a, M> {
     t: f64,
     timers: &'a mut Timers<M>,
     exit: &'a mut bool,
+    focus: &'a mut Option<FocusRequest>,
 }
 
 impl<M> Cx<'_, M> {
@@ -134,6 +180,19 @@ impl<M> Cx<'_, M> {
     /// Ends the run once everything has settled, so exit motion plays out first.
     pub fn exit(&mut self) {
         *self.exit = true;
+    }
+
+    /// Asks for keyboard focus through a focus proxy (`HostCtl::open_focus_proxy`). Keys
+    /// then come to [`App::key`], and [`App::keyboard_focus`] tells when focus arrives.
+    /// Offline, focus comes from the scenario's inputs instead.
+    pub fn take_keyboard_focus(&mut self, spec: FocusProxySpec) {
+        *self.focus = Some(FocusRequest::Take(spec));
+    }
+
+    /// Gives keyboard focus back: the proxy closes, and `App::keyboard_focus(false, true)`
+    /// follows at once.
+    pub fn release_keyboard_focus(&mut self) {
+        *self.focus = Some(FocusRequest::Release);
     }
 }
 
@@ -213,6 +272,9 @@ pub(crate) struct Driver<A: App> {
     /// How many views were applied to the main scene, so a live overlay checks the margin
     /// a new view needs once per view (EG-08).
     pub(crate) views: u64,
+    pub(crate) keys: Keys,
+    /// A focus change the app asked for, for the live overlay to carry out.
+    pub(crate) focus: Option<FocusRequest>,
 }
 
 impl<A: App> Driver<A> {
@@ -232,7 +294,8 @@ impl<A: App> Driver<A> {
     ) -> Driver<A> {
         let mut timers = Timers::default();
         let mut exit = false;
-        app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit });
+        let mut focus = None;
+        app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit, focus: &mut focus });
         let extras = Extras::new(make);
         let exit_at = exit.then_some(t);
         let mut d = Driver {
@@ -249,6 +312,8 @@ impl<A: App> Driver<A> {
             lazy: false,
             stale: None,
             views: 1,
+            keys: Keys::default(),
+            focus,
         };
         let view = d.view();
         d.scene.apply(view, t);
@@ -282,9 +347,14 @@ impl<A: App> Driver<A> {
     /// Runs `update` and the view at `t`. Times before the last event are moved up to it: the
     /// scene takes events in time order only.
     pub(crate) fn dispatch(&mut self, msg: A::Msg, t: f64) {
+        self.run(t, |app, cx| app.update(msg, cx));
+    }
+
+    /// Runs `f` on the app at `t` (moved up to the last event), then the view.
+    fn run(&mut self, t: f64, f: impl FnOnce(&mut A, &mut Cx<A::Msg>)) {
         let t = t.max(self.last_t);
         self.last_t = t;
-        self.app.update(msg, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit });
+        f(&mut self.app, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit, focus: &mut self.focus });
         if self.exit && self.exit_at.is_none() {
             self.exit_at = Some(t);
         }
@@ -321,22 +391,88 @@ impl<A: App> Driver<A> {
         }
     }
 
-    /// Fires the earliest timer if it is due at or before `t`. Returns whether one fired.
+    /// When the next timer or key repeat is due.
+    pub(crate) fn next_timer_at(&self) -> Option<f64> {
+        [self.timers.next_at(), self.keys.next_repeat()].into_iter().flatten().min_by(f64::total_cmp)
+    }
+
+    /// Fires the earliest timer or key repeat if it is due at or before `t`. Returns whether
+    /// one fired. A repeat due at the same time as a timer goes first.
     pub(crate) fn fire_timer(&mut self, t: f64) -> bool {
-        match self.timers.pop_due(t) {
-            Some((at, msg)) => {
-                self.dispatch(msg, at);
+        let timer = self.timers.next_at().filter(|&at| at <= t);
+        match self.keys.next_repeat().filter(|&at| at <= t) {
+            Some(at) if timer.is_none_or(|tm| at <= tm) => {
+                let mods = self.keys.mods;
+                let (held, n) = self.keys.repeat.as_mut().expect("a repeat is due");
+                *n += 1;
+                let ev = KeyEvent { t: at, state: KeyState::Repeat, mods, ..held.clone() };
+                self.run(at, |app, cx| {
+                    app.key(&ev, cx);
+                });
                 true
             }
-            None => false,
+            _ => match self.timers.pop_due(t) {
+                Some((at, msg)) => {
+                    self.dispatch(msg, at);
+                    true
+                }
+                None => false,
+            },
         }
     }
 
-    /// Fires every timer due at or before `t`, each at its own time.
+    /// Fires every timer and key repeat due at or before `t`, each at its own time.
     pub(crate) fn fire_timers(&mut self, t: f64) {
-        while let Some((at, msg)) = self.timers.pop_due(t) {
-            self.dispatch(msg, at);
+        while self.fire_timer(t) {}
+    }
+
+    /// A key from the host. Due timers and repeats fire first. A press of a key that repeats
+    /// starts its repeat (replacing any other), a press of a modifier stops it, and the
+    /// release of the repeating key stops it.
+    pub(crate) fn key(&mut self, ev: &KeyEvent) {
+        self.fire_timers(ev.t);
+        self.flush();
+        let mut ev = ev.clone();
+        ev.t = ev.t.max(self.last_t);
+        match ev.state {
+            KeyState::Down => {
+                let on = repeats(&ev) && self.keys.info.is_some_and(|i| i.rate_hz > 0.0);
+                self.keys.repeat = on.then(|| (ev.clone(), 0));
+            }
+            KeyState::Up => {
+                if self.keys.repeat.as_ref().is_some_and(|(r, _)| r.code == ev.code) {
+                    self.keys.repeat = None;
+                }
+            }
+            KeyState::Repeat => {}
         }
+        self.run(ev.t, |app, cx| {
+            app.key(&ev, cx);
+        });
+    }
+
+    /// Keyboard focus came or went. A loss stops any repeat.
+    pub(crate) fn keyboard_focus(&mut self, t: f64, gained: bool, requested: bool) {
+        self.fire_timers(t);
+        self.flush();
+        if !gained {
+            self.keys.repeat = None;
+        }
+        self.run(t, |app, cx| app.keyboard_focus(gained, requested, cx));
+    }
+
+    /// The modifier state changed: any repeat stops.
+    pub(crate) fn modifiers(&mut self, t: f64, mods: Mods) {
+        self.fire_timers(t);
+        if mods != self.keys.mods {
+            self.keys.mods = mods;
+            self.keys.repeat = None;
+        }
+    }
+
+    /// The compositor's repeat rate and delay.
+    pub(crate) fn repeat_info(&mut self, info: RepeatInfo) {
+        self.keys.info = Some(info);
     }
 
     pub(crate) fn pointer(&mut self, ev: &PointerEvent) {
@@ -547,5 +683,94 @@ mod tests {
         d.dispatch(7, 2.0);
         d.dispatch(8, 1.0);
         assert_eq!(d.app.0, vec![(7, 2.0), (8, 2.0)]);
+    }
+
+    /// Logs every key it gets, as (state, code, time).
+    #[derive(Default)]
+    struct Keyed(Vec<(KeyState, u32, f64)>);
+
+    impl App for Keyed {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> Element<()> {
+            Element::panel("root")
+        }
+        fn key(&mut self, ev: &KeyEvent, _: &mut Cx<()>) -> bool {
+            self.0.push((ev.state, ev.code, ev.t));
+            true
+        }
+    }
+
+    fn key_ev(state: KeyState, code: u32, t: f64) -> KeyEvent {
+        let key = if code == 42 { LogicalKey::Named(vo_host::NamedKey::ShiftLeft) } else { LogicalKey::Char('a') };
+        KeyEvent { surface: 1, t, state, key, code, text: None, mods: Mods::NONE }
+    }
+
+    /// Holds 'a' from 1.0 to `up`, stepping the driver at `hz` as a frame loop would, and
+    /// returns what the app saw.
+    fn hold_a(hz: f64, up: f64, extra: impl Fn(&mut Driver<Keyed>, f64)) -> Vec<(KeyState, u32, f64)> {
+        let mut d = Driver::new(Keyed::default(), Scene::new(), Tokens::default(), 0.0);
+        d.repeat_info(RepeatInfo { rate_hz: 25.0, delay_s: 0.5 });
+        let mut t = 0.0;
+        let mut pressed = false;
+        while t < 3.0 {
+            t += 1.0 / hz;
+            if !pressed && t >= 1.0 {
+                d.key(&key_ev(KeyState::Down, 30, 1.0));
+                pressed = true;
+            }
+            if t >= up && d.keys.repeat.is_some() {
+                d.key(&key_ev(KeyState::Up, 30, up));
+            }
+            extra(&mut d, t);
+            d.fire_timers(t);
+        }
+        d.app.0
+    }
+
+    #[test]
+    fn key_repeats_are_the_same_at_any_frame_rate() {
+        let at60 = hold_a(60.0, 2.0, |_, _| {});
+        let at144 = hold_a(144.0, 2.0, |_, _| {});
+        assert_eq!(at60, at144);
+        // Down at 1.0, repeats from 1.5 every 40 ms while held, then the release.
+        let repeats: Vec<f64> = at60.iter().filter(|e| e.0 == KeyState::Repeat).map(|e| e.2).collect();
+        assert_eq!(repeats.len(), 13, "{repeats:?}");
+        assert!((repeats[0] - 1.5).abs() < 1e-9 && (repeats[12] - 1.98).abs() < 1e-9);
+        assert_eq!(at60.first().map(|e| e.0), Some(KeyState::Down));
+        assert_eq!(at60.last().map(|e| (e.0, e.2)), Some((KeyState::Up, 2.0)));
+    }
+
+    #[test]
+    fn repeat_stops_on_focus_loss_and_modifier_change() {
+        let lost = hold_a(60.0, 9.0, |d, t| {
+            if (t - 1.7).abs() < 0.5 / 60.0 {
+                d.keyboard_focus(1.7, false, false);
+            }
+        });
+        assert!(lost.iter().all(|e| e.2 < 1.7 + 1e-9), "{lost:?}");
+        let shifted = hold_a(60.0, 9.0, |d, t| {
+            if (t - 1.7).abs() < 0.5 / 60.0 {
+                d.modifiers(1.7, Mods::SHIFT);
+            }
+        });
+        assert!(shifted.iter().all(|e| e.2 < 1.7 + 1e-9), "{shifted:?}");
+        assert!(shifted.iter().any(|e| e.0 == KeyState::Repeat));
+        // A modifier never repeats, and pressing one stops the key repeating.
+        let mut d = Driver::new(Keyed::default(), Scene::new(), Tokens::default(), 0.0);
+        d.repeat_info(RepeatInfo { rate_hz: 25.0, delay_s: 0.5 });
+        d.key(&key_ev(KeyState::Down, 42, 1.0));
+        assert_eq!(d.next_timer_at(), None);
+        d.key(&key_ev(KeyState::Down, 30, 1.1));
+        assert_eq!(d.next_timer_at(), Some(1.6));
+        d.key(&key_ev(KeyState::Down, 42, 1.2));
+        assert_eq!(d.next_timer_at(), None);
+        // No repeat until the compositor's rate is known, and none at rate 0.
+        let mut d = Driver::new(Keyed::default(), Scene::new(), Tokens::default(), 0.0);
+        d.key(&key_ev(KeyState::Down, 30, 1.0));
+        assert_eq!(d.next_timer_at(), None);
+        d.repeat_info(RepeatInfo { rate_hz: 0.0, delay_s: 0.5 });
+        d.key(&key_ev(KeyState::Down, 30, 2.0));
+        assert_eq!(d.next_timer_at(), None);
     }
 }

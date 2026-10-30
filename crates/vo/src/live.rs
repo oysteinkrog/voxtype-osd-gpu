@@ -10,7 +10,7 @@ use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, InputRegion};
 
-use crate::app::{App, Driver, EXIT_MOTION_MAX};
+use crate::app::{App, Driver, FocusRequest, EXIT_MOTION_MAX};
 use crate::surfaces::PanelAnchor;
 use crate::{Options, SurfaceMargin, Tokens};
 
@@ -238,6 +238,8 @@ struct Live<A: App> {
     startup_logged: bool,
     finished: bool,
     error: Option<HostError>,
+    /// The focus proxy open for the app (`Cx::take_keyboard_focus`).
+    proxy: Option<SurfaceId>,
 }
 
 impl<A: App> Live<A> {
@@ -247,6 +249,7 @@ impl<A: App> Live<A> {
 
     /// After any change: ask for a frame if needed, arm the next timer, exit when done.
     fn after_change(&mut self, host: &mut dyn HostCtl) {
+        self.follow_focus(host);
         self.follow_main_surface(host);
         let now = host.now();
         let id = self.surface;
@@ -264,7 +267,7 @@ impl<A: App> Live<A> {
                 None => host.request_frame(id),
             }
         }
-        let next = d.timers.next_at();
+        let next = d.next_timer_at();
         let paced = paced.filter(|&w| w > now);
         // A new view may reach further: check it before its frame.
         let fresh = !self.driver().stale() && self.driver().views != self.margin_checked;
@@ -282,6 +285,28 @@ impl<A: App> Live<A> {
         let drawn = !d.dirty && !d.stale() && !d.extras.list.iter().any(|e| e.dirty);
         if d.done(now) && (drawn || d.overdue(now)) {
             self.finish(host);
+        }
+    }
+
+    /// Opens or closes the focus proxy when the app asked to take or give back keyboard
+    /// focus. A host that cannot take focus tells the app at once that it has none.
+    fn follow_focus(&mut self, host: &mut dyn HostCtl) {
+        let Some(request) = self.driver().focus.take() else { return };
+        match request {
+            FocusRequest::Take(spec) if self.proxy.is_none() => match host.open_focus_proxy(&spec) {
+                Ok(id) => self.proxy = Some(id),
+                Err(e) => {
+                    eprintln!("vo: no keyboard focus: {e}");
+                    let t = host.now();
+                    self.driver().keyboard_focus(t, false, false);
+                }
+            },
+            FocusRequest::Take(_) => {}
+            FocusRequest::Release => {
+                if let Some(id) = self.proxy.take() {
+                    host.close_focus_proxy(id);
+                }
+            }
         }
     }
 
@@ -472,6 +497,9 @@ impl<A: App> Live<A> {
             return;
         }
         let t = host.now();
+        if let Some(id) = self.proxy.take() {
+            host.close_focus_proxy(id);
+        }
         if self.driver().overdue(t) && self.driver().moving(t) {
             eprintln!("vo: still moving {EXIT_MOTION_MAX} s after the exit, closing anyway");
         }
@@ -637,7 +665,7 @@ impl<A: App> Live<A> {
                     // 60 Hz refresh early, or a 30 fps loop lands at 20 fps.
                     let w = (w - 1.0 / 120.0).max(t);
                     self.paced = Some(w);
-                    let timer = self.driver().timers.next_at();
+                    let timer = self.driver().next_timer_at();
                     host.wake_at(Some(timer.map_or(w, |x| x.min(w))));
                 }
                 _ => host.request_frame(id),
@@ -729,6 +757,19 @@ impl<A: App> HostApp for Live<A> {
                 self.finish(host);
                 return;
             }
+            // Keys come to whichever surface has focus: the focus proxy, or a main surface
+            // opened with keyboard interactivity.
+            HostEvent::Key(ev) => self.driver().key(&ev),
+            HostEvent::KeyboardFocus { id, t, gained, requested } => {
+                if !gained && self.proxy == Some(id) {
+                    // Focus was taken away: the proxy goes, and a new take opens a new one.
+                    self.proxy = None;
+                    host.close_focus_proxy(id);
+                }
+                self.driver().keyboard_focus(t, gained, requested);
+            }
+            HostEvent::Modifiers { t, mods, .. } => self.driver().modifiers(t, mods),
+            HostEvent::KeyRepeatInfo { info, .. } => self.driver().repeat_info(info),
             _ => {}
         }
         self.after_change(host);
@@ -877,6 +918,7 @@ impl<A: App> Live<A> {
             startup_logged: false,
             finished: false,
             error: None,
+            proxy: None,
         }
     }
 }
@@ -1648,5 +1690,143 @@ mod margin_tests {
     fn a_fixed_margin_does_not_follow() {
         let sizes = run(SurfaceMargin::Fixed(Insets::uniform(400.0)));
         assert!(sizes.iter().all(|(_, s)| *s == sizes[0].1));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use vo_host::{FocusProxySpec, Gpu, HostCaps, HostDiag, KeyEvent, KeyState, LogicalKey, Mods, RepeatInfo, Waker};
+
+    use super::*;
+    use crate::app::Cx;
+
+    /// Takes keyboard focus on its message, logs focus changes and keys, and gives focus back
+    /// on Escape.
+    #[derive(Default)]
+    struct Editor {
+        log: Vec<String>,
+    }
+
+    impl App for Editor {
+        type Msg = ();
+        fn update(&mut self, _: (), cx: &mut Cx<()>) {
+            cx.take_keyboard_focus(FocusProxySpec { app_id: "test-edit".into(), output: None });
+        }
+        fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            vo_scene::element::Element::column("root")
+        }
+        fn key(&mut self, ev: &KeyEvent, cx: &mut Cx<()>) -> bool {
+            self.log.push(format!("{:?} {:.2}", ev.state, ev.t));
+            if ev.key == LogicalKey::Named(vo_host::NamedKey::Escape) {
+                cx.release_keyboard_focus();
+            }
+            true
+        }
+        fn keyboard_focus(&mut self, gained: bool, requested: bool, _: &mut Cx<()>) {
+            self.log.push(format!("focus {gained} {requested}"));
+        }
+    }
+
+    /// A host with focus proxies, at a clock the test sets.
+    #[derive(Default)]
+    struct Proxies {
+        caps: HostCaps,
+        diag: HostDiag,
+        now: f64,
+        wake: Option<f64>,
+        open: Vec<SurfaceId>,
+        closed: Vec<SurfaceId>,
+    }
+
+    impl HostCtl for Proxies {
+        fn caps(&self) -> &HostCaps {
+            &self.caps
+        }
+        fn diag(&self) -> &HostDiag {
+            &self.diag
+        }
+        fn now(&self) -> f64 {
+            self.now
+        }
+        fn gpu(&mut self) -> Result<Gpu, HostError> {
+            Err(HostError::Gpu("none in tests".into()))
+        }
+        fn open(&mut self, _: &OverlaySpec) -> Result<SurfaceId, HostError> {
+            Ok(7)
+        }
+        fn update(&mut self, _: SurfaceId, _: SurfaceChange) -> Result<(), HostError> {
+            Ok(())
+        }
+        fn close(&mut self, _: SurfaceId) {}
+        fn open_focus_proxy(&mut self, _: &FocusProxySpec) -> Result<SurfaceId, HostError> {
+            self.open.push(20 + self.open.len() as SurfaceId);
+            Ok(*self.open.last().unwrap())
+        }
+        fn close_focus_proxy(&mut self, id: SurfaceId) {
+            self.closed.push(id);
+        }
+        fn request_frame(&mut self, _: SurfaceId) {}
+        fn wake_at(&mut self, t: Option<f64>) {
+            self.wake = t;
+        }
+        fn waker(&self) -> Waker {
+            Waker::new(|| {})
+        }
+        fn exit(&mut self) {}
+    }
+
+    fn key(code: u32, state: KeyState, t: f64) -> HostEvent {
+        let key = if code == 1 { LogicalKey::Named(vo_host::NamedKey::Escape) } else { LogicalKey::Char('a') };
+        HostEvent::Key(KeyEvent { surface: 20, t, state, key, code, text: None, mods: Mods::NONE })
+    }
+
+    #[test]
+    fn focus_proxy_keys_and_repeat_through_the_live_loop() {
+        let mut live = Live::new(Editor::default(), OverlaySpec::default(), crate::Options::default(), None);
+        let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
+        live.driver = Some(driver);
+        let mut host = Proxies::default();
+        live.event(&mut host, HostEvent::KeyRepeatInfo { t: 0.0, info: RepeatInfo { rate_hz: 10.0, delay_s: 0.5 } });
+
+        // The app asks for focus: the proxy opens.
+        live.driver().dispatch((), 1.0);
+        live.after_change(&mut host);
+        assert_eq!(host.open, [20]);
+        live.event(&mut host, HostEvent::KeyboardFocus { id: 20, t: 1.0, gained: true, requested: false });
+
+        // A held key: the host is woken at the repeat times.
+        live.event(&mut host, key(30, KeyState::Down, 1.1));
+        assert_eq!(host.wake, Some(1.6));
+        host.now = 1.6;
+        live.event(&mut host, HostEvent::Timer { t: 1.6 });
+        assert!(host.wake.is_some_and(|w| (w - 1.7).abs() < 1e-9), "{:?}", host.wake);
+        live.event(&mut host, key(30, KeyState::Up, 1.65));
+        assert_eq!(host.wake, None);
+
+        // Escape gives focus back: the proxy closes.
+        live.event(&mut host, key(1, KeyState::Down, 2.0));
+        assert_eq!(host.closed, [20]);
+        live.event(&mut host, HostEvent::KeyboardFocus { id: 20, t: 2.0, gained: false, requested: true });
+
+        // Focus taken away from a new proxy: it is closed too, and the app hears of it.
+        live.driver().dispatch((), 3.0);
+        live.after_change(&mut host);
+        assert_eq!(host.open, [20, 21]);
+        live.event(&mut host, HostEvent::KeyboardFocus { id: 21, t: 3.0, gained: true, requested: false });
+        live.event(&mut host, HostEvent::KeyboardFocus { id: 21, t: 3.5, gained: false, requested: false });
+        assert_eq!(host.closed, [20, 21]);
+        assert_eq!(
+            live.driver().app.log,
+            [
+                "focus true false",
+                "Down 1.10",
+                "Repeat 1.60",
+                "Up 1.65",
+                "Down 2.00",
+                "focus false true",
+                "focus true false",
+                "focus false false"
+            ]
+        );
     }
 }
