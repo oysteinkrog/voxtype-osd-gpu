@@ -911,11 +911,14 @@ fn show_when_clear(
     let t = make.t;
     let mut shown = Vec::new();
     for &s in rewrapped {
-        let (line, a) = (next[s].line, next[s].x.target());
-        let b = a + next[s].width.target();
+        let line = next[s].line;
         let row = next[s].y.target() + next[s].roll.target();
         let near = 0.9 * line_height as f64;
         let busy = |at: f64| {
+            // Where the word is at `at`: one that slides with the words before it on its
+            // new line never meets them.
+            let a = next[s].x.value(at);
+            let b = a + next[s].width.value(at);
             next.iter().enumerate().any(|(i, o)| {
                 let x = o.x.value(at);
                 let in_row =

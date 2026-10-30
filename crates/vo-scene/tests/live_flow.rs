@@ -666,3 +666,36 @@ fn under_reduced_motion_a_rolled_revision_arrives_readable() {
     let readable = list.glyphs.iter().filter(|g| g.word == 2 && g.color.a >= 0.7).count();
     assert!(readable >= 13, "{readable} of {count} glyphs readable");
 }
+
+#[test]
+fn a_rewrapped_word_that_slides_with_the_words_before_it_crossfades_at_once() {
+    // A line cap drops a word from the front: "popup" moves up to the end of the first line
+    // and slides left with "set the" before it. Nothing crosses its place as it moves, so
+    // it crosses over from the second line at once instead of waiting until it is gone.
+    let view = |w: &[Word]| {
+        let live = Element::live_text("live", w).text_style(TextStyle::new(0, 22.0, 28.0)).width(328.0);
+        Element::column("root").child(live)
+    };
+    let text = |front: &str, rest: &str| -> Vec<Word> {
+        let mut all = vec![(4, front.to_string())];
+        all.extend(rest.split(' ').enumerate().map(|(i, w)| (i as u32 + 5, w.to_string())));
+        all.into_iter().map(|(id, text)| Word { id, text }).collect()
+    };
+    let rest = "and set the popup theme to swiss so the";
+    let mut s = scene();
+    s.apply(view(&text("…configuration file", rest)), 0.0);
+    let base = first(&s.sample(1.0), 5).1;
+    assert!(first(&s.sample(1.0), 8).1 > base + 14.0, "popup starts on the second line");
+    s.apply(view(&text("…file", &format!("{rest} dictation"))), 1.0);
+    assert!((first(&s.sample(5.0), 8).1 - base).abs() < 1e-3, "popup ends on the first line");
+    for k in 0..=36 {
+        let t = 1.0 + k as f64 / 120.0;
+        let list = s.sample(t);
+        // The first glyph of each copy: the one moving onto the first line and the ghost.
+        let ink = |row: f32| {
+            list.glyphs.iter().find(|g| g.word == 8 && (g.pos.y - row).abs() < 14.0).map_or(0.0, |g| g.color.a)
+        };
+        let (up, down) = (ink(base), ink(base + 28.0));
+        assert!(up + down > 0.6, "popup at {:.2} + {:.2} ink at +{:.3}", up, down, t - 1.0);
+    }
+}
