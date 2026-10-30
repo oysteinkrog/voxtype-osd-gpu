@@ -58,8 +58,10 @@ pub struct Envelope {
     /// where glyphs come to rest. Use `until` to leave out an ending that removes the text.
     pub from: f64,
     pub until: f64,
-    /// A glyph is at rest from a frame on when it and the next `still_frames - 1` frames
-    /// differ by less than `still_px` in position and size and 0.5 % in ink.
+    /// A glyph is at rest from a frame on when it holds still for `still_frames - 1` frame
+    /// times at [`STILL_FPS`] (0.067 s by default), moving less than `still_px` in position
+    /// and size and 0.5 % in ink per frame time. Both are times and speeds, not frame
+    /// counts, so the verdict does not depend on the rate the scenario is sampled at.
     pub still_frames: usize,
     pub still_px: f32,
     /// The word ids of the transcript. Other live text, such as a status row whose words
@@ -256,9 +258,28 @@ impl fmt::Display for Report {
     }
 }
 
+/// The frame rate [`Envelope::still_frames`], [`Envelope::still_px`], [`ROW_STILL_PX`] and
+/// [`ROW_TOGETHER_PX`] are given at. At other rates they scale with the time between samples:
+/// a frame at 60 fps moves half as far as one at 30 fps, and a hold of three frames at
+/// 30 fps is five at 60 fps.
+pub const STILL_FPS: f64 = 30.0;
+
+/// The time between samples `a` and `b`, in frames at [`STILL_FPS`].
+fn frames_between(a: &Sample, b: &Sample) -> f32 {
+    ((b.t - a.t).abs() * STILL_FPS) as f32
+}
+
+/// Whether samples `a` to `b` of `tr` span the hold `env` needs to count as a rest.
+fn long_enough(tr: &Track, a: usize, b: usize, env: &Envelope) -> bool {
+    let need = env.still_frames.max(1) - 1;
+    frames_between(&tr.samples[a], &tr.samples[b]) + 1e-3 >= need as f32
+}
+
 /// A live-text glyph as drawn, in surface space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Sample {
+    /// Time of the frame it was drawn in.
+    t: f64,
     /// Pen position on the baseline.
     pos: Point,
     /// Em size after every transform.
@@ -274,13 +295,20 @@ struct Sample {
 }
 
 impl Sample {
+    /// Whether `next`, the glyph's next sample, moved less than `px` (and 0.5 % ink, 0.05
+    /// degrees) per frame time at [`STILL_FPS`].
     fn still(&self, next: &Sample, px: f32) -> bool {
-        (self.pos.x - next.pos.x).abs() <= px
-            && (self.pos.y - next.pos.y).abs() <= px
-            && (self.em - next.em).abs() <= px
-            && (self.ink - next.ink).abs() <= 0.005
-            && (self.rot - next.rot).abs() <= 0.05
-            && (self.blur - next.blur).abs() <= px
+        self.same(next, px, frames_between(self, next))
+    }
+
+    /// Whether `other` differs by at most `px` (and 0.5 % ink, 0.05 degrees), each times `k`.
+    fn same(&self, other: &Sample, px: f32, k: f32) -> bool {
+        (self.pos.x - other.pos.x).abs() <= px * k
+            && (self.pos.y - other.pos.y).abs() <= px * k
+            && (self.em - other.em).abs() <= px * k
+            && (self.ink - other.ink).abs() <= 0.005 * k
+            && (self.rot - other.rot).abs() <= 0.05 * k
+            && (self.blur - other.blur).abs() <= px * k
     }
 }
 
@@ -324,6 +352,9 @@ impl Tracker {
         let n = self.frames.len();
         let mut now: Vec<(Key, Sample)> = Vec::new();
         collect(list, &mut now);
+        for (_, s) in &mut now {
+            s.t = t;
+        }
         let steps = self.word_steps(&now);
         let moves = self.word_moves(n, &now);
         let replaced = self.replaced(n, &now);
@@ -620,7 +651,7 @@ impl Tracker {
                 return false;
             };
             let left = (0..k).rev().find(|&j| rests[ti][j] == Some(j));
-            !tr.samples[k].still(&tr.samples[r], env.still_px)
+            !tr.samples[k].same(&tr.samples[r], env.still_px, 1.0)
                 && left.and_then(row_of) == Some(true)
                 && row_of(r) != Some(false)
         };
@@ -645,7 +676,8 @@ impl Tracker {
                 continue;
             }
             report.frames_checked += 1;
-            let mut words: HashMap<u32, Vec<(&Sample, Sample)>> = HashMap::new();
+            // Per word: (track, sample, rest).
+            let mut words: HashMap<u32, Vec<(usize, &Sample, Sample)>> = HashMap::new();
             for &(ti, s, r) in &glyphs {
                 if (r.pos.y - line_y).abs() >= 0.5 * r.em || elsewhere(ti, n - self.tracks[ti].first) {
                     continue;
@@ -683,7 +715,7 @@ impl Tracker {
                 if s.blur - r.blur > env.blur_px {
                     flag(Breach::Blur(s.blur - r.blur));
                 }
-                words.entry(word).or_default().push((s, r));
+                words.entry(word).or_default().push((ti, s, r));
             }
             let mut ids: Vec<u32> = words.keys().copied().collect();
             ids.sort_unstable();
@@ -692,13 +724,26 @@ impl Tracker {
                 if gs.len() < 2 {
                     continue;
                 }
-                let span = |f: fn(&(&Sample, Sample)) -> f32| {
-                    let (lo, hi) = gs.iter().map(f).fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+                let span = |xs: &mut dyn Iterator<Item = f32>| {
+                    let (lo, hi) = xs.fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
                     hi - lo
                 };
-                let now = span(|g| g.0.pos.x);
-                let rest = span(|g| g.1.pos.x);
-                if rest > 0.5 * gs[0].1.em && (now / rest - 1.0).abs() > env.tracking {
+                // The word's width at rest is its width at one moment: when the last of its
+                // glyphs comes to rest. Letters that show first can rest on a hold a few
+                // frames before the rest of the word does while the whole word glides along
+                // its row (a centred line re-centring), and their rests and those of the
+                // later letters are then from different moments.
+                let at = gs.iter().map(|g| g.2.t).fold(f64::NEG_INFINITY, f64::max);
+                let rest_x = |&(ti, _, r): &(usize, &Sample, Sample)| {
+                    let tr = &self.tracks[ti];
+                    match tr.samples.binary_search_by(|q| q.t.total_cmp(&at)) {
+                        Ok(j) if (tr.samples[j].pos.y - r.pos.y).abs() < 0.5 * r.em => tr.samples[j].pos.x,
+                        _ => r.pos.x,
+                    }
+                };
+                let now = span(&mut gs.iter().map(|g| g.1.pos.x));
+                let rest = span(&mut gs.iter().map(rest_x));
+                if rest > 0.5 * gs[0].2.em && (now / rest - 1.0).abs() > env.tracking {
                     report.violations.push(Violation {
                         frame: n as u64,
                         t: fr.t,
@@ -726,15 +771,17 @@ impl Tracker {
                 env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y))
             })
             .collect();
-        // Words about to show, with where each glyph comes to rest.
+        // Words about to show, with where each glyph comes to rest, or where it shows when it
+        // never holds still (a word that drifts on as a cancel dims the text is still read
+        // where it shows).
         let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
         // (word, rest y, frames from now until it shows)
         let pending: Vec<(u32, f32, usize)> = soon
             .flat_map(|(i, f)| {
                 f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(move |&ti| {
                     let tr = &self.tracks[ti];
-                    let r = rests[ti][0]?;
-                    env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y, i))
+                    let at = tr.samples[rests[ti][0].unwrap_or(0)].pos.y;
+                    env.transcript.contains(&tr.key.0).then_some((tr.key.0, at, i))
                 })
             })
             .collect();
@@ -744,12 +791,33 @@ impl Tracker {
         // where the line before is still scrolling to now. Words can show out of order
         // (one waits for its place while the next shows), so the next one is the first
         // to show, not the lowest id.
-        let drawn = rests_now.iter().map(|a| a.0).max();
-        let next = pending.iter().filter(|p| drawn.is_none_or(|d| p.0 > d)).min_by_key(|p| (p.2, p.0)).map(|p| p.0);
-        let newest = next.or(drawn)?;
-        let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == newest).map(|a| a.1).collect();
-        ys.sort_by(f32::total_cmp);
-        Some(ys[ys.len() / 2])
+        // A word drawn now counts as shown even while all its glyphs are leaving: when a
+        // revision lays the text out again, the old copies fade out while the words show
+        // again where they go, and those are not new words.
+        let shown = fr.tracks.iter().map(|&ti| self.tracks[ti].key.0).filter(|w| env.transcript.contains(w)).max();
+        let next = pending.iter().filter(|p| shown.is_none_or(|d| p.0 > d)).min_by_key(|p| (p.2, p.0)).map(|p| p.0);
+        let line = |w: u32| {
+            let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == w).map(|a| a.1).collect();
+            ys.sort_by(f32::total_cmp);
+            (!ys.is_empty()).then(|| ys[ys.len() / 2])
+        };
+        // The newest word shown rests where its new copy will show when it is leaving now.
+        // With no copy about to show, it is still read where it is drawn: an older word that
+        // rests now is on another line.
+        let drawn_at = |w: u32| {
+            let mut ys: Vec<f32> = fr
+                .tracks
+                .iter()
+                .filter(|&&ti| self.tracks[ti].key.0 == w)
+                .map(|&ti| self.tracks[ti].samples[n - self.tracks[ti].first].pos.y)
+                .collect();
+            ys.sort_by(f32::total_cmp);
+            (!ys.is_empty()).then(|| ys[ys.len() / 2])
+        };
+        match next {
+            Some(w) => line(w),
+            None => shown.and_then(|w| line(w).or_else(|| drawn_at(w))),
+        }
     }
 
     /// Per track, per sample: how far the glyph's row has scrolled down since the track's first
@@ -765,6 +833,7 @@ impl Tracker {
     fn row_scroll(&self, env: &Envelope) -> Vec<Vec<f32>> {
         let mut out: Vec<Vec<f32>> = self.tracks.iter().map(|tr| vec![0.0; tr.samples.len()]).collect();
         for n in 1..self.frames.len() {
+            let together = ROW_TOGETHER_PX * ((self.frames[n].t - self.frames[n - 1].t) * STILL_FPS) as f32;
             // Transcript glyphs drawn in this frame and the last: (track, word, height in the
             // last frame, move, em).
             let both: Vec<(usize, u32, f32, f32, f32)> = self.frames[n]
@@ -782,9 +851,7 @@ impl Tracker {
             for &(ti, word, y, own, em) in &both {
                 let near = |m: f32, row: bool| {
                     both.iter()
-                        .filter(|o| {
-                            o.1 != word && ((o.2 - y).abs() < 0.5 * em) == row && (o.3 - m).abs() <= ROW_TOGETHER_PX
-                        })
+                        .filter(|o| o.1 != word && ((o.2 - y).abs() < 0.5 * em) == row && (o.3 - m).abs() <= together)
                         .count()
                 };
                 let alone = !both.iter().any(|o| o.1 != word && (o.2 - y).abs() < 0.5 * em);
@@ -799,7 +866,7 @@ impl Tracker {
                 }
                 for m in moves {
                     let off = (m - own).abs();
-                    let row = near(m, true) >= ROW_MATES || off <= ROW_TOGETHER_PX || alone;
+                    let row = near(m, true) >= ROW_MATES || off <= together || alone;
                     if off < best && row && near(m, false) >= ROW_MATES {
                         best = off;
                         step = m;
@@ -816,7 +883,8 @@ impl Tracker {
 /// Glyphs of other words a row needs before its move counts as a scroll ([`Tracker::row_scroll`]).
 const ROW_MATES: usize = 2;
 
-/// How far a glyph's move can be from its row's and still move with the row, in logical pixels.
+/// How far a glyph's move in a frame at [`STILL_FPS`] can be from its row's and still move with
+/// the row, in logical pixels.
 const ROW_TOGETHER_PX: f32 = 0.5;
 
 /// Per sample, where the glyph comes to rest. That is the next still sample ([`rest_of`]),
@@ -829,23 +897,35 @@ fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>>
     let mut rests = rest_of(tr, env, last_frame);
     let len = tr.samples.len();
     // Only the height counts: a centred line glides along its row as words arrive.
-    let holds = |j: usize| (tr.samples[j].pos.y - tr.samples[j + 1].pos.y).abs() <= ROW_STILL_PX;
+    let holds = |j: usize| {
+        let (a, b) = (&tr.samples[j], &tr.samples[j + 1]);
+        (a.pos.y - b.pos.y).abs() <= ROW_STILL_PX * frames_between(a, b)
+    };
     let mut i = 0;
     while i < len {
         let mut e = i;
         while e + 1 < len && holds(e) {
             e += 1;
         }
-        if e + 1 - i >= env.still_frames.max(1) {
+        if long_enough(tr, i, e, env) {
             // The stillest sample of the hold in height, the latest of equals: the word has
             // settled most there, before the scroll that ends the hold sets off.
             let speed = |j: usize| match j {
                 _ if j == i || tr.samples[j].ink < REST_INK => f32::MAX,
-                _ => (tr.samples[j].pos.y - tr.samples[j - 1].pos.y).abs(),
+                _ => {
+                    let (a, b) = (&tr.samples[j - 1], &tr.samples[j]);
+                    (b.pos.y - a.pos.y).abs() / frames_between(a, b).max(1e-3)
+                }
             };
             let calm = (i..=e).fold(i, |b, j| if speed(j) <= speed(b) + 0.01 { j } else { b });
             let end = &tr.samples[calm];
-            for rest in &mut rests[i..=e] {
+            // The samples on their way into the hold rest there too: a word that rises into its
+            // row and holds there until the text scrolls comes to rest on that row first.
+            let mut from = i;
+            while from > 0 && rests[from - 1] == rests[i] && rests[from - 1] != Some(from - 1) {
+                from -= 1;
+            }
+            for rest in &mut rests[from..=e] {
                 if rest.is_some_and(|r| (tr.samples[r].pos.y - end.pos.y).abs() >= 0.5 * end.em) {
                     *rest = Some(calm);
                 }
@@ -856,7 +936,8 @@ fn rests_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>>
     rests
 }
 
-/// Vertical movement per frame under which a glyph holds its row, in logical pixels.
+/// Vertical movement per frame at [`STILL_FPS`] under which a glyph holds its row, in logical
+/// pixels.
 const ROW_STILL_PX: f32 = 1.5;
 
 /// How far a measured rest can be from where the glyph would settle, in logical pixels. A
@@ -874,12 +955,17 @@ const REST_INK: f32 = 0.02;
 /// nowhere sooner, so a short scenario does not hide arrivals.
 fn rest_of(tr: &Track, env: &Envelope, last_frame: usize) -> Vec<Option<usize>> {
     let len = tr.samples.len();
-    let k = env.still_frames.max(1);
+    // A sample is still when it and the samples after it hold still for the time a rest needs.
     let mut still = vec![false; len];
     for (i, flag) in still.iter_mut().enumerate() {
-        *flag = i + k <= len
-            && tr.samples[i].ink >= REST_INK
-            && (i..i + k - 1).all(|j| tr.samples[j].still(&tr.samples[j + 1], env.still_px));
+        if tr.samples[i].ink < REST_INK {
+            continue;
+        }
+        let mut j = i;
+        while !long_enough(tr, i, j, env) && j + 1 < len && tr.samples[j].still(&tr.samples[j + 1], env.still_px) {
+            j += 1;
+        }
+        *flag = long_enough(tr, i, j, env);
     }
     let mut out = vec![None; len];
     let mut next = (tr.last_frame() == last_frame && tr.samples[len - 1].ink >= REST_INK).then_some(len - 1);
@@ -948,6 +1034,7 @@ fn collect(list: &DisplayList, out: &mut Vec<(Key, Sample)>) {
                 let (ax, ay) = (px.x - p.x, px.y - p.y);
                 let em = ((ax.hypot(ay)) * ((py.x - p.x).hypot(py.y - p.y))).sqrt();
                 let s = Sample {
+                    t: 0.0,
                     pos: p,
                     em,
                     rot: ay.atan2(ax).to_degrees(),
@@ -1683,5 +1770,187 @@ mod tests {
         let r = tr.check(&Envelope::default());
         let kinds: Vec<_> = r.by_kind().iter().map(|s| s.kind).collect();
         assert_eq!(kinds, vec!["baseline"], "{r}");
+    }
+
+    /// Glyphs of word `id` at `xs` on height `y` with `alpha`, glyph ids from `glyph` on.
+    fn letters(id: u32, glyph: u32, xs: &[f32], y: f32, alpha: f32) -> Vec<GlyphInstance> {
+        xs.iter()
+            .enumerate()
+            .map(|(k, &x)| GlyphInstance {
+                pos: Point::new(x, y),
+                size: 16.0,
+                font: 0,
+                glyph: glyph + k as u32,
+                word: id,
+                color: Color::rgba(1.0, 1.0, 1.0, alpha),
+                xform: vo_scene::display::GlyphXform::IDENTITY,
+            })
+            .collect()
+    }
+
+    /// The same motion, `at(t)`, sampled at `fps` for `secs` and checked.
+    fn sampled(fps: f64, secs: f64, at: impl Fn(f64) -> Vec<GlyphInstance>) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..=(secs * fps).round() as usize {
+            let t = n as f64 / fps;
+            tr.push(t, &list(at(t)));
+        }
+        tr.check(&Envelope::default())
+    }
+
+    /// The kinds a report breaks, sorted.
+    fn kinds(r: &Report) -> Vec<&'static str> {
+        let mut k: Vec<_> = r.by_kind().iter().map(|s| s.kind).collect();
+        k.sort_unstable();
+        k
+    }
+
+    /// A one-glyph track sampled at `fps` from `y(t)` for `secs`.
+    fn track_at(fps: f64, secs: f64, y: impl Fn(f64) -> f32) -> Track {
+        let samples = (0..=(secs * fps).round() as usize)
+            .map(|n| {
+                let t = n as f64 / fps;
+                Sample { t, pos: Point::new(0.0, y(t)), em: 16.0, rot: 0.0, tilt: 0.0, skew: 0.0, ink: 1.0, blur: 0.0 }
+            })
+            .collect();
+        Track { key: (1, 0, 0), first: 0, samples }
+    }
+
+    #[test]
+    fn a_rest_is_a_time_and_a_speed_not_a_frame_count() {
+        let env = Envelope::default();
+        for fps in [30.0, 60.0, 120.0] {
+            // Creeping at 2 px/s is moving at any rate (0.033 px a frame at 60 fps once read as
+            // still). The glyph leaves after the last sample, so it never comes to rest.
+            let tr = track_at(fps, 1.0, |t| 40.0 - 2.0 * t as f32);
+            let last = tr.last_frame() + 1;
+            assert!(rest_of(&tr, &env, last).iter().all(Option::is_none), "{fps} fps");
+            // A stop of 0.05 s between two moves is too short to rest in at any rate (three
+            // frames at 60 fps once made a rest).
+            let tr = track_at(fps, 0.5, |t| match t {
+                t if t < 0.2 => 40.0 - 50.0 * t as f32,
+                t if t < 0.25 => 30.0,
+                t => 30.0 - 50.0 * (t - 0.25) as f32,
+            });
+            let last = tr.last_frame() + 1;
+            assert!(rest_of(&tr, &env, last).iter().all(Option::is_none), "{fps} fps");
+            // A hold of 0.1 s is a rest at any rate.
+            let tr = track_at(fps, 0.5, |t| if t < 0.2 { 40.0 - 50.0 * t as f32 } else { 30.0 });
+            assert!(rest_of(&tr, &env, tr.last_frame() + 1)[0].is_some(), "{fps} fps");
+        }
+    }
+
+    /// A word on a centred line: its first four letters show at 0.1 s, its last four at
+    /// 0.15 s, and the whole word glides 60 px left as the line re-centres, easing in and
+    /// out over 0.25 s and up 2 px with it. At 0.3 s, before it is done, the text scrolls up
+    /// a row. Word 1, the line before, scrolls with it.
+    fn gliding(t: f64) -> Vec<GlyphInstance> {
+        let t = t as f32;
+        let up = 24.0 * ((t - 0.3) / 0.1).clamp(0.0, 1.0);
+        let mut g = letters(1, 10, &[10.0, 20.0, 30.0], 40.0 - up, 1.0);
+        if t >= 0.1 {
+            let u = ((t - 0.1) / 0.25).clamp(0.0, 1.0);
+            let ease = u * u * (3.0 - 2.0 * u);
+            let y = 64.0 - 2.0 * ease - up;
+            let x = |k: usize| 100.0 + 10.0 * k as f32 - 60.0 * ease;
+            g.extend(letters(2, 20, &[x(0), x(1), x(2), x(3)], y, 1.0));
+            if t >= 0.15 {
+                g.extend(letters(2, 24, &[x(4), x(5), x(6), x(7)], y, 1.0));
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn a_word_that_glides_whole_keeps_its_width_at_any_rate() {
+        for fps in [30.0, 60.0] {
+            let r = sampled(fps, 1.0, gliding);
+            assert!(!kinds(&r).contains(&"tracking"), "{fps} fps: {r}");
+        }
+    }
+
+    /// Two rows (words 0 and 1 on top, words 2 and 3 below, word 3 the newest) laid out
+    /// again at 0.2 s: the old copies fade out over 0.1 s, the new copies of words 0 and 1
+    /// fade in a row higher, and words 2 and 3 show again on the row above only at 0.6 s.
+    fn relaid(t: f64) -> Vec<GlyphInstance> {
+        let mut g = Vec::new();
+        let out = (1.0 - (t as f32 - 0.2) / 0.1).clamp(0.0, 1.0);
+        if out > 0.0 {
+            g.extend(letters(0, 10, &[10.0, 20.0], 40.0, out));
+            g.extend(letters(1, 20, &[40.0, 50.0], 40.0, out));
+            g.extend(letters(2, 30, &[10.0, 20.0], 64.0, out));
+            g.extend(letters(3, 40, &[40.0, 50.0], 64.0, out));
+        }
+        if t >= 0.2 {
+            let fade = ((t as f32 - 0.2) / 0.1 + 0.05).min(1.0);
+            g.extend(letters(0, 10, &[70.0, 80.0], 16.0, fade));
+            g.extend(letters(1, 20, &[100.0, 110.0], 16.0, fade));
+        }
+        if t >= 0.6 {
+            g.extend(letters(2, 30, &[10.0, 20.0], 40.0, 1.0));
+            g.extend(letters(3, 40, &[40.0, 50.0], 40.0, 1.0));
+        }
+        g
+    }
+
+    #[test]
+    fn words_laid_out_again_on_an_older_line_are_not_the_reading_line() {
+        for fps in [30.0, 60.0] {
+            sampled(fps, 1.0, relaid).assert_ok();
+        }
+    }
+
+    /// The line before (word 1) scrolls up 12 px from 0.1 s, easing out over 0.3 s, and the
+    /// next word (word 2) shows on the row below at `show` s and drifts along it until it
+    /// fades out at 0.8 s, never still, as a cancel takes the text away.
+    fn drifting(show: f64) -> impl Fn(f64) -> Vec<GlyphInstance> {
+        move |t: f64| {
+            let tf = t as f32;
+            let up = 12.0 * (1.0 - (-((tf - 0.1).max(0.0)) / 0.08).exp());
+            let fade = (1.0 - (tf - 0.8) / 0.1).clamp(0.0, 1.0);
+            let mut g = letters(1, 10, &[10.0, 20.0, 30.0], 40.0 - up, fade);
+            if t >= show {
+                let x = 10.0 - 6.0 * (tf - show as f32);
+                g.extend(letters(2, 20, &[x, x + 10.0], 64.0, fade));
+            }
+            g.retain(|g| g.color.a > 0.0);
+            g
+        }
+    }
+
+    #[test]
+    fn a_next_word_that_never_holds_still_still_sets_the_reading_line() {
+        for fps in [30.0, 60.0] {
+            sampled(fps, 1.0, drifting(0.2)).assert_ok();
+            // With no next word the scroll's tail is on the reading line and is reported.
+            assert!(kinds(&sampled(fps, 1.0, drifting(5.0))).contains(&"baseline"), "{fps} fps");
+        }
+    }
+
+    /// Word 2 rises 18 px into its row from 0.1 s, fading in from 5 %, and is still settling
+    /// when the text scrolls up 20 px in one frame at 0.45 s. Word 3 shows in place on the
+    /// same row at 0.3 s.
+    fn rise_then_scroll(t: f64) -> Vec<GlyphInstance> {
+        let tf = t as f32;
+        let up = if t >= 0.45 { 20.0 } else { 0.0 };
+        let mut g = letters(1, 10, &[10.0, 20.0, 30.0], 40.0 - up, 1.0);
+        if t >= 0.1 {
+            let k = (-(tf - 0.1) / 0.1).exp();
+            g.extend(letters(2, 20, &[50.0, 60.0, 70.0], 64.0 + 18.0 * k - up, 1.0 - 0.95 * k));
+        }
+        if t >= 0.3 {
+            g.extend(letters(3, 30, &[90.0, 100.0], 64.0 - up, 1.0));
+        }
+        g
+    }
+
+    #[test]
+    fn a_word_that_rises_into_its_row_before_the_text_scrolls_is_checked_at_any_rate() {
+        for fps in [30.0, 60.0] {
+            let r = sampled(fps, 1.0, rise_then_scroll);
+            let k = kinds(&r);
+            assert!(k.contains(&"off-row") && k.contains(&"ink"), "{fps} fps: {r}");
+            assert!(r.violations.iter().all(|v| v.word == 2), "{fps} fps: {r}");
+        }
     }
 }
