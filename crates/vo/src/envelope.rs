@@ -97,6 +97,18 @@ impl Default for Envelope {
     }
 }
 
+impl Envelope {
+    /// The slowest sample rate the check can be read at: two samples must fall inside the
+    /// hold that makes a rest (`still_frames - 1` frame times at [`STILL_FPS`], 15 fps by
+    /// default). Sampled slower, a new word that holds where it shows for less than two
+    /// sample times and then moves on (jarvis under reduced motion: 100 ms, then the line
+    /// re-centres, scrolls and tilts back) is drawn there once, takes its rest from after
+    /// the moves, and its first frame reads as a breach that is not on screen.
+    pub fn slowest_fps(&self) -> f64 {
+        STILL_FPS / (self.still_frames.max(2) - 1) as f64
+    }
+}
+
 /// What a glyph on the reading line did wrong, with the measured value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Breach {
@@ -1417,6 +1429,15 @@ mod tests {
             let r = tr.check(&Envelope::default());
             assert!(r.is_ok() && r.glyphs_checked > 0, "ink {ink}, word at frame {at}: {r}");
         }
+    }
+
+    /// Two samples fit in the hold that makes a rest: 15 fps for the default 67 ms hold, and
+    /// slower for a longer one.
+    #[test]
+    fn the_slowest_rate_puts_two_samples_in_a_rest() {
+        assert_eq!(Envelope::default().slowest_fps(), 15.0);
+        assert_eq!(Envelope { still_frames: 5, ..Envelope::default() }.slowest_fps(), 7.5);
+        assert_eq!(Envelope { still_frames: 1, ..Envelope::default() }.slowest_fps(), STILL_FPS);
     }
 
     /// A typographic tracking channel at full strength either way on the reading line (the
