@@ -54,14 +54,29 @@ struct MarginFollow {
     cap: Option<vo_scene::Insets>,
 }
 
+/// Whether the host centres a surface with `placement` across (`x`) and down (`y`) the
+/// output; `None` for a full-screen one.
+fn centred_axes(placement: Placement) -> Option<(bool, bool)> {
+    match placement {
+        Placement::Centered => Some((true, true)),
+        Placement::Anchored { edges, .. } => Some((edges.left == edges.right, edges.top == edges.bottom)),
+        Placement::FromTop { .. } | Placement::LineAt { .. } => Some((true, false)),
+        Placement::Fullscreen => None,
+    }
+}
+
+/// `m` with both sides of each centred axis at the larger of the two, so the host's
+/// centring puts the content, not the content plus an uneven margin, in the middle.
+fn pair_margin(m: vo_scene::Insets, placement: Placement) -> vo_scene::Insets {
+    let (x, y) = centred_axes(placement).unwrap_or((false, false));
+    let (l, r) = if x { (m.left.max(m.right), m.left.max(m.right)) } else { (m.left, m.right) };
+    let (t, b) = if y { (m.top.max(m.bottom), m.top.max(m.bottom)) } else { (m.top, m.bottom) };
+    vo_scene::Insets::new(l, t, r, b)
+}
+
 impl MarginFollow {
     fn new(base: vo_scene::Insets, placement: Placement) -> Option<MarginFollow> {
-        let paired = match placement {
-            Placement::Centered => (true, true),
-            Placement::Anchored { edges, .. } => (edges.left == edges.right, edges.top == edges.bottom),
-            Placement::FromTop { .. } | Placement::LineAt { .. } => (true, false),
-            Placement::Fullscreen => return None,
-        };
+        let paired = centred_axes(placement)?;
         Some(MarginFollow { base, now: base, paired, below: None, cap: None })
     }
 
@@ -521,7 +536,7 @@ impl<A: App> Live<A> {
         driver.extras.reduced = options.reduced_motion;
         let follows = matches!(options.margin, SurfaceMargin::Auto | SurfaceMargin::AtLeast(_))
             && self.spec.placement != Placement::Fullscreen;
-        let first = options.margin.reach(&driver.scene, t);
+        let first = options.margin.reach(&driver.scene, t).map(|m| pair_margin(m, self.spec.placement));
         if let Some(m) = first {
             let content = self.spec.size;
             let fit = vo_scene::surface_for(content, m);
@@ -1143,6 +1158,15 @@ mod inset_tests {
     use vo_scene::Insets;
 
     const INSETS: Insets = Insets::new(6.0, 9.0, 7.0, 11.0);
+
+    #[test]
+    fn the_first_margin_is_even_across_a_centred_axis() {
+        let line = Placement::LineAt { fraction: 0.5, y: 120.0 };
+        assert_eq!(pair_margin(INSETS, line), Insets::new(7.0, 9.0, 7.0, 11.0));
+        assert_eq!(pair_margin(INSETS, Placement::Centered), Insets::new(7.0, 11.0, 7.0, 11.0));
+        let corner = Placement::Anchored { edges: Edges::BOTTOM_RIGHT, margin: [0; 4] };
+        assert_eq!(pair_margin(INSETS, corner), INSETS);
+    }
 
     #[test]
     fn line_at_follows_the_top_inset() {
