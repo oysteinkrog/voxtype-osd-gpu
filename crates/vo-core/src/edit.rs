@@ -14,6 +14,12 @@
 //!
 //! Separators are ASCII punctuation such as `.` `,` `-` `/` and quotes ([`is_word_separator`]).
 //!
+//! Undo history (R15): a run of typing, or of Backspace or Delete, with gaps under
+//! [`MERGE_GAP`] seconds and no other action between, is one step. A new edit clears redo.
+//! [`EditBuffer::set_floor`] and [`EditBuffer::seed`] start a new edit session: undo never
+//! goes past them, so text that came from elsewhere (speech added while not editing) is never
+//! undone. The history keeps the last [`MAX_STEPS`] steps.
+//!
 //! Vertical moves and line-edge moves need the wrapped layout. The app passes it in as a
 //! [`Lines`]; [`PlainLines`] is the layout with no soft wraps, one line per hard newline.
 
@@ -102,6 +108,38 @@ pub enum EditAction {
         extend: bool,
     },
     SelectAll,
+    /// Takes back the last step, back to the floor at most.
+    Undo,
+    /// Does again the last step undone, until a new edit.
+    Redo,
+}
+
+/// Seconds between two keys of one typing run, below which they are one undo step.
+pub const MERGE_GAP: f64 = 1.0;
+
+/// Undo steps kept; older ones are dropped.
+pub const MAX_STEPS: usize = 1000;
+
+/// What kind of edit a step is, for merging runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepKind {
+    Typing,
+    DeleteBack,
+    DeleteForward,
+    Other,
+}
+
+/// One undo step: `removed` at `at` was replaced by `inserted`.
+#[derive(Clone, Debug, PartialEq)]
+struct Step {
+    at: usize,
+    removed: String,
+    inserted: String,
+    before: Selection,
+    after: Selection,
+    kind: StepKind,
+    /// Time of the last edit in the step.
+    t: f64,
 }
 
 /// The text change an action made: `range` of the old text was replaced by `inserted`.
@@ -187,6 +225,10 @@ pub struct EditBuffer {
     /// The x a run of Up and Down moves keeps to. Any other action forgets it.
     goal_x: Option<f32>,
     rev: u64,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+    /// The top undo step may still grow: no other action came since it.
+    run_open: bool,
 }
 
 impl EditBuffer {
@@ -194,7 +236,33 @@ impl EditBuffer {
     pub fn new(text: impl Into<String>) -> EditBuffer {
         let text = text.into();
         let sel = Selection::caret(text.len());
-        EditBuffer { text, sel, goal_x: None, rev: 0 }
+        EditBuffer { text, sel, goal_x: None, rev: 0, undo: Vec::new(), redo: Vec::new(), run_open: false }
+    }
+
+    /// Replaces the whole text, as when speech was added between edit sessions: caret at the
+    /// end, and an undo floor, so the change itself cannot be undone.
+    pub fn seed(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.sel = Selection::caret(self.text.len());
+        self.goal_x = None;
+        self.rev += 1;
+        self.set_floor();
+    }
+
+    /// Marks an undo floor (an edit session starts): steps before it can no longer be undone
+    /// or redone.
+    pub fn set_floor(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.run_open = false;
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     pub fn text(&self) -> &str {
@@ -222,21 +290,44 @@ impl EditBuffer {
             affinity: sel.affinity,
         };
         self.goal_x = None;
+        self.run_open = false;
     }
 
     /// [`EditBuffer::apply`] with [`PlainLines`] for the current text.
-    pub fn apply_plain(&mut self, action: EditAction) -> Option<EditEffect> {
+    pub fn apply_plain(&mut self, action: EditAction, t: f64) -> Option<EditEffect> {
         let lines = PlainLines::new(&self.text);
-        self.apply(action, &lines)
+        self.apply(action, &lines, t)
     }
 
-    /// Does `action`. `lines` is the layout of the text as it is before the action. Returns
-    /// the text change, or `None` when only the selection moved (or nothing happened).
-    pub fn apply(&mut self, action: EditAction, lines: &dyn Lines) -> Option<EditEffect> {
+    /// Does `action` at time `t` (seconds, any clock; only gaps between actions matter, for
+    /// merging undo steps). `lines` is the layout of the text as it is before the action.
+    /// Returns the text change, or `None` when only the selection moved (or nothing happened).
+    pub fn apply(&mut self, action: EditAction, lines: &dyn Lines, t: f64) -> Option<EditEffect> {
+        let before = self.sel;
+        let kind = match &action {
+            EditAction::Insert(_) if before.is_caret() => StepKind::Typing,
+            EditAction::Delete(Dir::Back, Unit::Grapheme) if before.is_caret() => StepKind::DeleteBack,
+            EditAction::Delete(Dir::Forward, Unit::Grapheme) if before.is_caret() => StepKind::DeleteForward,
+            _ => StepKind::Other,
+        };
+        let effect = match action {
+            EditAction::Undo => return self.undo(),
+            EditAction::Redo => return self.redo(),
+            action => self.act(action, lines),
+        };
+        match &effect {
+            Some(e) => self.record(e, before, kind, t),
+            None => self.run_open = false,
+        }
+        effect
+    }
+
+    fn act(&mut self, action: EditAction, lines: &dyn Lines) -> Option<EditEffect> {
         if !matches!(action, EditAction::MoveLine { .. }) {
             self.goal_x = None;
         }
         match action {
+            EditAction::Undo | EditAction::Redo => None,
             EditAction::Insert(s) => {
                 if s.is_empty() && self.sel.is_caret() {
                     return None;
@@ -290,6 +381,78 @@ impl EditBuffer {
                 None
             }
         }
+    }
+
+    /// Adds an edit to the history, merged into the top step when it continues its run.
+    fn record(&mut self, e: &EditEffect, before: Selection, kind: StepKind, t: f64) {
+        self.redo.clear();
+        let after = self.sel;
+        if let Some(top) = self
+            .undo
+            .last_mut()
+            .filter(|top| self.run_open && kind != StepKind::Other && top.kind == kind && t - top.t < MERGE_GAP)
+        {
+            let joined = match kind {
+                StepKind::Typing if e.range.start == top.at + top.inserted.len() => {
+                    top.inserted.push_str(&e.inserted);
+                    true
+                }
+                StepKind::DeleteBack if e.range.end == top.at => {
+                    top.at = e.range.start;
+                    top.removed.insert_str(0, &e.removed);
+                    true
+                }
+                StepKind::DeleteForward if e.range.start == top.at => {
+                    top.removed.push_str(&e.removed);
+                    true
+                }
+                _ => false,
+            };
+            if joined {
+                top.after = after;
+                top.t = t;
+                return;
+            }
+        }
+        self.undo.push(Step {
+            at: e.range.start,
+            removed: e.removed.clone(),
+            inserted: e.inserted.clone(),
+            before,
+            after,
+            kind,
+            t,
+        });
+        if self.undo.len() > MAX_STEPS {
+            self.undo.remove(0);
+        }
+        self.run_open = true;
+    }
+
+    fn undo(&mut self) -> Option<EditEffect> {
+        self.run_open = false;
+        self.goal_x = None;
+        let step = self.undo.pop()?;
+        let range = step.at..step.at + step.inserted.len();
+        self.text.replace_range(range.clone(), &step.removed);
+        self.sel = step.before;
+        self.rev += 1;
+        let e = EditEffect { range, removed: step.inserted.clone(), inserted: step.removed.clone() };
+        self.redo.push(step);
+        Some(e)
+    }
+
+    fn redo(&mut self) -> Option<EditEffect> {
+        self.run_open = false;
+        self.goal_x = None;
+        let step = self.redo.pop()?;
+        let range = step.at..step.at + step.removed.len();
+        self.text.replace_range(range.clone(), &step.inserted);
+        self.sel = step.after;
+        self.rev += 1;
+        let e = EditEffect { range, removed: step.removed.clone(), inserted: step.inserted.clone() };
+        self.undo.push(step);
+        Some(e)
     }
 
     fn move_focus(&mut self, to: usize, affinity: Affinity, extend: bool) {
@@ -459,12 +622,12 @@ mod tests {
         let mut b = caret(text, 0);
         let mut right = vec![0];
         while b.selection().focus < text.len() {
-            b.apply_plain(mv(Dir::Forward, Unit::Grapheme));
+            b.apply_plain(mv(Dir::Forward, Unit::Grapheme), 0.0);
             right.push(b.selection().focus);
         }
         let mut left = vec![text.len()];
         while b.selection().focus > 0 {
-            b.apply_plain(mv(Dir::Back, Unit::Grapheme));
+            b.apply_plain(mv(Dir::Back, Unit::Grapheme), 0.0);
             left.push(b.selection().focus);
         }
         (right, left)
@@ -494,11 +657,11 @@ mod tests {
         assert_eq!(left, [27, 26, 8, 0]);
         // Backspace removes the whole family, Delete the whole thumbs up.
         let mut b = caret(s, 26);
-        let e = b.apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme)).unwrap();
+        let e = b.apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme), 0.0).unwrap();
         assert_eq!(e.removed, "👨\u{200d}👩\u{200d}👧");
         assert_eq!(b.text(), "👍🏽x");
         let mut b = caret(s, 0);
-        b.apply_plain(EditAction::Delete(Dir::Forward, Unit::Grapheme));
+        b.apply_plain(EditAction::Delete(Dir::Forward, Unit::Grapheme), 0.0);
         assert_eq!(b.text(), "👨\u{200d}👩\u{200d}👧x");
     }
 
@@ -507,7 +670,7 @@ mod tests {
         let mut b = EditBuffer::new("e\u{301}x");
         b.set_selection(Selection::caret(1));
         assert_eq!(b.selection().focus, 0);
-        b.apply_plain(EditAction::MoveTo { to: 2, affinity: Affinity::Downstream, extend: false });
+        b.apply_plain(EditAction::MoveTo { to: 2, affinity: Affinity::Downstream, extend: false }, 0.0);
         assert_eq!(b.selection().focus, 0);
         b.set_selection(Selection::caret(99));
         assert_eq!(b.selection().focus, 4);
@@ -659,22 +822,22 @@ mod tests {
             }
             checked += 1;
             let mut b = caret(text, at);
-            b.apply_plain(mv(Dir::Forward, Unit::Word));
+            b.apply_plain(mv(Dir::Forward, Unit::Word), 0.0);
             assert_eq!(b.selection().focus, next, "Ctrl+Right in {text:?} from {at}");
             let mut b = caret(text, at);
-            b.apply_plain(mv(Dir::Back, Unit::Word));
+            b.apply_plain(mv(Dir::Back, Unit::Word), 0.0);
             assert_eq!(b.selection().focus, prev, "Ctrl+Left in {text:?} from {at}");
 
             // QLineEdit's Ctrl+Backspace is "extend a word back, then Delete", so where the word
             // move goes nowhere (the text start) it deletes the grapheme after the caret. We
             // delete nothing there instead; everywhere else the result must match.
             let mut b = caret(text, at);
-            b.apply_plain(EditAction::Delete(Dir::Back, Unit::Word));
+            b.apply_plain(EditAction::Delete(Dir::Back, Unit::Word), 0.0);
             let want = if prev == at { text } else { after_back };
             assert_eq!(b.text(), want, "Ctrl+Backspace in {text:?} at {at}");
             assert_eq!(b.selection().focus, prev);
             let mut b = caret(text, at);
-            b.apply_plain(EditAction::Delete(Dir::Forward, Unit::Word));
+            b.apply_plain(EditAction::Delete(Dir::Forward, Unit::Word), 0.0);
             assert_eq!(b.text(), after_fwd, "Ctrl+Delete in {text:?} at {at}");
             assert_eq!(b.selection().focus, at);
         }
@@ -686,7 +849,7 @@ mod tests {
         // "hello |wor|ld": Ctrl+Backspace extends the selection back a word, then deletes it.
         let mut b = EditBuffer::new("hello world");
         b.set_selection(Selection { anchor: 9, focus: 6, affinity: Affinity::Downstream });
-        b.apply_plain(EditAction::Delete(Dir::Back, Unit::Word));
+        b.apply_plain(EditAction::Delete(Dir::Back, Unit::Word), 0.0);
         assert_eq!(b.text(), "ld");
     }
 
@@ -694,14 +857,14 @@ mod tests {
     fn grapheme_moves_collapse_a_selection() {
         let mut b = EditBuffer::new("abcdef");
         b.set_selection(Selection { anchor: 4, focus: 2, affinity: Affinity::Downstream });
-        b.apply_plain(mv(Dir::Forward, Unit::Grapheme));
+        b.apply_plain(mv(Dir::Forward, Unit::Grapheme), 0.0);
         assert_eq!(b.selection(), Selection::caret(4));
         b.set_selection(Selection { anchor: 4, focus: 2, affinity: Affinity::Downstream });
-        b.apply_plain(mv(Dir::Back, Unit::Grapheme));
+        b.apply_plain(mv(Dir::Back, Unit::Grapheme), 0.0);
         assert_eq!(b.selection(), Selection::caret(2));
         // Shift extends from the focus instead.
         b.set_selection(Selection { anchor: 4, focus: 2, affinity: Affinity::Downstream });
-        b.apply_plain(EditAction::MoveBy { dir: Dir::Back, unit: Unit::Grapheme, extend: true });
+        b.apply_plain(EditAction::MoveBy { dir: Dir::Back, unit: Unit::Grapheme, extend: true }, 0.0);
         assert_eq!(b.selection().range(), 1..4);
         assert_eq!(b.selected_text(), "bcd");
     }
@@ -710,18 +873,18 @@ mod tests {
     fn insert_replaces_the_selection() {
         let mut b = EditBuffer::new("their car");
         b.set_selection(Selection { anchor: 0, focus: 5, affinity: Affinity::Downstream });
-        let e = b.apply_plain(EditAction::Insert("there".into())).unwrap();
+        let e = b.apply_plain(EditAction::Insert("there".into()), 0.0).unwrap();
         assert_eq!(e, EditEffect { range: 0..5, removed: "their".into(), inserted: "there".into() });
         assert_eq!(b.text(), "there car");
         assert_eq!(b.selection(), Selection::caret(5));
         assert_eq!(b.rev(), 1);
         // Moves do not change the revision; an empty insert with a caret does nothing.
-        b.apply_plain(mv(Dir::Back, Unit::Text));
-        assert_eq!(b.apply_plain(EditAction::Insert(String::new())), None);
+        b.apply_plain(mv(Dir::Back, Unit::Text), 0.0);
+        assert_eq!(b.apply_plain(EditAction::Insert(String::new()), 0.0), None);
         assert_eq!(b.rev(), 1);
-        b.apply_plain(EditAction::SelectAll);
+        b.apply_plain(EditAction::SelectAll, 0.0);
         assert_eq!(b.selected_text(), "there car");
-        b.apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme));
+        b.apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme), 0.0);
         assert_eq!(b.text(), "");
         assert_eq!(b.rev(), 2);
     }
@@ -729,13 +892,13 @@ mod tests {
     #[test]
     fn home_end_and_text_edges() {
         let mut b = caret("one\ntwo three\nx", 7);
-        b.apply_plain(mv(Dir::Back, Unit::Line));
+        b.apply_plain(mv(Dir::Back, Unit::Line), 0.0);
         assert_eq!(b.selection().focus, 4);
-        b.apply_plain(mv(Dir::Forward, Unit::Line));
+        b.apply_plain(mv(Dir::Forward, Unit::Line), 0.0);
         assert_eq!(b.selection().focus, 13);
-        b.apply_plain(mv(Dir::Forward, Unit::Text));
+        b.apply_plain(mv(Dir::Forward, Unit::Text), 0.0);
         assert_eq!(b.selection().focus, 15);
-        b.apply_plain(EditAction::MoveBy { dir: Dir::Back, unit: Unit::Text, extend: true });
+        b.apply_plain(EditAction::MoveBy { dir: Dir::Back, unit: Unit::Text, extend: true }, 0.0);
         assert_eq!(b.selection().range(), 0..15);
     }
 
@@ -810,7 +973,7 @@ mod tests {
         let mut b = caret(text, 0);
         let step = |b: &mut EditBuffer, down: bool| {
             let w = Wrap::new(b.text(), 10);
-            b.apply(EditAction::MoveLine { down, extend: false }, &w);
+            b.apply(EditAction::MoveLine { down, extend: false }, &w, 0.0);
             b.selection().focus
         };
         let w = Wrap::new(text, 10);
@@ -825,11 +988,11 @@ mod tests {
         assert_eq!(step(&mut b, false), 18);
         assert_eq!(step(&mut b, false), 8);
         assert_eq!(step(&mut b, false), 0); // Up on the first line: text start
-        // A horizontal move forgets the goal x.
+                                            // A horizontal move forgets the goal x.
         b.set_selection(Selection::caret(8));
         step(&mut b, true);
         let w = Wrap::new(b.text(), 10);
-        b.apply(mv(Dir::Back, Unit::Grapheme), &w);
+        b.apply(mv(Dir::Back, Unit::Grapheme), &w, 0.0);
         assert_eq!(b.selection().focus, 17);
         assert_eq!(step(&mut b, false), 7);
     }
@@ -839,17 +1002,187 @@ mod tests {
         let text = "the quick brown fox";
         let w = Wrap::new(text, 10);
         let mut b = caret(text, 13);
-        b.apply(mv(Dir::Back, Unit::Line), &w);
+        b.apply(mv(Dir::Back, Unit::Line), &w, 0.0);
         assert_eq!(b.selection().focus, 10);
-        b.apply(mv(Dir::Forward, Unit::Line), &w);
+        b.apply(mv(Dir::Forward, Unit::Line), &w, 0.0);
         assert_eq!(b.selection().focus, 19);
         // End on a soft-wrapped line stays on that line: upstream of the break.
         let mut b = caret(text, 2);
-        b.apply(mv(Dir::Forward, Unit::Line), &w);
+        b.apply(mv(Dir::Forward, Unit::Line), &w, 0.0);
         assert_eq!(b.selection(), Selection { anchor: 10, focus: 10, affinity: Affinity::Upstream });
         assert_eq!(w.line_of(10, b.selection().affinity), 0);
         // Home from there goes to the start of line 0, not line 1.
-        b.apply(mv(Dir::Back, Unit::Line), &w);
+        b.apply(mv(Dir::Back, Unit::Line), &w, 0.0);
         assert_eq!(b.selection().focus, 0);
+    }
+
+    #[test]
+    fn typing_runs_merge_into_one_step() {
+        let mut b = EditBuffer::new("x ");
+        b.set_floor();
+        for (i, c) in "hello".chars().enumerate() {
+            b.apply_plain(EditAction::Insert(c.into()), 0.3 * i as f64);
+        }
+        // A pause of a second or more starts a new step.
+        b.apply_plain(EditAction::Insert(" world".into()), 0.3 * 4.0 + 1.0);
+        assert_eq!(b.text(), "x hello world");
+        b.apply_plain(EditAction::Undo, 3.0);
+        assert_eq!(b.text(), "x hello");
+        b.apply_plain(EditAction::Undo, 3.1);
+        assert_eq!(b.text(), "x ");
+        assert_eq!(b.selection(), Selection::caret(2));
+        assert!(!b.can_undo());
+        b.apply_plain(EditAction::Redo, 3.2);
+        b.apply_plain(EditAction::Redo, 3.3);
+        assert_eq!(b.text(), "x hello world");
+        assert_eq!(b.selection(), Selection::caret(13));
+    }
+
+    #[test]
+    fn a_move_ends_the_run_and_a_new_edit_clears_redo() {
+        let mut b = EditBuffer::new("");
+        b.apply_plain(EditAction::Insert("ab".into()), 0.0);
+        b.apply_plain(mv(Dir::Back, Unit::Grapheme), 0.1);
+        b.apply_plain(EditAction::Insert("x".into()), 0.2);
+        assert_eq!(b.text(), "axb");
+        b.apply_plain(EditAction::Undo, 0.3);
+        assert_eq!((b.text(), b.selection()), ("ab", Selection::caret(1)));
+        b.apply_plain(EditAction::Insert("y".into()), 0.4);
+        assert!(!b.can_redo());
+        assert_eq!(b.apply_plain(EditAction::Redo, 0.5), None);
+        // Backspace runs merge too.
+        let mut b = EditBuffer::new("hello");
+        for i in 0..3 {
+            b.apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme), i as f64 * 0.2);
+        }
+        assert_eq!(b.text(), "he");
+        let e = b.apply_plain(EditAction::Undo, 1.0).unwrap();
+        assert_eq!(e, EditEffect { range: 2..2, removed: String::new(), inserted: "llo".into() });
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn undo_stops_at_the_floor() {
+        // The seed is what speech gave; the user's edits come after the floor.
+        let mut b = EditBuffer::new("");
+        b.seed("their car is red");
+        b.apply_plain(EditAction::SelectAll, 0.0);
+        b.apply_plain(EditAction::Insert("there".into()), 0.5);
+        b.apply_plain(EditAction::Insert(" car".into()), 3.0);
+        b.apply_plain(EditAction::Delete(Dir::Back, Unit::Word), 5.0);
+        while b.apply_plain(EditAction::Undo, 9.0).is_some() {}
+        assert_eq!(b.text(), "their car is red");
+        // Speech added after a resume is a new seed: Ctrl+Z never takes it back.
+        let more = format!("{} and fast", b.text());
+        b.seed(more);
+        b.apply_plain(EditAction::Insert("!".into()), 10.0);
+        while b.apply_plain(EditAction::Undo, 11.0).is_some() {}
+        assert_eq!(b.text(), "their car is red and fast");
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut b = EditBuffer::new("");
+        for i in 0..1500 {
+            b.apply_plain(EditAction::Insert("a".into()), i as f64 * 2.0);
+        }
+        let mut n = 0;
+        while b.apply_plain(EditAction::Undo, 1e6).is_some() {
+            n += 1;
+        }
+        assert_eq!(n, MAX_STEPS);
+        assert_eq!(b.text().len(), 500);
+    }
+
+    /// A naive history: whole-text snapshots before and after each step.
+    #[derive(Default)]
+    struct Naive {
+        steps: Vec<((String, Selection), (String, Selection))>,
+        done: usize,
+        /// Time and caret of the last edit, while no other action came since.
+        run: Option<(char, f64, Selection)>,
+    }
+
+    #[test]
+    fn undo_matches_a_naive_model() {
+        let pool = ["a", "b", "ø", "e\u{301}", " ", "\n", "👍🏽", "word "];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _run in 0..200 {
+            let mut b = EditBuffer::new("");
+            b.seed("seed text");
+            let mut m = Naive::default();
+            let mut t = 0.0;
+            let mut floor_text = b.text().to_owned();
+            for _ in 0..150 {
+                t += [0.05, 0.3, 0.9, 1.2][next(4) as usize];
+                let before = (b.text().to_owned(), b.selection());
+                let (action, kind) = match next(20) {
+                    0..=5 => (EditAction::Insert(pool[next(pool.len() as u64) as usize].into()), 't'),
+                    6..=7 => (EditAction::Delete(Dir::Back, Unit::Grapheme), 'b'),
+                    8 => (EditAction::Delete(Dir::Forward, Unit::Grapheme), 'f'),
+                    9 => (EditAction::Delete(Dir::Back, Unit::Word), 'o'),
+                    10..=11 => (mv([Dir::Back, Dir::Forward][next(2) as usize], Unit::Grapheme), 'm'),
+                    12 => (EditAction::MoveBy { dir: Dir::Back, unit: Unit::Word, extend: true }, 'm'),
+                    13 => (EditAction::SelectAll, 'm'),
+                    14..=16 => (EditAction::Undo, 'u'),
+                    17..=18 => (EditAction::Redo, 'r'),
+                    _ => {
+                        b.set_floor();
+                        m = Naive::default();
+                        floor_text = b.text().to_owned();
+                        continue;
+                    }
+                };
+                let changed = b.apply_plain(action, t).is_some();
+                let after = (b.text().to_owned(), b.selection());
+                match kind {
+                    'u' => {
+                        assert_eq!(changed, m.done > 0);
+                        if m.done > 0 {
+                            m.done -= 1;
+                            assert_eq!(after, m.steps[m.done].0, "undo");
+                        }
+                        m.run = None;
+                    }
+                    'r' => {
+                        assert_eq!(changed, m.done < m.steps.len());
+                        if m.done < m.steps.len() {
+                            assert_eq!(after, m.steps[m.done].1, "redo");
+                            m.done += 1;
+                        }
+                        m.run = None;
+                    }
+                    'm' => {
+                        assert!(!changed);
+                        m.run = None;
+                    }
+                    _ if !changed => m.run = None,
+                    _ => {
+                        let kind = if before.1.is_caret() && "tbf".contains(kind) { kind } else { 'o' };
+                        let merge = m.done > 0
+                            && kind != 'o'
+                            && m.run.is_some_and(|(k, t0, caret)| k == kind && t - t0 < MERGE_GAP && caret == before.1);
+                        if merge {
+                            m.steps[m.done - 1].1 = after.clone();
+                        } else {
+                            m.steps.truncate(m.done);
+                            m.steps.push((before, after.clone()));
+                            m.done += 1;
+                        }
+                        m.run = Some((kind, t, after.1));
+                    }
+                }
+                assert_eq!(after.0, b.text());
+            }
+            // Undo all the way gives the text at the floor.
+            while b.apply_plain(EditAction::Undo, t).is_some() {}
+            assert_eq!(b.text(), floor_text);
+        }
     }
 }
