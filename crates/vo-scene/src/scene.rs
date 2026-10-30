@@ -2153,11 +2153,11 @@ impl<M> Scene<M> {
                     let spans = glyph_spans(&n.shaped, style.size);
                     // Each word wipes over its own span, from its first glyph to its last.
                     // With it, for the typographic channels, how many glyphs each word has and
-                    // the middle of its ink run.
+                    // its first and last pen.
                     let mut word_spans: Vec<(u32, f32, f32, usize, f32, f32)> = Vec::new();
                     for (g, &(x0, x1)) in n.shaped.glyphs.iter().zip(&spans) {
                         let word = word_of(g.cluster);
-                        let (p0, p1) = (g.pos.x, g.pos.x + g.advance);
+                        let (p0, p1) = (g.pos.x, g.pos.x);
                         match word_spans.iter_mut().find(|w| w.0 == word) {
                             Some(w) => {
                                 (w.1, w.2, w.3) = (w.1.min(x0), w.2.max(x1), w.3 + 1);
@@ -2222,8 +2222,11 @@ impl<M> Scene<M> {
                                 // channel's ink each keep it; their product must too.
                                 k = k.max(before.min(Envelope::READING.ink));
                             }
-                            // Tracking spreads the letters about the word's middle.
-                            dx += (v.tracking - 1.0) * (g.pos.x + 0.5 * g.advance - middle);
+                            // Tracking spreads the pens about the word's middle, so the span
+                            // from its first pen to its last changes by the factor exactly, as
+                            // the envelope measures it. Spread by glyph centres, a word whose
+                            // last letter is wider than its first ("into") read wider still.
+                            dx += (v.tracking - 1.0) * (g.pos.x - middle);
                             dy -= v.baseline;
                             weight = v.weight;
                         }

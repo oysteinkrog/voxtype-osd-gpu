@@ -209,7 +209,8 @@ impl Envelope {
     pub const FREE: Envelope =
         Envelope { baseline: f32::INFINITY, tracking: f32::INFINITY, ink: 0.0, weight: f32::INFINITY };
 
-    /// `v` within the limits, with [`FILL_FLOOR`].
+    /// `v` within the limits, with [`FILL_FLOOR`]. Tracking keeps [`TRACKING_MARGIN`] inside
+    /// its limit.
     pub fn clamp(&self, v: Typo) -> Typo {
         self.clamp_over(v, FILL_FLOOR)
     }
@@ -219,7 +220,10 @@ impl Envelope {
         Typo {
             ink: v.ink.clamp(self.ink, 1.0),
             weight: v.weight.clamp(-self.weight, self.weight),
-            tracking: v.tracking.clamp(1.0 - self.tracking, 1.0 + self.tracking),
+            tracking: {
+                let most = (self.tracking - TRACKING_MARGIN).max(0.0);
+                v.tracking.clamp(1.0 - most, 1.0 + most)
+            },
             baseline: v.baseline.clamp(-self.baseline, self.baseline),
             // A letter past the fill must still reach the ink floor.
             fill: if self.ink > 0.0 && v.ink.clamp(self.ink, 1.0) * floor.clamp(0.0, 1.0) < self.ink { 1.0 } else { v.fill },
@@ -235,6 +239,10 @@ impl Envelope {
             && v.weight.abs() <= self.weight + e
     }
 }
+
+/// How far inside its limit [`Envelope::clamp`] keeps tracking, as a share. A channel at
+/// full strength is not on the edge of the envelope check, where float rounding decides.
+pub const TRACKING_MARGIN: f32 = 0.005;
 
 /// The element's channels: every word's [`WordTypo`] and the default springs.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -502,7 +510,7 @@ mod tests {
         let c = Envelope::READING.clamp(wild);
         assert!(Envelope::READING.holds(c));
         assert_eq!(c.baseline, -3.0);
-        assert_eq!(c.tracking, 1.05);
+        assert!((c.tracking - (1.05 - TRACKING_MARGIN)).abs() < 1e-6);
         assert_eq!(c.ink, 0.7);
         // An unfilled letter would fall under the ink floor, so the fill is dropped.
         assert_eq!(c.fill, 1.0);

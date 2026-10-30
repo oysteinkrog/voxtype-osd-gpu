@@ -1375,6 +1375,47 @@ mod tests {
         }
     }
 
+    /// A typographic tracking channel at full strength either way on the reading line (the
+    /// draw-time clamp, `typo::Envelope::READING`), held and then let go, stays inside the
+    /// envelope's tracking rule as the checker measures it.
+    #[test]
+    fn a_tracking_channel_at_full_strength_keeps_the_envelope() {
+        use vo_core::words::Word;
+        use vo_scene::element::{Element, TextStyle};
+        use vo_scene::font::{test_font_path, FontRegistry};
+        use vo_scene::scene::Scene;
+        use vo_scene::text::ShapedLayout;
+        use vo_scene::typo::{Typo, Typos, WordTypo};
+        for (text, wide) in [("into", 1.6), ("into", 0.4), ("configuration", 1.6), ("configuration", 0.4)] {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            let mut s: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts)));
+            let words = [Word { id: 1, text: "alpha".into() }, Word { id: 2, text: text.into() }];
+            // Spoken: the word holds stretched for a second, then springs back to rest.
+            let view = |tracking: f32| {
+                let typos =
+                    Typos { words: vec![(2, WordTypo::rest(Typo::REST.tracking(tracking)))], ..Typos::default() };
+                Element::column("root").child(
+                    Element::live_text("live", &words)
+                        .text_style(TextStyle::new(0, 22.0, 28.0))
+                        .width(400.0)
+                        .word_typo(typos),
+                )
+            };
+            s.apply(view(wide), 0.0);
+            let mut tr = Tracker::new();
+            for n in 0..120 {
+                let t = n as f64 / 60.0;
+                if n == 60 {
+                    s.apply(view(1.0), t);
+                }
+                tr.push(t, &s.sample(t));
+            }
+            let r = tr.check(&Envelope::default());
+            assert!(r.is_ok() && r.glyphs_checked > 0, "{text} at {wide}: {r}");
+        }
+    }
+
     /// A look with one live text per line, under the still profile, re-keys its line nodes
     /// in an edit: the caret line's words move from one node to another at the same place.
     /// The copy that leaves must not be drawn under rule 1's ink while the new one shows.
