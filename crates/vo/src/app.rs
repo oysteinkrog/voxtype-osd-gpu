@@ -55,7 +55,8 @@ pub trait App {
     /// The main surface's size and place, read after every update. `None` keeps what the
     /// overlay opened with. Live, a change resizes and moves the open surface in the same
     /// run, so the clock, the timers and the app's state carry on; the last frame stays on
-    /// screen until the first frame at the new size replaces it. Offline it is ignored.
+    /// screen until the first frame at the new size replaces it. Offline the frames take the
+    /// new size from the next frame on.
     fn main_surface(&self) -> Option<(Size, Placement)> {
         None
     }

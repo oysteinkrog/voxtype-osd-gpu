@@ -297,12 +297,14 @@ pub fn exit_check<A: App>(
 ) -> OfflineReport {
     let mut driver = start(app, scenario, &mut options);
     let mut next_input = 0;
+    let mut size = scenario.size;
     for n in 0.. {
         let ft = FrameTime::at_rate(n, fps);
         if ft.t > scenario.duration && driver.exit_at().is_none() {
             return OfflineReport { frames: n, ending: Ending::Unfinished { exit_at: None } };
         }
         advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
+        size = follow_main_surface(&mut driver, size, scenario.scale, ft.t);
         driver.extras.take_closed(ft.t);
         if driver.done(ft.t) {
             return OfflineReport { frames: n + 1, ending: ending_at(&driver, ft.t) };
@@ -323,6 +325,19 @@ pub(crate) fn start<A: App>(app: A, scenario: &Scenario<A::Msg>, options: &mut O
     let popup = Placement::LineAt { fraction: 0.85, y: 0.5 * scenario.size.h };
     driver.extras.anchor = crate::surfaces::PanelAnchor::of(popup, scenario.size, Default::default());
     driver
+}
+
+/// Lays the scene out at the size the app asks for after its updates (`App::main_surface`),
+/// as a live run resizes the open surface. `size` is the surface's size so far; returns its
+/// size from now on.
+pub(crate) fn follow_main_surface<A: App>(driver: &mut Driver<A>, size: Size, scale: f32, t: f64) -> Size {
+    match driver.app.main_surface() {
+        Some((asked, _)) if asked != size => {
+            driver.scene.set_viewport(t, asked, scale);
+            asked
+        }
+        _ => size,
+    }
 }
 
 /// Applies the scenario inputs from `inputs[*next..]` and the app's timers up to and including
@@ -429,7 +444,7 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
     // belongs to one surface.
     let mut extra_off: Vec<(String, Offscreen, u64)> = Vec::new();
     let mut extra_list = Default::default();
-    let px = [(scenario.size.w * scenario.scale).round() as u32, (scenario.size.h * scenario.scale).round() as u32];
+    let mut size = scenario.size;
 
     let mut rendered = 0u64;
     let mut next_input = 0;
@@ -449,6 +464,8 @@ pub(crate) fn drive_surfaces<A: App, E: From<OfflineError>>(
             _ => {}
         }
         advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
+        size = follow_main_surface(&mut driver, size, scenario.scale, ft.t);
+        let px = [(size.w * scenario.scale).round() as u32, (size.h * scenario.scale).round() as u32];
         driver.scene.sample_into(ft.t, &mut list);
         rendered += 1;
         let ready = off.submit(&list, px, scenario.scale);
@@ -633,6 +650,37 @@ mod tests {
 
     fn exit_at_one(duration: f64) -> Scenario<()> {
         Scenario { size: Size::new(200.0, 100.0), scale: 1.0, duration, inputs: vec![(1.0, Input::Msg(()))] }
+    }
+
+    /// An empty view that asks for a wider surface once its message comes.
+    struct Grows {
+        wide: bool,
+    }
+
+    impl App for Grows {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {
+            self.wide = true;
+        }
+        fn view(&self, _: &Tokens) -> Element<()> {
+            Element::column("root")
+        }
+        fn main_surface(&self) -> Option<(Size, Placement)> {
+            Some((Size::new(if self.wide { 400.0 } else { 200.0 }, 100.0), Placement::Centered))
+        }
+    }
+
+    /// Offline, as live, the frames take the size the app asks for after its updates; they
+    /// kept the scenario's size, so a look switch to a wider look was cut off (t0xg).
+    #[test]
+    fn offline_frames_follow_the_main_surface() {
+        let s =
+            Scenario { size: Size::new(200.0, 100.0), scale: 1.0, duration: 2.0, inputs: vec![(1.0, Input::Msg(()))] };
+        let mut widths = Vec::new();
+        crate::envelope::sample_scenario(Grows { wide: false }, &s, 10.0, Options::default(), &mut |_, t, l| {
+            widths.push((t, l.size.w));
+        });
+        assert!(widths.iter().all(|&(t, w)| w == if t < 1.0 { 200.0 } else { 400.0 }), "{widths:?}");
     }
 
     #[test]

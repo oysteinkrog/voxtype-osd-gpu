@@ -1133,6 +1133,7 @@ pub fn sample_scenario<A: App>(
     let mut driver = offline::start(app, scenario, &mut options);
     let mut next_input = 0;
     let mut list = DisplayList::default();
+    let mut size = scenario.size;
     let mut n = 0u64;
     loop {
         let ft = vo_core::time::FrameTime::at_rate(n, fps);
@@ -1140,6 +1141,7 @@ pub fn sample_scenario<A: App>(
             break;
         }
         offline::advance(&mut driver, &scenario.inputs, &mut next_input, ft.t);
+        size = offline::follow_main_surface(&mut driver, size, scenario.scale, ft.t);
         driver.scene.sample_into(ft.t, &mut list);
         sink(n, ft.t, &list);
         n += 1;
