@@ -603,6 +603,28 @@ impl Tracker {
             })
         };
 
+        let line_at: Vec<Option<f32>> = (0..self.frames.len()).map(|n| self.reading_line(n, &rests, env)).collect();
+        // Whether sample `k` of track `ti` belongs to another line on its way to a rest: it
+        // left a rest on a row that was not the reading line then, and it is not on the reading
+        // line when it rests again. An older line that moves on (jarvis tilts its last line back
+        // over a second or so) can come to rest near the row being read, at a time when that
+        // row is no longer read. A glyph at its rest, one that rests on the reading line, and
+        // one arriving (no rest before) are checked as before.
+        let elsewhere = |ti: usize, k: usize| {
+            let tr = &self.tracks[ti];
+            let row_of = |j: usize| {
+                let s = &tr.samples[j];
+                line_at[tr.first + j].map(|y| (s.pos.y - y).abs() >= 0.5 * s.em)
+            };
+            let Some(r) = rests[ti][k] else {
+                return false;
+            };
+            let left = (0..k).rev().find(|&j| rests[ti][j] == Some(j));
+            !tr.samples[k].still(&tr.samples[r], env.still_px)
+                && left.and_then(row_of) == Some(true)
+                && row_of(r) != Some(false)
+        };
+
         for (n, fr) in self.frames.iter().enumerate() {
             // (track, sample, rest sample)
             let mut glyphs: Vec<(usize, &Sample, Sample)> = Vec::new();
@@ -615,34 +637,9 @@ impl Tracker {
                 }
             }
             glyphs.retain(|g| env.transcript.contains(&self.tracks[g.0].key.0));
-            // Words drawn now, and words about to show, with where each glyph comes to rest.
-            let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
-            // (word, rest y, frames from now until it shows)
-            let rests = &rests;
-            let pending: Vec<(u32, f32, usize)> = soon
-                .flat_map(|(i, f)| {
-                    f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(move |&ti| {
-                        let tr = &self.tracks[ti];
-                        let r = rests[ti][0]?;
-                        env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y, i))
-                    })
-                })
-                .collect();
-            let rests_now = glyphs.iter().map(|g| (self.tracks[g.0].key.0, g.2.pos.y));
-            let all: Vec<(u32, f32)> = rests_now.clone().chain(pending.iter().map(|p| (p.0, p.1))).collect();
-            // The reading line is the next new word to show, not the furthest one within
-            // `pending`: a later word can rest where a later scroll puts its line, which is
-            // where the line before is still scrolling to now. Words can show out of order
-            // (one waits for its place while the next shows), so the next one is the first
-            // to show, not the lowest id.
-            let drawn = rests_now.map(|a| a.0).max();
-            let next = pending.iter().filter(|p| drawn.is_none_or(|d| p.0 > d)).min_by_key(|p| (p.2, p.0)).map(|p| p.0);
-            let Some(newest) = next.or(drawn) else {
+            let Some(line_y) = line_at[n] else {
                 continue;
             };
-            let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == newest).map(|a| a.1).collect();
-            ys.sort_by(f32::total_cmp);
-            let line_y = ys[ys.len() / 2];
             let inside = fr.t >= env.from && fr.t <= env.until;
             if !inside {
                 continue;
@@ -650,7 +647,7 @@ impl Tracker {
             report.frames_checked += 1;
             let mut words: HashMap<u32, Vec<(&Sample, Sample)>> = HashMap::new();
             for &(ti, s, r) in &glyphs {
-                if (r.pos.y - line_y).abs() >= 0.5 * r.em {
+                if (r.pos.y - line_y).abs() >= 0.5 * r.em || elsewhere(ti, n - self.tracks[ti].first) {
                     continue;
                 }
                 // A glyph whose rest is off its row from here, while its row scrolls on the way
@@ -712,6 +709,47 @@ impl Tracker {
             }
         }
         report
+    }
+
+    /// The height of the reading line in frame `n`: where the newest word comes to rest, the
+    /// next new word to show within `pending` when there is one. `None` with no transcript word
+    /// drawn or about to show.
+    fn reading_line(&self, n: usize, rests: &[Vec<Option<usize>>], env: &Envelope) -> Option<f32> {
+        let fr = &self.frames[n];
+        // Words drawn now, with where each glyph comes to rest.
+        let rests_now: Vec<(u32, f32)> = fr
+            .tracks
+            .iter()
+            .filter_map(|&ti| {
+                let tr = &self.tracks[ti];
+                let r = rests[ti][n - tr.first]?;
+                env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y))
+            })
+            .collect();
+        // Words about to show, with where each glyph comes to rest.
+        let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
+        // (word, rest y, frames from now until it shows)
+        let pending: Vec<(u32, f32, usize)> = soon
+            .flat_map(|(i, f)| {
+                f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(move |&ti| {
+                    let tr = &self.tracks[ti];
+                    let r = rests[ti][0]?;
+                    env.transcript.contains(&tr.key.0).then(|| (tr.key.0, tr.samples[r].pos.y, i))
+                })
+            })
+            .collect();
+        let all: Vec<(u32, f32)> = rests_now.iter().copied().chain(pending.iter().map(|p| (p.0, p.1))).collect();
+        // The reading line is the next new word to show, not the furthest one within
+        // `pending`: a later word can rest where a later scroll puts its line, which is
+        // where the line before is still scrolling to now. Words can show out of order
+        // (one waits for its place while the next shows), so the next one is the first
+        // to show, not the lowest id.
+        let drawn = rests_now.iter().map(|a| a.0).max();
+        let next = pending.iter().filter(|p| drawn.is_none_or(|d| p.0 > d)).min_by_key(|p| (p.2, p.0)).map(|p| p.0);
+        let newest = next.or(drawn)?;
+        let mut ys: Vec<f32> = all.iter().filter(|a| a.0 == newest).map(|a| a.1).collect();
+        ys.sort_by(f32::total_cmp);
+        Some(ys[ys.len() / 2])
     }
 
     /// Per track, per sample: how far the glyph's row has scrolled down since the track's first
@@ -1392,6 +1430,48 @@ mod tests {
         assert!(r.is_ok(), "no ghost: {r}");
         let r = rewrap(true);
         assert!(r.is_ok(), "with its ghost: {r}");
+    }
+
+    /// Line 1 (word 1) rests at y 40, line 2 (word 2) at y 64, and the reading line is line 2.
+    /// In frame 10 word 3 shows on line 2, which re-centres: both its words glide left under a
+    /// spring. Line 1 moves on at the same time, as jarvis tilts its last line back: it sinks
+    /// slowly and shrinks, and comes to rest at y 59 about a second later, when word 4 has
+    /// started line 3 (y 88).
+    fn older_line_moves_on(sink_to: f32, line_3_at: usize) -> Report {
+        let mut tr = Tracker::new();
+        for n in 0..60usize {
+            let k = n.saturating_sub(10) as i32;
+            let x = 10.0 + if n < 10 { 30.0 } else { 30.0 * 0.8f32.powi(k) };
+            let ease = if n < 10 { 0.0 } else { 1.0 - 0.9f32.powi(k) };
+            let mut g = word(1, 200.0, 40.0 + (sink_to - 40.0) * ease, 9.0, 1.0);
+            for gl in &mut g {
+                gl.size = 16.0 - 2.0 * ease;
+            }
+            g.extend(word(2, x, 64.0, 9.0, 1.0));
+            if n >= 10 {
+                g.extend(word(3, x + 40.0, 64.0, 9.0, 1.0));
+            }
+            if n >= line_3_at {
+                g.extend(word(4, 10.0, 88.0, 9.0, 1.0));
+            }
+            tr.push(n as f64 / 30.0, &list(g));
+        }
+        tr.check(&Envelope::default())
+    }
+
+    #[test]
+    fn an_older_line_that_moves_on_is_not_on_the_reading_line() {
+        // Line 1's rest is within half an em of line 2, but it rests there only after line 2
+        // is no longer read. Taken by that rest, its glyphs on their way read as off row 2.
+        older_line_moves_on(59.0, 30).assert_ok();
+    }
+
+    #[test]
+    fn an_older_line_that_comes_to_rest_on_the_reading_line_is_checked() {
+        // The same, with no line 3: line 1 comes to rest near row 2 while row 2 is still read.
+        // Its glyphs shrink on their way there, and that is reported.
+        let r = older_line_moves_on(59.0, usize::MAX);
+        assert!(r.by_kind().iter().any(|s| s.kind == "scale"), "{r}");
     }
 
     #[test]
