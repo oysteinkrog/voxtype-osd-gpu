@@ -504,6 +504,7 @@ impl WaylandHost {
             fractional_scale: fractional.is_some(),
             present_feedback: has("wp_presentation"),
             cpu_first_frame: subcompositor.is_some() && shm.is_some(),
+            keyboard: false,
         };
         let presentation = PresentationTimeState::bind(&globals, &qh);
         let blur = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()).ok();

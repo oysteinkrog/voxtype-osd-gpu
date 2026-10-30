@@ -5,11 +5,13 @@
 //! reads a clock; `clippy.toml` in this crate bans `Instant::now` and `SystemTime::now`.
 //! Word model (phase 0): `words`. Noise (FX10): `noise`, the Rust side of the shaders' noise.
 //! Signal bus (SIG01): `signals`, audio features as a timestamped input.
+//! Keyboard (edit F1): `key`, the key event types the host, driver and edit model share.
 
 pub mod ambient;
 pub mod channel;
 pub mod event_log;
 pub mod hash;
+pub mod key;
 pub mod noise;
 pub mod signals;
 pub mod spring;

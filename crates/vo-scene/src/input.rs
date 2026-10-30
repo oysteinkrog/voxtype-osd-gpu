@@ -4,7 +4,9 @@
 //! the frame rate. First cut: enter, leave and click. Drag comes when a design needs it.
 
 use crate::geom::Point;
+
 use crate::scene::{NodeId, Scene};
+pub use vo_core::key::{KeyEvent, KeyState, LogicalKey, Mods, NamedKey, RepeatInfo};
 
 pub type SurfaceId = u32;
 

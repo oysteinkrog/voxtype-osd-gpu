@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 pub use vo_scene::display::{IRect, InputRegion};
 pub use vo_scene::geom::{Point, Size};
-pub use vo_scene::input::{Button, PointerEvent, PointerKind, SurfaceId};
+pub use vo_scene::input::{
+    Button, KeyEvent, KeyState, LogicalKey, Mods, NamedKey, PointerEvent, PointerKind, RepeatInfo, SurfaceId,
+};
 
 /// What this host can do on this system. Probed once, when the host connects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +37,9 @@ pub struct HostCaps {
     /// The host can draw the first frames on the CPU while the GPU device is still being made
     /// ([`HostCtl::gpu_in_background`]).
     pub cpu_first_frame: bool,
+    /// The host can take keyboard focus through a focus proxy ([`HostCtl::open_focus_proxy`])
+    /// and sends key events.
+    pub keyboard: bool,
 }
 
 /// How much of a surface can let pointer input through to what is below.
@@ -102,7 +107,9 @@ pub enum InputMode {
     Whole,
 }
 
-/// Keyboard focus, matching layer-shell's keyboard interactivity. M1 implements `None` only.
+/// Keyboard focus, matching layer-shell's keyboard interactivity. Visible surfaces use `None`;
+/// keyboard focus comes from a separate focus proxy ([`HostCtl::open_focus_proxy`]), because a
+/// compositor may not let a mapped surface give focus back (`docs/INPUT-MODEL.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keyboard {
     #[default]
@@ -158,6 +165,19 @@ impl Default for OverlaySpec {
             app_id: "vo".into(),
         }
     }
+}
+
+/// Everything needed to open a focus proxy: a small, transparent overlay that exists only to
+/// take keyboard focus while the app edits text. The visible surfaces stay click-through and
+/// never take focus.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FocusProxySpec {
+    /// Layer namespace.
+    pub app_id: String,
+    /// The output to put it on, by name (for example `DP-1`). Put it on the output of the
+    /// window that should get focus back when the proxy closes: on another output the
+    /// compositor may give focus to no window at all. `None` lets the compositor choose.
+    pub output: Option<String>,
 }
 
 /// A change to an open surface.
@@ -218,6 +238,33 @@ pub enum HostEvent {
     /// at once, and frames go to `HostApp::frame` from now on.
     GpuReady {
         t: f64,
+    },
+    /// A key went down or up on a surface with keyboard focus. Hosts send only `Down` and
+    /// `Up`. Keys already held when focus arrives send nothing, not even their release.
+    Key(KeyEvent),
+    /// Keyboard focus came to `id` or left it. After a loss no more keys come for `id`, and
+    /// keys still held count as released: the app cancels repeat and any half-typed compose.
+    KeyboardFocus {
+        id: SurfaceId,
+        t: f64,
+        gained: bool,
+        /// For a loss: true when the app asked for it by closing the focus proxy
+        /// ([`HostCtl::close_focus_proxy`]), false when the compositor took focus away (a
+        /// click elsewhere, Alt+Tab, the lock screen, an output removed). Always false for a
+        /// gain.
+        requested: bool,
+    },
+    /// The modifier state changed on the focused surface `id`.
+    Modifiers {
+        id: SurfaceId,
+        t: f64,
+        mods: Mods,
+    },
+    /// The compositor's key repeat rate and delay. Sent before the first `Key` and again
+    /// when it changes.
+    KeyRepeatInfo {
+        t: f64,
+        info: RepeatInfo,
     },
 }
 
@@ -360,6 +407,21 @@ pub trait HostCtl {
     fn update(&mut self, id: SurfaceId, change: SurfaceChange) -> Result<(), HostError>;
 
     fn close(&mut self, id: SurfaceId);
+
+    /// Opens a focus proxy and returns its id. The compositor gives it keyboard focus, and
+    /// key events then come with this id as their surface. Nothing is drawn on it by the app.
+    /// Hosts without [`HostCaps::keyboard`] return `HostError::Unsupported`.
+    fn open_focus_proxy(&mut self, spec: &FocusProxySpec) -> Result<SurfaceId, HostError> {
+        let _ = spec;
+        Err(HostError::Unsupported("keyboard focus".into()))
+    }
+
+    /// Closes a focus proxy. The host sends `KeyboardFocus { gained: false, requested: true }`
+    /// for it at once, without waiting for the compositor, and focus goes back to whatever the
+    /// compositor picks next. Unknown ids are ignored.
+    fn close_focus_proxy(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
 
     /// Asks for one frame on `id`. The host calls `HostApp::frame` when the compositor is ready
     /// for it. Asking again before then does nothing more. A host draws nothing that was not
