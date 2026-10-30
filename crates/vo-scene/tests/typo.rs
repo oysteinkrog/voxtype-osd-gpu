@@ -7,7 +7,7 @@ use vo_scene::display::DisplayList;
 use vo_scene::element::{Element, TextStyle, Transition};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
-use vo_scene::typo::{Typo, Typos, WordTypo};
+use vo_scene::typo::{Envelope, Typo, Typos, WordTypo};
 use vo_scene::Scene;
 
 fn scene() -> Scene<()> {
@@ -85,7 +85,8 @@ fn the_reading_line_is_clamped_and_older_lines_are_not() {
     assert!(new0.1 > old0.1, "beta is on a later line");
     assert!((old1.1 - (old0.1 - 8.0)).abs() < 1e-3, "older line moves the full 8 px");
     assert!((new1.1 - (new0.1 - 3.0)).abs() < 1e-3, "reading line clamps to 3 px");
-    assert!((new1.2 - 0.7 * new0.2).abs() < 1e-3, "reading line ink at least 70 %");
+    let least = Envelope::READING.least_ink();
+    assert!((new1.2 - least * new0.2).abs() < 1e-3, "reading line ink a hair over 70 %");
     assert!((old1.2 - 0.3 * old0.2).abs() < 1e-3);
 }
 

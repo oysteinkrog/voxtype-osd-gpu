@@ -1375,6 +1375,50 @@ mod tests {
         }
     }
 
+    /// A word that arrives with its ink channel far under the floor and holds there (a spoken
+    /// stagger's delay) draws over the floor in every frame as the checker measures it, also
+    /// while the popup's own fade-in is a hair short of full (0.9999953 times the floor read
+    /// as 69.99967 %, Swissfi's first word).
+    #[test]
+    fn an_ink_channel_held_under_the_floor_keeps_the_envelope() {
+        use vo_core::spring::Spring;
+        use vo_core::words::Word;
+        use vo_scene::element::{Element, Prop, TextStyle};
+        use vo_scene::font::{test_font_path, FontRegistry};
+        use vo_scene::scene::Scene;
+        use vo_scene::text::ShapedLayout;
+        use vo_scene::typo::{Typo, Typos, WordTypo};
+        // The word arrives at frame `at`, while the popup's fade-in (opacity 0.9 to 1) ends.
+        for (ink, at) in [0.0, 0.3, 0.69].into_iter().flat_map(|ink| (20..60).map(move |at| (ink, at))) {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            let mut s: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts)));
+            let view = |opacity: f32, words: &[Word]| {
+                let typo = WordTypo { arrive: Some(Typo::REST.ink(ink)), delay: 0.2, ..WordTypo::rest(Typo::REST) };
+                let typos = Typos { words: vec![(1, typo)], ..Typos::default() };
+                Element::column("root").opacity(opacity).motion(Prop::Opacity, Spring::critical_to_98(0.3)).child(
+                    Element::live_text("live", words)
+                        .text_style(TextStyle::new(0, 22.0, 28.0))
+                        .width(400.0)
+                        .word_typo(typos),
+                )
+            };
+            let words = [Word { id: 1, text: "alpha".into() }];
+            s.apply(view(0.9, &[]), 0.0);
+            s.apply(view(1.0, &[]), 0.0);
+            let mut tr = Tracker::new();
+            for n in 0..120 {
+                let t = n as f64 / 60.0;
+                if n == at {
+                    s.apply(view(1.0, &words), t);
+                }
+                tr.push(t, &s.sample(t));
+            }
+            let r = tr.check(&Envelope::default());
+            assert!(r.is_ok() && r.glyphs_checked > 0, "ink {ink}, word at frame {at}: {r}");
+        }
+    }
+
     /// A typographic tracking channel at full strength either way on the reading line (the
     /// draw-time clamp, `typo::Envelope::READING`), held and then let go, stays inside the
     /// envelope's tracking rule as the checker measures it.

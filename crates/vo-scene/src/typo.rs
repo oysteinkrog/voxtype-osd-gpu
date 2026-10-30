@@ -210,15 +210,16 @@ impl Envelope {
         Envelope { baseline: f32::INFINITY, tracking: f32::INFINITY, ink: 0.0, weight: f32::INFINITY };
 
     /// `v` within the limits, with [`FILL_FLOOR`]. Tracking keeps [`TRACKING_MARGIN`] inside
-    /// its limit.
+    /// its limit, and ink [`INK_MARGIN`] over its floor ([`Envelope::least_ink`]).
     pub fn clamp(&self, v: Typo) -> Typo {
         self.clamp_over(v, FILL_FLOOR)
     }
 
     /// `v` within the limits for a word whose letters past the fill keep `floor` of its ink.
     pub fn clamp_over(&self, v: Typo, floor: f32) -> Typo {
+        let least = self.least_ink();
         Typo {
-            ink: v.ink.clamp(self.ink, 1.0),
+            ink: v.ink.clamp(least, 1.0),
             weight: v.weight.clamp(-self.weight, self.weight),
             tracking: {
                 let most = (self.tracking - TRACKING_MARGIN).max(0.0);
@@ -226,7 +227,17 @@ impl Envelope {
             },
             baseline: v.baseline.clamp(-self.baseline, self.baseline),
             // A letter past the fill must still reach the ink floor.
-            fill: if self.ink > 0.0 && v.ink.clamp(self.ink, 1.0) * floor.clamp(0.0, 1.0) < self.ink { 1.0 } else { v.fill },
+            fill: if self.ink > 0.0 && v.ink.clamp(least, 1.0) * floor.clamp(0.0, 1.0) < self.ink { 1.0 } else { v.fill },
+        }
+    }
+
+    /// The least ink a clamped word draws with: [`INK_MARGIN`] over the floor, or 0 with no
+    /// floor.
+    pub fn least_ink(&self) -> f32 {
+        if self.ink > 0.0 {
+            (self.ink + INK_MARGIN).min(1.0)
+        } else {
+            0.0
         }
     }
 
@@ -243,6 +254,9 @@ impl Envelope {
 /// How far inside its limit [`Envelope::clamp`] keeps tracking, as a share. A channel at
 /// full strength is not on the edge of the envelope check, where float rounding decides.
 pub const TRACKING_MARGIN: f32 = 0.005;
+/// How far over its floor [`Envelope::clamp`] keeps ink. A word held at the floor while an
+/// outer fade was a hair short of full drew at 0.6999967, under the envelope check's 0.7.
+pub const INK_MARGIN: f32 = 0.01;
 
 /// The element's channels: every word's [`WordTypo`] and the default springs.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -511,7 +525,7 @@ mod tests {
         assert!(Envelope::READING.holds(c));
         assert_eq!(c.baseline, -3.0);
         assert!((c.tracking - (1.05 - TRACKING_MARGIN)).abs() < 1e-6);
-        assert_eq!(c.ink, 0.7);
+        assert!((c.ink - (0.7 + INK_MARGIN)).abs() < 1e-6);
         // An unfilled letter would fall under the ink floor, so the fill is dropped.
         assert_eq!(c.fill, 1.0);
         assert_eq!(Envelope::FREE.clamp(wild), wild);

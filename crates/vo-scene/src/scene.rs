@@ -2220,7 +2220,7 @@ impl<M> Scene<M> {
                             if reading {
                                 // An arrival or revision already at the floor (70 %) and a
                                 // channel's ink each keep it; their product must too.
-                                k = k.max(before.min(Envelope::READING.ink));
+                                k = k.max(before.min(Envelope::READING.least_ink()));
                             }
                             // Tracking spreads the pens about the word's middle, so the span
                             // from its first pen to its last changes by the factor exactly, as
