@@ -336,8 +336,11 @@ impl<A: App> Driver<A> {
         }
     }
 
-    /// Puts the view inside a transparent margin of `m` from `t` on.
+    /// Puts the view inside a transparent margin of `m` from `t` on. `t` is an event like any
+    /// other: a timer due before it and fired after it moves up to it.
     pub(crate) fn set_margin(&mut self, m: vo_scene::Insets, t: f64) {
+        let t = t.max(self.last_t);
+        self.last_t = t;
         self.margin = Some(m);
         self.stale = None;
         self.views += 1;
@@ -683,6 +686,17 @@ mod tests {
         assert!(t < deadline, "still moving at the cap: settled at {t}, cap {deadline}");
         assert!(d.done(t) && !d.overdue(t), "the run ends because it settled, not by the cap");
         assert!(t - exit < 1.5, "settles well inside the cap: took {:.2} s", t - exit);
+    }
+
+    /// A margin that comes at 1.2 (the surface's configure) and a timer due at 1.0 that a late
+    /// wake-up fires after it: the timer's message moves up to 1.2, so the scene still takes
+    /// its events in time order.
+    #[test]
+    fn a_timer_fired_after_a_margin_moves_up_to_it() {
+        let mut d = Driver::new(Log::default(), Scene::new(), Tokens::default(), 0.0);
+        d.set_margin(vo_scene::Insets::new(4.0, 4.0, 4.0, 4.0), 1.2);
+        d.fire_timers(1.3);
+        assert_eq!(d.app.0, vec![(1, 1.2)]);
     }
 
     #[test]
