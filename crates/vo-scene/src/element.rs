@@ -1463,6 +1463,18 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the text as typed, with runs of spaces and hard newlines kept (the edit
+    /// layer's buffer). Each word is found in it in order; it is used only when nothing but
+    /// whitespace lies around and between the words, else the words are joined by single
+    /// spaces as without it (`flow::live_spans`).
+    pub fn live_source(mut self, text: impl Into<String>) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.source = Some(text.into()),
+            _ => debug_assert!(false, "live_source on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: the magnetic caret (MO-89). New words snap to the caret along their line,
     /// and the caret draws a field whose strength follows the voice level and which relaxes
     /// into concentric rings in silence. Needs a `caret`. See [`crate::flow::magnet`].

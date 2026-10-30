@@ -281,6 +281,9 @@ pub struct LiveMotion {
     pub magnet: Option<magnet::Magnet>,
     /// Words set in a font of their own, such as a variable font instance (MO-81).
     pub word_fonts: Vec<(WordId, FontId)>,
+    /// The text as typed, when it is more than the words joined by single spaces: runs of
+    /// spaces and hard newlines (`Element::live_source`). See `live_spans`.
+    pub source: Option<String>,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
     /// Draws glyphs on the newest line that break the reading-line envelope in this colour
@@ -302,21 +305,84 @@ pub struct LiveMotion {
     pub elsewhere: Vec<WordId>,
 }
 
-/// The byte ranges of `words` joined by spaces that `fonts` sets in a font of their own, in
-/// order: what `TextLayout::layout_fonts` takes for live text.
-pub(crate) fn word_font_ranges(words: &[Word], fonts: &[(WordId, FontId)]) -> Vec<(std::ops::Range<usize>, FontId)> {
+/// The byte ranges of the words that `fonts` sets in a font of their own, in order, from
+/// the words' `ranges` in the shaped text: what `TextLayout::layout_fonts` takes for live
+/// text.
+pub(crate) fn word_font_ranges(
+    words: &[Word],
+    ranges: &[std::ops::Range<usize>],
+    fonts: &[(WordId, FontId)],
+) -> Vec<(std::ops::Range<usize>, FontId)> {
     if fonts.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let mut at = 0;
-    for w in words {
+    for (w, r) in words.iter().zip(ranges) {
         if let Some(&(_, f)) = fonts.iter().find(|(id, _)| *id == w.id) {
-            out.push((at..at + w.text.len(), f));
+            out.push((r.clone(), f));
         }
-        at += w.text.len() + 1;
     }
     out
+}
+
+/// The text a live text shapes, and the byte range of each word in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveSpans<'a> {
+    pub text: std::borrow::Cow<'a, str>,
+    /// One range per word, in order.
+    pub ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// Where `words` sit in the text a live text shapes. `source` (`LiveMotion::source`) is
+/// used when it holds the words in order with only whitespace around them, so runs of
+/// spaces and hard newlines reach the layout. Otherwise the text is the words joined by
+/// single spaces.
+pub fn live_spans<'a>(words: &[Word], source: Option<&'a str>) -> LiveSpans<'a> {
+    if let Some(src) = source {
+        if let Some(ranges) = source_ranges(words, src) {
+            return LiveSpans { text: std::borrow::Cow::Borrowed(src), ranges };
+        }
+    }
+    let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    LiveSpans { text: std::borrow::Cow::Owned(text), ranges: joined_ranges(words) }
+}
+
+/// The ranges of `live_spans`, without building the text: for code that runs every frame.
+pub(crate) fn word_ranges(words: &[Word], source: Option<&str>) -> Vec<std::ops::Range<usize>> {
+    source.and_then(|src| source_ranges(words, src)).unwrap_or_else(|| joined_ranges(words))
+}
+
+/// The ranges of `words` joined by single spaces.
+fn joined_ranges(words: &[Word]) -> Vec<std::ops::Range<usize>> {
+    let mut at = 0;
+    words
+        .iter()
+        .map(|w| {
+            let r = at..at + w.text.len();
+            at = r.end + 1;
+            r
+        })
+        .collect()
+}
+
+/// The ranges of `words` in `src`, when `src` is the words in order with only whitespace
+/// between, before and after them, and at least one whitespace character between two words.
+fn source_ranges(words: &[Word], src: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut ranges = Vec::with_capacity(words.len());
+    let mut at = 0;
+    for w in words {
+        if w.text.is_empty() || w.text.contains(char::is_whitespace) {
+            return None;
+        }
+        let gap = &src[at..];
+        let start = at + (gap.len() - gap.trim_start().len());
+        if !(ranges.is_empty() || start > at) || !src[start..].starts_with(w.text.as_str()) {
+            return None;
+        }
+        at = start + w.text.len();
+        ranges.push(start..at);
+    }
+    src[at..].trim_start().is_empty().then_some(ranges)
 }
 
 /// What `Flow::update` needs from the node.
@@ -685,21 +751,18 @@ fn whole_rows(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>]) -
 }
 
 /// The words as the layout placed them, aligned with `words`; `None` for a word with no
-/// glyphs on screen (cut by `max_lines`).
-fn place(shaped: &ShapedText, words: &[Word]) -> Vec<Option<PlacedWord>> {
-    let mut starts = Vec::with_capacity(words.len());
-    let mut at = 0u32;
-    for w in words {
-        starts.push(at);
-        at += w.text.len() as u32 + 1;
-    }
+/// glyphs on screen (cut by `max_lines`). `ranges` are the words' bytes in the shaped text
+/// (`live_spans`); glyphs outside every word, such as a "…", belong to no word.
+fn place(shaped: &ShapedText, words: &[Word], ranges: &[std::ops::Range<usize>]) -> Vec<Option<PlacedWord>> {
     let mut out: Vec<Option<PlacedWord>> = (0..words.len()).map(|_| None).collect();
     let (mut line, mut last_y) = (0u32, None::<f32>);
     for (i, g) in shaped.glyphs.iter().enumerate() {
-        if g.cluster >= at {
+        let c = g.cluster as usize;
+        let Some(w) = ranges.partition_point(|r| r.start <= c).checked_sub(1) else { continue };
+        if c >= ranges[w].end {
             continue;
         }
-        let w = starts.partition_point(|s| *s <= g.cluster) - 1;
+        let start = ranges[w].start as u32;
         let p = out[w].get_or_insert_with(|| {
             if last_y.is_some_and(|y| g.pos.y > y + 0.5) {
                 line += 1;
@@ -714,7 +777,7 @@ fn place(shaped: &ShapedText, words: &[Word]) -> Vec<Option<PlacedWord>> {
             x: g.pos.x - p.x,
             y: g.pos.y - p.y,
             advance: g.advance,
-            offset: g.cluster - starts[w],
+            offset: g.cluster - start,
         });
         p.width = p.width.max(g.pos.x + g.advance - p.x);
     }
@@ -773,11 +836,12 @@ impl Make {
 impl Flow {
     /// Takes the new layout of the node's words at `t` and springs every word toward it.
     pub fn update(&mut self, t: f64, input: FlowInput<'_>) {
-        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width, entering } = input;
+        let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width, entering } =
+            input;
         self.size = size;
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
-        let placed = place(shaped, words);
+        let placed = place(shaped, words, &word_ranges(words, motion.source.as_deref()));
         let stage = StageTargets::new(&placed, motion.reading.as_ref(), size);
         self.spans = stage.spans.clone();
         (self.origin, self.staged) = (motion.reading.as_ref().map_or(0.0, |r| r.origin), motion.reading.is_some());
@@ -1748,6 +1812,99 @@ mod tests {
         assert_eq!(ops.iter().filter(|o| matches!(o, Kept(_))).count(), 4);
         assert_eq!(leaves.iter().filter(|l| **l).count(), 1);
         assert_eq!(ops.iter().filter(|o| **o == Enter).count(), 1);
+    }
+
+    fn words(texts: &[&str]) -> Vec<Word> {
+        texts.iter().enumerate().map(|(i, t)| Word { id: i as WordId + 1, text: (*t).into() }).collect()
+    }
+
+    #[test]
+    fn spans_without_a_source_join_by_single_spaces() {
+        let s = live_spans(&words(&["hello", "big", "world"]), None);
+        assert_eq!(s.text, "hello big world");
+        assert_eq!(s.ranges, [0..5, 6..9, 10..15]);
+        assert_eq!(word_ranges(&words(&["hello", "big", "world"]), Some("hello big  world!")), s.ranges);
+        assert_eq!(live_spans(&[], None).text, "");
+    }
+
+    #[test]
+    fn spans_follow_runs_of_spaces_and_newlines_in_the_source() {
+        let w = words(&["hello", "big", "wörld", "x"]);
+        for (src, ranges) in [
+            ("hello big wörld x", vec![0..5, 6..9, 10..16, 17..18]),
+            ("hello   big  wörld x", vec![0..5, 8..11, 13..19, 20..21]),
+            ("hello\nbig\n\nwörld\r\nx", vec![0..5, 6..9, 11..17, 19..20]),
+            ("  hello \t big wörld x \n", vec![2..7, 10..13, 14..20, 21..22]),
+        ] {
+            let s = live_spans(&w, Some(src));
+            assert_eq!(s.text, src);
+            assert_eq!(s.ranges, ranges, "{src:?}");
+            assert!(s.ranges.iter().zip(&w).all(|(r, w)| src[r.clone()] == w.text));
+            assert_eq!(word_ranges(&w, Some(src)), s.ranges);
+        }
+        // Only whitespace around the words: an empty word list fits a blank source.
+        assert_eq!(live_spans(&[], Some(" \n")).text, " \n");
+    }
+
+    #[test]
+    fn a_source_that_does_not_hold_the_words_is_ignored() {
+        let w = words(&["hello", "world"]);
+        for src in ["hello world!", "helloworld", "hello, world", "world hello", "hello", "hi hello world"] {
+            assert_eq!(live_spans(&w, Some(src)).text, "hello world", "{src:?}");
+        }
+        // A word with a space in it cannot be found word by word.
+        assert_eq!(live_spans(&words(&["a b"]), Some("a b")).ranges, vec![std::ops::Range { start: 0, end: 3 }]);
+        assert_eq!(live_spans(&words(&["a b"]), Some("a  b")).text, "a b");
+    }
+
+    #[test]
+    fn fonts_take_the_word_ranges() {
+        let w = words(&["hello", "big", "world"]);
+        let s = live_spans(&w, Some("hello  big\nworld"));
+        assert_eq!(word_font_ranges(&w, &s.ranges, &[(2, 7), (3, 9)]), [(7..10, 7), (11..16, 9)]);
+        assert!(word_font_ranges(&w, &s.ranges, &[]).is_empty());
+    }
+
+    mod spans_in_layout {
+        use super::*;
+        use crate::element::TextStyle;
+        use crate::font::{test_font_path, FontRegistry};
+        use crate::text::{ShapedLayout, TextLayout};
+
+        fn placed(src: Option<&str>, texts: &[&str]) -> Vec<Option<PlacedWord>> {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            let layout = ShapedLayout::new(fonts);
+            let w = words(texts);
+            let s = live_spans(&w, src);
+            let shaped = layout.layout(&s.text, &TextStyle::new(0, 20.0, 26.0), Some(1000.0));
+            place(&shaped, &w, &s.ranges)
+        }
+
+        /// Each word's glyph offsets are bytes into the word, one per letter here, and a
+        /// hard newline starts a new line.
+        #[test]
+        fn words_keep_their_glyphs_across_spaces_and_newlines() {
+            let texts = ["hello", "big", "world"];
+            let single = placed(None, &texts);
+            let runs = placed(Some("hello    big world"), &texts);
+            let broken = placed(Some("hello\nbig\n\nworld"), &texts);
+            for p in [&single, &runs, &broken] {
+                for (p, t) in p.iter().zip(texts) {
+                    let p = p.as_ref().expect("every word is on screen");
+                    let offsets: Vec<u32> = p.glyphs.iter().map(|g| g.offset).collect();
+                    assert_eq!(offsets, (0..t.len() as u32).collect::<Vec<_>>());
+                }
+            }
+            let at = |p: &[Option<PlacedWord>], i: usize| p[i].as_ref().map(|p| (p.x, p.y, p.line)).unwrap();
+            assert_eq!(at(&runs, 0), at(&single, 0));
+            assert!(at(&runs, 1).0 > at(&single, 1).0 + 1.0, "a run of spaces pushes the next word along");
+            assert_eq!([at(&single, 0).2, at(&single, 1).2, at(&single, 2).2], [0, 0, 0]);
+            let (b, w) = (at(&broken, 1), at(&broken, 2));
+            assert_eq!((at(&broken, 0).2, b.2, w.2), (0, 1, 2));
+            assert_eq!(b.0, at(&broken, 0).0, "a word after a newline starts the line");
+            assert!(w.1 - b.1 > 1.5 * 26.0, "a blank line between them: {} {}", b.1, w.1);
+        }
     }
 
     /// RD-04: a live word that grows or shrinks while its enter fade runs.

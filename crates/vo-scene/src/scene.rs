@@ -256,15 +256,11 @@ fn edge_springs(right: bool, lead: bool) -> (Spring, Spring) {
 /// A live text's final pass, its word boxes `(id, x0, x1, baseline)` and its lines.
 type PassLines = (FinalPass, Vec<(u32, f32, f32, f32)>, Vec<final_pass::ReadLine>);
 
-/// Byte offset where each word starts in the joined text, with its id.
-fn word_starts(words: &[vo_core::words::Word]) -> Vec<(u32, u32)> {
-    let mut starts = Vec::with_capacity(words.len());
-    let mut at = 0u32;
-    for w in words {
-        starts.push((at, w.id));
-        at += w.text.len() as u32 + 1;
-    }
-    starts
+/// Byte offset where each word starts in the shaped text, with its id. `source` is the live
+/// text's `LiveMotion::source`.
+fn word_starts(words: &[vo_core::words::Word], source: Option<&str>) -> Vec<(u32, u32)> {
+    let ranges = crate::flow::word_ranges(words, source);
+    words.iter().zip(&ranges).map(|(w, r)| (r.start as u32, w.id)).collect()
 }
 
 /// The id of the word a glyph of `cluster` belongs to, or `NO_WORD`.
@@ -322,7 +318,7 @@ fn release_finals<M>(n: &mut Node<M>, kind: &mut Kind, t: f64) {
         return;
     }
     let boxes = match &n.kind {
-        Kind::LiveText { words: old, .. } => word_boxes(&n.shaped, &word_starts(old)),
+        Kind::LiveText { words: old, live, .. } => word_boxes(&n.shaped, &word_starts(old, live.source.as_deref())),
         _ => Vec::new(),
     };
     let lines = final_pass::read_lines(&boxes);
@@ -341,7 +337,7 @@ fn release_finals<M>(n: &mut Node<M>, kind: &mut Kind, t: f64) {
     }
 }
 
-/// The character at byte offset `cluster` of the words joined by spaces.
+/// The character at byte offset `cluster` of the shaped text, from the word that holds it.
 fn glyph_char(words: &[vo_core::words::Word], starts: &[(u32, u32)], cluster: u32) -> Option<char> {
     let i = starts.partition_point(|(s, _)| *s <= cluster).checked_sub(1)?;
     let w = words.get(i)?;
@@ -575,7 +571,7 @@ impl<M> Node<M> {
     /// Live text: moves the current-word accent and mark to the word that holds the role now,
     /// using the last layout. Returns whether anything started to move.
     fn sync_mark(&mut self, t: f64, retention: f64) -> bool {
-        let Kind::LiveText { words, style, current, mark, .. } = &self.kind else {
+        let Kind::LiveText { words, style, current, mark, live, .. } = &self.kind else {
             return self.mark.take().is_some();
         };
         let current = current.filter(|id| words.iter().any(|w| w.id == *id));
@@ -595,7 +591,7 @@ impl<M> Node<M> {
         let lead = mark.shape == MarkShape::Karaoke && !self.reduced;
         let reduced = self.reduced;
         let size = style.size;
-        let boxes = word_boxes(&self.shaped, &word_starts(words));
+        let boxes = word_boxes(&self.shaped, &word_starts(words, live.source.as_deref()));
         let target = current.and_then(|id| boxes.iter().find(|b| b.0 == id)).copied();
         let chan =
             |v: f32, s: Spring, rest: Rest| Channel::new(t, v as f64, s).with_rest(rest).with_retention(retention);
@@ -698,8 +694,8 @@ impl<M> Node<M> {
 
     /// Live text: the final pass and its lines, when the node has one.
     fn pass_lines(&self) -> Option<PassLines> {
-        let Kind::LiveText { words, pass: Some(pass), .. } = &self.kind else { return None };
-        let boxes = word_boxes(&self.shaped, &word_starts(words));
+        let Kind::LiveText { words, pass: Some(pass), live, .. } = &self.kind else { return None };
+        let boxes = word_boxes(&self.shaped, &word_starts(words, live.source.as_deref()));
         let lines = final_pass::read_lines(&boxes);
         Some((*pass, boxes, lines))
     }
@@ -2099,7 +2095,7 @@ impl<M> Scene<M> {
                         out.shapes.push(shape);
                     }
                 }
-                let starts = word_starts(words);
+                let starts = word_starts(words, live.source.as_deref());
                 let word_of = |cluster: u32| word_at(&starts, cluster);
                 let accent = mark.as_deref().filter(|m| m.tints());
                 if n.words.is_empty() || color.a <= 0.0 {
