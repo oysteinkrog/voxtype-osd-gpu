@@ -470,9 +470,11 @@ pub struct LiveMotion {
     /// The still profile (`Element::still_motion`), for editing: words that enter, change or
     /// leave only change ink, within 80 ms (`STILL_FADE`), in place; a letter that comes in
     /// starts at arrival ink (`arrival::INK`), so it is readable in its first frame. Reflow and scroll move
-    /// whole words in at most 150 ms (`STILL_REFLOW`). Revisions crossfade, rewraps fade,
-    /// and settling ink, letter physics, the magnet and revision marks are off. Motion that
-    /// is running when it turns on settles the same way.
+    /// whole words in at most 150 ms (`STILL_REFLOW`), and a revised word is at its place at
+    /// once. Revisions diff by letter: kept letters keep their ink, removed ones fade where
+    /// they are drawn (a word less than half kept crossfades). Rewraps fade, and settling
+    /// ink, letter physics, the magnet and revision marks are off. Motion that is running
+    /// when it turns on settles the same way.
     pub still: bool,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
@@ -579,7 +581,9 @@ impl LiveMotion {
     /// This motion under the still profile (`LiveMotion::still`).
     pub(crate) fn stilled(&self) -> LiveMotion {
         LiveMotion {
-            revise: Revise::Crossfade,
+            // Letter by letter, so the letters a key leaves alone keep their ink and place:
+            // a crossfade would draw the whole word twice, the new copy at arrival ink.
+            revise: Revise::Glyphs,
             rewrap: Rewrap::Fade,
             case: CaseChange::default(),
             settle: None,
@@ -1073,6 +1077,8 @@ impl Flow {
         self.letters = if reduced { None } else { motion.letters };
         (self.magnet, self.magnet_still) = (motion.magnet, reduced || motion.magnet.is_some_and(|m| m.still));
         let mut old = std::mem::take(&mut self.words);
+        // Words new in this update, and words whose text changed.
+        let (mut new_ids, mut revised_ids) = (Vec::new(), Vec::new());
         let scroll = front_scroll(&old, words, &placed);
         let whole = if scroll.is_some() { whole_rows(&old, words, &placed) } else { Vec::new() };
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
@@ -1116,6 +1122,7 @@ impl Flow {
             let graphemes = graphemes_of(&w.text, &p.glyphs);
             let Some(mut o) = prev else {
                 arrived = true;
+                new_ids.push(w.id);
                 let back = match line_shift {
                     Some((line, dx)) if line == p.line && !reduced => dx,
                     _ => 0.0,
@@ -1185,6 +1192,7 @@ impl Flow {
             };
             let revised = o.text != w.text;
             if revised {
+                revised_ids.push(o.id);
                 o.revisions += 1;
                 arrived = true;
                 let joins = entering.contains(&w.id);
@@ -1324,14 +1332,17 @@ impl Flow {
             }
         }
         if motion.still {
-            self.calm(t);
+            self.calm(t, &new_ids, &revised_ids);
         }
     }
 
     /// The still profile: from `t`, every glyph is at its place, ink moves to where it is
     /// going within `STILL_FADE`, and words and the caret reach their places within
-    /// `STILL_REFLOW`. Delays and waits that were set up are dropped.
-    fn calm(&mut self, t: f64) {
+    /// `STILL_REFLOW`. Delays and waits that were set up are dropped. A word in `revised`
+    /// is at its place at once: its kept letters are already at theirs within it, and the
+    /// word sliding there would carry them away and back. The letters of a word in `new`
+    /// are at full ink: the word's own enter fade, from arrival ink, is the only fade.
+    fn calm(&mut self, t: f64, new: &[WordId], revised: &[WordId]) {
         // Glyphs on their way out stay where they are drawn now, so the word's width can
         // snap without squeezing them.
         for i in 0..self.ghosts.len() {
@@ -1350,6 +1361,9 @@ impl Flow {
             for c in [&mut w.x, &mut w.y, &mut w.roll, &mut w.look_scale] {
                 settle_with(c, t, STILL_REFLOW);
             }
+            if revised.contains(&w.id) {
+                w.x.snap(t, w.x.target());
+            }
             // A changed word is at its new width at once: its glyphs do not stretch.
             w.width.snap(t, w.width.target());
             for c in [&mut w.ink, &mut w.look_opacity] {
@@ -1358,12 +1372,18 @@ impl Flow {
             for c in [&mut w.track, &mut w.fresh] {
                 c.snap(t, c.target());
             }
+            let fresh = new.contains(&w.id);
             for g in &mut w.glyphs {
                 // A letter that comes in is readable in the frame it shows
-                // (reading-line envelope): its fade starts at arrival ink.
-                let ink = crate::arrival::INK as f64;
-                if g.opacity.target() >= 1.0 && g.opacity.value(t) < ink {
+                // (reading-line envelope): its fade starts at arrival ink, a hair over the
+                // floor so rounding never puts it under. A new word's letters are whole at
+                // once, as the word fades in.
+                let ink = if fresh { 1.0 } else { crate::arrival::INK as f64 + 0.01 };
+                let to = g.opacity.target();
+                if to >= 1.0 && g.opacity.value(t) < ink {
+                    // `snap` also moves the target: it still goes to full ink.
                     g.opacity.snap(t, ink);
+                    g.opacity.retarget(t, to);
                 }
                 settle_with(&mut g.opacity, t, STILL_FADE);
                 for c in [&mut g.x, &mut g.rise, &mut g.scale] {
@@ -1373,8 +1393,9 @@ impl Flow {
         }
         for g in &mut self.ghosts {
             settle_with(&mut g.opacity, t, STILL_FADE);
+            // A removed letter fades where it is drawn now, instead of rising out.
             for c in [&mut g.rise, &mut g.scale, &mut g.slide] {
-                c.snap(t, c.target());
+                c.snap(t, c.value(t));
             }
         }
         for (_, c) in &mut self.open {
@@ -2494,12 +2515,18 @@ mod tests {
         const HELLO: &[(WordId, &str)] = &[(1, "hello")];
         const HELLO_WORLD: &[(WordId, &str)] = &[(1, "hello"), (2, "world")];
         const HELLO_WORD: &[(WordId, &str)] = &[(1, "hello"), (2, "word")];
+        /// A space typed inside a word: the word keeps its tail, and its head is a new word.
+        const SPLIT_BEFORE: &[(WordId, &str)] = &[(1, "configuration")];
+        const SPLIT_AFTER: &[(WordId, &str)] = &[(2, "config"), (1, "uration")];
 
         #[test]
         fn enter_revise_and_exit_change_only_ink_for_80_ms() {
-            for (name, from, to) in
-                [("enter", HELLO, HELLO_WORLD), ("revise", HELLO_WORLD, HELLO_WORD), ("exit", HELLO_WORLD, HELLO)]
-            {
+            for (name, from, to) in [
+                ("enter", HELLO, HELLO_WORLD),
+                ("revise", HELLO_WORLD, HELLO_WORD),
+                ("exit", HELLO_WORLD, HELLO),
+                ("split", SPLIT_BEFORE, SPLIT_AFTER),
+            ] {
                 let (in_place, done, new_ink) = run(from, to, true);
                 assert!(in_place, "{name}: a glyph left its place");
                 // Readable in the frame it shows (reading-line envelope, rule 1).
@@ -2515,6 +2542,38 @@ mod tests {
             for (from, to) in [(HELLO, HELLO_WORLD), (HELLO_WORLD, HELLO_WORD)] {
                 let (in_place, done, _) = run(from, to, false);
                 assert!(!in_place && done > 1.15, "{done}");
+            }
+        }
+
+        /// Typing inside a word under the profile: the letters a key leaves alone stay at
+        /// full ink and are drawn once, a removed letter fades where it stood, and a typed
+        /// letter ends at full ink.
+        #[test]
+        fn a_key_inside_a_word_keeps_the_other_letters() {
+            for (from, to) in [("hello", "helxlo"), ("hello", "helo")] {
+                let mut s = scene();
+                s.apply(view(&[(1, from)], true), 0.0);
+                let before = glyphs(&s.sample(0.99));
+                s.apply(view(&[(1, to)], true), 1.0);
+                let after = glyphs(&s.sample(3.0));
+                let gone = before.len().saturating_sub(after.len());
+                assert!(after.iter().all(|g| g.4 >= 0.99), "{to} at rest: {after:?}");
+                let mut t = 1.0;
+                while t < 1.5 {
+                    let now: Vec<_> = glyphs(&s.sample(t)).into_iter().filter(|g| g.4 > 0.0).collect();
+                    assert!(now.len() <= after.len() + gone, "{to} at {t}: {} glyphs drawn", now.len());
+                    // A kept letter: at its place after the change, and drawn before.
+                    let kept = after.iter().filter(|a| {
+                        before.iter().filter(|b| b.1 == a.1).count() >= after.iter().filter(|b| b.1 == a.1).count()
+                    });
+                    for k in kept {
+                        let g = now.iter().find(|g| g.1 == k.1 && (g.2.x - k.2.x).abs() < 0.01);
+                        assert!(g.is_some_and(|g| g.4 >= 0.99), "{to} at {t}: glyph {} at {:?}", k.1, g);
+                    }
+                    // Whatever is fading is on the baseline it was drawn on.
+                    assert!(now.iter().all(|g| (g.2.y - after[0].2.y).abs() < 0.01), "{to} at {t}");
+                    t += STEP;
+                }
             }
         }
 
