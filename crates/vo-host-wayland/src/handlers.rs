@@ -19,6 +19,7 @@ use smithay_client_toolkit::{
     registry_handlers,
 };
 use vo_host::{Button, HostCtl, HostEvent, Point, PointerEvent, PointerKind, Size};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_pointer::WlPointer;
 use wayland_client::protocol::{wl_output, wl_seat, wl_surface};
 use wayland_client::{Connection, QueueHandle, WEnum};
@@ -239,12 +240,24 @@ impl SeatHandler for State {
                 self.pointers.push(p);
             }
         }
+        if cap == Capability::Keyboard && self.keyboards.is_empty() {
+            self.keyboards.push(seat.get_keyboard(qh, ()));
+        }
     }
 
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
             for p in self.pointers.drain(..) {
                 p.release();
+            }
+        }
+        if cap == Capability::Keyboard {
+            for k in self.keyboards.drain(..) {
+                k.release();
+            }
+            if let Some(id) = self.keyboard.leave() {
+                let t = self.now();
+                self.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
             }
         }
     }
@@ -335,6 +348,50 @@ impl Dispatch<WpFractionalScaleV1, wl_surface::WlSurface> for State {
         s.frac = Some(k);
         if s.configured {
             state.configured(&wl.clone(), None);
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut State,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        let t = state.now();
+        match event {
+            wl_keyboard::Event::Keymap { format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
+                state.keyboard.keymap(fd, size);
+            }
+            wl_keyboard::Event::Enter { surface, .. } => {
+                // Keys held at enter are ignored, so the key list is not read.
+                if let Some(i) = state.surface_index(&surface) {
+                    let id = state.surfaces[i].id;
+                    state.keyboard.enter(id, t, &mut state.events);
+                }
+            }
+            wl_keyboard::Event::Leave { .. } => {
+                if let Some(id) = state.keyboard.leave() {
+                    state.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
+                }
+            }
+            wl_keyboard::Event::Key { key, state: WEnum::Value(s), .. } => {
+                let pressed = s == wl_keyboard::KeyState::Pressed;
+                // Compositor repeats (wl_keyboard 10) are dropped: the driver repeats.
+                if pressed || s == wl_keyboard::KeyState::Released {
+                    state.keyboard.key(t, key, pressed, &mut state.events);
+                }
+            }
+            wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
+                state.keyboard.modifiers(t, (mods_depressed, mods_latched, mods_locked, group), &mut state.events);
+            }
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.events.push(crate::keyboard::Keyboard::repeat_info(t, rate, delay));
+            }
+            _ => {}
         }
     }
 }

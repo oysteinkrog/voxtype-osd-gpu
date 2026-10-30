@@ -15,6 +15,8 @@ wayland-client = { version = "0.31", features = ["system"] }
 raw-window-handle = "0.6"
 pollster = "0.4"
 libc = "0.2"
+# Keymaps, dead keys and compose for wl_keyboard. The version sctk's xkbcommon feature uses.
+xkbcommon = { version = "0.8", default-features = false, features = ["wayland"] }
 
 [dev-dependencies]
 # The fake_click example injects pointer input into a nested KWin through org_kde_kwin_fake_input.

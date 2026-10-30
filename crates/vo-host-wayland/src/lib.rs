@@ -30,6 +30,7 @@
 mod blur;
 pub mod guard;
 mod handlers;
+mod keyboard;
 
 use std::ptr::NonNull;
 use std::sync::mpsc;
@@ -430,6 +431,8 @@ pub struct State {
     pub(crate) surfaces: Vec<Surf>,
     next_id: SurfaceId,
     pub(crate) pointers: Vec<WlPointer>,
+    pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
+    pub(crate) keyboard: keyboard::Keyboard,
     pub(crate) events: Vec<HostEvent>,
     timer: Option<f64>,
     exit: bool,
@@ -550,6 +553,8 @@ impl WaylandHost {
             surfaces: Vec::new(),
             next_id: 1,
             pointers: Vec::new(),
+            keyboards: Vec::new(),
+            keyboard: keyboard::Keyboard::default(),
             events: Vec::new(),
             timer: None,
             exit: false,
