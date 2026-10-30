@@ -1285,6 +1285,107 @@ mod tests {
         tr.check(&Envelope::default())
     }
 
+    /// Typing inside a word under the still profile, as an editor does: the word changes
+    /// at each key and splits at the space, under every revision style a look may set.
+    /// Every frame keeps rule 1 on the caret line.
+    #[test]
+    fn typing_inside_a_word_keeps_the_envelope() {
+        use vo_core::words::WordModel;
+        use vo_scene::element::{Element, TextStyle};
+        use vo_scene::flow::{EditDecor, Revise};
+        use vo_scene::font::{test_font_path, FontRegistry};
+        use vo_scene::scene::Scene;
+        use vo_scene::text::ShapedLayout;
+        let revises =
+            [Revise::Swap, Revise::Palimpsest, Revise::Crossfade, Revise::Glyphs, Revise::Roll, Revise::Ghost];
+        // `shift`: the line moves 1 px at each key, as a centred line re-centres.
+        for (revise, shift) in revises.into_iter().flat_map(|r| [(r, false), (r, true)]) {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            let mut s: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts)));
+            let view = |model: &WordModel, text: &str, caret: usize, t: f64| {
+                let dx = if shift { text.len() as f32 } else { 0.0 };
+                let live = Element::live_text("live", model.words())
+                    .margin_edges(0.0, 0.0, 0.0, dx)
+                    .text_style(TextStyle::new(0, 20.0, 26.0))
+                    .width(400.0)
+                    .word_revise(revise)
+                    .live_source(text.to_string())
+                    .edit(EditDecor { caret: Some(caret), since: t, ..EditDecor::default() })
+                    .still_motion(true);
+                Element::column("root").child(live)
+            };
+            let (mut text, mut caret) = ("alpha bravo charlie delta".to_string(), "alpha bra".len());
+            let mut model = WordModel::new();
+            model.update(&text);
+            s.apply(view(&model, &text, caret, 0.0), 0.0);
+            let mut keys: Vec<(f64, char)> =
+                "quick ly".chars().enumerate().map(|(i, c)| (1.0 + 0.07 * i as f64, c)).collect();
+            keys.reverse();
+            let mut tr = Tracker::new();
+            for n in 0..90 {
+                let t = n as f64 / 30.0;
+                while keys.last().is_some_and(|k| k.0 <= t) {
+                    let (at, c) = keys.pop().unwrap();
+                    text.insert(caret, c);
+                    caret += c.len_utf8();
+                    model.update(&text);
+                    s.apply(view(&model, &text, caret, at), at);
+                }
+                tr.push(t, &s.sample(t));
+            }
+            let r = tr.check(&Envelope::default());
+            assert!(r.is_ok() && r.glyphs_checked > 0, "{revise:?}, shift {shift}: {r}");
+        }
+    }
+
+    /// A look with one live text per line, under the still profile, re-keys its line nodes
+    /// in an edit: the caret line's words move from one node to another at the same place.
+    /// The copy that leaves must not be drawn under rule 1's ink while the new one shows.
+    #[test]
+    fn a_line_that_changes_node_keeps_the_envelope() {
+        use vo_core::words::Word;
+        use vo_scene::element::{Element, TextStyle};
+        use vo_scene::flow::EditDecor;
+        use vo_scene::font::{test_font_path, FontRegistry};
+        use vo_scene::scene::Scene;
+        use vo_scene::text::ShapedLayout;
+        let fonts = FontRegistry::new();
+        fonts.add_file(&test_font_path()).unwrap();
+        let mut s: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts)));
+        let words = [Word { id: 1, text: "alpha".into() }, Word { id: 2, text: "bravo".into() }];
+        // Two nodes at one place (the first takes no height); `on` holds the line.
+        let view = |on: usize, t: f64| {
+            let mut col = Element::column("root");
+            for i in 0..2 {
+                let line: &[Word] = if i == on { &words } else { &[] };
+                let src = line.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+                let mut e = Element::live_text(format!("line-{i}"), line)
+                    .text_style(TextStyle::new(0, 20.0, 26.0))
+                    .width(400.0)
+                    .live_source(src.clone())
+                    .edit(EditDecor { caret: (i == on).then_some(src.len()), since: t, ..EditDecor::default() })
+                    .still_motion(true);
+                if i == 0 {
+                    e = e.height(0.0);
+                }
+                col = col.child(e);
+            }
+            col
+        };
+        s.apply(view(0, 0.0), 0.0);
+        let mut tr = Tracker::new();
+        for n in 0..60 {
+            let t = n as f64 / 30.0;
+            if n == 30 {
+                s.apply(view(1, t), t);
+            }
+            tr.push(t, &s.sample(t));
+        }
+        let r = tr.check(&Envelope::default());
+        assert!(r.is_ok() && r.glyphs_checked > 0, "{r}");
+    }
+
     /// Word 1 rests on line 1 (y 40), word 2 is the newest, on line 2 (y 64). In frames 6
     /// to 9 word 1's ink dips to 30 %. An edit caret sits on the line at `caret`, if any.
     fn upper_line_dips(caret: Option<f32>) -> Report {
