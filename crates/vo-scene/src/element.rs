@@ -1496,6 +1496,17 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: the still profile for editing (`LiveMotion::still`). Words that enter,
+    /// change or leave only change ink, within 80 ms; reflow and scroll take at most 150 ms.
+    /// Turning it off brings the node's own motion back for the next change.
+    pub fn still_motion(mut self, on: bool) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.still = on,
+            _ => debug_assert!(false, "still_motion on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: the text as typed, with runs of spaces and hard newlines kept (the edit
     /// layer's buffer). Each word is found in it in order; it is used only when nothing but
     /// whitespace lies around and between the words, else the words are joined by single

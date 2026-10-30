@@ -492,10 +492,14 @@ impl<M> Node<M> {
                 Motion::Snap => Spring::SNAP,
             };
         let (fade, slide) = (spring(Prop::Opacity), spring(Prop::Offset));
+        // The still profile keeps a word's enter and change to its fade, within 80 ms.
+        let still = live.still;
+        let fade = if still { crate::flow::STILL_FADE } else { fade };
         let chan = |v: f64, s: Spring, rest: Rest| Channel::new(t, v, s).with_rest(rest).with_retention(retention);
         let reduced = self.reduced;
         let from = |tr: &Transition| {
             let tr = if reduced { tr.reduced() } else { *tr };
+            let tr = if still { Transition { opacity: tr.opacity, ..Transition::NONE } } else { tr };
             let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
             let fx = [tr.blur, tr.dissolve, tr.wipe].map(|v| v.unwrap_or(0.0) as f64);
             ([tr.opacity.unwrap_or(1.0) as f64, x as f64, y as f64], fx)
@@ -553,6 +557,22 @@ impl<M> Node<M> {
                     if v != rest {
                         ch.snap(t, v);
                         ch.retarget(t, rest);
+                        changed = true;
+                    }
+                }
+            }
+            if still {
+                // Motion that was running settles: ink within 80 ms, the rest at once.
+                if !anim.opacity.resting_at(t) && anim.opacity.spring() != fade {
+                    let (now, to) = (anim.opacity.value(t), anim.opacity.target());
+                    anim.opacity.set_spring(fade);
+                    anim.opacity.snap(t, now);
+                    anim.opacity.retarget(t, to);
+                    changed = true;
+                }
+                for ch in [&mut anim.dx, &mut anim.dy, &mut anim.blur, &mut anim.dissolve, &mut anim.wipe] {
+                    if !ch.resting_at(t) {
+                        ch.snap(t, ch.target());
                         changed = true;
                     }
                 }

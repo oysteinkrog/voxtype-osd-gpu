@@ -127,6 +127,12 @@ impl Default for Caret {
     }
 }
 
+/// Ink under the still profile (`LiveMotion::still`): 98 % of the way in 50 ms, within 1 %
+/// by 80 ms.
+pub const STILL_FADE: Spring = Spring::critical_to_98(0.05);
+/// Words that reflow or scroll under the still profile: at most 150 ms.
+pub const STILL_REFLOW: Spring = Spring::critical_to_98(0.15);
+
 /// The edit caret stays solid this long after the text or the caret last changed.
 pub const EDIT_HOLD: f64 = 0.5;
 /// This long after the last change the edit caret stops blinking and stays on, so an idle
@@ -452,6 +458,12 @@ pub struct LiveMotion {
     /// The text as typed, when it is more than the words joined by single spaces: runs of
     /// spaces and hard newlines (`Element::live_source`). See `live_spans`.
     pub source: Option<String>,
+    /// The still profile (`Element::still_motion`), for editing: words that enter, change or
+    /// leave only change ink, within 80 ms (`STILL_FADE`), in place. Reflow and scroll move
+    /// whole words in at most 150 ms (`STILL_REFLOW`). Revisions crossfade, rewraps fade,
+    /// and settling ink, letter physics, the magnet and revision marks are off. Motion that
+    /// is running when it turns on settles the same way.
+    pub still: bool,
     /// How the top line leaves when a line cap drops it (MO-33).
     pub overflow: overflow::Overflow,
     /// Draws glyphs on the newest line that break the reading-line envelope in this colour
@@ -551,6 +563,32 @@ fn source_ranges(words: &[Word], src: &str) -> Option<Vec<std::ops::Range<usize>
         ranges.push(start..at);
     }
     src[at..].trim_start().is_empty().then_some(ranges)
+}
+
+impl LiveMotion {
+    /// This motion under the still profile (`LiveMotion::still`).
+    pub(crate) fn stilled(&self) -> LiveMotion {
+        LiveMotion {
+            revise: Revise::Crossfade,
+            rewrap: Rewrap::Fade,
+            case: CaseChange::default(),
+            settle: None,
+            letters: None,
+            magnet: None,
+            revisions: revisions::RevisionMotion::default(),
+            bell: None,
+            ..self.clone()
+        }
+    }
+}
+
+/// From `t`, `c` moves from where it is to its final target on `spring`; later segments
+/// (a delayed start) are dropped.
+fn settle_with(c: &mut Channel, t: f64, spring: Spring) {
+    let (now, to) = (c.value(t), c.target());
+    c.set_spring(spring);
+    c.snap(t, now);
+    c.retarget(t, to);
 }
 
 /// What `Flow::update` needs from the node.
@@ -1006,6 +1044,13 @@ impl Flow {
     pub fn update(&mut self, t: f64, input: FlowInput<'_>) {
         let FlowInput { shaped, words, motion, size, line_height, retention, reduced, crossfade, width, entering } =
             input;
+        let calm;
+        let motion = if motion.still {
+            calm = motion.stilled();
+            &calm
+        } else {
+            motion
+        };
         self.size = size;
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
@@ -1267,6 +1312,61 @@ impl Flow {
                 cx.retarget(t, now);
                 cx.retarget(hold, to);
             }
+        }
+        if motion.still {
+            self.calm(t);
+        }
+    }
+
+    /// The still profile: from `t`, every glyph is at its place, ink moves to where it is
+    /// going within `STILL_FADE`, and words and the caret reach their places within
+    /// `STILL_REFLOW`. Delays and waits that were set up are dropped.
+    fn calm(&mut self, t: f64) {
+        // Glyphs on their way out stay where they are drawn now, so the word's width can
+        // snap without squeezing them.
+        for i in 0..self.ghosts.len() {
+            let g = &self.ghosts[i];
+            if g.fixed.is_some() {
+                continue;
+            }
+            let Some(w) = self.words.iter().find(|w| w.id == g.word) else { continue };
+            let k = if g.width > 0.0 { w.width.value(t) as f32 / g.width } else { 1.0 };
+            let y = w.y.value(t) as f32 + w.roll.value(t) as f32 + self.opened(w.line, t);
+            let x = w.x.value(t) as f32;
+            let g = &mut self.ghosts[i];
+            (g.fixed, g.x) = (Some((x, y)), g.x * k);
+        }
+        for w in &mut self.words {
+            for c in [&mut w.x, &mut w.y, &mut w.roll, &mut w.look_scale] {
+                settle_with(c, t, STILL_REFLOW);
+            }
+            // A changed word is at its new width at once: its glyphs do not stretch.
+            w.width.snap(t, w.width.target());
+            for c in [&mut w.ink, &mut w.look_opacity] {
+                settle_with(c, t, STILL_FADE);
+            }
+            for c in [&mut w.track, &mut w.fresh] {
+                c.snap(t, c.target());
+            }
+            for g in &mut w.glyphs {
+                settle_with(&mut g.opacity, t, STILL_FADE);
+                for c in [&mut g.x, &mut g.rise, &mut g.scale] {
+                    c.snap(t, c.target());
+                }
+            }
+        }
+        for g in &mut self.ghosts {
+            settle_with(&mut g.opacity, t, STILL_FADE);
+            for c in [&mut g.rise, &mut g.scale, &mut g.slide] {
+                c.snap(t, c.target());
+            }
+        }
+        for (_, c) in &mut self.open {
+            c.snap(t, c.target());
+        }
+        if let Some((x, y, ..)) = &mut self.caret {
+            settle_with(x, t, STILL_REFLOW);
+            settle_with(y, t, STILL_REFLOW);
         }
     }
 
@@ -2246,6 +2346,126 @@ mod tests {
             let after: Vec<_> = s.sample(20.0).glyphs.iter().map(|g| g.pos).collect();
             assert_eq!(before, after);
             assert_eq!(s.next_wake(20.0), Some(20.0 + EDIT_HOLD));
+        }
+    }
+
+    /// M4.8: under the still profile a word that enters, changes or leaves only changes
+    /// ink, for at most 80 ms, even with a look's own enter and change transitions and the
+    /// palimpsest revise.
+    mod still_profile {
+        use super::*;
+        use crate::display::DisplayList;
+        use crate::element::{Element, Prop, TextStyle, Transition};
+        use crate::font::{test_font_path, FontRegistry};
+        use crate::text::ShapedLayout;
+        use crate::Scene;
+        use vo_core::spring::Spring;
+
+        const STEP: f64 = 1.0 / 240.0;
+
+        fn scene() -> Scene<()> {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            Scene::new().with_text(Box::new(ShapedLayout::new(fonts)))
+        }
+
+        fn view(words: &[(WordId, &str)], still: bool) -> Element<()> {
+            let w: Vec<Word> = words.iter().map(|&(id, t)| Word { id, text: t.into() }).collect();
+            // A look that moves words a lot on its own.
+            let rise =
+                Transition { opacity: Some(0.0), offset: Some((0.0, 12.0)), blur: Some(4.0), ..Transition::NONE };
+            Element::column("root").child(
+                Element::live_text("live", &w)
+                    .text_style(TextStyle::new(0, 20.0, 26.0))
+                    .width(400.0)
+                    .motion(Prop::Opacity, Spring::critical_to_98(0.3))
+                    .motion(Prop::Offset, Spring::critical_to_98(0.3))
+                    .word_enter(rise)
+                    .word_change(rise)
+                    .still_motion(still),
+            )
+        }
+
+        /// Each drawn glyph: word, glyph, position, size and ink.
+        fn glyphs(dl: &DisplayList) -> Vec<(u32, u32, Point, f32, f32)> {
+            dl.glyphs.iter().map(|g| (g.word, g.glyph, g.pos, g.size, g.color.a)).collect()
+        }
+
+        /// Runs `from` then `to` at 1.0. Returns whether every frame drew each glyph only where
+        /// it rests before or after, at its size and with no blur, and the first time from
+        /// which every frame matches the end within 1 % ink (a glyph under 1 % counts as gone).
+        fn run(from: &[(WordId, &str)], to: &[(WordId, &str)], still: bool) -> (bool, f64) {
+            let mut s = scene();
+            s.apply(view(from, still), 0.0);
+            let before = glyphs(&s.sample(0.99));
+            s.apply(view(to, still), 1.0);
+            let after = glyphs(&s.sample(3.0));
+            let at_rest = |g: &(u32, u32, Point, f32, f32)| {
+                before.iter().chain(&after).any(|r| {
+                    r.0 == g.0
+                        && r.1 == g.1
+                        && (r.2.x - g.2.x).abs() < 0.01
+                        && (r.2.y - g.2.y).abs() < 0.01
+                        && r.3 == g.3
+                })
+            };
+            let (mut in_place, mut done) = (true, 1.0);
+            let mut t = 1.0;
+            while t < 1.5 {
+                let dl = s.sample(t);
+                let mut now = glyphs(&dl);
+                in_place &= now.iter().filter(|g| g.4 > 0.0).all(at_rest);
+                // Under 1 % ink a glyph is gone.
+                now.retain(|g| g.4 >= 0.01);
+                in_place &= dl.glyph_fx.iter().all(|(_, fx)| fx.blur == 0.0);
+                let same = now.len() == after.len()
+                    && now.iter().zip(&after).all(|(a, b)| (a.4 - b.4).abs() < 0.01 && at_rest(a));
+                if !same {
+                    done = t + STEP;
+                }
+                t += STEP;
+            }
+            (in_place, done)
+        }
+
+        const HELLO: &[(WordId, &str)] = &[(1, "hello")];
+        const HELLO_WORLD: &[(WordId, &str)] = &[(1, "hello"), (2, "world")];
+        const HELLO_WORD: &[(WordId, &str)] = &[(1, "hello"), (2, "word")];
+
+        #[test]
+        fn enter_revise_and_exit_change_only_ink_for_80_ms() {
+            for (name, from, to) in
+                [("enter", HELLO, HELLO_WORLD), ("revise", HELLO_WORLD, HELLO_WORD), ("exit", HELLO_WORLD, HELLO)]
+            {
+                let (in_place, done) = run(from, to, true);
+                assert!(in_place, "{name}: a glyph left its place");
+                assert!(done > 1.0 && done <= 1.08 + 1e-9, "{name}: settled at {done}");
+            }
+        }
+
+        /// The same changes without the profile move glyphs and take longer: the check above
+        /// can tell.
+        #[test]
+        fn without_the_profile_the_look_moves_words() {
+            for (from, to) in [(HELLO, HELLO_WORLD), (HELLO_WORLD, HELLO_WORD)] {
+                let (in_place, done) = run(from, to, false);
+                assert!(!in_place && done > 1.15, "{done}");
+            }
+        }
+
+        /// R34: turning the profile on while a word is entering settles it within 150 ms.
+        #[test]
+        fn running_motion_settles_when_the_profile_turns_on() {
+            let mut s = scene();
+            s.apply(view(HELLO, false), 0.0);
+            s.apply(view(HELLO_WORLD, false), 1.0);
+            s.apply(view(HELLO_WORLD, true), 1.03);
+            let end = glyphs(&s.sample(3.0));
+            let now = glyphs(&s.sample(1.03 + 0.15));
+            assert_eq!(now.len(), end.len());
+            for (a, b) in now.iter().zip(&end) {
+                assert!((a.2.x - b.2.x).abs() < 0.01 && (a.2.y - b.2.y).abs() < 0.01 && (a.4 - b.4).abs() < 0.01);
+            }
         }
     }
 
