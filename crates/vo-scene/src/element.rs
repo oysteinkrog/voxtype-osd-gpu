@@ -756,17 +756,20 @@ pub enum MarkShape {
     Karaoke,
 }
 
-/// Pointer handlers. Message values, not closures, so elements stay cheap to rebuild.
+/// Pointer and key handlers. Message values and plain functions, not closures, so elements
+/// stay cheap to rebuild.
 #[derive(Clone, Debug)]
 pub(crate) struct Handlers<M> {
     pub hit: bool,
     pub click: Option<M>,
     pub hover: Option<(M, M)>,
+    /// Makes the message for a key while this node has keyboard focus.
+    pub key: Option<fn(crate::input::KeyEvent) -> M>,
 }
 
 impl<M> Default for Handlers<M> {
     fn default() -> Self {
-        Handlers { hit: false, click: None, hover: None }
+        Handlers { hit: false, click: None, hover: None, key: None }
     }
 }
 
@@ -2135,6 +2138,16 @@ impl<M> Element<M> {
     pub fn on_hover(mut self, enter: M, leave: M) -> Element<M> {
         self.handlers.hit = true;
         self.handlers.hover = Some((enter, leave));
+        self
+    }
+
+    /// Makes the node focusable: while the app has keyboard focus, keys go to the focused
+    /// node first, as `msg(key)`, and reach `App::key` only when no node is focused. The
+    /// scene focuses the first focusable node in tree order (one per scene for now), and a
+    /// node that is removed or leaves loses focus. `msg` is usually a message constructor,
+    /// such as `Msg::Key`.
+    pub fn on_key(mut self, msg: fn(crate::input::KeyEvent) -> M) -> Element<M> {
+        self.handlers.key = Some(msg);
         self
     }
 }

@@ -406,9 +406,7 @@ impl<A: App> Driver<A> {
                 let (held, n) = self.keys.repeat.as_mut().expect("a repeat is due");
                 *n += 1;
                 let ev = KeyEvent { t: at, state: KeyState::Repeat, mods, ..held.clone() };
-                self.run(at, |app, cx| {
-                    app.key(&ev, cx);
-                });
+                self.deliver_key(&ev);
                 true
             }
             _ => match self.timers.pop_due(t) {
@@ -446,9 +444,18 @@ impl<A: App> Driver<A> {
             }
             KeyState::Repeat => {}
         }
-        self.run(ev.t, |app, cx| {
-            app.key(&ev, cx);
-        });
+        self.deliver_key(&ev);
+    }
+
+    /// Gives a key to the focused node (`Element::on_key`), or to `App::key` when no node
+    /// is focusable.
+    fn deliver_key(&mut self, ev: &KeyEvent) {
+        match self.scene.key(ev) {
+            Some(msg) => self.dispatch(msg, ev.t),
+            None => self.run(ev.t, |app, cx| {
+                app.key(ev, cx);
+            }),
+        }
     }
 
     /// Keyboard focus came or went. A loss stops any repeat.
@@ -772,5 +779,46 @@ mod tests {
         d.repeat_info(RepeatInfo { rate_hz: 0.0, delay_s: 0.5 });
         d.key(&key_ev(KeyState::Down, 30, 2.0));
         assert_eq!(d.next_timer_at(), None);
+    }
+
+    /// Edits through a focusable node when `node` is set, else through `App::key`.
+    struct Routed {
+        node: bool,
+        via_node: Vec<f64>,
+        via_app: Vec<f64>,
+    }
+
+    impl App for Routed {
+        type Msg = Option<KeyEvent>;
+        fn update(&mut self, msg: Option<KeyEvent>, _: &mut Cx<Option<KeyEvent>>) {
+            if let Some(ev) = msg {
+                self.via_node.push(ev.t);
+            }
+        }
+        fn view(&self, _: &Tokens) -> Element<Option<KeyEvent>> {
+            let root = Element::column("root");
+            if self.node {
+                root.child(Element::panel("text").on_key(Some))
+            } else {
+                root
+            }
+        }
+        fn key(&mut self, ev: &KeyEvent, _: &mut Cx<Option<KeyEvent>>) -> bool {
+            self.via_app.push(ev.t);
+            true
+        }
+    }
+
+    #[test]
+    fn keys_go_to_the_focused_node_before_app_key() {
+        let app = Routed { node: true, via_node: Vec::new(), via_app: Vec::new() };
+        let mut d = Driver::new(app, Scene::new(), Tokens::default(), 0.0);
+        d.key(&key_ev(KeyState::Down, 30, 1.0));
+        assert_eq!((d.app.via_node.as_slice(), d.app.via_app.as_slice()), (&[1.0][..], &[][..]));
+        // The node goes away: keys reach App::key.
+        d.app.node = false;
+        d.dispatch(None, 2.0);
+        d.key(&key_ev(KeyState::Down, 30, 3.0));
+        assert_eq!(d.app.via_app, [3.0]);
     }
 }
