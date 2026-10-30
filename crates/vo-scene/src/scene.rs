@@ -1228,6 +1228,11 @@ impl<M> Scene<M> {
             .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.style_wake(t)))
             .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.displace_wake(t)))
             .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| n.live.wake(t)))
+            // An edit caret wakes only at its blink edges.
+            .chain(nodes.iter().copied().filter(|n| n.alive(t)).filter_map(|n| match &n.kind {
+                Kind::LiveText { edit: Some(d), .. } => d.wake(t),
+                _ => None,
+            }))
             // Materials that flicker or scroll (FX15), at their own capped rate.
             .chain(
                 self.nodes
@@ -2042,7 +2047,7 @@ impl<M> Scene<M> {
                 self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, items, out);
                 None
             }
-            Kind::LiveText { words, style, particles, mark, inline, pass, live, .. } => {
+            Kind::LiveText { words, style, particles, mark, inline, pass, live, edit, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 let z = n.value(Slot::TextZoom as u8, t) as f32;
                 if let Some(look) = particles {
@@ -2097,6 +2102,24 @@ impl<M> Scene<M> {
                 }
                 let starts = word_starts(words, live.source.as_deref());
                 let word_of = |cluster: u32| word_at(&starts, cluster);
+                // The edit decor moves with the glyphs: by each glyph's word and flow motion.
+                let edit = edit.as_deref().map(|d| {
+                    let moved = |i: usize| {
+                        let (_, wx, wy) = n.word_motion(word_of(n.shaped.glyphs[i].cluster), t);
+                        let m = n.live.glyph(i, t);
+                        (wx + m.dx, wy + m.dy)
+                    };
+                    (d, crate::flow::edit_frame(&n.shaped, d, style.size, t, moved))
+                });
+                let zoomed = |r: Rect| Rect::new(origin.x + r.x * z, origin.y + r.y * z, r.w * z, r.h * z);
+                // The selection goes behind the glyphs.
+                if let Some((d, f)) = &edit {
+                    let fill = d.selection_color.map_or(color.fade(0.35), |c| c.fade(alpha));
+                    for &r in &f.selection {
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        out.shapes.push(ShapeInstance::rrect(RRect::new(zoomed(r), 0.0), Paint::solid(fill)));
+                    }
+                }
                 let accent = mark.as_deref().filter(|m| m.tints());
                 if n.words.is_empty() || color.a <= 0.0 {
                     self.glyphs(n, style.size, origin, color, alpha, t, word_of, items, out);
@@ -2408,7 +2431,28 @@ impl<M> Scene<M> {
                     push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                     out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(color.fade(m.alpha))));
                 }
-                if let Some((bar, tint, blink)) = n.live.caret(t) {
+                if let Some((d, f)) = &edit {
+                    let ink = d.mark_color.map_or(color, |c| c.fade(alpha));
+                    for &r in &f.marks {
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        out.shapes.push(ShapeInstance::rrect(RRect::new(zoomed(r), 0.0), Paint::solid(ink)));
+                    }
+                    let c = d.caret_style.color.map_or(color, |c| c.fade(alpha));
+                    if let Some((bar, blink)) = f.caret.filter(|&(_, blink)| blink > 0.0 && c.a > 0.0) {
+                        let r = zoomed(bar);
+                        push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+                        let paint = match d.caret_style.gradient {
+                            Some(g) => Paint::linear(
+                                Point::new(r.x, r.y),
+                                c.fade(blink),
+                                Point::new(r.x, r.y + r.h),
+                                g.fade(alpha).fade(blink),
+                            ),
+                            None => Paint::solid(c.fade(blink)),
+                        };
+                        out.shapes.push(ShapeInstance::rrect(RRect::new(r, 0.5 * r.w), paint));
+                    }
+                } else if let Some((bar, tint, blink)) = n.live.caret(t) {
                     let c = tint.map_or(color, |c| c.fade(alpha)).fade(blink);
                     if c.a > 0.0 {
                         let r = Rect::new(origin.x + bar.x * z, origin.y + bar.y * z, bar.w * z, bar.h * z);

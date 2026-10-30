@@ -64,10 +64,12 @@ impl<M> LayoutView<'_, M> {
         type Fonts = Vec<(std::ops::Range<usize>, crate::font::FontId)>;
         let content: Option<(String, TextStyle, Vec<f32>, Fonts)> = match &n.kind {
             Kind::Label { text, style } => Some((text.clone(), *style, Vec::new(), Vec::new())),
-            Kind::LiveText { words, style, inline, live, .. } => {
+            Kind::LiveText { words, style, inline, live, edit, .. } => {
                 let spans = crate::flow::live_spans(words, live.source.as_deref());
                 let fonts = crate::flow::word_font_ranges(words, &spans.ranges, &live.word_fonts);
-                Some((spans.text.into_owned(), *style, crate::inline::widths(words, inline, style.size), fonts))
+                // An edit decor needs caret stops.
+                let style = TextStyle { stops: style.stops || edit.is_some(), ..*style };
+                Some((spans.text.into_owned(), style, crate::inline::widths(words, inline, style.size), fonts))
             }
             _ => None,
         };

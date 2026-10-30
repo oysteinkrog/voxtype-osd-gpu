@@ -127,6 +127,174 @@ impl Default for Caret {
     }
 }
 
+/// The edit caret stays solid this long after the text or the caret last changed.
+pub const EDIT_HOLD: f64 = 0.5;
+/// This long after the last change the edit caret stops blinking and stays on, so an idle
+/// editor draws no more frames.
+pub const EDIT_STILL: f64 = 10.0;
+
+/// What an editable live text draws besides its glyphs (`Element::edit`): the caret, the
+/// selection behind the glyphs, and underlines on edited text.
+///
+/// Bytes are in the text the node shapes: pass the edit buffer with `Element::live_source`
+/// so they match it (`live_spans`). Each piece moves with the glyph next to it, so it stays
+/// on the glyphs while lines reflow or scroll, and it is drawn in the node's own space, so a
+/// rotated or scaled parent turns it with the text. The node lays out with caret stops
+/// (`TextStyle::stops`) while it has a decor, and its end-of-text `Caret` is not drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditDecor {
+    /// The caret byte; `None` draws no caret.
+    pub caret: Option<usize>,
+    /// The line the caret is on when its byte is a soft wrap.
+    pub affinity: vo_core::edit::Affinity,
+    /// Selected bytes; empty for none.
+    pub selection: std::ops::Range<usize>,
+    /// Edited bytes, each range underlined.
+    pub marks: Vec<std::ops::Range<usize>>,
+    /// When the text or the caret last changed, in scene time. The caret is solid for
+    /// `EDIT_HOLD`, then blinks on and off in hard steps at `CARET_HZ`, and from
+    /// `EDIT_STILL` on it stays on.
+    pub since: f64,
+    /// The bar: width and colour (`gap` is not used). A `None` colour is the text colour.
+    pub caret_style: Caret,
+    /// The selection fill; `None` is the text colour at 35 %.
+    pub selection_color: Option<Color>,
+    /// The underline colour; `None` is the text colour.
+    pub mark_color: Option<Color>,
+}
+
+impl Default for EditDecor {
+    fn default() -> EditDecor {
+        EditDecor {
+            caret: None,
+            affinity: vo_core::edit::Affinity::Downstream,
+            selection: 0..0,
+            marks: Vec::new(),
+            since: 0.0,
+            caret_style: Caret::default(),
+            selection_color: None,
+            mark_color: None,
+        }
+    }
+}
+
+impl EditDecor {
+    /// The caret's opacity at `t`: 1 or 0, never in between.
+    pub fn caret_alpha(&self, t: f64) -> f32 {
+        let idle = t - self.since;
+        if !(EDIT_HOLD..EDIT_STILL).contains(&idle) {
+            return 1.0;
+        }
+        let period = 1.0 / CARET_HZ;
+        if (idle - EDIT_HOLD).rem_euclid(period) < CARET_DUTY * period {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// The next time after `t` the caret turns on or off, or `None` when it no longer
+    /// changes (no caret, or `EDIT_STILL` has passed). A frame is needed only then.
+    pub fn wake(&self, t: f64) -> Option<f64> {
+        self.caret?;
+        let idle = t - self.since;
+        if idle >= EDIT_STILL {
+            return None;
+        }
+        if idle < EDIT_HOLD {
+            return Some(self.since + EDIT_HOLD);
+        }
+        let period = 1.0 / CARET_HZ;
+        let u = (idle - EDIT_HOLD).rem_euclid(period);
+        let on = CARET_DUTY * period;
+        let next = if u < on { t - u + on } else { t - u + period };
+        // A microsecond past the edge, so a frame there is sure to see the new state.
+        Some((next + 1e-6).min(self.since + EDIT_STILL))
+    }
+}
+
+/// An edit decor placed at `t`, in the text box's space.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct EditFrame {
+    /// Selection fills, one per line.
+    pub selection: Vec<Rect>,
+    /// Underlines, one per line of each mark.
+    pub marks: Vec<Rect>,
+    /// The caret bar and its blink opacity.
+    pub caret: Option<(Rect, f32)>,
+}
+
+/// Places `decor` on `shaped`, laid out with caret stops, for the frame at `t`. `moved(i)`
+/// is how far glyph `i` is drawn from its laid-out place at `t`; each piece moves with the
+/// glyph at its start (`edit_anchor`).
+pub(crate) fn edit_frame(
+    shaped: &ShapedText,
+    decor: &EditDecor,
+    size: f32,
+    t: f64,
+    moved: impl Fn(usize) -> (f32, f32),
+) -> EditFrame {
+    let shift = |r: Rect, byte: usize, line: usize| match edit_anchor(shaped, byte, line) {
+        Some(i) => {
+            let (dx, dy) = moved(i);
+            Rect::new(r.x + dx, r.y + dy, r.w, r.h)
+        }
+        None => r,
+    };
+    // The line a selection rect is on, and the first byte of the range on it.
+    let on_line = |r: &Rect, from: usize| {
+        let mid = r.y + 0.5 * r.h;
+        let line = (0..shaped.lines.len())
+            .min_by(|&a, &b| (shaped.lines[a].baseline - mid).abs().total_cmp(&(shaped.lines[b].baseline - mid).abs()))
+            .unwrap_or(0);
+        (line, from.max(shaped.lines.get(line).map_or(0, |l| l.bytes.start)))
+    };
+    let selection = shaped
+        .selection_rects(decor.selection.clone())
+        .into_iter()
+        .map(|r| {
+            let (line, byte) = on_line(&r, decor.selection.start);
+            shift(r, byte, line)
+        })
+        .collect();
+    let thick = (0.06 * size).max(1.0);
+    let mut marks = Vec::new();
+    for m in &decor.marks {
+        for r in shaped.selection_rects(m.clone()) {
+            let (line, byte) = on_line(&r, m.start);
+            let baseline = shaped.lines[line].baseline;
+            marks.push(shift(Rect::new(r.x, baseline + 0.12 * size, r.w, thick), byte, line));
+        }
+    }
+    let caret = decor.caret.and_then(|byte| {
+        let stop = shaped.stop_at(byte, decor.affinity)?;
+        let baseline = shaped.lines.get(stop.line)?.baseline;
+        let w = decor.caret_style.width;
+        let bar = Rect::new(stop.x - 0.5 * w, baseline - 0.78 * size, w, size);
+        Some((shift(bar, byte, stop.line), decor.caret_alpha(t)))
+    });
+    EditFrame { selection, marks, caret }
+}
+
+/// The glyph that a decor at `byte` on `line` moves with: the glyph that starts at `byte`,
+/// else the last one before it on the line, else the line's first. A line with no glyphs (a
+/// blank line) takes the last glyph before `byte`, else the first glyph of the text.
+fn edit_anchor(shaped: &ShapedText, byte: usize, line: usize) -> Option<usize> {
+    let range = shaped.lines.get(line).map_or(0..0, |l| l.glyphs.clone());
+    let on = &shaped.glyphs[range.clone()];
+    if let Some(i) = on.iter().position(|g| g.cluster as usize == byte) {
+        return Some(range.start + i);
+    }
+    if let Some(i) = on.iter().rposition(|g| (g.cluster as usize) < byte) {
+        return Some(range.start + i);
+    }
+    if !on.is_empty() {
+        return Some(range.start);
+    }
+    let before = shaped.glyphs.iter().rposition(|g| (g.cluster as usize) < byte);
+    before.or((!shaped.glyphs.is_empty()).then_some(0))
+}
+
 /// How a word moves to another line when the text reflows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rewrap {
@@ -1904,6 +2072,180 @@ mod tests {
             assert_eq!((at(&broken, 0).2, b.2, w.2), (0, 1, 2));
             assert_eq!(b.0, at(&broken, 0).0, "a word after a newline starts the line");
             assert!(w.1 - b.1 > 1.5 * 26.0, "a blank line between them: {} {}", b.1, w.1);
+        }
+    }
+
+    #[test]
+    fn edit_caret_blinks_in_steps_and_wakes_only_on_edges() {
+        let d = EditDecor { caret: Some(0), since: 1.0, ..EditDecor::default() };
+        let mut t = 1.0;
+        let mut edges = Vec::new();
+        while let Some(next) = d.wake(t) {
+            assert!(next > t, "{next} after {t}");
+            // Between two edges the caret does not change, and it is fully on or off.
+            let a = d.caret_alpha(t);
+            assert!(a == 0.0 || a == 1.0);
+            for k in 1..8 {
+                assert_eq!(d.caret_alpha(t + (next - t) * k as f64 / 8.0), a, "between {t} and {next}");
+            }
+            edges.push(next);
+            t = next;
+        }
+        assert_eq!(edges[0], 1.0 + EDIT_HOLD, "solid while typing");
+        assert!((edges.last().unwrap() - (1.0 + EDIT_STILL)).abs() < 1e-9);
+        assert_eq!(d.caret_alpha(1.0 + EDIT_STILL + 5.0), 1.0, "on and still after the blink stops");
+        let period = 1.0 / CARET_HZ;
+        assert!((edges[1] - edges[0] - CARET_DUTY * period).abs() < 1e-5);
+        assert!((edges[2] - edges[0] - period).abs() < 1e-5);
+        assert_eq!(d.caret_alpha(edges[1] + 0.01), 0.0);
+        assert_eq!(EditDecor { caret: None, ..d }.wake(1.0), None, "no caret, no wake");
+    }
+
+    mod edit_decor {
+        use super::*;
+        use crate::display::{DisplayList, ItemKind};
+        use crate::element::{Element, TextStyle};
+        use crate::font::{test_font_path, FontRegistry};
+        use crate::text::ShapedLayout;
+        use crate::Scene;
+
+        const SIZE: f32 = 20.0;
+        const STEP: f64 = 1.0 / 120.0;
+
+        fn scene() -> Scene<()> {
+            let fonts = FontRegistry::new();
+            fonts.add_file(&test_font_path()).unwrap();
+            Scene::new().with_text(Box::new(ShapedLayout::new(fonts)))
+        }
+
+        fn view(words: &[(WordId, &str)], decor: EditDecor, turn: f32, scale: f32) -> Element<()> {
+            let w: Vec<Word> = words.iter().map(|&(id, t)| Word { id, text: t.into() }).collect();
+            let src = words.iter().map(|w| w.1).collect::<Vec<_>>().join(" ");
+            let live = Element::live_text("live", &w)
+                .text_style(TextStyle::new(0, SIZE, 26.0))
+                .width(200.0)
+                .live_source(src)
+                .edit(decor);
+            Element::column("root").child(Element::column("box").rotate(turn).scale(scale).child(live))
+        }
+
+        /// The layer an instance of `kind` at `index` is drawn in.
+        fn layer_of(dl: &DisplayList, kind: ItemKind, index: u32) -> usize {
+            dl.layers
+                .iter()
+                .position(|l| {
+                    dl.items[l.items.start as usize..l.items.end as usize]
+                        .iter()
+                        .any(|i| i.kind == kind && (i.start..i.start + i.len).contains(&index))
+                })
+                .expect("drawn in a layer")
+        }
+
+        /// The caret bar (index, x, middle y) and the last glyph of word `id` (index, x, y).
+        fn caret_and_glyph(dl: &DisplayList, id: WordId) -> ((u32, f32, f32), (u32, f32, f32)) {
+            let (ci, c) = dl
+                .shapes
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.geom[2] == 2.0 && s.geom[3] == SIZE)
+                .expect("the caret is drawn");
+            let (gi, g) = dl
+                .glyphs
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.word == id)
+                .max_by(|a, b| a.1.pos.x.total_cmp(&b.1.pos.x))
+                .expect("the word is drawn");
+            ((ci as u32, c.geom[0], c.geom[1] + 0.5 * c.geom[3]), (gi as u32, g.pos.x, g.pos.y))
+        }
+
+        /// R33: "hello big world", caret after "big"; then "really" goes in before "big",
+        /// so "big" slides along its line and "world" wraps. In every frame of that reflow
+        /// spring the caret keeps its laid-out place relative to the last glyph of "big",
+        /// within 1 px, also inside a rotated and scaled parent, where it is drawn in the
+        /// glyphs' own layer.
+        #[test]
+        fn caret_stays_on_the_glyphs_through_a_reflow() {
+            for (turn, scale) in [(0.0, 1.0), (0.4, 1.6)] {
+                let mut s = scene();
+                let caret = |at: usize| EditDecor { caret: Some(at), since: 1.0, ..EditDecor::default() };
+                s.apply(view(&[(1, "hello"), (2, "big"), (3, "world")], caret(9), turn, scale), 0.0);
+                s.apply(view(&[(1, "hello"), (4, "really"), (2, "big"), (3, "world")], caret(16), turn, scale), 1.0);
+                let frames: Vec<f64> = (0..58).map(|k| 1.0 + k as f64 * STEP).collect();
+                let at = |t: f64| {
+                    let dl = s.sample(t);
+                    let ((ci, cx, cy), (gi, gx, gy)) = caret_and_glyph(&dl, 2);
+                    let same = layer_of(&dl, ItemKind::Shapes, ci) == layer_of(&dl, ItemKind::Glyphs, gi);
+                    assert!(same, "caret and glyphs in one layer at {t}");
+                    (cx - gx, cy - gy, gx)
+                };
+                let (rx, ry, end) = at(*frames.last().unwrap());
+                let (_, _, start) = at(1.0);
+                assert!(end - start > 20.0, "\"big\" slides along: {start} to {end}");
+                for &t in &frames {
+                    let (dx, dy, _) = at(t);
+                    assert!((dx - rx).abs() <= 1.0 && (dy - ry).abs() <= 1.0, "{turn}: {t}: {dx} {dy} vs {rx} {ry}");
+                }
+                if turn != 0.0 {
+                    let dl = s.sample(2.0);
+                    let ((ci, ..), _) = caret_and_glyph(&dl, 2);
+                    let m = dl.layers[layer_of(&dl, ItemKind::Shapes, ci)].transform;
+                    assert_ne!(m, crate::geom::Affine::IDENTITY, "the parent's turn applies to the caret's layer");
+                }
+            }
+        }
+
+        #[test]
+        fn selection_goes_behind_the_glyphs_and_marks_underline() {
+            let mut s = scene();
+            let decor = EditDecor {
+                caret: Some(5),
+                selection: 0..5,
+                marks: vec![std::ops::Range { start: 6, end: 9 }],
+                since: 0.0,
+                ..Default::default()
+            };
+            s.apply(view(&[(1, "hello"), (2, "big"), (3, "world")], decor, 0.0, 1.0), 0.0);
+            let dl = s.sample(1.0);
+            let item_of = |kind: ItemKind, index: u32| {
+                dl.items.iter().position(|i| i.kind == kind && (i.start..i.start + i.len).contains(&index)).unwrap()
+            };
+            let glyph = |id: WordId| dl.glyphs.iter().enumerate().filter(move |(_, g)| g.word == id);
+            let sel = dl.shapes.iter().position(|s| s.geom[3] == 26.0).expect("a selection fill");
+            let first = glyph(1).map(|(i, _)| i).min().unwrap();
+            assert!(item_of(ItemKind::Shapes, sel as u32) < item_of(ItemKind::Glyphs, first as u32));
+            let r = dl.shapes[sel].geom;
+            let hello: Vec<f32> = glyph(1).map(|(_, g)| g.pos.x).collect();
+            assert!(r[0] <= hello[0] + 0.5 && r[0] + r[2] > *hello.last().unwrap());
+            let line = |s: &&crate::display::ShapeInstance| s.geom[3] < 2.0 && s.geom[2] > 10.0;
+            let mark = dl.shapes.iter().find(line).expect("an underline").geom;
+            let big: Vec<(f32, f32)> = glyph(2).map(|(_, g)| (g.pos.x, g.pos.y)).collect();
+            assert!((mark[0] - big[0].0).abs() < 1.0, "under \"big\": {mark:?} {big:?}");
+            assert!(mark[1] > big[0].1 && mark[1] < big[0].1 + 0.3 * SIZE, "just under the baseline");
+            assert!(mark[0] + mark[2] < glyph(3).map(|(_, g)| g.pos.x).fold(f32::MAX, f32::min));
+        }
+
+        /// R43: once the text is at rest, the scene wakes only at the caret's blink edges,
+        /// and not at all after `EDIT_STILL`. Without a decor the node has no caret.
+        #[test]
+        fn an_idle_editor_wakes_only_for_the_blink() {
+            let mut s = scene();
+            let decor = EditDecor { caret: Some(3), since: 0.0, ..Default::default() };
+            s.apply(view(&[(1, "hello"), (2, "big")], decor.clone(), 0.0, 1.0), 0.0);
+            for t in [2.0, 2.3, 4.01, 7.77] {
+                assert_eq!(s.next_wake(t), decor.wake(t), "{t}");
+            }
+            assert_eq!(s.next_wake(EDIT_STILL + 0.1), None);
+            assert!(caret_and_glyph(&s.sample(EDIT_STILL + 0.1), 2).0 .1.is_finite());
+            // Moving the caret alone is no new layout: the glyphs stay where they are.
+            let before: Vec<_> = s.sample(20.0).glyphs.iter().map(|g| g.pos).collect();
+            s.apply(
+                view(&[(1, "hello"), (2, "big")], EditDecor { caret: Some(9), since: 20.0, ..decor }, 0.0, 1.0),
+                20.0,
+            );
+            let after: Vec<_> = s.sample(20.0).glyphs.iter().map(|g| g.pos).collect();
+            assert_eq!(before, after);
+            assert_eq!(s.next_wake(20.0), Some(20.0 + EDIT_HOLD));
         }
     }
 

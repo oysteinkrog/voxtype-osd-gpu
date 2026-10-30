@@ -25,7 +25,7 @@ use crate::display::{BackdropRes, BlendMode, BloomShape, Mask, ShapeKind, TrailD
 use crate::dots::Dots;
 use crate::emitter::{Emitter, WordParticles};
 use crate::final_pass::FinalPass;
-use crate::flow::{Caret, CaseChange, LiveMotion, Revise, Rewrap, SettleInk};
+use crate::flow::{Caret, CaseChange, EditDecor, LiveMotion, Revise, Rewrap, SettleInk};
 use crate::geom::{Color, Rect};
 use crate::glass::{Glass, GlassShape};
 use crate::material::Material;
@@ -568,6 +568,8 @@ pub(crate) enum Kind {
         finals: Vec<Word>,
         /// Inline objects by word id (`Element::inline_objects`, `crate::inline`).
         inline: Vec<(u32, crate::inline::Inline)>,
+        /// Caret, selection and edit marks (`Element::edit`). Boxed to keep `Kind` small.
+        edit: Option<Box<EditDecor>>,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -659,17 +661,33 @@ impl Kind {
         matches!(self, Kind::Label { .. } | Kind::LiveText { .. })
     }
 
-    /// Whether `other` lays out differently from `self`. A live text's current-word mark and
-    /// final pass do not change its layout; its live motion does, since the layout feeds it to
-    /// the flow.
+    /// Whether `other` lays out differently from `self`. A live text's current-word mark,
+    /// final pass and edit decor do not change its layout (only whether it has a decor does,
+    /// for the caret stops); its live motion does, since the layout feeds it to the flow.
     pub(crate) fn layout_differs(&self, other: &Kind) -> bool {
         match (self, other) {
             (
                 Kind::LiveText {
-                    words: a, style: sa, inline: ia, live: la, enter: ea, change: ca, particles: pa, ..
+                    words: a,
+                    style: sa,
+                    inline: ia,
+                    live: la,
+                    enter: ea,
+                    change: ca,
+                    particles: pa,
+                    edit: da,
+                    ..
                 },
                 Kind::LiveText {
-                    words: b, style: sb, inline: ib, live: lb, enter: eb, change: cb, particles: pb, ..
+                    words: b,
+                    style: sb,
+                    inline: ib,
+                    live: lb,
+                    enter: eb,
+                    change: cb,
+                    particles: pb,
+                    edit: db,
+                    ..
                 },
             ) => {
                 a != b
@@ -678,6 +696,7 @@ impl Kind {
                     || ea != eb
                     || ca != cb
                     || pa != pb
+                    || da.is_some() != db.is_some()
                     || ia.len() != ib.len()
                     || ia.iter().zip(ib).any(|(x, y)| x.0 != y.0 || x.1.width != y.1.width)
             }
@@ -880,6 +899,7 @@ impl<M> Element<M> {
             pass: None,
             finals: Vec::new(),
             inline: Vec::new(),
+            edit: None,
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
@@ -1459,6 +1479,19 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { live, .. } => live.word_fonts = fonts,
             _ => debug_assert!(false, "word_fonts on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: draws a caret, a selection and edit marks with the words, at their sprung
+    /// places (`flow::EditDecor`). Pass the buffer with `Element::live_source` so the decor's
+    /// bytes match the text. While a node has a decor it lays out with caret stops and does
+    /// not draw its end-of-text caret. Changing the decor alone does not lay the text out
+    /// again.
+    pub fn edit(mut self, decor: EditDecor) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { edit, .. } => *edit = Some(Box::new(decor)),
+            _ => debug_assert!(false, "edit on a node that is not live text: {}", self.key),
         }
         self
     }
