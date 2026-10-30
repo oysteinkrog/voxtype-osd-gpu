@@ -44,11 +44,15 @@ pub struct GpuPaint {
 
 impl GpuPaint {
     fn new(p: &Paint, opacity: f32) -> GpuPaint {
-        GpuPaint {
-            c0: oklab_alpha(p.c0, opacity),
-            c1: oklab_alpha(p.c1, opacity),
-            ends: [p.p0.x, p.p0.y, p.p1.x, p.p1.y],
-        }
+        let c0 = oklab_alpha(p.c0, opacity);
+        // A solid paint, a glow or a shadow has one colour in both ends: convert it once.
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits();
+        let c1 = if same(p.c1.r, p.c0.r) && same(p.c1.g, p.c0.g) && same(p.c1.b, p.c0.b) {
+            [c0[0], c0[1], c0[2], (p.c1.a * opacity).clamp(0.0, 1.0)]
+        } else {
+            oklab_alpha(p.c1, opacity)
+        };
+        GpuPaint { c0, c1, ends: [p.p0.x, p.p0.y, p.p1.x, p.p1.y] }
     }
 }
 
