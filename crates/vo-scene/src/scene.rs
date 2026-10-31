@@ -2453,8 +2453,8 @@ impl<M> Scene<M> {
                     push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
                     out.shapes.push(ShapeInstance::line(tail, tip, z, Paint::solid(c.fade(alpha))));
                 }
-                if let (Some(p), Some((baseline, x))) =
-                    (pass, n.pass_lines().and_then(|(p, _, l)| final_pass::locate(&l, p.at)))
+                if let (Some(p), Some((baseline, x, pass_boxes))) =
+                    (pass, n.pass_lines().and_then(|(p, b, l)| final_pass::locate(&l, p.at).map(|(bl, x)| (bl, x, b))))
                 {
                     // A bracket under each word the pass changed (MO-40).
                     if p.bracket.a > 0.0 && !n.pass_changed.is_empty() {
@@ -2482,6 +2482,8 @@ impl<M> Scene<M> {
                     }
                     if p.line.a > 0.0 {
                         let s = style.size;
+                        // In the gap between two words, never on one (u7d6).
+                        let x = final_pass::head_x(&pass_boxes, baseline, x, final_pass::HEAD_EDGE * s);
                         let top = Point::new(origin.x + x, origin.y + baseline - 0.95 * s);
                         let bottom = Point::new(origin.x + x, origin.y + baseline + 0.3 * s);
                         let line = ShapeInstance::line(top, bottom, 0.0, Paint::NONE)

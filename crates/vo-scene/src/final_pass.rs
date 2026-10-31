@@ -256,9 +256,49 @@ pub(crate) fn locate(lines: &[ReadLine], at: f32) -> Option<(f32, f32)> {
     Some((l.baseline, (l.lo + pos - l.start).min(l.hi)))
 }
 
+/// How far before a line's first word and after its last the hairline stands, in em: about
+/// half a word space, as in the gaps between words.
+pub const HEAD_EDGE: f32 = 0.12;
+
+/// Where the hairline stands for reading point `x` on the line at `baseline`: in a gap
+/// between words, never on one (u7d6). It waits in the gap before a word until the pass is
+/// past the word's middle, then stands in the gap after it: the middle of the space between
+/// two words, or `edge` before the line's first word or after its last. `boxes` are the word
+/// boxes `(id, x0, x1, baseline)`. A line with no words keeps `x`.
+pub(crate) fn head_x(boxes: &[(u32, f32, f32, f32)], baseline: f32, x: f32, edge: f32) -> f32 {
+    let mut line: Vec<(f32, f32)> = boxes.iter().filter(|b| b.3 == baseline).map(|b| (b.1, b.2)).collect();
+    line.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let passed = line.iter().take_while(|&&(x0, x1)| (x0 + x1) / 2.0 <= x).count();
+    match (passed, line.len()) {
+        (_, 0) => x,
+        (0, _) => line[0].0 - edge,
+        (k, n) if k == n => line[n - 1].1 + edge,
+        (k, _) => (line[k - 1].1 + line[k].0) / 2.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_head_stands_in_the_gaps_between_words() {
+        // "one" 0 to 33, "two" 39 to 72 on one line; "three" 0 to 55 on the next.
+        let boxes = [(1, 0.0, 33.0, 16.0), (2, 39.0, 72.0, 16.0), (3, 0.0, 55.0, 42.0)];
+        assert_eq!(head_x(&boxes, 16.0, 0.0, 2.0), -2.0, "before the first word");
+        assert_eq!(head_x(&boxes, 16.0, 16.0, 2.0), -2.0, "waits before 'one' to its middle");
+        assert_eq!(head_x(&boxes, 16.0, 17.0, 2.0), 36.0, "then the gap after it");
+        assert_eq!(head_x(&boxes, 16.0, 37.0, 2.0), 36.0, "the gap itself");
+        assert_eq!(head_x(&boxes, 16.0, 60.0, 2.0), 74.0, "after the line's last word");
+        assert_eq!(head_x(&boxes, 42.0, 20.0, 2.0), -2.0, "the next line by its own words");
+        assert_eq!(head_x(&boxes, 99.0, 20.0, 2.0), 20.0, "no words, no snapping");
+        // Every reading point lands outside every box on its line.
+        for i in 0..=800 {
+            let x = i as f32 * 0.1;
+            let h = head_x(&boxes, 16.0, x, 2.0);
+            assert!(boxes.iter().filter(|b| b.3 == 16.0).all(|b| h <= b.1 || h >= b.2), "{x} -> {h}");
+        }
+    }
 
     #[test]
     fn the_pulse_rises_then_falls_to_nothing() {

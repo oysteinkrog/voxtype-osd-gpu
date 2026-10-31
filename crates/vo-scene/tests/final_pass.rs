@@ -46,14 +46,33 @@ fn ink(list: &DisplayList, word: u32) -> f32 {
 fn the_hairline_reads_line_after_line() {
     let mut s = Scene::<()>::new();
     s.apply(view(Some(0.5)), 0.0);
+    // Half of 127 is 63.5, on line 1 past the middle of "two": the hairline stands after it,
+    // 0.12 em (2.4) past its end (u7d6).
     let (x, top, bottom) = hairline(&s.sample(0.0)).expect("a hairline");
-    assert!((x - 63.5).abs() < 1e-3, "half of 127 is on line 1: {x}");
+    assert!((x - 74.4).abs() < 1e-3, "after 'two' on line 1: {x}");
     assert!(top < 16.0 && bottom > 16.0, "it spans the first baseline");
+    // 0.8 of 127 is 29.6 on line 2, past the middle of "three" (0 to 55).
     s.apply(view(Some(0.8)), 1.0);
     let (x, top, _) = hairline(&s.sample(1.0)).unwrap();
-    assert!((x - 29.6).abs() < 1e-3 && top > 16.0, "on line 2: {x} {top}");
+    assert!((x - 57.4).abs() < 1e-3 && top > 16.0, "after 'three' on line 2: {x} {top}");
     s.apply(view(None), 2.0);
     assert!(hairline(&s.sample(2.0)).is_none());
+}
+
+/// u7d6: sampled at 30 fps over a 3 s pass, the hairline never stands on a glyph of a line it
+/// spans. The width estimate gives every glyph an 11 unit advance box.
+#[test]
+fn the_hairline_never_stands_on_a_glyph() {
+    let mut s = Scene::<()>::new();
+    for f in 0..=90 {
+        let (at, t) = (f as f32 / 90.0, f as f64 / 30.0);
+        s.apply(view(Some(at)), t);
+        let list = s.sample(t);
+        let (x, top, bottom) = hairline(&list).expect("a hairline");
+        for g in list.glyphs.iter().filter(|g| g.pos.y > top && g.pos.y < bottom) {
+            assert!(x <= g.pos.x || x >= g.pos.x + 11.0, "at {at}: the hairline at {x} is on a glyph at {}", g.pos.x);
+        }
+    }
 }
 
 #[test]
