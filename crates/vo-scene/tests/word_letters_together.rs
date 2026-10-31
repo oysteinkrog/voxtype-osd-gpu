@@ -186,3 +186,21 @@ fn a_deleted_letter_still_leaves_a_faint_ghost() {
     let ghost = list.glyphs.iter().filter(|g| g.word == 1).count();
     assert_eq!(ghost, 6, "five letters and the comma's ghost");
 }
+
+#[test]
+fn under_reduced_motion_a_rewrapped_word_is_never_faint() {
+    let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts()))).with_reduced_motion(true);
+    scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+    let long = "with the waveform above them then press the key again to stop and let the final pass";
+    scene.apply(view(&words(long), Align::Start), 0.0);
+    scene.sample(1.0);
+    let wider = long.replacen("with", "Wherewith", 1);
+    scene.apply(view(&words(&wider), Align::Start), 1.0);
+    for i in 0..60 {
+        let t = 1.0 + i as f64 / 120.0;
+        // Word 1 is the revised one: its new letters arrive at arrival ink.
+        let faint =
+            scene.sample(t).glyphs.iter().filter(|g| g.word > 1 && g.word != NO_WORD && g.color.a < 0.99).count();
+        assert_eq!(faint, 0, "at {t:.3} s");
+    }
+}

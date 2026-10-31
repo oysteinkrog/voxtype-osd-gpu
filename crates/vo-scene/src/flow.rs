@@ -1495,9 +1495,11 @@ impl Flow {
                 } else {
                     make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS)
                 };
+                // Under reduced motion the old copy is gone at once: the new one shows whole.
+                let whole = newest || reduced;
                 for g in &mut o.glyphs {
-                    g.opacity = make.ch(if newest { 1.0 } else { 0.0 }, CROSSFADE, Rest::UNIT);
-                    if !newest {
+                    g.opacity = make.ch(if whole { 1.0 } else { 0.0 }, CROSSFADE, Rest::UNIT);
+                    if !whole {
                         g.opacity.retarget(t + DROP_FADE_SECS, 1.0);
                     }
                 }
@@ -1529,7 +1531,8 @@ impl Flow {
                 o.x = make.to(p.x - back, p.x, FLIP, Rest::PIXELS);
                 line_shift = Some((p.line, back));
                 o.y = make.ch(p.y, REWRAP, Rest::PIXELS);
-                let from = if newest { 1.0 } else { 0.0 };
+                // Under reduced motion the old copy is gone at once: the new one shows whole.
+                let from = if newest || reduced { 1.0 } else { 0.0 };
                 for g in &mut o.glyphs {
                     g.opacity = make.to(from, 1.0, CROSSFADE, Rest::UNIT);
                 }
