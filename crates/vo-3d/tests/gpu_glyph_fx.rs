@@ -243,3 +243,49 @@ fn morph_flows_from_old_word_to_new() {
     assert!(differ(&frames[5], &plain_new, 60) < 0.004);
     support::check(&sheet, Tolerance { per_pixel: 4, max_fraction: 0.01 }).unwrap();
 }
+
+/// The light's colour and accent take their alpha as strength: at half alpha the light adds
+/// half as much to the panel, and an accent at alpha 0 leaves the letters as they were.
+#[test]
+fn light_takes_its_colours_alpha() {
+    let (fonts, font) = fonts();
+    let mut r = renderer(&fonts);
+    let text = "DICTATE";
+    let moved: Vec<FxGlyph> = glyphs(&fonts, font, text, 0.0)
+        .into_iter()
+        .map(|g| FxGlyph { pos: Point::new(g.pos.x + TEXT.0, g.pos.y + TEXT.1), ..g })
+        .collect();
+    // Shadows darken too; leave them out so the sum is the light alone.
+    let light =
+        |alpha: f32| Light { color: Color { a: alpha, ..Light::default().color }, shadow: 0.0, ..Light::default() };
+    let under =
+        |l: Light| GlyphFx::new(Effect::Light(l, Side::Under), moved.clone()).fonts(fonts.clone()).reduced(true);
+    let plain = render(&mut r, &fonts, view(font, None, None, None), 0.0);
+    // In linear light: the target is sRGB, where half the light reads as more than half.
+    let lin = |v: i32| {
+        let c = v as f64 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let added = |f: &[u8]| -> f64 {
+        (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .map(|(x, y)| lin(rgb(f, x, y)[2]) - lin(rgb(&plain, x, y)[2]))
+            .sum()
+    };
+    let full = added(&render(&mut r, &fonts, view(font, None, Some(under(light(1.0))), None), 0.0));
+    let half = added(&render(&mut r, &fonts, view(font, None, Some(under(light(0.5))), None), 0.0));
+    assert!(full > 50.0, "the light adds too little: {full}");
+    assert!((half / full - 0.5).abs() < 0.12, "half alpha adds {:.2} of full", half / full);
+    // An accent at alpha 0 paints nothing over the letters.
+    let text_only = render(&mut r, &fonts, view(font, Some(text), None, None), 0.0);
+    let clear = Light { accent: Color { a: 0.0, ..Light::default().accent }, ..Light::default() };
+    let over = GlyphFx::new(Effect::Light(clear, Side::Over), glyphs(&fonts, font, text, 0.0))
+        .fonts(fonts.clone())
+        .reduced(true);
+    let with_over = render(&mut r, &fonts, view(font, Some(text), None, Some(over)), 0.0);
+    assert!(differ(&text_only, &with_over, 2) < 0.001, "a clear accent changed the letters");
+}

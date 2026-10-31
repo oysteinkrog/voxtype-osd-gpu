@@ -428,7 +428,7 @@ fn revision (q: Quad, px: vec2f, reading: bool) -> vec4f {
 //
 // p0: shadow length (pixels), shadow strength, caustic strength, caustic scale (pixels per
 // cell). p1: glow falloff (pixels), caustic speed, sheen on the letters, edge fade (pixels). c0: the light,
-// c1: the accent the letters nearest the light take.
+// c1: the accent the letters nearest the light take. Each colour's alpha is its strength.
 
 // A soft caustic net at `uv` (cells), 0..1: the classic iterated water pattern.
 fn caustic (uv: vec2f, time: f32) -> f32 {
@@ -484,7 +484,7 @@ fn light_under (px: vec2f) -> vec4f {
   let edge = min (min (px.x - fx.rect.x, fx.rect.x + fx.rect.z - px.x), min (px.y - fx.rect.y, fx.rect.y + fx.rect.w - px.y));
   let soft = smoothstep (0.0, min (fx.p1.w, 0.5 * min (fx.rect.z, fx.rect.w)), edge);
   let lit = soft * glow * (0.22 + net * (0.5 + glow) + ring) * (1.0 - fx.p0.y * occ);
-  let rgb = fx.c0.rgb * lit;
+  let rgb = fx.c0.rgb * fx.c0.a * lit;
   // Shadows also darken a little of what is below, so they read on a lit panel.
   let shade = soft * 0.25 * fx.p0.y * occ * glow;
   return finish (rgb, shade);
@@ -502,7 +502,7 @@ fn light_over (g: Glyph, px: vec2f) -> vec4f {
   let l = fx.light.xy;
   let near = exp (-abs (px.x - l.x) / (1.2 * g.place.z)) * fx.light.z;
   // Painted over the letter rather than added, so white type turns the accent.
-  let k = clamp (cov * near * fx.p1.z, 0.0, 0.8);
+  let k = clamp (cov * near * fx.p1.z, 0.0, 0.8) * fx.c1.a;
   return finish (fx.c1.rgb * k, k);
 }
 

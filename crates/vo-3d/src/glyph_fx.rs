@@ -78,9 +78,9 @@ impl Default for Ink {
 /// MO-84: light through letters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
-    /// The light on the panel.
+    /// The light on the panel; its alpha is the light's strength.
     pub color: Color,
-    /// What the letters nearest the light take.
+    /// What the letters nearest the light take; its alpha is how much they take.
     pub accent: Color,
     /// Shadow length in logical pixels, and strength (0..1).
     pub shadow_len: f32,
