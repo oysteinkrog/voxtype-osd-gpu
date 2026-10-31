@@ -60,11 +60,13 @@ fn a_revised_word_crossfades_and_its_neighbours_slide() {
     assert!(fox_new > first(&before, 3).0 + 10.0);
 
     // Mid move: "fox" is between, and old and new glyphs of word 2 both show, part faded.
+    // New letters that would come within half a space of "fox" before it moved on start
+    // their fade once it has (s8my), so at least those over "quick" show now.
     let mid = s.sample(1.06);
     let x = first(&mid, 3).0;
     assert!(x > first(&before, 3).0 + 0.5 && x < fox_new - 0.5, "fox at {x}");
     let w2: Vec<f32> = mid.glyphs.iter().filter(|g| g.word == 2).map(|g| g.color.a).collect();
-    assert_eq!(w2.len(), 8 + 5, "new and old glyphs of the revised word");
+    assert!((5 + 5..=8 + 5).contains(&w2.len()), "new and old glyphs of the revised word: {}", w2.len());
     assert!(w2.iter().all(|&a| a > 0.02 && a < 0.98), "{w2:?}");
 
     // Settled glyphs sit exactly where a fresh layout puts them.
@@ -209,19 +211,24 @@ fn a_case_fix_rolls_only_the_changed_letter() {
 }
 
 #[test]
-fn an_inserted_comma_pops_in_from_the_baseline_and_pushes_the_next_word() {
+fn an_inserted_comma_pops_in_from_the_baseline_once_the_next_word_makes_room() {
     let mut s = scene();
     s.apply(glyph_view(&words(&[(1, "hello"), (2, "there")]), CaseChange::Roll), 0.0);
     let before = s.sample(1.0);
     s.apply(glyph_view(&words(&[(1, "hello,"), (2, "there")]), CaseChange::Roll), 1.0);
-    let sizes: Vec<f32> = (0..30).map(|i| of(&s.sample(1.0 + i as f64 * 0.01), 1)[5].size).collect();
+    // The next word makes room first: the comma pops in once it fits half a space clear of
+    // "there" all the way (s8my), within 0.3 s.
+    let shown =
+        (0..30).map(|i| 1.0 + i as f64 * 0.01).find(|&t| of(&s.sample(t), 1).len() == 6).expect("the comma shows");
+    assert!(first(&s.sample(shown), 2).0 > first(&before, 2).0, "\"there\" moved before the comma shows");
+    let sizes: Vec<f32> = (0..30).map(|i| of(&s.sample(shown + i as f64 * 0.01), 1)[5].size).collect();
     assert!(sizes[1] < 20.0 * 0.8, "starts small: {sizes:?}");
     let peak = sizes.iter().copied().fold(0.0, f32::max);
     assert!(peak > 20.0 * 1.02 && peak < 20.0 * 1.2, "small overshoot: {peak}");
     assert!((sizes[29] - 20.0).abs() < 0.1, "settles at full size: {sizes:?}");
     // The comma sits on the baseline the whole way.
     let base_y = of(&before, 1)[0].pos.y;
-    assert!((0..20).all(|i| of(&s.sample(1.0 + i as f64 * 0.01), 1)[5].pos.y == base_y));
+    assert!((0..20).all(|i| of(&s.sample(shown + i as f64 * 0.01), 1)[5].pos.y == base_y));
     // The next word slides right by the comma's advance, without a jump.
     assert_eq!(first(&s.sample(1.0), 2), first(&before, 2));
     assert!(first(&s.sample(5.0), 2).0 > first(&before, 2).0 + 2.0);

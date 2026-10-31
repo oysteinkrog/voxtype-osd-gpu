@@ -121,6 +121,24 @@ impl Channel {
         self.start_segment(t, x + by, v, target);
     }
 
+    /// From `t`, shows `meanwhile` for `by` seconds, then plays what it would have played from
+    /// `t` on, `by` seconds late: the motion under way at `t` and every change set for later.
+    /// For an enter that must wait for room, such as a letter whose neighbour has not moved
+    /// out of its way yet.
+    pub fn postpone(&mut self, t: f64, by: f64, meanwhile: f64) {
+        if by <= 0.0 {
+            return;
+        }
+        let active = self.segments[self.index(t)];
+        let (x, v) = self.sample(t);
+        let later: Vec<Segment> =
+            self.segments.iter().filter(|s| s.t0 > t).map(|s| Segment { t0: s.t0 + by, ..*s }).collect();
+        self.start_segment(t, meanwhile, 0.0, meanwhile);
+        let left = (active.t0 + active.settle - t).max(0.0);
+        self.segments.push(Segment { t0: t + by, x0: x, v0: v, settle: left, ..active });
+        self.segments.extend(later);
+    }
+
     /// From `t`, starts at `value` with `velocity` and moves toward `target`. For a hand-off
     /// from motion the channel does not hold itself, such as an ambient loop that stops and
     /// must carry on from where it was drawn.
@@ -203,6 +221,25 @@ impl Channel {
 mod tests {
     use super::*;
     use crate::hash::rand_f64;
+
+    /// A postponed channel holds its stand-in value, then plays the same motion late: the one
+    /// under way and the change set for later.
+    #[test]
+    fn postpone_plays_the_same_motion_late() {
+        let spring = Spring::from_frequency(15.0, 2.5);
+        let mut ch = Channel::new(0.0, 0.0, spring);
+        ch.retarget(1.0, 1.0);
+        ch.retarget(1.3, 0.5);
+        let plain = ch.clone();
+        ch.postpone(1.1, 0.2, 0.0);
+        assert_eq!(ch.value(1.05), plain.value(1.05), "untouched before");
+        assert_eq!(ch.value(1.2), 0.0, "the stand-in meanwhile");
+        for k in 0..60 {
+            let t = 1.1 + k as f64 * 0.02;
+            assert!((ch.value(t + 0.2) - plain.value(t)).abs() < 1e-9, "at {t}");
+        }
+        assert!((ch.settled_at() - plain.settled_at() - 0.2).abs() < 1e-9);
+    }
 
     /// Random retarget events from a fixed seed: `(t, target)` in time order.
     fn events(seed: u32, n: u32, span: f64) -> Vec<(f64, f64)> {

@@ -938,6 +938,98 @@ fn drop_rows(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>]) ->
     (dy >= 0.5).then_some(dy)
 }
 
+/// Half the narrowest gap between two neighbouring words on a line of the new layout: the
+/// space the text uses, halved. Words that move never come closer than this (s8my). A
+/// quarter em, halved, when no line holds two words.
+fn half_space(placed: &[Option<PlacedWord>], size: f32) -> f64 {
+    let words: Vec<&PlacedWord> = placed.iter().flatten().collect();
+    let space = words
+        .windows(2)
+        .filter(|p| p[0].line == p[1].line)
+        .map(|p| p[1].x - (p[0].x + p[0].width))
+        .filter(|&d| d > 0.0)
+        .fold(f32::INFINITY, f32::min);
+    0.5 * if space.is_finite() { space } else { 0.25 * size } as f64
+}
+
+/// A glyph new at `make.t` that would draw within `gap` of its neighbour on the row (a word
+/// that grew, "stop" to "stop,", before the next word slid over, or before the old copy of
+/// a word that left the row faded) is not drawn until it fits all the way, then runs the
+/// same fade, pop or rise from there (s8my). The glyph counts at the width it is
+/// drawn (a pop starts at no width) and only while it shows. Glyphs drawn before are left
+/// alone, so nothing on screen blinks.
+fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, gap: f64, make: &Make) {
+    const STEP: f64 = 1.0 / 240.0;
+    /// Under this ink a glyph is not seen yet.
+    const SEEN: f64 = 0.05;
+    let t = make.t;
+    let near = 0.9 * line_height as f64;
+    for i in 0..next.len() {
+        if !next[i].glyphs.iter().any(|g| g.born >= t) {
+            continue;
+        }
+        let mut o = std::mem::take(&mut next[i].glyphs);
+        let me = &next[i];
+        // The other words on the row, while they show.
+        let others: Vec<&FlowWord> = next.iter().filter(|q| q.id != me.id && q.line == me.line).collect();
+        let row_settles = others.iter().map(|q| q.x.settled_at().max(q.width.settled_at())).fold(t, f64::max);
+        for g in o.iter_mut().filter(|g| g.born >= t) {
+            // Whether the glyph, `d` seconds into its own enter, keeps clear at `at`.
+            let clear = |at: f64, d: f64| {
+                let own = t + d;
+                if g.opacity.value(own) < SEEN {
+                    return true;
+                }
+                let half = 0.5 * g.advance as f64;
+                let mid = me.x.value(at) + g.x.value(at) + half;
+                let (a, b) = (mid - half * g.scale.value(own), mid + half * g.scale.value(own));
+                let row = me.y.value(at) + me.roll.value(at);
+                !others.iter().any(|q| {
+                    let x = q.x.value(at);
+                    x < b + gap
+                        && x + q.width.value(at) + gap > a
+                        && q.glyphs.iter().any(|f| f.opacity.value(at) > SEEN)
+                }) && !ghosts.iter().any(|h| {
+                    h.word != me.id && h.opacity.value(at) > GHOST_GONE && {
+                        let (x, y) = ghost_pen(h, at);
+                        (y - row).abs() < near && x < b + gap && x + h.advance as f64 + gap > a
+                    }
+                })
+            };
+            // Its enter, started `wait` later, keeps clear until it settles and the row has
+            // stopped moving.
+            let enter = (g.opacity.settled_at().max(g.scale.settled_at()) - t).clamp(0.0, 0.5);
+            let fits = |wait: f64| {
+                let span = enter.max(row_settles - t - wait).min(0.6);
+                let mut d = 0.0;
+                loop {
+                    if !clear(t + wait + d, d) {
+                        return false;
+                    }
+                    if d >= span {
+                        return true;
+                    }
+                    d = (d + 4.0 * STEP).min(span);
+                }
+            };
+            if fits(0.0) {
+                continue;
+            }
+            let mut wait = STEP;
+            while wait < REWRAP_WAIT_MAX && !fits(wait) {
+                wait += STEP;
+            }
+            // Not drawn while it waits; then its enter runs as it would have.
+            g.opacity.postpone(t, wait, 0.0);
+            for c in [&mut g.scale, &mut g.rise] {
+                let now = c.value(t);
+                c.postpone(t, wait, now);
+            }
+        }
+        next[i].glyphs = o;
+    }
+}
+
 /// A rewrapped word shows once the words still sliding along its new line have left its
 /// place, so text never draws over text: the words a reflow pushes along a line start
 /// where the newcomer lands. On the newest line it then shows whole, in the frame its old
@@ -952,6 +1044,7 @@ fn show_when_clear(
     newest: u32,
     line_height: f32,
     make: &Make,
+    gap: f64,
     ghost_at: Option<&dyn Fn(f64, f64, f64, f64, WordId) -> bool>,
 ) -> Vec<(WordId, f64)> {
     const STEP: f64 = 1.0 / 240.0;
@@ -962,10 +1055,10 @@ fn show_when_clear(
         let row = next[s].y.target() + next[s].roll.target();
         let near = 0.9 * line_height as f64;
         let busy = |at: f64| {
-            // Where the word is at `at`: one that slides with the words before it on its
-            // new line never meets them.
-            let a = next[s].x.value(at);
-            let b = a + next[s].width.value(at);
+            // Where the word is at `at`, with `gap` kept clear on each side: one that slides
+            // with the words before it on its new line never meets them.
+            let a = next[s].x.value(at) - gap;
+            let b = next[s].x.value(at) + next[s].width.value(at) + gap;
             next.iter().enumerate().any(|(i, o)| {
                 let x = o.x.value(at);
                 let in_row =
@@ -1119,6 +1212,7 @@ impl Flow {
         let revise = if crossfade { motion.revise } else { Revise::Swap };
         let make = Make { t, retention, size };
         let placed = place(shaped, words, &word_ranges(words, motion.source.as_deref()));
+        let gap = half_space(&placed, size);
         let stage = StageTargets::new(&placed, motion.reading.as_ref(), size);
         self.spans = stage.spans.clone();
         (self.origin, self.staged) = (motion.reading.as_ref().map_or(0.0, |r| r.origin), motion.reading.is_some());
@@ -1433,6 +1527,7 @@ impl Flow {
             stage.newest,
             line_height,
             &make,
+            gap,
             (!dropped.is_empty()).then_some(&ghost_at as &dyn Fn(f64, f64, f64, f64, WordId) -> bool),
         );
         for &(id, from) in &handed {
@@ -1443,8 +1538,11 @@ impl Flow {
                 g.opacity.snap(at, 0.0);
             }
         }
-        self.clear_ghosts(&next, &rewrapped, &left, t);
-        self.clear_dropped(&next, &dropped, line_height, t);
+        self.clear_ghosts(&next, &rewrapped, &left, gap, t);
+        self.clear_dropped(&next, &dropped, line_height, gap, t);
+        if !reduced {
+            hold_new_glyphs(&mut next, &self.ghosts, line_height, gap, &make);
+        }
         self.words = next;
         self.index = index;
         self.update_margin(t, motion.margin, reduced);
@@ -1805,9 +1903,19 @@ impl Flow {
 
     /// Fades out every glyph of a word that left the screen, where it is at `t`.
     /// The ghost of a word that faded off a line is gone by the time the words sliding
-    /// along that line reach its place, so they never draw over it.
-    fn clear_ghosts(&mut self, next: &[FlowWord], rewrapped: &[usize], left: &[(WordId, u32, f64, f64)], t: f64) {
+    /// along that line come within `gap` of its place, so they never draw over it or touch
+    /// it.
+    fn clear_ghosts(
+        &mut self,
+        next: &[FlowWord],
+        rewrapped: &[usize],
+        left: &[(WordId, u32, f64, f64)],
+        gap: f64,
+        t: f64,
+    ) {
         for &(id, line, a, b) in left {
+            // Gone before a sliding word comes within `gap` of it, not once they touch.
+            let (a, b) = (a - gap, b + gap);
             let reached = |at: f64| {
                 next.iter().enumerate().any(|(i, o)| {
                     let x = o.x.value(at);
@@ -1829,7 +1937,7 @@ impl Flow {
     /// On a front drop, each old copy in `dropped` goes in the frame a word of the new
     /// layout first shows over it, so the leaving and the reflowed lines never draw over
     /// each other.
-    fn clear_dropped(&mut self, next: &[FlowWord], dropped: &[WordId], line_height: f32, t: f64) {
+    fn clear_dropped(&mut self, next: &[FlowWord], dropped: &[WordId], line_height: f32, gap: f64, t: f64) {
         if dropped.is_empty() {
             return;
         }
@@ -1849,8 +1957,8 @@ impl Flow {
                         let a = o.x.value(at);
                         o.id != id
                             && (o.y.value(at) + o.roll.value(at) - y).abs() < near
-                            && a < x + g.advance as f64
-                            && a + o.width.value(at) > x
+                            && a < x + g.advance as f64 + gap
+                            && a + o.width.value(at) + gap > x
                             && o.glyphs.iter().any(|f| f.opacity.value(at) > GHOST_GONE)
                     })
                 });
