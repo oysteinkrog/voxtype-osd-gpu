@@ -22,7 +22,10 @@
 //!
 //! The app describes the glyphs (font, glyph id, pen position in the element's box, size,
 //! colour, start time) in a [`GlyphFx`] and puts it in `Element::gpu`; [`install`] adds the
-//! painter. Everything is a pure function of the frame time and the signal bus, so a live
+//! painter. Or it gives each glyph its word ([`FxGlyph::word`]) and hands the [`GlyphFx`] to
+//! the live text with `Element::glyph_follow`: then each word's glyphs move with that word
+//! as the live text draws it in every frame (through glides, re-centring and snaps), and the
+//! glyphs of words that live text does not draw are left out. Everything is a pure function of the frame time and the signal bus, so a live
 //! session and an export draw the same frames. Reduced motion draws each effect's settled
 //! state: the ink trace, still light with still shadows, the corrected word.
 
@@ -36,10 +39,11 @@ use vo_render::color::srgb_to_linear;
 use vo_render::material::{materials_source, GpuMaterial};
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
 use vo_render::{GpuPainter, PaintCx, Renderer};
+use vo_scene::display::{GlyphInstance, NO_WORD};
 use vo_scene::flow::liquid::{LiquidPart, LiquidRevision};
 use vo_scene::font::{FontId, FontRegistry};
 use vo_scene::geom::{Color, Point};
-use vo_scene::gpu::GpuSource;
+use vo_scene::gpu::{GlyphFollow, GpuSource};
 
 use crate::glyph_sdf::{glyph_sdf, GlyphSdf};
 
@@ -185,11 +189,19 @@ pub struct FxGlyph {
     pub part: Part,
     pub group: u32,
     pub from_dx: f32,
+    /// The live text word the glyph belongs to, for `Element::glyph_follow`; `NO_WORD` when
+    /// it belongs to none.
+    pub word: u32,
 }
 
 impl FxGlyph {
     pub fn new(font: FontId, glyph: u32, pos: Point, size: f32, color: Color, start: f64) -> FxGlyph {
-        FxGlyph { font, glyph, pos, size, color, start, part: Part::Both, group: 0, from_dx: 0.0 }
+        FxGlyph { font, glyph, pos, size, color, start, part: Part::Both, group: 0, from_dx: 0.0, word: NO_WORD }
+    }
+
+    /// The live text word this glyph belongs to (`GlyphFollow`).
+    pub fn word(self, word: u32) -> FxGlyph {
+        FxGlyph { word, ..self }
     }
 
     pub fn part(self, part: Part, group: u32) -> FxGlyph {
@@ -281,6 +293,35 @@ impl GlyphFx {
         let x = 0.5 - 0.42 * phase.cos() + 0.12 * level;
         let y = 0.12 + 0.1 * (0.6 * phase).sin();
         (Point::new(x * w, y * h), (0.45 + 0.55 * level).min(1.0))
+    }
+}
+
+/// Following the live text (`Element::glyph_follow`): each word's glyphs move by how far that
+/// word's first glyph is drawn from its first glyph here, and glyphs of words not drawn are
+/// left out.
+impl GlyphFollow for GlyphFx {
+    fn follow(&self, drawn: &[GlyphInstance], _t: f64) -> Option<Arc<dyn GpuSource>> {
+        let mut live: HashMap<u32, Point> = HashMap::new();
+        for g in drawn {
+            live.entry(g.word).or_insert(g.pos);
+        }
+        let mut here: HashMap<u32, Point> = HashMap::new();
+        for g in self.glyphs.iter().filter(|g| g.word != NO_WORD) {
+            here.entry(g.word).or_insert(g.pos);
+        }
+        let glyphs: Vec<FxGlyph> = self
+            .glyphs
+            .iter()
+            .filter_map(|g| {
+                let (to, from) = (live.get(&g.word)?, here.get(&g.word)?);
+                Some(FxGlyph { pos: Point::new(g.pos.x + to.x - from.x, g.pos.y + to.y - from.y), ..*g })
+            })
+            .collect();
+        Some(Arc::new(GlyphFx { glyphs, ..self.clone() }))
+    }
+
+    fn until(&self) -> f64 {
+        self.settled_at()
     }
 }
 
@@ -954,6 +995,29 @@ pub fn install(renderer: &mut Renderer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Following the live text, each word's glyphs move with that word's first drawn glyph,
+    /// keeping their places within the word, and a word the live text does not draw is left
+    /// out.
+    #[test]
+    fn followed_glyphs_move_with_their_word() {
+        let g = |word: u32, x: f32| FxGlyph::new(0, 1, Point::new(x, 20.0), 16.0, Color::WHITE, 0.0).word(word);
+        let fx = GlyphFx::new(Effect::Ink(Ink::default()), vec![g(1, 0.0), g(1, 9.0), g(2, 40.0), g(3, 80.0)]);
+        let drawn = |word: u32, x: f32, y: f32| GlyphInstance {
+            pos: Point::new(x, y),
+            size: 16.0,
+            font: 0,
+            glyph: 1,
+            word,
+            color: Color::WHITE,
+            xform: Default::default(),
+        };
+        let src = fx.follow(&[drawn(1, 12.0, 26.0), drawn(1, 21.0, 26.0), drawn(2, 50.0, 26.0)], 0.0).unwrap();
+        let moved = src.as_any().downcast_ref::<GlyphFx>().unwrap();
+        let at: Vec<(f32, f32)> = moved.glyphs.iter().map(|g| (g.pos.x, g.pos.y)).collect();
+        assert_eq!(at, vec![(12.0, 26.0), (21.0, 26.0), (50.0, 26.0)], "word 3 is not drawn");
+        assert_eq!(GlyphFollow::until(&fx), fx.settled_at());
+    }
 
     #[test]
     fn fx_shader_validates_in_naga() {

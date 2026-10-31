@@ -1211,8 +1211,9 @@ impl<M> Scene<M> {
                         Kind::StrokePath(a) => a.head.is_some(),
                         Kind::Frame(f) => f.moving(),
                         Kind::Spectrum(s) => s.moving(self.signals.as_ref(), t),
-                        Kind::LiveText { .. } => {
+                        Kind::LiveText { follow, .. } => {
                             n.live.magnet_moving(self.signals.as_ref().map(|c| c.get()).as_deref(), t)
+                                || follow.iter().flat_map(|f| f.iter()).any(|f| t < f.source.until())
                         }
                         _ => false,
                     })
@@ -1978,7 +1979,46 @@ impl<M> Scene<M> {
             if let Some(at) = &leaving {
                 crate::flow::overflow::emit(n.live.leaving(), t, at, &self.stage, self.viewport, items, out);
             }
+            // Drawings that follow the glyphs (`Element::glyph_follow`): the ones under take
+            // their place before the glyphs and get them once they are drawn.
+            let follow: &[crate::gpu::Follow] = match &n.kind {
+                Kind::LiveText { follow: Some(follow), .. } => follow,
+                _ => &[],
+            };
+            let item = |source: std::sync::Arc<dyn crate::gpu::GpuSource>| crate::gpu::GpuItem {
+                source: crate::gpu::GpuRef(source),
+                rect: Rect::new(m.e, m.f, size.w, size.h),
+                t,
+                opacity: alpha,
+                part: crate::gpu::GpuPart::Whole,
+                cut: Vec::new(),
+            };
+            let mut under = Vec::new();
+            for f in follow.iter().filter(|f| !f.over) {
+                out.gpu.push(item(std::sync::Arc::new(crate::gpu::NoPaint)));
+                push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
+                under.push((out.gpu.len() - 1, f));
+            }
+            let first_glyph = out.glyphs.len();
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, layer, items, out);
+            if !follow.is_empty() {
+                let drawn: Vec<GlyphInstance> = out.glyphs[first_glyph..]
+                    .iter()
+                    .filter(|g| g.word != NO_WORD)
+                    .map(|g| GlyphInstance { pos: Point::new(g.pos.x - m.e, g.pos.y - m.f), ..*g })
+                    .collect();
+                for (i, f) in under {
+                    if let Some(source) = f.source.follow(&drawn, t) {
+                        out.gpu[i].source = crate::gpu::GpuRef(source);
+                    }
+                }
+                for f in follow.iter().filter(|f| f.over) {
+                    if let Some(source) = f.source.follow(&drawn, t) {
+                        out.gpu.push(item(source));
+                        push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
+                    }
+                }
+            }
             if let Some(at) = &leaving {
                 crate::flow::overflow::emit_shadows(n.live.leaving(), t, at, items, out);
                 crate::flow::margin::emit(&n.live, t, at, alpha, items, out);

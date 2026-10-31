@@ -45,6 +45,47 @@ impl PartialEq for GpuRef {
     }
 }
 
+/// A GPU drawing that follows the glyphs of a live text as they are drawn in each frame
+/// (`Element::glyph_follow`): through glides, re-centring, snaps and reflows it stays on the
+/// letters, where a separate GPU element laid from a resting layout would drift off them.
+pub trait GlyphFollow: Debug + Send + Sync {
+    /// What to paint over (or under) `glyphs`: the live text's glyphs in this frame, pen
+    /// positions in the live text's box (logical units from its top left). `None` paints
+    /// nothing this frame.
+    fn follow(&self, glyphs: &[crate::display::GlyphInstance], t: f64) -> Option<Arc<dyn GpuSource>>;
+    /// Scene time after which the drawing no longer changes for unchanged glyphs.
+    fn until(&self) -> f64;
+}
+
+/// A follower and where it draws: under the live text's glyphs or over them. Compared by
+/// identity, as [`GpuRef`] is.
+#[derive(Clone, Debug)]
+pub struct Follow {
+    pub source: Arc<dyn GlyphFollow>,
+    pub over: bool,
+}
+
+impl PartialEq for Follow {
+    fn eq(&self, o: &Follow) -> bool {
+        Arc::ptr_eq(&self.source, &o.source) && self.over == o.over
+    }
+}
+
+/// Stands in for a follower that paints nothing this frame: no painter knows it, so the
+/// renderer skips it.
+#[derive(Debug)]
+pub(crate) struct NoPaint;
+
+impl GpuSource for NoPaint {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn until(&self) -> f64 {
+        f64::NEG_INFINITY
+    }
+}
+
 /// One GPU element in a frame.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GpuItem {

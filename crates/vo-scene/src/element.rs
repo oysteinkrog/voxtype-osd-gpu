@@ -572,6 +572,9 @@ pub(crate) enum Kind {
         inline: Vec<(u32, crate::inline::Inline)>,
         /// Caret, selection and edit marks (`Element::edit`). Boxed to keep `Kind` small.
         edit: Option<Box<EditDecor>>,
+        /// GPU drawings that follow the drawn glyphs (`Element::glyph_follow`). Behind one
+        /// pointer to keep `Kind` small.
+        follow: Option<std::sync::Arc<Vec<crate::gpu::Follow>>>,
     },
     /// A scrolling waveform filling the box.
     Wave(Wave),
@@ -902,6 +905,7 @@ impl<M> Element<M> {
             finals: Vec::new(),
             inline: Vec::new(),
             edit: None,
+            follow: None,
         };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
@@ -1436,6 +1440,19 @@ impl<M> Element<M> {
         match &mut self.kind {
             Kind::LiveText { enter, .. } => *enter = t,
             _ => debug_assert!(false, "word_enter on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
+    /// Live text: a GPU drawing under (`over` false) or over its glyphs that follows them as
+    /// they are drawn in each frame (`crate::gpu::GlyphFollow`). Several stack in the order
+    /// given.
+    pub fn glyph_follow(mut self, source: std::sync::Arc<dyn crate::gpu::GlyphFollow>, over: bool) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { follow, .. } => {
+                std::sync::Arc::make_mut(follow.get_or_insert_default()).push(crate::gpu::Follow { source, over })
+            }
+            _ => debug_assert!(false, "glyph_follow on a node that is not live text: {}", self.key),
         }
         self
     }
