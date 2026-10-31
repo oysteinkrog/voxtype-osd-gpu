@@ -179,6 +179,13 @@ impl WordVoices {
     }
 }
 
+/// Most pitch baseline either way, in px: half the reading line's baseline limit
+/// ([`Envelope::READING`]). A word follows the pitch while it is said, so it can swing from
+/// one end to the other, and the whole swing must stay within the limit of where it rests.
+///
+/// [`Envelope::READING`]: crate::typo::Envelope::READING
+pub const PITCH_REACH: f32 = crate::typo::Envelope::READING.baseline / 2.0;
+
 /// How a reading becomes channel values. Each part can be turned off with a zero gain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoiceTypo {
@@ -234,9 +241,10 @@ impl VoiceTypo {
         ratio.powf(self.tracking_gamma).clamp(self.tracking_range.0, self.tracking_range.1)
     }
 
-    /// Baseline in px for `semitones` from the speaker's running pitch (MO-14).
+    /// Baseline in px for `semitones` from the speaker's running pitch (MO-14), within
+    /// [`PITCH_REACH`] either way.
     pub fn baseline(&self, semitones: f32) -> f32 {
-        semitones * self.pitch_px
+        (semitones * self.pitch_px).clamp(-PITCH_REACH, PITCH_REACH)
     }
 }
 
@@ -327,6 +335,13 @@ mod tests {
         assert!(b.weight < 0.0 && b.fill < 0.5);
         assert_eq!(b.tracking, 1.3);
         assert_eq!(vt.tracking(&WordVoice { duration: 0.05, ..WordVoice::QUIET }, 5), 0.8);
-        assert_eq!(vt.baseline(4.0), 2.0);
+        assert_eq!(vt.baseline(2.0), 1.0);
+    }
+
+    #[test]
+    fn a_pitch_swing_from_one_end_to_the_other_stays_within_the_reading_line() {
+        let vt = VoiceTypo { pitch_px: 1.0, ..VoiceTypo::default() };
+        let swing = vt.baseline(12.0) - vt.baseline(-12.0);
+        assert!(swing > 0.0 && swing <= crate::typo::Envelope::READING.baseline, "{swing}");
     }
 }
