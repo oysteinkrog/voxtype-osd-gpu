@@ -141,6 +141,8 @@ Swissfi with its idle motion (di6: the waveform's tick row drifts 1 px every 4 s
 
 Island with its idle motion (ucu: a 12 px glow at 35 % alpha orbits the capsule's edge once every 6 s, drawn under an opaque underlay so only its outer half shows; bars at their flat height rise by at most 1 px with the room's noise floor), measure build, popup d2b28c5, 2026-10-31: recording 6.39 % CPU, 51.6 frames/s, GPU 0.087 / 0.090 ms; idle-open 2.20 % CPU, 15.4 frames/s, GPU 0.049 / 0.052 ms. The same run without the motion gave idle-open 2.68 %, so the difference is noise. Over the 2 % limit above and under the 3 % limit the idle beads use.
 
+Particles with its idle motion (unz: 30 dots at most 25 % alpha circle the text box at 10 degrees a second, 20 to 60 px out, and fade out 2 px before the newest line's band), measure build, popup 80bf770, 2026-10-31: recording 7.40 % CPU, 49.4 frames/s, GPU 0.078 / 0.083 ms; idle-open 2.19 % CPU, 15.4 frames/s, GPU 0.054 / 0.072 ms. The same run without the dots gave idle-open 2.43 %, so the difference is noise. Over the 2 % limit above and under the 3 % limit the idle beads use. The look's own GPU particles (strands, dust and the newest word's trail) already change pixels in the newest line's box between idle frames, so the bead's "none inside the newest line's box" holds for the new dots only.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
