@@ -33,6 +33,7 @@
 //! ([`Particles::snapshot`]), or the start state, then steps forward. Formed particles need no
 //! seek of their own, but the changes before the target time must be applied again.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -40,16 +41,20 @@ use vo_core::hash::rand_f32;
 use vo_scene::font::{Face, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
 
-pub use vo_scene::emitter::{tilt_x, ColorBy, EmitterLook, EmitterSim, MaskField, Shape, Shock, SpriteStyle};
+pub use vo_scene::emitter::{
+    tilt_x, ColorBy, EmitterLook, EmitterSim, GlyphChars, MaskField, Shape, Shock, SpriteStyle,
+};
 
 use crate::color::srgb_to_linear;
 use crate::glyph_points::{GlyphPointCache, GlyphPoints};
 use crate::hot::wgsl;
+use crate::text::slug_gpu::{hb_source, Atlas, Footprint};
 
 const COMMON_WGSL: &str = include_str!("wgsl/particles.wgsl");
 const STEP_WGSL: &str = include_str!("wgsl/particles_step.wgsl");
 const ANCHOR_WGSL: &str = include_str!("wgsl/particles_anchor.wgsl");
 const DRAW_WGSL: &str = include_str!("wgsl/particles_draw.wgsl");
+const GLYPH_WGSL: &str = include_str!("wgsl/particles_glyph.wgsl");
 
 /// The compute shader that steps free particles.
 pub fn step_shader_source() -> String {
@@ -65,6 +70,17 @@ pub fn anchor_shader_source() -> String {
 pub fn draw_shader_source() -> String {
     [wgsl("particles.wgsl", COMMON_WGSL), wgsl("particles_draw.wgsl", DRAW_WGSL)].join("\n")
 }
+
+/// The glyph particle shaders (EG-27): the HarfBuzz helpers, then the sprite shaders' helpers.
+pub fn glyph_shader_source() -> String {
+    [hb_source(Footprint::default()), draw_shader_source(), wgsl("particles_glyph.wgsl", GLYPH_WGSL).to_string()]
+        .join("\n")
+}
+
+/// Most glyph particles an emitter draws (EG-27).
+pub const MAX_GLYPH_PARTICLES: u32 = 4096;
+/// Most letters all glyph emitters pick from, together.
+const GLYPH_RECS: u32 = 1024;
 
 /// Workgroup size of the compute passes, and the alignment of every pool.
 pub const WORKGROUP: u32 = 64;
@@ -173,8 +189,13 @@ fn style_code(s: SpriteStyle) -> [f32; 4] {
         SpriteStyle::Dot { pitch } => [1.0, pitch, 0.0, 0.0],
         SpriteStyle::Bokeh { focus, aperture } => [2.0, 0.0, focus, aperture],
         SpriteStyle::Spark { accents, gain, twinkle } => [3.0, accents, gain, twinkle],
+        // `w`, where the emitter's letters are, is set when the frame is prepared.
+        SpriteStyle::Glyph { size, spin, .. } => [ST_GLYPH, size, spin, 0.0],
     }
 }
+
+/// `style_code`'s code for glyph particles; `ST_GLYPH` in `particles.wgsl`.
+const ST_GLYPH: f32 = 5.0;
 
 /// What an emitter is made of. Fixed once added.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -475,6 +496,16 @@ struct GpuEmitDraw {
     ribbon: [f32; 4],
 }
 
+/// One letter a glyph emitter can show (`GlyphRec` in `particles_glyph.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct GpuGlyphRec {
+    ext: [f32; 4],
+    loc: u32,
+    upem: f32,
+    _pad: [f32; 2],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct GpuSlotDraw {
@@ -544,6 +575,9 @@ struct DrawPipes {
     trail: wgpu::RenderPipeline,
     word: wgpu::RenderPipeline,
     ribbon: wgpu::RenderPipeline,
+    /// Glyph particles with the key's blend, and with normal blend for light mode.
+    glyph: wgpu::RenderPipeline,
+    glyph_over: wgpu::RenderPipeline,
 }
 
 struct MaskTex {
@@ -610,6 +644,9 @@ pub struct Particles {
     /// Where the next fresh word's particles start, relative to the word, instead of a cloud
     /// round it; taken by the next [`Particles::set_word_held`].
     word_from: Option<(Point, f32)>,
+    glyphs: GlyphParts,
+    /// Emitters drawn as letters this frame.
+    glyph_emitters: Vec<bool>,
 }
 
 fn storage(binding: u32, read_only: bool, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -838,6 +875,7 @@ impl Particles {
             bind_group_layouts: &[Some(&draw_layout)],
             immediate_size: 0,
         });
+        let glyphs = GlyphParts::new(device, &draw_layout);
         // Formed particles start empty: zeroed flags are "not in use".
         let mut enc = device.create_command_encoder(&Default::default());
         enc.clear_buffer(&words, 0, None);
@@ -893,6 +931,8 @@ impl Particles {
             emit_data: Vec::new(),
             target_data: Vec::new(),
             word_from: None,
+            glyphs,
+            glyph_emitters: Vec::new(),
         }
     }
 
@@ -1528,6 +1568,7 @@ impl Particles {
         self.frame_data = frame;
         self.view_keys = [None; VIEWS as usize];
         self.ribbons.clear();
+        self.glyph_emitters.clear();
         let draws: Vec<GpuEmitDraw> = self
             .emitters
             .iter()
@@ -1546,7 +1587,17 @@ impl Particles {
                         [r[2][0], r[2][1], r[2][2], 0.0],
                     ],
                     c: l.ramp.map(linear),
-                    look: style_code(l.style),
+                    look: {
+                        let mut look = style_code(l.style);
+                        let mut letters = false;
+                        if let SpriteStyle::Glyph { font, chars, .. } = l.style {
+                            let (first, count) = self.glyphs.set(&self.device, &self.queue, &self.fonts, font, chars);
+                            look[3] = (first * 32 + count) as f32;
+                            letters = count > 0 && l.brightness > 0.0;
+                        }
+                        self.glyph_emitters.push(letters);
+                        look
+                    },
                     trail: match l.color_by {
                         ColorBy::Age => [l.trail_width, l.trail_alpha, 0.0, 0.0],
                         ColorBy::Angle => [l.trail_width, l.trail_alpha, 1.0, 0.0],
@@ -1634,6 +1685,9 @@ impl Particles {
                 }
                 pass.set_pipeline(&pipes.free);
                 pass.draw(e.base * 6..(e.base + e.capacity) * 6, 0..1);
+                if self.glyph_emitters.get(id as usize).copied().unwrap_or(false) {
+                    self.draw_glyphs(pass, pipes, e);
+                }
                 let trails = e.spec.trails.min(e.capacity);
                 if trails > 0 {
                     let per = (TRAIL - 1) * 6;
@@ -1703,19 +1757,23 @@ impl Particles {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let make = |vs: &str| {
+        let over = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: One, dst_factor: OneMinusSrcAlpha, ..blend.color },
+            ..blend
+        };
+        let make_with = |vs: &str, fs: &str, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, blend| {
             self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(vs),
-                layout: Some(&self.draw_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
-                    module: &self.draw_module,
+                    module,
                     entry_point: Some(vs),
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &self.draw_module,
-                    entry_point: Some("fs_sprite"),
+                    module,
+                    entry_point: Some(fs),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -1736,12 +1794,16 @@ impl Particles {
                 cache: None,
             })
         };
+        let make = |vs: &str| make_with(vs, "fs_sprite", &self.draw_layout, &self.draw_module, blend);
+        let g = &self.glyphs;
         let pipes = DrawPipes {
             key,
             free: make("vs_free"),
             trail: make("vs_trail"),
             word: make("vs_word"),
             ribbon: make("vs_ribbon"),
+            glyph: make_with("vs_glyph", "fs_glyph", &g.pipeline_layout, &g.module, blend),
+            glyph_over: make_with("vs_glyph", "fs_glyph", &g.pipeline_layout, &g.module, over),
         };
         self.draw_pipes.push(pipes);
     }
@@ -1759,6 +1821,9 @@ impl Particles {
         if self.free_used > 0 {
             pass.set_pipeline(&pipes.free);
             pass.draw(0..self.free_used * 6, 0..1);
+            for (e, _) in self.emitters.iter().zip(&self.glyph_emitters).filter(|(_, &g)| g) {
+                self.draw_glyphs(pass, pipes, e);
+            }
         }
         if self.trails_used > 0 {
             pass.set_pipeline(&pipes.trail);
@@ -1768,6 +1833,20 @@ impl Particles {
             pass.set_pipeline(&pipes.word);
             pass.draw(0..self.formed_capacity() * 6, 0..1);
         }
+    }
+
+    /// Emitter `e`'s particles as letters (EG-27).
+    fn draw_glyphs(&self, pass: &mut wgpu::RenderPass<'_>, pipes: &DrawPipes, e: &Emitter) {
+        pass.set_pipeline(if self.glyphs.light { &pipes.glyph_over } else { &pipes.glyph });
+        pass.set_bind_group(1, &self.glyphs.bind, &[]);
+        let n = e.capacity.min(MAX_GLYPH_PARTICLES);
+        pass.draw(e.base * 6..(e.base + n) * 6, 0..1);
+    }
+
+    /// Light mode (`Renderer::set_light`): glyph particles blend normally instead of adding
+    /// light, so they show on a light background.
+    pub fn set_light(&mut self, light: bool) {
+        self.glyphs.light = light;
     }
 
     /// Records a render pass on `view` that loads what is there and draws the particles on
@@ -1788,6 +1867,138 @@ impl Particles {
             multiview_mask: None,
         });
         self.draw(&mut pass);
+    }
+}
+
+/// The letters of glyph particles (EG-27): Slug-encoded once, the first time an emitter
+/// shows them, into an atlas of their own.
+struct GlyphParts {
+    atlas: Atlas,
+    /// Texels of `atlas` on the GPU so far, and the buffer's room in texels.
+    uploaded: usize,
+    room: usize,
+    atlas_buf: wgpu::Buffer,
+    recs: Vec<GpuGlyphRec>,
+    recs_buf: wgpu::Buffer,
+    /// Where each font and letter set's records start, and how many there are.
+    sets: HashMap<(u32, GlyphChars), (u32, u32)>,
+    layout: wgpu::BindGroupLayout,
+    bind: wgpu::BindGroup,
+    pipeline_layout: wgpu::PipelineLayout,
+    module: wgpu::ShaderModule,
+    /// Normal blend instead of the frame's: light mode.
+    light: bool,
+}
+
+impl GlyphParts {
+    fn new(device: &wgpu::Device, draw_layout: &wgpu::BindGroupLayout) -> GlyphParts {
+        use wgpu::BufferUsages as U;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vo-particles-glyph"),
+            entries: &[storage(0, true, wgpu::ShaderStages::FRAGMENT), storage(1, true, wgpu::ShaderStages::VERTEX)],
+        });
+        let room = 4096;
+        let atlas_buf = buffer(device, "vo-particles-glyph-atlas", room as u64 * 16, U::STORAGE | U::COPY_DST);
+        let recs_buf = buffer(
+            device,
+            "vo-particles-glyph-recs",
+            GLYPH_RECS as u64 * size_of::<GpuGlyphRec>() as u64,
+            U::STORAGE | U::COPY_DST,
+        );
+        let bind = Self::bind(device, &layout, &atlas_buf, &recs_buf);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vo-particles-glyph"),
+            source: wgpu::ShaderSource::Wgsl(glyph_shader_source().into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vo-particles-glyph"),
+            bind_group_layouts: &[Some(draw_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        GlyphParts {
+            atlas: Atlas::default(),
+            uploaded: 0,
+            room,
+            atlas_buf,
+            recs: Vec::new(),
+            recs_buf,
+            sets: HashMap::new(),
+            layout,
+            bind,
+            pipeline_layout,
+            module,
+            light: false,
+        }
+    }
+
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        atlas: &wgpu::Buffer,
+        recs: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vo-particles-glyph"),
+            layout,
+            entries: &[entry(0, atlas, None), entry(1, recs, None)],
+        })
+    }
+
+    /// Where the letters `chars` of font `font` are in the records, and how many: encoded
+    /// and uploaded the first time. Letters the font lacks or that have no ink are left out;
+    /// past [`GLYPH_RECS`] records a set gets none.
+    fn set(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        fonts: &FontRegistry,
+        font: u32,
+        chars: GlyphChars,
+    ) -> (u32, u32) {
+        if let Some(&at) = self.sets.get(&(font, chars)) {
+            return at;
+        }
+        let first = self.recs.len() as u32;
+        if let Some(face) = fonts.get(font) {
+            use skrifa::MetadataProvider;
+            let upem = face.units_per_em() as f32;
+            let map = face.skrifa().charmap();
+            for &c in chars.letters().iter() {
+                let Some(gid) = map.map(c) else { continue };
+                if self.recs.len() as u32 >= GLYPH_RECS {
+                    break;
+                }
+                if let Some(a) = self.atlas.glyph_in_at(font, || (face.skrifa(), face.location()), gid) {
+                    self.recs.push(GpuGlyphRec { ext: a.extents, loc: a.loc, upem, _pad: [0.0; 2] });
+                }
+            }
+        }
+        let count = self.recs.len() as u32 - first;
+        self.sets.insert((font, chars), (first, count));
+        if count > 0 {
+            let at = first as u64 * size_of::<GpuGlyphRec>() as u64;
+            queue.write_buffer(&self.recs_buf, at, bytemuck::cast_slice(&self.recs[first as usize..]));
+            self.upload(device, queue);
+        }
+        (first, count)
+    }
+
+    /// Sends the atlas texels the GPU does not have yet, growing its buffer when needed.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let texels = &self.atlas.texels;
+        if texels.len() > self.room {
+            use wgpu::BufferUsages as U;
+            self.room = texels.len().next_power_of_two();
+            self.atlas_buf =
+                buffer(device, "vo-particles-glyph-atlas", self.room as u64 * 16, U::STORAGE | U::COPY_DST);
+            self.bind = Self::bind(device, &self.layout, &self.atlas_buf, &self.recs_buf);
+            self.uploaded = 0;
+        }
+        if texels.len() > self.uploaded {
+            let at = self.uploaded as u64 * 16;
+            queue.write_buffer(&self.atlas_buf, at, bytemuck::cast_slice(&texels[self.uploaded..]));
+            self.uploaded = texels.len();
+        }
     }
 }
 

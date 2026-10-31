@@ -68,6 +68,8 @@ const ST_BOKEH: u32 = 2u;
 const ST_SPARK: u32 = 3u;
 // A glowing ribbon: a sharp core with a faint wide halo, across the ribbon only.
 const ST_RIBBON: u32 = 4u;
+// Tiny letters (EG-27): drawn by `vs_glyph` in `particles_glyph.wgsl`, not as sprites.
+const ST_GLYPH: u32 = 5u;
 
 // --- hashing (vo_core::hash, the same functions bit for bit) ---
 

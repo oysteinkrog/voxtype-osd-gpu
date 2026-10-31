@@ -8,6 +8,8 @@
 //!   with sparks flowing along the same strands.
 //! - `--concept 26`: shapes (EG-26): a swarm of sparks above the text forms a check mark at
 //!   1.2 s, then scatters into a microphone icon read from SVG at 2.6 s.
+//! - `--concept 27`: letters (EG-27): an orb of sparks breathes with the voice and streams
+//!   small turning letters out round it, more of them the louder the voice.
 //!
 //! Offline, to PNG frames (default 600x300 at scale 1):
 //!   cargo run --release -p vo --example particles_v2 -- --concept 09 --offline DIR [--fps 60]
@@ -21,8 +23,8 @@ use std::sync::Arc;
 
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::emitter::{
-    tilt_x, ColorBy, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, ShapeTarget, SpriteStyle,
-    Target as Form, WordParticles,
+    tilt_x, ColorBy, Emitter, EmitterLook, EmitterSim, EmitterSource, GlyphChars, LevelTrack, Shape, ShapeTarget,
+    SpriteStyle, Target as Form, WordParticles,
 };
 use vo::scene::geom::{Color, Point, Size};
 use vo::scene::Scene;
@@ -220,6 +222,73 @@ impl EmitterSource for Swarm {
     }
 }
 
+/// The orb of concept 27: sparks held on a small disc that swell with the voice.
+#[derive(Debug)]
+struct Orb {
+    level: LevelTrack,
+}
+
+impl EmitterSource for Orb {
+    fn sim(&self, t: f64) -> EmitterSim {
+        let l = self.level.at(t).clamp(0.0, 1.2);
+        EmitterSim {
+            shape: Shape::Disc { radius: 12.0 + 6.0 * l },
+            life: 0.8,
+            swirl: 1.5,
+            noise: 30.0 + 40.0 * l,
+            noise_scale: 0.05,
+            attract_strength: 6.0,
+            drag: 2.0,
+            level: l,
+            ..Default::default()
+        }
+    }
+
+    fn look(&self, t: f64) -> EmitterLook {
+        let l = self.level.at(t).clamp(0.0, 1.2);
+        EmitterLook {
+            size: 1.0,
+            brightness: 0.9 + 0.6 * l,
+            ramp: [Color::hex(0xdff4ff, 1.0), Color::hex(CYAN, 1.0), Color::hex(BLUE, 0.0)],
+            style: SpriteStyle::SPARK,
+            ..Default::default()
+        }
+    }
+}
+
+/// Letters streaming out of the orb (concept 27, EG-27): born on its rim, they drift out,
+/// turning slowly, and fade before they reach the text. The voice sets how many and how far.
+#[derive(Debug)]
+struct LetterStream {
+    level: LevelTrack,
+}
+
+impl EmitterSource for LetterStream {
+    fn sim(&self, t: f64) -> EmitterSim {
+        let l = self.level.at(t).clamp(0.0, 1.2);
+        EmitterSim {
+            shape: Shape::Ring { radius: 16.0, spread: 0.2 },
+            emit: (0.15 + 0.85 * l).min(1.0),
+            life: 2.0,
+            life_jitter: 0.3,
+            spawn_speed: 40.0 + 40.0 * l,
+            noise: 20.0,
+            noise_scale: 0.02,
+            drag: 0.9,
+            level: l,
+            ..Default::default()
+        }
+    }
+
+    fn look(&self, _: f64) -> EmitterLook {
+        EmitterLook {
+            ramp: [Color::hex(0xf4f7ff, 1.0), Color::hex(0xbfe8ff, 0.9), Color::hex(VIOLET, 0.0)],
+            style: SpriteStyle::Glyph { font: 0, chars: GlyphChars::new("makeitfpolshd"), size: 11.0, spin: 0.15 },
+            ..Default::default()
+        }
+    }
+}
+
 const CYAN: u32 = 0x36d6ff;
 const BLUE: u32 = 0x3a6bff;
 const VIOLET: u32 = 0xa24bff;
@@ -333,6 +402,13 @@ impl App for Popup {
             let swarm =
                 Element::layer("glow").bloom(0.8, 6.0).child(emitter("river", self.swarm.clone(), 2000, 8, false, 150.0));
             card.child(swarm).child(self.text(24.0))
+        } else if self.concept == 27 {
+            let orb = Element::layer("glow")
+                .bloom(0.8, 6.0)
+                .child(emitter("river", Arc::new(Orb { level: self.level.clone() }), 1024, 9, false, 150.0));
+            // The letters carry coverage, not light: they sit outside the bloom.
+            let letters = emitter("letters", Arc::new(LetterStream { level: self.level.clone() }), 512, 10, false, 150.0);
+            card.child(orb).child(letters).child(self.text(24.0))
         } else {
             let pink = [Color::hex(VIOLET, 1.0), Color::hex(0x6a5cff, 1.0), Color::hex(CYAN, 1.0)];
             let cyan = [Color::hex(CYAN, 1.0), Color::hex(BLUE, 1.0), Color::hex(VIOLET, 1.0)];
@@ -396,7 +472,7 @@ fn bench() {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    for concept in [9, 24, 26] {
+    for concept in [9, 24, 26, 27] {
         for (w, h, scale) in [(600u32, 300u32, 1.0f32), (1920, 1080, 3.2)] {
             let mut renderer = Renderer::with_fonts(&device, &queue, fonts.clone());
             let target = Target::new(&device, w, h, vo_render::offscreen::FORMAT);
@@ -457,7 +533,7 @@ fn main() {
         match a.as_str() {
             "--offline" => offline = Some(v().into()),
             "--fps" => fps = v().parse().expect("--fps takes a number"),
-            "--concept" => concept = v().parse().expect("--concept takes 9, 24 or 26"),
+            "--concept" => concept = v().parse().expect("--concept takes 9, 24, 26 or 27"),
             "--bench" => bench_it = true,
             "--preview" => {}
             _ => panic!("unknown option {a}"),

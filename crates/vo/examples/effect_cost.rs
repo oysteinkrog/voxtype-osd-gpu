@@ -75,6 +75,7 @@ const CASES: &[&str] = &[
     "grid-words",
     "grid-words-moving",
     "glyphs-2000-rotating",
+    "glyph-particles-2000",
     "flex-breathing",
     "panes-20",
     "image-icon",
@@ -208,6 +209,15 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
     if case == "glyphs-2000-rotating" {
         // EG-15: 2000 letters at 14 px over the card, each turning on its own, in one draw.
         let letters = Element::canvas("letters", f64::INFINITY, move |t, rect, p| rotating_glyphs(t, rect, k, p))
+            .size(size.w, size.h)
+            .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
+        let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+        return root.child(Element::layer("fx").child(card)).child(letters);
+    }
+    if case == "glyph-particles-2000" {
+        // EG-27: 2000 letter particles at 10 px swirling over the card, in one draw.
+        let e = vo::scene::emitter::Emitter::new(std::sync::Arc::new(LetterSwirl { k }), 2000, 7);
+        let letters = Element::emitter("letters", e)
             .size(size.w, size.h)
             .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
         let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
@@ -398,6 +408,36 @@ fn rotating_glyphs(t: f64, rect: Rect, k: f32, p: &mut vo::scene::canvas::Painte
             color: Color::hex(0x9be7ff, 0.85),
             xform: GlyphXform::rotate(((t * speed + i as f64 * 11.0) % 360.0) as f32),
         });
+    }
+}
+
+/// The "glyph-particles-2000" case's emitter: letters born on a wide ring, turning as they
+/// swirl about the middle (EG-27).
+#[derive(Debug)]
+struct LetterSwirl {
+    k: f32,
+}
+
+impl vo::scene::emitter::EmitterSource for LetterSwirl {
+    fn sim(&self, _: f64) -> vo::scene::emitter::EmitterSim {
+        vo::scene::emitter::EmitterSim {
+            emit: 1.0,
+            life: 3.0,
+            swirl: 0.6,
+            spawn_speed: 20.0 * self.k,
+            noise: 20.0 * self.k,
+            drag: 0.4,
+            ..vo::scene::emitter::EmitterSim::ring(110.0 * self.k, 0.8)
+        }
+    }
+
+    fn look(&self, _: f64) -> vo::scene::emitter::EmitterLook {
+        use vo::scene::emitter::{EmitterLook, GlyphChars, SpriteStyle};
+        EmitterLook {
+            ramp: [Color::hex(0x9be7ff, 0.9), Color::hex(0x4cc9f0, 0.8), Color::hex(0x3a6bff, 0.0)],
+            style: SpriteStyle::Glyph { font: 0, chars: GlyphChars::new("voxtype"), size: 10.0 * self.k, spin: 0.3 },
+            ..Default::default()
+        }
     }
 }
 

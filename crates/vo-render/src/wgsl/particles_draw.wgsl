@@ -197,6 +197,9 @@ fn vs_free (@builtin(vertex_index) vid: u32) -> VOut {
     return hidden ();
   }
   let e = emit_draw[p.info.y];
+  if (u32 (e.look.x) == ST_GLYPH) {
+    return hidden ();
+  }
   let is3d = (e.pool.w & E_3D) != 0u;
   let u = clamp (p.pos.w / p.prev.w, 0.0, 1.0);
   let fade = smoothstep (0.0, 0.1, u) * (1.0 - smoothstep (0.65, 1.0, u));

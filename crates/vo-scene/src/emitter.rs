@@ -161,11 +161,74 @@ pub enum SpriteStyle {
     /// (0 to 1) of the particles are four times brighter and whiter; `gain` scales all the
     /// light; `twinkle` (0 to 1) makes each point flicker a little.
     Spark { accents: f32, gain: f32, twinkle: f32 },
+    /// Tiny letters (EG-27): each free particle shows one letter of `chars` in font `font`,
+    /// picked by a hash of its index, `size` logical units to the em. It turns to its
+    /// direction of travel, or by `spin` turns a second when that is not 0. In light mode
+    /// the letters blend normally rather than adding light, so they show on a light
+    /// background. Free particles only: formed words draw a glyph style as soft sprites.
+    Glyph { font: u32, chars: GlyphChars, size: f32, spin: f32 },
 }
 
 impl SpriteStyle {
     /// Points of light with a few accents.
     pub const SPARK: SpriteStyle = SpriteStyle::Spark { accents: 0.03, gain: 1.0, twinkle: 0.15 };
+
+    /// Letters of `chars` in font `font`, `size` units to the em, turned along their travel.
+    pub fn glyphs(font: u32, chars: &str, size: f32) -> SpriteStyle {
+        SpriteStyle::Glyph { font, chars: GlyphChars::new(chars), size, spin: 0.0 }
+    }
+}
+
+/// The letters a glyph sprite picks from (`SpriteStyle::Glyph`): up to
+/// [`GlyphChars::MAX`], whitespace left out. A set is stored once for the life of the process
+/// and named by its index, so a sprite style stays small and `Copy` (it sits in every
+/// element's word particles).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlyphChars(u32);
+
+/// Every letter set made so far, in the order they were first made.
+static GLYPH_SETS: std::sync::Mutex<Vec<Arc<[char]>>> = std::sync::Mutex::new(Vec::new());
+
+impl GlyphChars {
+    /// Letters a glyph sprite can pick from.
+    pub const MAX: usize = 16;
+
+    /// The first [`GlyphChars::MAX`] letters of `text` that are not whitespace.
+    pub fn new(text: &str) -> GlyphChars {
+        let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).take(GlyphChars::MAX).collect();
+        let mut sets = GLYPH_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        let at = sets.iter().position(|s| **s == *chars).unwrap_or_else(|| {
+            sets.push(chars.into());
+            sets.len() - 1
+        });
+        GlyphChars(at as u32)
+    }
+
+    /// The letters, in order.
+    pub fn letters(&self) -> Arc<[char]> {
+        GLYPH_SETS.lock().unwrap_or_else(|e| e.into_inner())[self.0 as usize].clone()
+    }
+
+    /// The letter particle `index` of its pool shows: the same hash (`vo_core::hash::pcg`) the
+    /// GPU uses, when the font has every letter (the GPU leaves out the ones it lacks).
+    pub fn pick(&self, index: u32) -> Option<char> {
+        let letters = self.letters();
+        let n = letters.len() as u32;
+        (n > 0).then(|| letters[(vo_core::hash::pcg(index) % n) as usize])
+    }
+}
+
+impl std::fmt::Debug for GlyphChars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GlyphChars({:?})", self.letters().iter().collect::<String>())
+    }
+}
+
+/// The letters, not the index, which depends on the order sets were first made.
+impl Serialize for GlyphChars {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.letters().iter().collect::<String>())
+    }
 }
 
 /// What picks a free particle's colour from an emitter's ramp.
@@ -1172,5 +1235,34 @@ mod tests {
         let first_soft = row.iter().position(|v| *v < 0.9).unwrap();
         let first_zero = row.iter().position(|v| *v == 0.0).unwrap();
         assert!(row[first_soft] > 0.05 && first_zero - first_soft <= 8, "{row:?}");
+    }
+
+    #[test]
+    fn glyph_letters_skip_whitespace_and_stop_at_the_limit() {
+        let g = GlyphChars::new(" vox type ");
+        assert_eq!(*g.letters(), ['v', 'o', 'x', 't', 'y', 'p', 'e']);
+        assert_eq!(g, GlyphChars::new("voxtype"), "one set, one name");
+        assert_ne!(g, GlyphChars::new("voxtyp"));
+        let long = GlyphChars::new("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(long.letters().len(), GlyphChars::MAX);
+        assert_eq!(long.letters().last(), Some(&'p'));
+        assert_eq!(format!("{g:?}"), "GlyphChars(\"voxtype\")");
+        assert_eq!(GlyphChars::new(" \t\n").pick(3), None);
+        // A style made from the same text is the same style (pools are keyed by it).
+        assert_eq!(SpriteStyle::glyphs(0, "ab", 10.0), SpriteStyle::glyphs(0, "a b", 10.0));
+    }
+
+    #[test]
+    fn glyph_picks_follow_the_hash_and_use_every_letter() {
+        let g = GlyphChars::new("voxtype");
+        let letters = g.letters();
+        let mut seen = [0u32; 7];
+        for i in 0..700 {
+            let c = g.pick(i).unwrap();
+            assert_eq!(c, letters[(vo_core::hash::pcg(i) % 7) as usize]);
+            seen[letters.iter().position(|&x| x == c).unwrap()] += 1;
+        }
+        // The seven letters are distinct; each gets a fair share of 700 particles.
+        assert!(seen.iter().all(|&n| (60..=140).contains(&n)), "{seen:?}");
     }
 }

@@ -994,6 +994,7 @@ impl Renderer {
     /// added light, because light added to a light backdrop washes out. Off by default.
     pub fn set_light(&mut self, light: bool) {
         self.light = light;
+        self.particles.set_light(light);
     }
 
     /// Whether the last frame took the effect path.

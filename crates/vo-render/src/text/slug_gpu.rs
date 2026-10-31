@@ -54,6 +54,13 @@ pub fn shader_source() -> String {
 /// if its target text is gone, so a HarfBuzz update that moves it fails the
 /// unit tests.
 pub fn shader_source_with(footprint: Footprint) -> String {
+    [hb_source(footprint), SLUG_GLYPH.to_string()].join("\n")
+}
+
+/// The HarfBuzz helpers alone, patched as for [`shader_source_with`], reading the atlas from
+/// a global `hbgpu_atlas_buf` the including shader declares: for other pipelines that draw
+/// Slug glyphs, such as glyph particles (EG-27).
+pub fn hb_source(footprint: Footprint) -> String {
     let mut hb = [HB_GPU_VERTEX, HB_GPU_FRAGMENT, HB_GPU_DRAW_FRAGMENT].concat();
     if footprint == Footprint::AxisLength {
         for (from, to) in [
@@ -73,7 +80,7 @@ pub fn shader_source_with(footprint: Footprint) -> String {
         .replace("hb_gpu_atlas: ptr<storage, array<vec4<i32>>, read>", "@@")
         .replace("&hb_gpu_atlas", "@@")
         .replace("hb_gpu_atlas", "@@");
-    [strip_marker(&hb), SLUG_GLYPH.to_string()].join("\n")
+    strip_marker(&hb)
 }
 
 /// Removes each `@@` with the comma that joins it to its neighbour.

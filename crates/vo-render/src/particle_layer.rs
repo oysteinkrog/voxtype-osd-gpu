@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use vo_scene::display::{DisplayList, GlyphInstance, NO_WORD};
 use vo_scene::emitter::{
-    EmitterInstance, EmitterLook, EmitterSim, EmitterSource, Shape, ShapeTarget, WordParticles,
+    EmitterInstance, EmitterLook, EmitterSim, EmitterSource, Shape, ShapeTarget, SpriteStyle, WordParticles,
     MAX_SHAPE_POINTS,
 };
 use vo_scene::font::FontRegistry;
@@ -129,6 +129,8 @@ pub struct ParticleLayer {
     warned: bool,
     /// Which pool (node, generation) holds each shape slot.
     shape_slots: [Option<(u64, u32)>; SHAPE_SLOTS as usize],
+    /// Light mode: letters blend normally (`Particles::set_light`).
+    light: bool,
 }
 
 impl ParticleLayer {
@@ -148,7 +150,13 @@ impl ParticleLayer {
             views: Vec::new(),
             warned: false,
             shape_slots: [None; SHAPE_SLOTS as usize],
+            light: false,
         }
+    }
+
+    /// Light mode (`Renderer::set_light`): glyph particles blend normally.
+    pub fn set_light(&mut self, light: bool) {
+        self.light = light;
     }
 
     /// Whether anything is drawn this frame.
@@ -359,8 +367,16 @@ impl ParticleLayer {
         look.brightness *= opacity * e.opacity;
         let k = ((to_px.a * to_px.d - to_px.b * to_px.c).abs().sqrt() / s).max(1e-6);
         look.size *= k;
+        let mut letter = 0.0;
+        if let SpriteStyle::Glyph { font, chars, size, spin } = look.style {
+            // Letters (EG-27) scale with the layer as sprites do, and hold still with reduced
+            // motion: they fade in place (`pool_sim`) without turning.
+            let spin = if pool.reduced { 0.0 } else { spin };
+            look.style = SpriteStyle::Glyph { font, chars, size: size * k, spin };
+            letter = size * k;
+        }
         let path = pool.path.as_ref().map_or(0.0, |p| p.iter().map(|q| q.x.hypot(q.y)).fold(0.0, f32::max));
-        let reach = ((extent(&pool.source.sim(self.t)) + path) * k + 4.0 * look.size) * s;
+        let reach = ((extent(&pool.source.sim(self.t)) + path) * k + 4.0 * look.size + letter) * s;
         // A shape's particles (EG-26) are drawn round the same origin, without the layer's
         // rotation and scale.
         let reach = reach.max((pool.shape_reach + 4.0 * look.size) * s);
@@ -491,6 +507,7 @@ impl ParticleLayer {
         // 3D emitters (D302) are seen in perspective from in front of the target's centre.
         let target = [width as f32, height as f32];
         let distance = EYE_DISTANCE * target[0].max(target[1]) / s;
+        parts.set_light(self.light);
         let mut params = FrameParams::new(self.t, Affine::scale(s), width, height, format);
         params.camera = Some(Camera::overlay_view(target, [0.0, 0.0], target, s, distance));
         parts.prepare(&params, &|id| looks.get(id as usize).copied().flatten().unwrap_or(hidden), &slots);
@@ -555,8 +572,19 @@ fn layer_config() -> ParticleConfig {
 }
 
 /// An emitter's inputs at tick time `t`: a pool that left the scene spawns nothing more.
+/// Letters (EG-27) with reduced motion do not travel: they fade in where they are born.
 fn pool_sim(pools: &[Pool], id: EmitterId, t: f64) -> EmitterSim {
     match pools.iter().find(|p| p.id == id) {
+        Some(p) if !p.gone && p.reduced && matches!(p.source.look(t).style, SpriteStyle::Glyph { .. }) => EmitterSim {
+            spawn_speed: 0.0,
+            swirl: 0.0,
+            ring_pull: 0.0,
+            noise: 0.0,
+            attract_strength: 0.0,
+            gravity: [0.0; 3],
+            shock: None,
+            ..p.source.sim(t)
+        },
         Some(p) if !p.gone => p.source.sim(t),
         Some(p) => EmitterSim { emit: 0.0, ..p.source.sim(t) },
         None => EmitterSim { emit: 0.0, ..Default::default() },
