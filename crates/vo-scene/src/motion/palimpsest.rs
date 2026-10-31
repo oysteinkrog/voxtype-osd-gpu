@@ -4,8 +4,9 @@
 //! kept, and what lies between is replaced (`diff_ends`). Letters that survive keep their
 //! glyph, ink and place, so the letters before the change never move and those after it
 //! only follow the width change; none dips or fades. Removed letters stay where they
-//! were, sink `SINK_PX` below the baseline and fade to a `GHOST_INK` ghost that is
-//! readable for `GHOST_HOLD`, then dissolve. New letters arrive in place at `ARRIVE_INK`
+//! were, drop to a `GHOST_INK` ghost in the frame the new letters arrive (so old and new
+//! letters are never both readable in one place), sink `SINK_PX` below the baseline, stay
+//! for `GHOST_HOLD`, then dissolve. New letters arrive in place at `ARRIVE_INK`
 //! or more and fill in, with no travel, so the reading line keeps its envelope (rule 1:
 //! no scale, ink at least 70 %).
 //!
@@ -16,8 +17,8 @@
 //! place, since a ghost cut out of a joined word reads as a broken word. A word that keeps
 //! no letter at all crossfades in place too: a whole ghost word under it is noise.
 //!
-//! Under reduced motion the ghost does not sink; it still fades to `GHOST_INK`, holds and
-//! dissolves, so the reader can still see what changed.
+//! Under reduced motion the ghost does not sink; it still holds and dissolves, so the
+//! reader can still see what changed.
 
 use super::*;
 
@@ -160,7 +161,9 @@ impl Flow {
             x: g.x.value(t) as f32 * s,
             y: g.y,
             width: 0.0,
-            opacity: if hold { ghost_ink(k, t, make) } else { make.to(k, 0.0, CROSSFADE, Rest::UNIT) },
+            // Faint in the frame the new letters arrive, so the old and new letters are never
+            // both readable in one place; then it sinks and holds.
+            opacity: if hold { ghost_ink(GHOST_INK.min(k), t, make) } else { make.to(k, 0.0, CROSSFADE, Rest::UNIT) },
             rise: make.to(rise, if sink { rise + SINK_PX } else { rise }, spring, Rest::PIXELS),
             scale: make.ch(1.0, GLYPH_POP, Rest::UNIT),
             slide: make.ch(0.0, GLYPH_ROLL, Rest::PIXELS),

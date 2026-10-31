@@ -89,3 +89,57 @@ fn a_word_shows_its_first_letters_in_order() {
         }
     }
 }
+
+/// Over this ink a glyph can be read.
+const READABLE: f32 = 0.35;
+
+/// The first frame, at 120 fps from `from` for a second, where a word shows two readable
+/// glyphs in one place or readable glyphs on two rows: two versions of it at once.
+fn two_versions(scene: &Scene<()>, from: f64) -> Option<(f64, u32)> {
+    (0..120).map(|i| from + i as f64 / 120.0).find_map(|t| {
+        let list = scene.sample(t);
+        let mut by: HashMap<u32, Vec<_>> = HashMap::new();
+        for g in list.glyphs.iter().filter(|g| g.word != NO_WORD && g.color.a > READABLE) {
+            by.entry(g.word).or_default().push(*g);
+        }
+        by.into_iter()
+            .find(|(_, gs)| {
+                gs.iter().enumerate().any(|(i, a)| {
+                    gs[i + 1..].iter().any(|b| {
+                        let (dx, dy) = ((a.pos.x - b.pos.x).abs(), (a.pos.y - b.pos.y).abs());
+                        (a.glyph != b.glyph && dx < 0.1 * SIZE && dy < 0.3 * SIZE) || dy > 0.6 * SIZE
+                    })
+                })
+            })
+            .map(|(w, _)| (t, w))
+    })
+}
+
+fn words(text: &str) -> Vec<Word> {
+    text.split(' ').enumerate().map(|(i, w)| Word { id: i as u32 + 1, text: w.into() }).collect()
+}
+
+#[test]
+fn a_revised_word_never_shows_old_and_new_letters_readable_in_one_place() {
+    for reduced in [false, true] {
+        let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts()))).with_reduced_motion(reduced);
+        scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+        scene.apply(view(&words("set the popup theme to swish so the"), Align::Start), 0.0);
+        scene.sample(1.0);
+        scene.apply(view(&words("set the popup theme to swiss so the"), Align::Start), 1.0);
+        assert_eq!(two_versions(&scene, 1.0), None, "reduced {reduced}");
+    }
+}
+
+#[test]
+fn under_reduced_motion_a_rewrap_never_shows_a_word_twice() {
+    let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts()))).with_reduced_motion(true);
+    scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+    let long = "with the waveform above them then press the key again to stop and let the final pass";
+    scene.apply(view(&words(long), Align::Start), 0.0);
+    scene.sample(1.0);
+    // A wider first word moves every line break.
+    let wider = long.replacen("with", "Wherewith", 1);
+    scene.apply(view(&words(&wider), Align::Start), 1.0);
+    assert_eq!(two_versions(&scene, 1.0), None);
+}

@@ -1314,7 +1314,7 @@ impl Flow {
             let prev = old.iter().position(|o| o.id == w.id).map(|i| old.remove(i));
             let Some(p) = p else {
                 if let Some(o) = prev {
-                    self.ghost_word(&o, t, retention);
+                    self.ghost_word(&o, t, retention, reduced);
                 }
                 continue;
             };
@@ -1468,7 +1468,7 @@ impl Flow {
                 if newest {
                     handed.push((o.id, self.ghosts.len()));
                 }
-                self.ghost_word(&o, t, retention);
+                self.ghost_word(&o, t, retention, reduced);
                 dropped.push(o.id);
                 let dy = scroll.unwrap_or(0.0);
                 for g in self.ghosts.iter_mut().filter(|g| g.word == o.id) {
@@ -1504,7 +1504,7 @@ impl Flow {
                 if newest {
                     handed.push((o.id, self.ghosts.len()));
                 }
-                self.ghost_word(&o, t, retention);
+                self.ghost_word(&o, t, retention, reduced);
                 if !reduced && !front_drop && scroll.is_none() {
                     let a = o.x.value(t);
                     left.push((o.id, o.line, a, a + o.width.value(t)));
@@ -1552,7 +1552,7 @@ impl Flow {
                 self.leave(&o, t, motion.overflow, scroll.unwrap_or(0.0));
                 continue;
             }
-            self.ghost_word(&o, t, retention);
+            self.ghost_word(&o, t, retention, reduced);
             if calm_drop {
                 dropped.push(id);
             }
@@ -2027,12 +2027,18 @@ impl Flow {
         }
     }
 
-    fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64) {
+    /// Leaves word `o` as it is drawn at `t` as ghosts that fade out where it is. Under
+    /// `reduced` motion there are none: the old copy goes in the frame the new layout shows,
+    /// since a fade with nothing moving reads as two layouts at once.
+    fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64, reduced: bool) {
         let at = (o.x.value(t) as f32, o.y.value(t) as f32 + o.roll.value(t) as f32);
         for g in self.ghosts.iter_mut().filter(|g| g.word == o.id && g.fixed.is_none()) {
             let k = if g.width > 0.0 { o.width.value(t) as f32 / g.width } else { 1.0 };
             g.x *= k;
             g.fixed = Some(at);
+        }
+        if reduced {
+            return;
         }
         let s = stretch(o, t);
         for g in &o.glyphs {

@@ -212,8 +212,8 @@ impl DepthStack {
     /// The stack in a box `size` big, the newest sheet `sheet` big at its bottom left.
     /// `lines` are `(key, line)`, oldest first; the last is the reading line. `content`
     /// builds a line's sheet content for its place, so it can blur older text by
-    /// [`Place::blur`]. Only the newest `depth + 1` lines are kept, plus one more that fades
-    /// out as it leaves.
+    /// [`Place::blur`]. Only the newest `depth + 1` lines are kept, plus one more, at no ink,
+    /// as it leaves.
     pub fn view<L, M>(
         &self,
         key: impl Into<Key>,
@@ -310,7 +310,9 @@ impl DepthStack {
             .opacity(ink)
             .motion(Prop::Tilt, motion)
             .motion(Prop::Offset, motion)
-            .motion(Prop::Opacity, if waits.is_some() { Motion::Snap } else { motion })
+            // A sheet pushed past the depth goes in one frame: it would fade out at almost the
+            // place the next sheet back moves into, and the two lines would overprint.
+            .motion(Prop::Opacity, if waits.is_some() || d > self.depth { Motion::Snap } else { motion })
             .child(pane);
         let layer = if held.is_some() { layer.motion(Prop::Position, motion) } else { layer };
         // A new reading line is readable in the frame it arrives: it rises at most 3 px
@@ -322,8 +324,8 @@ impl DepthStack {
         } else {
             Transition::fade().opacity(0.7 * p.ink).offset(p.offset.0, p.offset.1 + 3.0)
         };
-        // A sheet leaves in one frame. A line pushed past the depth has faded to no ink by
-        // then; a sheet that goes while it still shows is a whole relayout (the final pass),
+        // A sheet leaves in one frame. A line pushed past the depth has no ink by then; a
+        // sheet that goes while it still shows is a whole relayout (the final pass),
         // where a fading old stack would overprint the new one at the same places.
         layer.presence(enter, Transition::NONE)
     }
@@ -360,6 +362,24 @@ mod tests {
         assert!(inks.windows(2).all(|w| w[0] > w[1]), "{inks:?}");
         assert_eq!(s.place(4).ink, 0.0, "past the depth a sheet fades out");
         assert!(s.spring(3).omega() < s.spring(0).omega(), "deeper sheets lag");
+    }
+
+    #[test]
+    fn a_line_pushed_past_the_depth_has_no_ink_in_the_frame_it_leaves() {
+        // It would fade out next to where the next sheet back moves in, and overprint it.
+        let s = DepthStack::default();
+        let keys = ["a", "b", "c", "d", "e"];
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(view(&s, &keys[..4], false), 0.0);
+        scene.sample(0.0);
+        let ink =
+            |scene: &Scene<()>, k: &str, t: f64| scene.sampled(scene.find(&["stack", k]).unwrap(), t).unwrap().opacity;
+        assert!((ink(&scene, "a", 3.0) - s.place(3).ink).abs() < 1e-3);
+        scene.apply(view(&s, &keys, false), 3.0);
+        assert_eq!(ink(&scene, "a", 3.0), 0.0);
+        // The others still move back by spring.
+        assert!(ink(&scene, "b", 3.05) > s.place(3).ink + 0.01);
     }
 
     #[test]
