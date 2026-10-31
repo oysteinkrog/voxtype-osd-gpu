@@ -125,6 +125,8 @@ Scope with its idle motion (m18: the trace's 1 px live floor, the graticule glow
 
 Swiss with its idle motion (v41: a soft highlight along the top hairline once every 8 s, the recording dot breathing 100 to 70 %, the clock colon softening for 0.25 s each second), measure build, popup 954d005, 2026-10-29: recording 3.41 % CPU, 53.8 frames/s, GPU 0.075 / 0.078 ms; idle-open 1.50 % CPU, 14.9 frames/s, GPU 0.070 / 0.071 ms. All within the budget.
 
+Dotmatrix with its idle motion (feo: about 2 % of the unlit meter dots rise to 12 % ink for 0.4 s, and the quiet baseline steps one cell right every other 2 s and back), measure build, 2026-10-31: recording 5.40 % CPU, 52.8 frames/s, GPU 0.033 / 0.034 ms; idle-open 2.20 % CPU, GPU 0.026 ms p95. Idle-open was 1.46 % at 15.4 frames/s without it, so the motion costs about 0.7 % of one core. That is over the 2 % limit above and under the 3 % limit the idle beads use.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
