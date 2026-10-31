@@ -143,3 +143,46 @@ fn under_reduced_motion_a_rewrap_never_shows_a_word_twice() {
     scene.apply(view(&words(&wider), Align::Start), 1.0);
     assert_eq!(two_versions(&scene, 1.0), None);
 }
+
+#[test]
+fn a_replaced_letter_leaves_no_copy_under_the_new_one_and_none_goes_missing() {
+    // "open" to "Open": the wider "O" waits for "pen" to slide; the "o" stays until it shows.
+    for reduced in [false, true] {
+        let mut scene = Scene::new()
+            .with_text(Box::new(ShapedLayout::new(fonts())))
+            .with_default_motion(Motion::Spring(Spring::SOFT))
+            .with_reduced_motion(reduced);
+        scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+        scene.apply(view(&words("open the file"), Align::Start), 0.0);
+        scene.sample(1.0);
+        scene.apply(view(&words("Open the file"), Align::Start), 1.0);
+        for i in 0..120 {
+            let t = 1.0 + i as f64 / 120.0;
+            let list = scene.sample(t);
+            let first: Vec<_> = list.glyphs.iter().filter(|g| g.word == 1 && g.color.a > 0.02).collect();
+            for (k, a) in first.iter().enumerate() {
+                for b in &first[k + 1..] {
+                    assert!(
+                        a.glyph == b.glyph || (a.pos.x - b.pos.x).abs() > 0.3 * SIZE,
+                        "reduced {reduced}: at {t:.3} s two letters over each other at {:.0}",
+                        a.pos.x
+                    );
+                }
+            }
+            let readable = first.iter().filter(|g| g.color.a > READABLE).count();
+            assert_eq!(readable, 4, "reduced {reduced}: at {t:.3} s the word shows {readable} letters");
+        }
+    }
+}
+
+#[test]
+fn a_deleted_letter_still_leaves_a_faint_ghost() {
+    let mut scene = Scene::new().with_text(Box::new(ShapedLayout::new(fonts())));
+    scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+    scene.apply(view(&words("cream, then"), Align::Start), 0.0);
+    scene.sample(1.0);
+    scene.apply(view(&words("cream then"), Align::Start), 1.0);
+    let list = scene.sample(1.2);
+    let ghost = list.glyphs.iter().filter(|g| g.word == 1).count();
+    assert_eq!(ghost, 6, "five letters and the comma's ghost");
+}

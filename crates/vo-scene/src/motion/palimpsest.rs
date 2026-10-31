@@ -3,19 +3,23 @@
 //! A revised word is diffed by grapheme against its old text: the shared start and end are
 //! kept, and what lies between is replaced (`diff_ends`). Letters that survive keep their
 //! glyph, ink and place, so the letters before the change never move and those after it
-//! only follow the width change; none dips or fades. Removed letters stay where they
-//! were, drop to a `GHOST_INK` ghost in the frame the new letters arrive (so old and new
-//! letters are never both readable in one place), sink `SINK_PX` below the baseline, stay
-//! for `GHOST_HOLD`, then dissolve. New letters arrive in place at `ARRIVE_INK`
-//! or more and fill in, with no travel, so the reading line keeps its envelope (rule 1:
-//! no scale, ink at least 70 %).
+//! only follow the width change; none dips or fades. New letters arrive in place at
+//! `ARRIVE_INK` or more and fill in, with no travel, so the reading line keeps its envelope
+//! (rule 1: no scale, ink at least 70 %).
+//!
+//! The letters new ones replace ("o" in "open" to "Open", "re" in "there" to "their") stay
+//! as they are until the new letters show, then go in that frame: the old and new letters
+//! never draw over each other, not even as a faint copy under the new one. Only a deleted
+//! letter, with no new letter in its word, leaves a ghost: it stays where it was, drops
+//! to `GHOST_INK` at once, sinks `SINK_PX` below the baseline, stays for `GHOST_HOLD`,
+//! then dissolves.
 //!
 //! Shaping can break the one glyph per letter picture. A kept letter whose glyph changed
-//! (a ligature that forms or splits, a contextual form) crossfades in place, and so does
-//! a spare glyph of a kept letter. A word in a joined script (Arabic, Syriac, N'Ko,
-//! Mongolian, the Indic scripts) does not sink its removed letters: they crossfade in
-//! place, since a ghost cut out of a joined word reads as a broken word. A word that keeps
-//! no letter at all crossfades in place too: a whole ghost word under it is noise.
+//! (a ligature that forms or splits, a contextual form) swaps in place the same way, and
+//! so does a spare glyph of a kept letter. A word in a joined script (Arabic, Syriac, N'Ko,
+//! Mongolian, the Indic scripts) swaps its removed letters too, since a ghost cut out of a
+//! joined word reads as a broken word, and so does a word that keeps no letter at all: a
+//! whole ghost word under it is noise.
 //!
 //! Under reduced motion the ghost does not sink; it still holds and dissolves, so the
 //! reader can still see what changed.
@@ -94,6 +98,8 @@ impl Flow {
         let joined = joined_script(&o.text) || joined_script(&w.text);
         // A word with nothing in common is a new word: it crossfades, with no ghost under it.
         let shared = ops.iter().any(|op| matches!(op, GraphemeOp::Kept(_)));
+        // New letters in the word: the removed ones are replaced, not deleted.
+        let replaced = ops.iter().any(|op| matches!(op, GraphemeOp::Enter));
         let mut kept_old = vec![false; old_g.len()];
         for op in &ops {
             if let GraphemeOp::Kept(i) = op {
@@ -121,9 +127,9 @@ impl Flow {
                     FlowGlyph { grapheme: gr, advance: n.advance, y: n.y, ..g }
                 }
                 Some(g) => {
-                    // Same letter, another shape: a local crossfade.
-                    self.palimpsest_ghost(word, &g, s, make, false, false);
-                    make.enter(n, gr, (0.0, 0.0, 1.0), CROSSFADE)
+                    // Same letter, another shape: swapped in one frame.
+                    self.palimpsest_ghost(word, &g, s, make, Leave::Swap);
+                    make.enter(n, gr, (if joins { 1.0 } else { ARRIVE_INK }, 0.0, 1.0), ARRIVE)
                 }
                 // A letter that joins a word still fading in takes the word's fade, like the
                 // letters already there, so it is never fainter than they are (RD-04).
@@ -133,25 +139,28 @@ impl Flow {
         }
         for g in old_glyphs.into_iter().flatten() {
             let removed = !kept_old.get(g.grapheme as usize).copied().unwrap_or(false);
-            let sink = removed && !joined && shared;
-            // Reduced motion: the ghost holds in place instead of sinking.
-            self.palimpsest_ghost(word, &g, s, make, sink && !reduced, sink);
+            // Only a deleted letter leaves a ghost: one under new letters would sit under them.
+            let leave = if removed && !joined && shared && !replaced {
+                // Reduced motion: the ghost holds in place instead of sinking.
+                Leave::Ghost { sink: !reduced }
+            } else {
+                Leave::Swap
+            };
+            self.palimpsest_ghost(word, &g, s, make, leave);
         }
         o.glyphs = glyphs;
         o.spread = false;
     }
 
-    /// Leaves old glyph `g` of word `word` as a ghost where it is drawn now. It sinks
-    /// `SINK_PX` with `sink`, and with `hold` it fades to `GHOST_INK` and holds before it
-    /// dissolves; otherwise it fades out in place.
-    fn palimpsest_ghost(&mut self, word: WordId, g: &FlowGlyph, s: f32, make: &Make, sink: bool, hold: bool) {
+    /// Leaves old glyph `g` of word `word` where it is drawn now, as `leave` says.
+    fn palimpsest_ghost(&mut self, word: WordId, g: &FlowGlyph, s: f32, make: &Make, leave: Leave) {
         let t = make.t;
         let k = g.opacity.value(t) as f32;
         if k <= 0.0 {
             return;
         }
         let rise = g.rise.value(t) as f32;
-        let spring = if sink { SINK } else { CROSSFADE };
+        let sink = matches!(leave, Leave::Ghost { sink: true });
         self.ghosts.push(Ghost {
             glyph: g.glyph,
             font: g.font,
@@ -161,14 +170,28 @@ impl Flow {
             x: g.x.value(t) as f32 * s,
             y: g.y,
             width: 0.0,
-            // Faint in the frame the new letters arrive, so the old and new letters are never
-            // both readable in one place; then it sinks and holds.
-            opacity: if hold { ghost_ink(GHOST_INK.min(k), t, make) } else { make.to(k, 0.0, CROSSFADE, Rest::UNIT) },
-            rise: make.to(rise, if sink { rise + SINK_PX } else { rise }, spring, Rest::PIXELS),
+            // A ghost is faint at once and sinks; a swapped letter holds its ink until the
+            // new letters show (`Flow::apply` sets when).
+            opacity: match leave {
+                Leave::Ghost { .. } => ghost_ink(GHOST_INK.min(k), t, make),
+                Leave::Swap => make.ch(k, CROSSFADE, Rest::UNIT),
+            },
+            rise: make.to(rise, if sink { rise + SINK_PX } else { rise }, SINK, Rest::PIXELS),
             scale: make.ch(1.0, GLYPH_POP, Rest::UNIT),
             slide: make.ch(0.0, GLYPH_ROLL, Rest::PIXELS),
+            swap: matches!(leave, Leave::Swap),
         });
     }
+}
+
+/// How an old letter leaves a revised word.
+#[derive(Clone, Copy)]
+enum Leave {
+    /// A deleted letter: faint at once, sinking `SINK_PX` with `sink`, held, then dissolved.
+    Ghost { sink: bool },
+    /// A replaced letter, or one whose shape changed: it goes in the frame the new letters
+    /// show.
+    Swap,
 }
 
 /// A removed letter's opacity: from `from` to `GHOST_INK` (never above `from`), held until

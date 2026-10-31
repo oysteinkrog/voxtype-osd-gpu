@@ -734,6 +734,10 @@ struct Ghost {
     scale: Channel,
     /// Extra travel along the line, for a displaced ghost that centres over its word.
     slide: Channel,
+    /// An old letter that new letters replace (MO-20): it stays as drawn until they show,
+    /// then goes in that frame, so the old and new letters never draw over each other. Set
+    /// for the revision being applied; cleared once its time to go is set.
+    swap: bool,
 }
 
 /// A ghost under this opacity counts as gone when lines are kept apart.
@@ -983,12 +987,19 @@ fn half_space(placed: &[Option<PlacedWord>], size: f32) -> f64 {
 /// same fade, pop or rise from there (s8my). The glyph counts at the width it is
 /// drawn (a pop starts at no width) and only while it shows. Glyphs drawn before are left
 /// alone, so nothing on screen blinks.
-fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, gap: f64, make: &Make) {
+fn hold_new_glyphs(
+    next: &mut [FlowWord],
+    ghosts: &[Ghost],
+    line_height: f32,
+    gap: f64,
+    make: &Make,
+) -> Vec<(WordId, f64)> {
     const STEP: f64 = 1.0 / 240.0;
     /// Under this ink a glyph is not seen yet.
     const SEEN: f64 = 0.05;
     let t = make.t;
     let near = 0.9 * line_height as f64;
+    let mut waits = Vec::new();
     for i in 0..next.len() {
         if !next[i].glyphs.iter().any(|g| g.born >= t) {
             continue;
@@ -1066,6 +1077,7 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
             longest = longest.max(wait);
         }
         if longest > 0.0 {
+            waits.push((next[i].id, longest));
             // Not drawn while they wait; then their enters run as they would have.
             for g in o.iter_mut().filter(|g| g.born >= t) {
                 g.opacity.postpone(t, longest, 0.0);
@@ -1077,6 +1089,7 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
         }
         next[i].glyphs = o;
     }
+    waits
 }
 
 /// A rewrapped word shows once the words still sliding along its new line have left its
@@ -1592,8 +1605,13 @@ impl Flow {
         }
         self.clear_ghosts(&next, &rewrapped, &left, gap, t);
         self.clear_dropped(&next, &dropped, line_height, gap, t);
-        if !reduced {
-            hold_new_glyphs(&mut next, &self.ghosts, line_height, gap, &make);
+        let waits =
+            if reduced { Vec::new() } else { hold_new_glyphs(&mut next, &self.ghosts, line_height, gap, &make) };
+        // The old letters a revision replaces go in the frame its new letters show.
+        for g in self.ghosts.iter_mut().filter(|g| g.swap) {
+            let wait = waits.iter().find(|w| w.0 == g.word).map_or(0.0, |w| w.1);
+            g.opacity.snap(t + wait, 0.0);
+            g.swap = false;
         }
         self.words = next;
         self.index = index;
@@ -1714,6 +1732,7 @@ impl Flow {
                     rise: make.to(g.rise.value(t) as f32, g.rise.value(t) as f32 - travel, WORD_ROLL, Rest::PIXELS),
                     scale: make.ch(g.scale.value(t) as f32, GLYPH_POP, Rest::UNIT),
                     slide: make.ch(0.0, WORD_ROLL, Rest::PIXELS),
+                    swap: false,
                 });
             }
         }
@@ -1773,6 +1792,7 @@ impl Flow {
                 rise: move_(rise0, lift, Rest::PIXELS),
                 scale: move_(g.scale.value(t) as f32, GHOST_SCALE, Rest::UNIT),
                 slide: move_(0.0, to, Rest::PIXELS),
+                swap: false,
             });
         }
         o.glyphs = p
@@ -1819,6 +1839,7 @@ impl Flow {
                     rise: make.ch(g.rise.value(t) as f32, GLYPH_ROLL, Rest::PIXELS),
                     scale: make.ch(g.scale.value(t) as f32, GLYPH_POP, Rest::UNIT),
                     slide: make.ch(0.0, GLYPH_ROLL, Rest::PIXELS),
+                    swap: false,
                 });
             }
         }
@@ -1874,6 +1895,7 @@ impl Flow {
                 rise: make.to(g.rise.value(t) as f32, to.0 * size, spring, Rest::PIXELS),
                 scale: make.to(g.scale.value(t) as f32, to.1, spring, Rest::UNIT),
                 slide: make.ch(0.0, spring, Rest::PIXELS),
+                swap: false,
             });
         };
         let mut glyphs = Vec::with_capacity(p.glyphs.len());
@@ -2060,6 +2082,7 @@ impl Flow {
                     rise: ch(g.rise.value(t), GLYPH_ROLL, Rest::PIXELS),
                     scale: ch(g.scale.value(t), GLYPH_POP, Rest::UNIT),
                     slide: ch(0.0, GLYPH_ROLL, Rest::PIXELS),
+                    swap: false,
                 });
             }
         }

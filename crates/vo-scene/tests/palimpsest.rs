@@ -1,5 +1,5 @@
-//! Palimpsest correction (MO-20), the default revision: survivors stay, removed letters
-//! sink into a short ghost, new letters arrive in place.
+//! Palimpsest correction (MO-20), the default revision: survivors stay, replaced letters go
+//! as the new ones arrive in place, deleted letters sink into a short ghost.
 
 use vo_core::words::Word;
 use vo_scene::display::{DisplayList, GlyphInstance};
@@ -33,6 +33,8 @@ fn of(list: &DisplayList, word: u32) -> Vec<GlyphInstance> {
 
 const BEFORE: &[(u32, &str)] = &[(1, "meet"), (2, "there"), (3, "team")];
 const AFTER: &[(u32, &str)] = &[(1, "meet"), (2, "their"), (3, "team")];
+/// "there" to "the": "re" is deleted, with nothing new in its place.
+const CUT: &[(u32, &str)] = &[(1, "meet"), (2, "the"), (3, "team")];
 
 #[test]
 fn palimpsest_is_the_default() {
@@ -40,7 +42,7 @@ fn palimpsest_is_the_default() {
 }
 
 #[test]
-fn survivors_stay_removed_letters_sink_and_new_ones_arrive_in_place() {
+fn survivors_stay_replaced_letters_go_and_new_ones_arrive_in_place() {
     let mut s = scene();
     s.apply(view(&words(BEFORE)), 0.0);
     let before = of(&s.sample(1.0), 2);
@@ -59,14 +61,11 @@ fn survivors_stay_removed_letters_sink_and_new_ones_arrive_in_place() {
     assert!(fresh.iter().all(|g| (g.pos.y - base).abs() < 1e-3), "new letters arrive on the baseline");
     assert!(fresh.iter().filter(|g| g.color.a >= ARRIVE_INK - 1e-3).count() >= 2, "new letters readable at once");
 
-    // 300 ms on: the ghost of "re" sits 4 px lower at 20 %; survivors never moved.
+    // "re" went in that frame: no copy of it under "ir".
+    assert_eq!(first.len(), 5, "no ghost of \"re\" under \"ir\"");
+
+    // 300 ms on: survivors never moved.
     let held = of(&s.sample(1.3), 2);
-    let ghosts: Vec<_> = held.iter().filter(|g| g.color.a < 0.5).collect();
-    assert_eq!(ghosts.len(), 2, "the ghost of \"re\"");
-    for g in &ghosts {
-        assert!((g.pos.y - base - SINK_PX).abs() < 0.05, "{} {}", g.pos.y, base);
-        assert!((g.color.a - GHOST_INK).abs() < 0.02, "{}", g.color.a);
-    }
     for old in &before[..3] {
         assert!(held.iter().any(|g| g.pos == old.pos && g.color.a > 0.999));
     }
@@ -81,11 +80,28 @@ fn survivors_stay_removed_letters_sink_and_new_ones_arrive_in_place() {
 }
 
 #[test]
+fn a_deleted_letter_sinks_into_a_short_ghost() {
+    let mut s = scene();
+    s.apply(view(&words(BEFORE)), 0.0);
+    let base = of(&s.sample(1.0), 2)[0].pos.y;
+    s.apply(view(&words(CUT)), 1.0);
+    // 300 ms on: the ghost of "re" sits 4 px lower at 20 %.
+    let held = of(&s.sample(1.3), 2);
+    let ghosts: Vec<_> = held.iter().filter(|g| g.color.a < 0.5).collect();
+    assert_eq!(ghosts.len(), 2, "the ghost of \"re\"");
+    for g in &ghosts {
+        assert!((g.pos.y - base - SINK_PX).abs() < 0.05, "{} {}", g.pos.y, base);
+        assert!((g.color.a - GHOST_INK).abs() < 0.02, "{}", g.color.a);
+    }
+    assert!(s.next_wake(1.0 + GHOST_HOLD + 1.0).is_none());
+}
+
+#[test]
 fn reduced_motion_keeps_the_ghost_on_the_baseline() {
     let mut s = scene().with_reduced_motion(true);
     s.apply(view(&words(BEFORE)), 0.0);
     let base = of(&s.sample(1.0), 2)[0].pos.y;
-    s.apply(view(&words(AFTER)), 1.0);
+    s.apply(view(&words(CUT)), 1.0);
     let held = of(&s.sample(1.3), 2);
     let ghosts: Vec<_> = held.iter().filter(|g| g.color.a < 0.5).collect();
     assert_eq!(ghosts.len(), 2);
