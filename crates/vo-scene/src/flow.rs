@@ -1003,7 +1003,10 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
         let kept: Vec<(Channel, f32)> = o.iter().filter(|g| g.born < t).map(|g| (g.x.clone(), g.advance)).collect();
         let kept_settle = kept.iter().map(|k| k.0.settled_at()).fold(t, f64::max);
         let row_settles = row_settles.max(kept_settle);
-        for g in o.iter_mut().filter(|g| g.born >= t) {
+        // The longest wait any new letter needs: they all take it, so a word's letters come
+        // in together and none is missing from the start or the middle of what shows.
+        let mut longest = 0.0f64;
+        for g in o.iter().filter(|g| g.born >= t) {
             // A letter that arrives in place (the palimpsest's) waits for its word's kept
             // letters; one that rolls in from below (`CaseChange::Roll`) passes under them.
             let in_place = g.rise.value(t).abs() < 0.01;
@@ -1060,11 +1063,16 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
             while wait < REWRAP_WAIT_MAX && !fits(wait) {
                 wait += STEP;
             }
-            // Not drawn while it waits; then its enter runs as it would have.
-            g.opacity.postpone(t, wait, 0.0);
-            for c in [&mut g.scale, &mut g.rise] {
-                let now = c.value(t);
-                c.postpone(t, wait, now);
+            longest = longest.max(wait);
+        }
+        if longest > 0.0 {
+            // Not drawn while they wait; then their enters run as they would have.
+            for g in o.iter_mut().filter(|g| g.born >= t) {
+                g.opacity.postpone(t, longest, 0.0);
+                for c in [&mut g.scale, &mut g.rise] {
+                    let now = c.value(t);
+                    c.postpone(t, longest, now);
+                }
             }
         }
         next[i].glyphs = o;
@@ -1322,10 +1330,13 @@ impl Flow {
                     Some((line, dx)) if line == p.line && !reduced && !calm_drop => dx,
                     _ => 0.0,
                 };
-                // A word that arrives while the word before it on its line still slides
-                // (moved by an earlier update) starts as far off and as fast, so the two move
-                // as one piece instead of the new word landing on its neighbour.
-                let follow = next.last().filter(|n| back == 0.0 && !reduced && n.line == p.line).and_then(|n| {
+                // A word that arrives while the word before it on its line still slides (this
+                // update's line shift, or an earlier update's) starts as far off and as fast, so
+                // the two move as one piece instead of the new word landing on its neighbour.
+                // From where that word is now, not from its last target: one still catching
+                // up with an earlier shift would leave the new word short of it, over its last
+                // letter, and the new word's first letter would wait for room.
+                let follow = next.last().filter(|n| !reduced && n.line == p.line).and_then(|n| {
                     let (x, v) = n.x.sample(t);
                     let off = x - n.x.target();
                     (off.abs() >= 0.5).then_some((off, v, n.x.spring()))

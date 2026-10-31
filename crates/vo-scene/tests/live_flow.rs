@@ -59,14 +59,14 @@ fn a_revised_word_crossfades_and_its_neighbours_slide() {
     let fox_new = first(&settled, 3).0;
     assert!(fox_new > first(&before, 3).0 + 10.0);
 
-    // Mid move: "fox" is between, and old and new glyphs of word 2 both show, part faded.
-    // New letters that would come within half a space of "fox" before it moved on start
-    // their fade once it has (s8my), so at least those over "quick" show now.
+    // Mid move: "fox" is between, and the old glyphs of word 2 show, part faded. New letters
+    // that would come within half a space of "fox" before it moved on start their fade once
+    // it has (s8my), and a word's new letters all wait together, so none of them or all.
     let mid = s.sample(1.06);
     let x = first(&mid, 3).0;
     assert!(x > first(&before, 3).0 + 0.5 && x < fox_new - 0.5, "fox at {x}");
     let w2: Vec<f32> = mid.glyphs.iter().filter(|g| g.word == 2).map(|g| g.color.a).collect();
-    assert!((5 + 5..=8 + 5).contains(&w2.len()), "new and old glyphs of the revised word: {}", w2.len());
+    assert!([5, 8 + 5].contains(&w2.len()), "new and old glyphs of the revised word: {}", w2.len());
     assert!(w2.iter().all(|&a| a > 0.02 && a < 0.98), "{w2:?}");
 
     // Settled glyphs sit exactly where a fresh layout puts them.
