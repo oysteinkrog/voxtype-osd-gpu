@@ -16,7 +16,9 @@
 //! - `fill`: the share of the word's letters, from the left, at full ink; letters past it are
 //!   at `ink * floor`, with a soft front one letter wide. The floor is [`FILL_FLOOR`] unless
 //!   the word sets its own ([`WordTypo::floor`]): a pen that darkens a faint readable copy
-//!   (SW-02) uses 0.70.
+//!   (SW-02) uses 0.70. A word can keep its last letters at full ink whatever the fill
+//!   ([`WordTypo::tail`]), so a pen that rewrites only the middle of a revised word (SW-06)
+//!   leaves the unchanged end alone.
 //!
 //! Rule 1 of the motion language, the reading-line envelope, is enforced at draw time: a word
 //! on the newest line draws with its values clamped by [`Envelope::READING`] (baseline within
@@ -81,9 +83,14 @@ impl Typo {
     /// Opacity factor of letter `i` of `n` from `ink` and `fill`; letters past the fill are at
     /// `ink * floor`.
     pub fn letter_ink_over(&self, i: usize, n: usize, floor: f32) -> f32 {
+        self.letter_ink_span(i, n, floor, 0)
+    }
+
+    /// [`Typo::letter_ink_over`] with the last `tail` letters at full ink whatever the fill.
+    pub fn letter_ink_span(&self, i: usize, n: usize, floor: f32, tail: usize) -> f32 {
         let floor = floor.clamp(0.0, 1.0);
         let ink = self.ink.clamp(0.0, 1.0);
-        if self.fill >= 1.0 || n == 0 {
+        if self.fill >= 1.0 || n == 0 || i + tail >= n {
             return ink;
         }
         // The front sits at fill * n letters; the letter it crosses is part filled.
@@ -119,11 +126,13 @@ pub struct WordTypo {
     pub delay: f64,
     /// Share of the word's ink that letters past its fill keep. Not sprung: it applies at once.
     pub floor: f32,
+    /// The last this many letters stay at full ink whatever the fill. Not sprung.
+    pub tail: usize,
 }
 
 impl WordTypo {
     pub fn rest(rest: Typo) -> WordTypo {
-        WordTypo { rest, arrive: None, kick: None, motion: None, delay: 0.0, floor: FILL_FLOOR }
+        WordTypo { rest, arrive: None, kick: None, motion: None, delay: 0.0, floor: FILL_FLOOR, tail: 0 }
     }
 
     pub fn arrive(self, from: Typo) -> WordTypo {
@@ -145,6 +154,12 @@ impl WordTypo {
     /// Letters past the fill keep this share of the ink (0 to 1), instead of [`FILL_FLOOR`].
     pub fn floor(self, floor: f32) -> WordTypo {
         WordTypo { floor: floor.clamp(0.0, 1.0), ..self }
+    }
+
+    /// Keeps the last `letters` letters at full ink whatever the fill: the unchanged end of a
+    /// word whose middle a pen rewrites (SW-06).
+    pub fn tail(self, letters: usize) -> WordTypo {
+        WordTypo { tail: letters, ..self }
     }
 }
 
@@ -324,6 +339,7 @@ struct WordChannels {
     ch: [Channel; CHANNELS],
     kick: Option<u32>,
     floor: f32,
+    tail: usize,
     /// The fill track, empty for none.
     track: Vec<(f64, f32)>,
 }
@@ -381,15 +397,22 @@ impl TypoState {
                     });
                     changed = true;
                     // A word that arrives with a kick takes it as already seen.
-                    WordChannels { id, ch, kick: want.kick.map(|k| k.0), floor: want.floor, track: Vec::new() }
+                    WordChannels {
+                        id,
+                        ch,
+                        kick: want.kick.map(|k| k.0),
+                        floor: want.floor,
+                        tail: want.tail,
+                        track: Vec::new(),
+                    }
                 }
             };
             let kick = want.kick.filter(|k| Some(k.0) != w.kick);
             if let Some((n, _)) = want.kick {
                 w.kick = Some(n);
             }
-            if w.floor != want.floor {
-                w.floor = want.floor;
+            if w.floor != want.floor || w.tail != want.tail {
+                (w.floor, w.tail) = (want.floor, want.tail);
                 changed = true;
             }
             let track = if reduced { &[][..] } else { typos.track(id) };
@@ -442,6 +465,11 @@ impl TypoState {
     /// Word `id`'s fill floor; [`FILL_FLOOR`] for a word without channels.
     pub fn floor(&self, id: WordId) -> f32 {
         self.words.iter().find(|w| w.id == id).map_or(FILL_FLOOR, |w| w.floor)
+    }
+
+    /// How many of word `id`'s last letters stay at full ink ([`WordTypo::tail`]).
+    pub fn tail(&self, id: WordId) -> usize {
+        self.words.iter().find(|w| w.id == id).map_or(0, |w| w.tail)
     }
 
     pub fn settled_at(&self) -> f64 {
@@ -585,5 +613,22 @@ mod tests {
         let mut r = TypoState::default();
         r.sync(0.0, &[1], Some(&typos), true, 1.0);
         assert_eq!(r.sample(1, 1.1).unwrap().fill, 1.0);
+    }
+
+    #[test]
+    fn a_tail_keeps_the_last_letters_full_whatever_the_fill() {
+        let v = Typo::REST.fill(0.4);
+        // Letters 0 and 1 are filled, 2 is under the front, 3 and 4 are the tail.
+        assert_eq!(v.letter_ink_span(0, 5, 0.7, 2), 1.0);
+        assert!((v.letter_ink_span(2, 5, 0.7, 2) - 0.7).abs() < 1e-6);
+        assert_eq!(v.letter_ink_span(3, 5, 0.7, 2), 1.0);
+        assert_eq!(v.letter_ink_span(4, 5, 0.7, 2), 1.0);
+        // Without a tail the end waits for the fill, as before.
+        assert!((v.letter_ink_span(4, 5, 0.7, 0) - 0.7).abs() < 1e-6);
+        assert_eq!(v.letter_ink_span(4, 5, 0.7, 0), v.letter_ink_over(4, 5, 0.7));
+        let mut s = TypoState::default();
+        let typos = Typos::new().word(1, WordTypo::rest(Typo::REST).tail(3));
+        s.sync(0.0, &[1, 2], Some(&typos), false, f64::INFINITY);
+        assert_eq!((s.tail(1), s.tail(2)), (3, 0));
     }
 }

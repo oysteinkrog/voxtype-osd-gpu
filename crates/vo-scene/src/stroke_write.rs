@@ -289,6 +289,61 @@ impl Writing {
         Writing { word, strokes, glyph_begin, glyph_end, total: at, centres, pending, word_id: crate::display::NO_WORD }
     }
 
+    /// The part of this writing that writes glyphs `range` (SW-06), for a revision that
+    /// rewrites only the letters that changed: their strokes in the same order with the same
+    /// lifts, from pen distance 0, and every other glyph counted as written before the pen
+    /// starts.
+    pub fn glyphs(&self, range: std::ops::Range<usize>) -> Writing {
+        let n = self.word.glyphs.len();
+        let mut strokes = Vec::new();
+        let mut glyph_begin = vec![f32::NAN; n];
+        let mut glyph_end = vec![f32::NAN; n];
+        let mut base = vec![false; n];
+        let mut at = 0.0f32;
+        for (j, s) in self.strokes.iter().enumerate() {
+            if !range.contains(&s.glyph) {
+                continue;
+            }
+            let len = s.contour.length();
+            let next = self.strokes.get(j + 1).map_or(self.total, |x| x.start);
+            let lift = (next - s.start - len).max(0.0);
+            let i = s.glyph;
+            if glyph_begin[i].is_nan() {
+                glyph_begin[i] = at;
+            }
+            strokes.push(Stroke { start: at, ..s.clone() });
+            at += len + lift;
+            // A glyph is done at the end of its last base stroke, or of its last delayed one
+            // when it has only those.
+            if !s.delayed || !base[i] {
+                glyph_end[i] = at;
+            }
+            base[i] |= !s.delayed;
+        }
+        let mut last = 0.0f32;
+        for i in 0..n {
+            if !range.contains(&i) {
+                // Written already: full from the first moment.
+                (glyph_begin[i], glyph_end[i]) = (-1.0, -1.0);
+            } else if glyph_end[i].is_nan() {
+                // No strokes: done with the glyph before it.
+                (glyph_begin[i], glyph_end[i]) = (last, last);
+            } else {
+                last = glyph_end[i];
+            }
+        }
+        Writing {
+            word: self.word.clone(),
+            strokes,
+            glyph_begin,
+            glyph_end,
+            total: at,
+            centres: self.centres.clone(),
+            pending: self.pending,
+            word_id: self.word_id,
+        }
+    }
+
     /// The word id the drawn glyphs carry, so per-word tools (the reading-line envelope)
     /// follow them.
     pub fn word_id(mut self, id: u32) -> Writing {
@@ -1181,5 +1236,27 @@ mod tests {
         assert_eq!(pool_points(&corner, 5.0).len(), 1);
         // At the corner, not yet at the end.
         assert_eq!(pool_points(&corner, 12.0).len(), 2);
+    }
+
+    #[test]
+    fn a_glyph_range_writes_only_those_glyphs_from_the_start() {
+        let fonts = FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let shaped = ShapedLayout::new(fonts.clone()).layout("swiss", &TextStyle::new(id, 40.0, 48.0), None);
+        let word = WordOutline::new(&fonts, &shaped, 40.0, Point::ZERO);
+        let whole = Writing::with_source(&fonts, "swiss", word, 6.0, StrokeSource::FontNow);
+        let last = whole.glyphs(4..5);
+        assert!(last.strokes().all(|s| s.glyph == 4));
+        assert_eq!(last.strokes().count(), whole.strokes().filter(|s| s.glyph == 4).count());
+        assert_eq!(last.strokes().next().map(|s| s.start), Some(0.0));
+        let own: f32 = whole.strokes().filter(|s| s.glyph == 4).map(|s| s.contour.length()).sum();
+        assert!(last.length() >= own && last.length() < 0.5 * whole.length(), "{} of {}", last.length(), whole.length());
+        // The other glyphs count as written from the start; the last is not.
+        assert!(last.glyph_end[..4].iter().all(|e| *e < 0.0));
+        assert!(last.glyph_end[4] > 0.0);
+        // The whole range is the whole writing.
+        let all = whole.glyphs(0..5);
+        assert_eq!(all.length(), whole.length());
+        assert_eq!(all.glyph_end, whole.glyph_end);
     }
 }
