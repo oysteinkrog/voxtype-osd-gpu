@@ -21,8 +21,9 @@ use std::path::PathBuf;
 const N: usize = 256;
 
 /// The tiles, in the order of their channels in the renderer's tile texture.
-const TILES: [(&str, fn() -> Vec<f64>); 4] =
-    [("paper", paper), ("fabric", fabric), ("rubber", rubber), ("film-grain", film_grain)];
+type Make = fn() -> Vec<f64>;
+
+const TILES: [(&str, Make); 4] = [("paper", paper), ("fabric", fabric), ("rubber", rubber), ("film-grain", film_grain)];
 
 /// SplitMix64: a small, fixed random source.
 struct Rng(u64);
@@ -90,9 +91,9 @@ fn dab(px: &mut [f64], x: f64, y: f64, r: f64, v: f64) {
 }
 
 /// A 3 x 3 blur that wraps, `times` over.
-fn blur(px: &mut Vec<f64>, times: usize) {
+fn blur(px: &mut [f64], times: usize) {
     for _ in 0..times {
-        let src = px.clone();
+        let src = px.to_vec();
         for y in 0..N {
             for x in 0..N {
                 let mut sum = 0.0;
@@ -109,7 +110,7 @@ fn blur(px: &mut Vec<f64>, times: usize) {
 
 fn paper() -> Vec<f64> {
     let mut px = field(|x, y| fbm(x, y, &[(4, 0.45), (8, 0.3), (32, 0.15), (128, 0.1)], 11));
-    let mut r = Rng(0x7061_7065_72);
+    let mut r = Rng(0x0070_6170_6572);
     for _ in 0..1400 {
         let (mut x, mut y) = (r.unit() * N as f64, r.unit() * N as f64);
         let mut angle = r.unit() * std::f64::consts::TAU;
@@ -164,7 +165,7 @@ fn rubber() -> Vec<f64> {
 }
 
 fn film_grain() -> Vec<f64> {
-    let mut r = Rng(0x6772_6169_6e);
+    let mut r = Rng(0x0067_7261_696e);
     // Three uniforms a pixel sum to a rough bell curve; one blur clumps it like silver grain.
     let mut px: Vec<f64> = (0..N * N).map(|_| r.unit() + r.unit() + r.unit()).collect();
     blur(&mut px, 1);
