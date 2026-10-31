@@ -122,3 +122,52 @@ fn the_reading_line_keeps_its_envelope() {
         }
     }
 }
+
+/// No two letters of a revised word ever overlap: a case change ("open" to "Open") makes
+/// the new letter wider than the old, and the new letter waits, unseen, while the kept
+/// letters after it slide out of its place, so they never run over it. Checked in every frame of the
+/// revision; the ghost of a removed letter is left out (it sinks under the new letter by
+/// design), which is why each case removes only letters its new text does not have. A
+/// word that keeps no letter crossfades in place, old over new, so every case keeps some.
+#[test]
+fn letters_of_a_revised_word_never_overlap() {
+    use vo_scene::text::TextLayout;
+    let layout = ShapedLayout::new({
+        let fonts = FontRegistry::new();
+        fonts.add_file(&test_font_path()).unwrap();
+        fonts
+    });
+    let style = TextStyle::new(0, SIZE, 26.0);
+    for (old, new, gone) in [("open", "Open", "o"), ("cats", "Cats", "c"), ("nice", "Nice", "n")] {
+        let laid = layout.layout(new, &style, None);
+        let ghosts = layout.layout(gone, &style, None);
+        let advance = |glyph: u32| {
+            let i = laid.glyphs.iter().position(|g| g.glyph == glyph).unwrap();
+            laid.glyphs.get(i + 1).map_or(laid.size.w, |n| n.pos.x) - laid.glyphs[i].pos.x
+        };
+        let mut s = scene();
+        s.apply(view(&words(&[(1, "and"), (2, old), (3, "then")])), 0.0);
+        s.sample(1.0);
+        s.apply(view(&words(&[(1, "and"), (2, new), (3, "then")])), 1.0);
+        for f in 0..40 {
+            let mut drawn: Vec<GlyphInstance> = of(&s.sample(1.0 + f as f64 / 120.0), 2)
+                .into_iter()
+                .filter(|g| !ghosts.glyphs.iter().any(|h| h.glyph == g.glyph))
+                .collect();
+            // A new letter may wait, unseen, for the kept ones to leave its place; by the
+            // end every letter shows.
+            if f == 39 {
+                assert_eq!(drawn.len(), laid.glyphs.len(), "{new} at the end");
+            }
+            drawn.sort_by(|a, b| a.pos.x.total_cmp(&b.pos.x));
+            for p in drawn.windows(2) {
+                let end = p[0].pos.x + advance(p[0].glyph);
+                assert!(
+                    p[1].pos.x >= end - 0.5,
+                    "\"{old}\" to \"{new}\" frame {f}: a letter at {:.1} starts inside one that ends at {end:.1}",
+                    p[1].pos.x
+                );
+            }
+        }
+    }
+}

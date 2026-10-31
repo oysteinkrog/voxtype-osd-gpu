@@ -998,7 +998,15 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
         // The other words on the row, while they show.
         let others: Vec<&FlowWord> = next.iter().filter(|q| q.id != me.id && q.line == me.line).collect();
         let row_settles = others.iter().map(|q| q.x.settled_at().max(q.width.settled_at())).fold(t, f64::max);
+        // The word's own kept letters, which slide to their new places in it: a wider new
+        // letter ("open" to "Open") waits for them too, or they run over it.
+        let kept: Vec<(Channel, f32)> = o.iter().filter(|g| g.born < t).map(|g| (g.x.clone(), g.advance)).collect();
+        let kept_settle = kept.iter().map(|k| k.0.settled_at()).fold(t, f64::max);
+        let row_settles = row_settles.max(kept_settle);
         for g in o.iter_mut().filter(|g| g.born >= t) {
+            // A letter that arrives in place (the palimpsest's) waits for its word's kept
+            // letters; one that rolls in from below (`CaseChange::Roll`) passes under them.
+            let in_place = g.rise.value(t).abs() < 0.01;
             // Whether the glyph, `d` seconds into its own enter, keeps clear at `at`.
             let clear = |at: f64, d: f64| {
                 let own = t + d;
@@ -1009,17 +1017,25 @@ fn hold_new_glyphs(next: &mut [FlowWord], ghosts: &[Ghost], line_height: f32, ga
                 let mid = me.x.value(at) + g.x.value(at) + half;
                 let (a, b) = (mid - half * g.scale.value(own), mid + half * g.scale.value(own));
                 let row = me.y.value(at) + me.roll.value(at);
-                !others.iter().any(|q| {
-                    let x = q.x.value(at);
-                    x < b + gap
-                        && x + q.width.value(at) + gap > a
-                        && q.glyphs.iter().any(|f| f.opacity.value(at) > SEEN)
-                }) && !ghosts.iter().any(|h| {
-                    h.word != me.id && h.opacity.value(at) > GHOST_GONE && {
-                        let (x, y) = ghost_pen(h, at);
-                        (y - row).abs() < near && x < b + gap && x + h.advance as f64 + gap > a
-                    }
-                })
+                let word_x = me.x.value(at);
+                // Letters of one word touch, so only a real overlap counts.
+                !(in_place
+                    && kept.iter().any(|(x, w)| {
+                        let x = word_x + x.value(at);
+                        x < b - 0.5 && x + *w as f64 > a + 0.5
+                    }))
+                    && !others.iter().any(|q| {
+                        let x = q.x.value(at);
+                        x < b + gap
+                            && x + q.width.value(at) + gap > a
+                            && q.glyphs.iter().any(|f| f.opacity.value(at) > SEEN)
+                    })
+                    && !ghosts.iter().any(|h| {
+                        h.word != me.id && h.opacity.value(at) > GHOST_GONE && {
+                            let (x, y) = ghost_pen(h, at);
+                            (y - row).abs() < near && x < b + gap && x + h.advance as f64 + gap > a
+                        }
+                    })
             };
             // Its enter, started `wait` later, keeps clear until it settles and the row has
             // stopped moving.
