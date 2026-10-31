@@ -123,6 +123,21 @@ fn a_node_without_presence_goes_at_once() {
 }
 
 #[test]
+fn a_node_with_an_empty_exit_goes_at_once_while_it_still_moves() {
+    // It slides on a slow spring when it is dropped: an empty exit must not wait for that.
+    let mut scene = Scene::new();
+    let slow = |x| dot("a", x).motion(Prop::Offset, Motion::Spring(Spring::critical_to_98(1.0)));
+    let gone = |x| slow(x).presence(Transition::fade(), Transition::NONE);
+    scene.apply(root(vec![gone(0.0)]), 0.0);
+    let id = scene.find(&["root", "a"]).unwrap();
+    scene.sample(2.0);
+    scene.apply(root(vec![gone(100.0)]), 2.0);
+    scene.apply(root(vec![]), 2.1);
+    assert!(!scene.contains(id));
+    assert_eq!(scene.sample(2.1).shapes.len(), 0);
+}
+
+#[test]
 fn a_leaving_node_that_comes_back_keeps_its_id() {
     let fading = || dot("toast", 0.0).presence(Transition::fade(), Transition::fade());
     let mut scene = Scene::new();

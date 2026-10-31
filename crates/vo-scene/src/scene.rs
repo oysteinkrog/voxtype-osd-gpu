@@ -9,7 +9,8 @@
 //!
 //! Presence: a node with `.presence(enter, exit)` starts at `enter` and springs to its
 //! targets. When the view drops it, it springs to `exit` and stays, out of layout, until that
-//! settles. Without `.presence` a dropped node goes at once.
+//! settles. Without `.presence`, or with an empty exit (`Transition::NONE`), a dropped node
+//! goes at once.
 
 use slotmap::{new_key_type, Key as _, KeyData, SlotMap};
 use taffy::prelude::AvailableSpace;
@@ -1630,6 +1631,12 @@ impl<M> Scene<M> {
         }
         let Some((_, exit)) = n.presence else { return false };
         let exit = if n.reduced { exit.reduced() } else { exit };
+        // An empty exit is no exit: the node goes in this frame, not when its own motion
+        // and ambient loops settle, which kept a dropped line readable under the line
+        // moving into its place.
+        if exit.slots().next().is_none() {
+            return false;
+        }
         for (slot, v) in exit.slots() {
             n.set_target(slot, v, t, retention);
         }
