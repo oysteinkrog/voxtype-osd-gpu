@@ -38,6 +38,11 @@
 //! its letter at the glyph's stem width in the text colour lifted toward white, with a soft
 //! nib light in the accent at the pen, and lets each glyph's ink dry to nothing 180 ms after
 //! the pen leaves it. [`WriteStyle`] with [`Writing::draw`] stays the Hershey script look.
+//!
+//! A [`Nib`] (SW-05) makes the wet ink a broad pen's: each stroke is thinner where it runs
+//! along the nib's edge and full across it, and the word's voice presses it up to 15 %
+//! wider or lighter ([`Writing::draw_wet_voiced`]). Small pools of ink sit at stroke ends
+//! and at turns sharper than 60 degrees, and dry with their stroke.
 
 use std::sync::{Arc, OnceLock};
 
@@ -46,7 +51,7 @@ use crate::centreline::{self, GlyphCentre, Lookup};
 use crate::font::FontRegistry;
 use crate::geom::{Color, Point};
 use crate::glyph_morph::WordOutline;
-use crate::path::{Contour, StrokeStyle, WidthKnot};
+use crate::path::{Contour, StrokeStyle, VectorSeg, WidthKnot};
 
 const SCRIPT: &str = include_str!("../../../assets/hershey/scripts.jhf");
 
@@ -447,11 +452,48 @@ pub struct WetInk {
     /// itself; their ink rises from `ink_floor` to full as the pen finishes each glyph.
     pub type_ink: Color,
     pub ink_floor: f32,
+    /// A broad nib that sets the width by the stroke's direction and the voice (SW-05);
+    /// `None` for a round pen at the glyph's stem width.
+    pub pen: Option<Nib>,
+    /// Ink pools at stroke ends and sharp turns: dots this many times the stroke's width
+    /// there, drying with the stroke; 0 for none.
+    pub pool: f32,
+}
+
+/// A broad nib (SW-05). A stroke heading in direction `d` is `min + (1 - min) * |sin(d -
+/// angle)|` of the pen's width: thinnest along the nib's edge, full across it. Directions
+/// are angles on the page with y up, so 30 degrees is the edge rising to the right, as a
+/// right-handed pen holds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Nib {
+    /// The nib's edge, in radians.
+    pub angle: f32,
+    /// The width share of a stroke along the edge.
+    pub min: f32,
+    /// How far the voice moves the width either way: 0.15 is 15 % wider for the loudest
+    /// voice and 15 % lighter for the quietest.
+    pub pressure_gain: f32,
+}
+
+impl Nib {
+    /// The wet-ink pen: its edge at 30 degrees, 55 % wide along it, 15 % pressure.
+    pub const INK: Nib = Nib { angle: std::f32::consts::FRAC_PI_6, min: 0.55, pressure_gain: 0.15 };
+
+    /// The width factor of a stroke heading `dir` radians (y up).
+    pub fn width(&self, dir: f32) -> f32 {
+        self.min + (1.0 - self.min) * (dir - self.angle).sin().abs()
+    }
+
+    /// The width factor of a `voice` from 0 (quiet) to 1 (loud); 0.5 presses neither way.
+    pub fn pressure(&self, voice: f32) -> f32 {
+        1.0 + self.pressure_gain * (2.0 * voice.clamp(0.0, 1.0) - 1.0)
+    }
 }
 
 impl WetInk {
     /// The text colour lifted 15 % toward white, drying over 180 ms, with a shine lifted
-    /// 60 % toward white and a 5 px nib light in `accent`. The type is not drawn.
+    /// 60 % toward white and a 5 px nib light in `accent`, written with the [`Nib::INK`] pen
+    /// and pools 1.3 times the stroke's width. The type is not drawn.
     pub fn new(text: Color, accent: Color) -> WetInk {
         let lift = |k: f32| {
             let l = |c: f32| c + k * (1.0 - c);
@@ -466,6 +508,8 @@ impl WetInk {
             sheen_color: lift(0.6),
             type_ink: Color::TRANSPARENT,
             ink_floor: 0.7,
+            pen: Some(Nib::INK),
+            pool: 1.3,
         }
     }
 
@@ -517,7 +561,14 @@ impl Writing {
     /// [`PenSchedule`]): written strokes at their wetness, the live one trimmed at the pen
     /// with the nib light there, a swept word's strokes rising glyph by glyph.
     pub fn draw_wet(&self, p: &mut Painter, t: f64, slot: &PenSlot, wet: &WetInk) {
+        self.draw_wet_voiced(p, t, slot, wet, 0.5);
+    }
+
+    /// [`Writing::draw_wet`] with the word's `voice`, 0 (quiet) to 1 (loud), pressing the
+    /// nib ([`Nib::pressure`]). Freeze it per word, so a word keeps its weight as it dries.
+    pub fn draw_wet_voiced(&self, p: &mut Painter, t: f64, slot: &PenSlot, wet: &WetInk, voice: f32) {
         let phase = slot.phase(t);
+        let press = wet.pen.map_or(1.0, |n| n.pressure(voice));
         if wet.type_ink.a > 0.0 {
             let glyph_k: Box<dyn Fn(usize) -> f32> = match phase {
                 PenPhase::Waiting => Box::new(|_| 0.0),
@@ -558,7 +609,9 @@ impl Writing {
                     if along <= 0.0 {
                         break;
                     }
-                    let piece = if along >= len { s.contour.clone() } else { s.contour.trim(0.0, along) };
+                    let c = nibbed(&s.contour, wet.pen, press);
+                    let piece = if along >= len { c.clone() } else { c.trim(0.0, along) };
+                    pools(p, &c, along, width, 1.0, wet);
                     self.wet_stroke(p, &piece, width, 1.0, wet);
                     if let (Some((at, _)), true) = (s.contour.at(along), wet.nib > 0.0) {
                         p.stroke(
@@ -570,7 +623,9 @@ impl Writing {
                 }
                 _ => {
                     if alpha[j] > 0.0 {
-                        self.wet_stroke(p, &s.contour, width, alpha[j], wet);
+                        let c = nibbed(&s.contour, wet.pen, press);
+                        pools(p, &c, f32::INFINITY, width, alpha[j], wet);
+                        self.wet_stroke(p, &c, width, alpha[j], wet);
                     }
                 }
             }
@@ -733,6 +788,81 @@ impl PenSchedule {
     /// The scene time after which nothing changes.
     pub fn until(&self) -> f64 {
         self.slots.iter().map(|s| s.end).fold(f64::NEG_INFINITY, f64::max)
+    }
+}
+
+/// The heading of a segment at its start and at its end, in radians with y up.
+fn headings(s: &VectorSeg) -> (f32, f32) {
+    let dir = |a: Point, b: Point| (a.y - b.y).atan2(b.x - a.x);
+    let near = |a: Point, b: Point| (a.x - b.x).abs() + (a.y - b.y).abs() < 1e-4;
+    let start = if near(s.p0, s.p1) { dir(s.p0, s.p2) } else { dir(s.p0, s.p1) };
+    let end = if near(s.p1, s.p2) { dir(s.p0, s.p2) } else { dir(s.p1, s.p2) };
+    (start, end)
+}
+
+/// Whether segment `b` carries on from `a` without a lift.
+fn joined(a: &VectorSeg, b: &VectorSeg) -> bool {
+    (a.p2.x - b.p0.x).abs() + (a.p2.y - b.p0.y).abs() < 1e-3
+}
+
+/// `c` with each segment end's width multiplied by `nib`'s factor for its heading and by
+/// `press`. Where two segments join, both take the mean of their two factors, so the width
+/// turns with the stroke instead of stepping. Without a nib, `c` as it is.
+fn nibbed(c: &Contour, nib: Option<Nib>, press: f32) -> Contour {
+    let Some(nib) = nib else { return c.clone() };
+    let heads: Vec<(f32, f32)> = c.segs.iter().map(headings).collect();
+    let mut out = c.clone();
+    for i in 0..out.segs.len() {
+        let mut f0 = nib.width(heads[i].0);
+        let mut f1 = nib.width(heads[i].1);
+        if i > 0 && joined(&c.segs[i - 1], &c.segs[i]) {
+            f0 = 0.5 * (f0 + nib.width(heads[i - 1].1));
+        }
+        if i + 1 < c.segs.len() && joined(&c.segs[i], &c.segs[i + 1]) {
+            f1 = 0.5 * (f1 + nib.width(heads[i + 1].0));
+        }
+        let s = &mut out.segs[i];
+        s.w = [s.w[0] * f0 * press, s.w[1] * f1 * press];
+    }
+    out
+}
+
+/// A turn sharper than this between joined segments gets an ink pool.
+const POOL_TURN: f32 = std::f32::consts::FRAC_PI_3;
+
+/// Where stroke `c` pools ink up to pen distance `upto` (its arc length), with the width
+/// factor there: at its start, at each turn sharper than 60 degrees the pen has passed, and
+/// at its end once reached.
+fn pool_points(c: &Contour, upto: f32) -> Vec<(Point, f32)> {
+    let (Some(first), Some(last)) = (c.segs.first(), c.segs.last()) else { return Vec::new() };
+    let mut out = vec![(first.p0, first.w[0])];
+    for pair in c.segs.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.s1 > upto {
+            break;
+        }
+        let turn = (headings(a).1 - headings(b).0).rem_euclid(std::f32::consts::TAU);
+        let turn = turn.min(std::f32::consts::TAU - turn);
+        if joined(a, b) && turn > POOL_TURN {
+            out.push((a.p2, a.w[1].max(b.w[0])));
+        }
+    }
+    if upto >= last.s1 {
+        out.push((last.p2, last.w[1]));
+    }
+    out
+}
+
+/// Draws the ink pools of stroke `c` up to `upto` ([`pool_points`]), each `wet.pool` times
+/// the stroke's width there (`stem` times the segment's factor), at `wetness`.
+fn pools(p: &mut Painter, c: &Contour, upto: f32, stem: f32, wetness: f32, wet: &WetInk) {
+    if wet.pool <= 0.0 || wetness <= 0.0 {
+        return;
+    }
+    let ink = wet.ink.fade(wetness);
+    for (at, w) in pool_points(c, upto) {
+        let dot = Contour::polyline(&[at, Point::new(at.x + 0.01, at.y)], false);
+        p.stroke(&dot, &StrokeStyle::solid(wet.pool * stem * w, ink));
     }
 }
 
@@ -1005,5 +1135,51 @@ mod tests {
         let (d, a) = w.pen_at(0.1 * t.contour.length() / w.length());
         assert_eq!(d, 0);
         assert!(a < 0.1 * t.contour.length() && a > 0.0);
+    }
+
+    #[test]
+    fn a_horizontal_stroke_at_a_30_degree_nib_is_thinner_than_a_vertical_one() {
+        let nib = Nib::INK;
+        let flat = Contour::polyline(&[Point::new(0.0, 0.0), Point::new(20.0, 0.0)], false);
+        let down = Contour::polyline(&[Point::new(0.0, 0.0), Point::new(0.0, 20.0)], false);
+        let (f, d) = (nibbed(&flat, Some(nib), 1.0), nibbed(&down, Some(nib), 1.0));
+        let want = |deg: f32| 0.55 + 0.45 * (deg.to_radians() - std::f32::consts::FRAC_PI_6).sin().abs();
+        let ratio = f.segs[0].w[0] / d.segs[0].w[0];
+        let formula = want(0.0) / want(90.0);
+        assert!(ratio < 1.0, "{ratio}");
+        assert!((ratio - formula).abs() <= 0.02 * formula, "{ratio} against {formula}");
+        // Pressure scales both ends, 15 % either way.
+        let loud = nibbed(&flat, Some(nib), nib.pressure(1.0));
+        assert!((loud.segs[0].w[0] / f.segs[0].w[0] - 1.15).abs() < 1e-5);
+        assert!((nib.pressure(0.0) - 0.85).abs() < 1e-6 && nib.pressure(0.5) == 1.0);
+        // No nib leaves the widths alone.
+        assert_eq!(nibbed(&flat, None, 1.3), flat);
+    }
+
+    #[test]
+    fn a_nibbed_stroke_turns_its_width_without_steps() {
+        let pts = [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(17.0, 7.0), Point::new(17.0, 17.0)];
+        let c = nibbed(&Contour::polyline(&pts, false), Some(Nib::INK), 1.0);
+        for pair in c.segs.windows(2) {
+            assert!((pair[0].w[1] - pair[1].w[0]).abs() < 1e-6, "{:?}", c.segs);
+        }
+    }
+
+    #[test]
+    fn ink_pools_at_the_ends_and_at_sharp_turns_only() {
+        let line = |pts: &[Point]| Contour::polyline(pts, false);
+        let p = Point::new;
+        let straight = line(&[p(0.0, 0.0), p(10.0, 0.0), p(20.0, 0.0)]);
+        assert_eq!(pool_points(&straight, f32::INFINITY).len(), 2);
+        // A 30 degree bend pools nowhere between; a right angle does.
+        let gentle = line(&[p(0.0, 0.0), p(10.0, 0.0), p(18.66, 5.0)]);
+        assert_eq!(pool_points(&gentle, f32::INFINITY).len(), 2);
+        let corner = line(&[p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]);
+        let all = pool_points(&corner, f32::INFINITY);
+        assert_eq!(all.iter().map(|x| x.0).collect::<Vec<_>>(), vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]);
+        // The pen half way along the first leg has pooled only at the start.
+        assert_eq!(pool_points(&corner, 5.0).len(), 1);
+        // At the corner, not yet at the end.
+        assert_eq!(pool_points(&corner, 12.0).len(), 2);
     }
 }

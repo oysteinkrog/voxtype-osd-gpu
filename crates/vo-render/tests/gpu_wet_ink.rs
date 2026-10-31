@@ -1,7 +1,7 @@
 //! A word half written in wet ink (SW-03), at scale 1 and 1.5: the pen on each glyph's own
 //! centre lines at its stem width, the text colour lifted toward white, the first letters
 //! already drying, the nib light in the accent, over the type at its ink floor, in Inter
-//! and Saira.
+//! and Saira. A loud and a quiet word written with the nib (SW-05) differ in stroke width.
 //!
 //! GPU test: `just test-gpu` runs it.
 
@@ -67,4 +67,49 @@ fn half_written_wet_ink_goldens() {
     let failures: Vec<String> =
         images.iter().filter_map(|img| support::check(img, Tolerance::default()).err()).collect();
     assert!(failures.is_empty(), "golden mismatch:\n{}", failures.join("\n"));
+}
+
+/// "writing" fully written and still wet, at `voice`, with no type and no shine, so only the
+/// wet strokes and their pools draw.
+fn written(fonts: &FontRegistry, font: u32, voice: f32) -> vo_scene::display::DisplayList {
+    let text = "writing";
+    let shaped = ShapedLayout::new(fonts.clone()).layout(text, &TextStyle::new(font, 44.0, 52.0), None);
+    let word = WordOutline::new(fonts, &shaped, 44.0, Point::new(12.0, 6.0));
+    let writing = Arc::new(Writing::with_source(fonts, text, word, 6.6, StrokeSource::FontNow));
+    let slot = PenSchedule::plan(PenParams::default(), &[(0.0, writing.length())]).slots()[0];
+    let wet = WetInk { sheen: 0.0, nib: 0.0, ..WetInk::new(Color::hex(0xffffff, 1.0), Color::hex(0xf59e0b, 1.0)) };
+    let t = slot.end;
+    let w = writing.clone();
+    let view = Element::<()>::panel("bg")
+        .size(W, H)
+        .fill(Color::hex(0x000000, 1.0))
+        .child(Element::canvas("pen", 0.0, move |_, _, p| w.draw_wet_voiced(p, t, &slot, &wet, voice)).size(W, H));
+    let mut scene: Scene<()> = Scene::new();
+    scene.set_viewport(0.0, Size::new(W, H), 1.0);
+    scene.apply(view, 0.0);
+    scene.sample(0.0)
+}
+
+/// The ink in an image: the sum of its red channel over 255, a pixel count weighted by
+/// coverage. Over the same strokes it grows with their mean width.
+fn ink(img: &Image) -> f64 {
+    img.px.chunks(4).map(|p| p[0] as f64 / 255.0).sum()
+}
+
+#[test]
+fn a_loud_word_writes_at_least_10_percent_wider_than_a_quiet_one() {
+    let gpu = support::gpu();
+    let fonts = FontRegistry::new();
+    let mut off = Offscreen::with_fonts(&gpu.device, &gpu.queue, fonts.clone());
+    for face in ["grotesk", "extra-condensed-bold"] {
+        let font = fonts.asset(face).unwrap();
+        let loud = render(&mut off, "loud", &written(&fonts, font, 1.0), 1.0);
+        let quiet = render(&mut off, "quiet", &written(&fonts, font, 0.0), 1.0);
+        let (a, b) = (ink(&loud), ink(&quiet));
+        eprintln!("{face}: loud {a:.0} quiet {b:.0} ratio {:.3}", a / b);
+        assert!(a >= 1.10 * b, "{face}: loud {a:.0} against quiet {b:.0}");
+        // The same scenario renders the same twice.
+        let again = render(&mut off, "loud", &written(&fonts, font, 1.0), 1.0);
+        assert!(again.px == loud.px, "{face}: a second render differs");
+    }
 }
