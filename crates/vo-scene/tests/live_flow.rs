@@ -748,10 +748,16 @@ fn word_boxes(list: &DisplayList) -> Vec<(u32, f32, f32, f32)> {
 /// As `capped`, but the app drops whole lines: while the text takes more than `lines`
 /// lines, every word of the first line goes.
 fn capped_by_lines(all: &[(u32, &str)], width: f32, lines: usize) -> Vec<Word> {
+    capped_lines(all, width, lines, true)
+}
+
+/// As `capped_by_lines`; with `inline` false the "…" hangs in the margin, as type and swiss
+/// draw it, so no word changes and the lines below keep their words.
+fn capped_lines(all: &[(u32, &str)], width: f32, lines: usize, inline: bool) -> Vec<Word> {
     let mut start = 0;
     loop {
         let mut shown = words(&all[start..]);
-        if start > 0 {
+        if inline && start > 0 {
             shown[0].text = format!("…{}", shown[0].text);
         }
         let mut probe = scene();
@@ -773,16 +779,17 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
     // first line along and the lines below rewrap. The old copies of the dropped and
     // rewrapped words and the reflowed lines never take the same pixels at the same time,
     // and no word draws past the column's right edge, whether the cap drops words one at a
-    // time or whole lines.
+    // time or whole lines, with the "…" on the first word or in the margin.
     let text = "open the configuration file and set the popup theme to swiss so the dictation \
                 window shows the live words in the middle of the screen with the waveform above \
                 them then press the key again to stop and let the final pass punctuation land";
     let all: Vec<(u32, &str)> = text.split(' ').enumerate().map(|(i, w)| (i as u32 + 1, w)).collect();
-    for by_lines in [false, true] {
+    for (by_lines, inline) in [(false, true), (true, true), (true, false)] {
         let mut s = scene();
         for n in 1..=all.len() {
             let t = n as f64 * 0.3;
-            let shown = if by_lines { capped_by_lines(&all[..n], 300.0, 5) } else { capped(&all[..n], 300.0, 5) };
+            let shown =
+                if by_lines { capped_lines(&all[..n], 300.0, 5, inline) } else { capped(&all[..n], 300.0, 5) };
             s.apply(view(&shown, Some(300.0), false), t);
             for k in 0..36 {
                 let at = t + k as f64 / 120.0;
@@ -791,7 +798,7 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
                 for b in &boxes {
                     assert!(
                         b.2 <= 302.0,
-                        "{n} words (whole lines {by_lines}) at +{:.3}: word {} ends at {:.1}",
+                        "{n} words (whole lines {by_lines}, inline {inline}) at +{:.3}: word {} ends at {:.1}",
                         at - t,
                         b.0,
                         b.2
@@ -804,7 +811,7 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
                         let dy = (a.3 + 4.0).min(b.3 + 4.0) - (a.3 - 14.0).max(b.3 - 14.0);
                         assert!(
                             dx <= 2.0 || dy <= 2.0,
-                            "{n} words (whole lines {by_lines}) at +{:.3}: word {} at ({:.1}..{:.1}, {:.1}) over \
+                            "{n} words (whole lines {by_lines}, inline {inline}) at +{:.3}: word {} at ({:.1}..{:.1}, {:.1}) over \
                              word {} at ({:.1}..{:.1}, {:.1})",
                             at - t,
                             a.0,
