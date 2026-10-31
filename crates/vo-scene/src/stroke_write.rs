@@ -601,8 +601,8 @@ pub enum Pen {
     /// A light pen: a round line in the text colour with a glow that settles, and a nib
     /// light in the accent trailing 40 ms behind it. No pools, no shine.
     Light,
-    /// A beam: the spot as the nib, a dim round line with an afterglow that fades over
-    /// 0.3 s, so the word never reads bold, no shine or pools. A swept word shows no ink, so the look's own beam (or the
+    /// A beam: the spot as the nib, a faint round line (30 % of the text colour, no glow)
+    /// that fades over 0.3 s, so the word never reads bold, no shine or pools. A swept word shows no ink, so the look's own beam (or the
     /// type) brings it in.
     Phosphor,
     /// Script: the Hershey script strokes over the type in wet ink, with ink that bleeds
@@ -618,13 +618,13 @@ impl Pen {
             Pen::Ink => ink,
             Pen::Light => WetInk { nib: 7.0, sheen: 0.0, pen: None, pool: 0.0, glow: 4.0, trail_secs: 0.04, ..ink },
             Pen::Phosphor => WetInk {
-                ink: text.fade(0.45),
+                ink: text.fade(0.3),
                 nib: 4.0,
                 dry_secs: 0.3,
                 sheen: 0.0,
                 pen: None,
                 pool: 0.0,
-                glow: 1.5,
+                glow: 0.0,
                 swept_ink: false,
                 ..ink
             },
@@ -1198,7 +1198,7 @@ mod tests {
         assert!(beam.until(&written) > ink.until(&written) + 0.1);
         assert!(w.wetness(&written, 1.42, &beam).iter().any(|&a| a > 0.0));
         assert!(w.wetness(&written, 1.42, &ink).iter().all(|&a| a == 0.0));
-        assert!(beam.ink.a < 0.5);
+        assert!(beam.ink.a <= 0.3 && beam.glow == 0.0);
         // The light pen trails 40 ms and glows; neither ink pen does.
         let light = Pen::Light.wet(text, accent);
         assert!((light.trail_secs - 0.04).abs() < 1e-9 && light.glow > 0.0 && light.pen.is_none());
