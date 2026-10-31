@@ -96,7 +96,8 @@ fn live_words_enter_and_change_with_their_own_motion() {
     s.apply(view(&[w(1, "open"), w(3, "configuration")]), 3.0);
     assert_eq!(alpha_of(&s, 3.0, 3), 0.5);
     assert_eq!(alpha_of(&s, 3.0, 1), 1.0);
-    // A dropped word fades out where it was (crate::flow), then is gone.
-    assert!(alpha_of(&s, 3.05, 2) > 0.0 && alpha_of(&s, 3.05, 2) < 1.0);
+    // A dropped word whose place the next word takes goes at once (crate::flow): fading, it
+    // would be read under that word.
+    assert!(alpha_of(&s, 3.05, 2).is_nan());
     assert!(s.sample(4.0).glyphs.iter().all(|g| g.word != 2));
 }

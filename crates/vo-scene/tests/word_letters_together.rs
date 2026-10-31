@@ -224,3 +224,46 @@ fn under_reduced_motion_a_rewrapped_word_is_never_faint() {
         assert_eq!(faint, 0, "at {t:.3} s");
     }
 }
+
+#[test]
+fn under_full_motion_a_rewrap_never_shows_a_word_twice() {
+    let mut scene =
+        Scene::new().with_text(Box::new(ShapedLayout::new(fonts()))).with_default_motion(Motion::Spring(Spring::SOFT));
+    scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+    let long = "with the waveform above them then press the key again to stop and let the final pass";
+    scene.apply(view(&words(long), Align::Start), 0.0);
+    scene.sample(1.0);
+    let wider = long.replacen("with", "Wherewith", 1);
+    scene.apply(view(&words(&wider), Align::Start), 1.0);
+    assert_eq!(two_versions(&scene, 1.0), None);
+}
+
+#[test]
+fn a_removed_word_never_shows_under_the_word_that_takes_its_place() {
+    // "oh pen" heard again as "open": "oh" goes, and "open" (the old "pen") moves into its place.
+    let mut scene =
+        Scene::new().with_text(Box::new(ShapedLayout::new(fonts()))).with_default_motion(Motion::Spring(Spring::SOFT));
+    scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+    let w = |list: &[(u32, &str)]| list.iter().map(|&(id, t)| Word { id, text: t.into() }).collect::<Vec<_>>();
+    scene.apply(view(&w(&[(1, "oh"), (2, "pen"), (3, "the"), (4, "file")]), Align::Start), 0.0);
+    scene.sample(1.0);
+    scene.apply(view(&w(&[(2, "open"), (3, "the"), (4, "file")]), Align::Start), 1.0);
+    for i in 0..60 {
+        let t = 1.0 + i as f64 / 120.0;
+        let list = scene.sample(t);
+        let seen: Vec<_> = list.glyphs.iter().filter(|g| g.word != NO_WORD && g.color.a > READABLE).collect();
+        for (k, a) in seen.iter().enumerate() {
+            for b in &seen[k + 1..] {
+                assert!(
+                    a.word == b.word
+                        || (a.pos.x - b.pos.x).abs() > 0.3 * SIZE
+                        || (a.pos.y - b.pos.y).abs() > 0.5 * SIZE,
+                    "at {t:.3} s words {} and {} over each other at {:.0}",
+                    a.word,
+                    b.word,
+                    a.pos.x
+                );
+            }
+        }
+    }
+}

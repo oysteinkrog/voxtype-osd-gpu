@@ -1356,7 +1356,7 @@ impl Flow {
             let prev = old.iter().position(|o| o.id == w.id).map(|i| old.remove(i));
             let Some(p) = p else {
                 if let Some(o) = prev {
-                    self.ghost_word(&o, t, retention, reduced);
+                    self.ghost_word(&o, t, retention, !reduced);
                 }
                 continue;
             };
@@ -1504,15 +1504,15 @@ impl Flow {
                 o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
             } else if calm_drop && moved(&o, &p) {
-                // The old copy scrolls up with the block and fades out quickly; the new copy
-                // comes up with the block at its place in the new layout and fades in once the
-                // old one is gone. On the newest line it lands at rest and shows whole when its
-                // place is clear (reading-line envelope).
+                // The old copy goes at once and the new copy comes up with the block at its
+                // place in the new layout, whole: a fading old copy drew the old layout over
+                // the new one. On the newest line it lands at rest and shows whole when its
+                // place is clear (reading-line envelope), the old copy held until then.
                 let newest = p.line == stage.newest;
                 if newest {
                     handed.push((o.id, self.ghosts.len()));
                 }
-                self.ghost_word(&o, t, retention, reduced);
+                self.ghost_word(&o, t, retention, newest && !reduced);
                 dropped.push(o.id);
                 let dy = scroll.unwrap_or(0.0);
                 for g in self.ghosts.iter_mut().filter(|g| g.word == o.id) {
@@ -1526,13 +1526,8 @@ impl Flow {
                 } else {
                     make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS)
                 };
-                // Under reduced motion the old copy is gone at once: the new one shows whole.
-                let whole = newest || reduced;
                 for g in &mut o.glyphs {
-                    g.opacity = make.ch(if whole { 1.0 } else { 0.0 }, CROSSFADE, Rest::UNIT);
-                    if !whole {
-                        g.opacity.retarget(t + DROP_FADE_SECS, 1.0);
-                    }
+                    g.opacity = make.ch(1.0, CROSSFADE, Rest::UNIT);
                 }
                 if newest {
                     rewrapped.push(slot as usize);
@@ -1540,17 +1535,17 @@ impl Flow {
                 line_shift = Some((p.line, 0.0));
                 move_to(&mut o.roll, stage.roll, t, stage.travel, newest);
             } else if o.line != p.line && (front_drop || motion.rewrap == Rewrap::Fade) {
-                // A gliding word would cut across the lines it passes, so the word fades out
-                // where it is and in at its place,
-                // sliding there with the words before it on its new line. On the newest
-                // line the reader is on the word: it hands over in one frame instead, the
-                // old copy gone as the new one shows whole, so it is never drawn
-                // twice and never missing.
+                // A gliding word would cut across the lines it passes, so the word goes from
+                // where it is and shows at its place, sliding there with the words before it
+                // on its new line; a fading old copy would be a second readable copy. On the
+                // newest line the reader is on the word: it hands over in one frame, the old
+                // copy held until the new one shows whole, so it is never drawn twice and never
+                // missing.
                 let newest = p.line == stage.newest;
                 if newest {
                     handed.push((o.id, self.ghosts.len()));
                 }
-                self.ghost_word(&o, t, retention, reduced);
+                self.ghost_word(&o, t, retention, newest && !reduced);
                 if !reduced && !front_drop && scroll.is_none() {
                     let a = o.x.value(t);
                     left.push((o.id, o.line, a, a + o.width.value(t)));
@@ -1562,10 +1557,8 @@ impl Flow {
                 o.x = make.to(p.x - back, p.x, FLIP, Rest::PIXELS);
                 line_shift = Some((p.line, back));
                 o.y = make.ch(p.y, REWRAP, Rest::PIXELS);
-                // Under reduced motion the old copy is gone at once: the new one shows whole.
-                let from = if newest || reduced { 1.0 } else { 0.0 };
                 for g in &mut o.glyphs {
-                    g.opacity = make.to(from, 1.0, CROSSFADE, Rest::UNIT);
+                    g.opacity = make.ch(1.0, CROSSFADE, Rest::UNIT);
                 }
                 if !reduced {
                     rewrapped.push(slot as usize);
@@ -1599,7 +1592,13 @@ impl Flow {
                 self.leave(&o, t, motion.overflow, scroll.unwrap_or(0.0));
                 continue;
             }
-            self.ghost_word(&o, t, retention, reduced);
+            // A removed word fades where it is, unless a word of the new layout lands on its
+            // place: then it goes at once, so the old and new text are never both read there.
+            // One that leaves from the front scrolls up out of the text, fading.
+            let (a, b) = (o.x.value(t), o.x.value(t) + o.width.value(t));
+            let covered =
+                next.iter().any(|w| w.line == o.line && w.x.target() < b && w.x.target() + w.width.target() > a);
+            self.ghost_word(&o, t, retention, !reduced && (front.contains(&id) || !covered));
             if calm_drop {
                 dropped.push(id);
             }
@@ -2104,17 +2103,17 @@ impl Flow {
         }
     }
 
-    /// Leaves word `o` as it is drawn at `t` as ghosts that fade out where it is. Under
-    /// `reduced` motion there are none: the old copy goes in the frame the new layout shows,
-    /// since a fade with nothing moving reads as two layouts at once.
-    fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64, reduced: bool) {
+    /// Leaves word `o` as it is drawn at `t` as ghosts that fade out where it is, with `fade`.
+    /// Without, there are none: the old copy goes in the frame the new layout shows, since a
+    /// fading copy where new text lands reads as two layouts at once.
+    fn ghost_word(&mut self, o: &FlowWord, t: f64, retention: f64, fade: bool) {
         let at = (o.x.value(t) as f32, o.y.value(t) as f32 + o.roll.value(t) as f32);
         for g in self.ghosts.iter_mut().filter(|g| g.word == o.id && g.fixed.is_none()) {
             let k = if g.width > 0.0 { o.width.value(t) as f32 / g.width } else { 1.0 };
             g.x *= k;
             g.fixed = Some(at);
         }
-        if reduced {
+        if !fade {
             return;
         }
         let s = stretch(o, t);
