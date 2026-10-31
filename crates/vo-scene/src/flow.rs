@@ -2179,10 +2179,16 @@ impl Flow {
 
     /// The caret bar at `t` in the text box's space, its colour if set, and its opacity.
     pub fn caret(&self, t: f64) -> Option<(Rect, Option<Color>, f32)> {
-        let (x, y, style, [w, up, down]) = self.caret.as_ref()?;
+        let (cx, cy, style, [w, up, down]) = self.caret.as_ref()?;
         let alpha = caret_alpha(t - self.arrived);
         let roll = self.words.last().map_or(0.0, |w| w.roll.value(t) as f32 + self.opened(w.line, t));
-        let (x, y) = (x.value(t) as f32, y.value(t) as f32 + roll);
+        let (mut x, y) = (cx.value(t) as f32, cy.value(t) as f32 + roll);
+        // Never inside the last word as it is drawn: on a centred line the word and its line
+        // still slide to the new middle after the caret took the new end at rest.
+        if let Some(last) = self.words.last().filter(|l| (l.y.target() - cy.target()).abs() < 0.5) {
+            let edge = last.x.value(t) as f32 + self.magnet_snap(last, t) + last.width.target() as f32;
+            x = x.max(edge + style.gap);
+        }
         let x = x + self.bell_caret_dx(x, t);
         Some((Rect::new(x, y - up, *w, up + down), style.color, alpha))
     }
