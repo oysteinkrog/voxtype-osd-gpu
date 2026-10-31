@@ -315,7 +315,13 @@ impl DepthStack {
         let layer = if held.is_some() { layer.motion(Prop::Position, motion) } else { layer };
         // A new reading line is readable in the frame it arrives: it rises at most 3 px
         // and starts at 70 % ink (rule 1).
-        let enter = if reduced { Transition::NONE } else { Transition::fade().opacity(0.7).offset(0.0, 3.0) };
+        // A sheet that shows at a deeper place (a whole relayout) does the same from its own
+        // place and ink, so the new stack does not fan out from the newest sheet's spot.
+        let enter = if reduced {
+            Transition::NONE
+        } else {
+            Transition::fade().opacity(0.7 * p.ink).offset(p.offset.0, p.offset.1 + 3.0)
+        };
         // A sheet leaves in one frame. A line pushed past the depth has faded to no ink by
         // then; a sheet that goes while it still shows is a whole relayout (the final pass),
         // where a fading old stack would overprint the new one at the same places.
@@ -395,7 +401,19 @@ mod tests {
         scene.apply(view(&s, &["a", "b", "c"], false), 0.0);
         scene.sample(1.0);
         let old: Vec<_> = ["a", "b", "c"].iter().map(|k| scene.find(&["stack", k]).unwrap()).collect();
+        let rest: Vec<_> = old.iter().map(|&id| covers(&scene.sampled(id, 1.0).unwrap())).collect();
         scene.apply(view(&s, &["x", "y", "z"], false), 1.0);
+        // The new sheets show at their own places, not fanned out from the newest one's.
+        for n in 0..30 {
+            let t = 1.0 + n as f64 / 30.0;
+            for (k, r) in ["x", "y", "z"].iter().zip(&rest) {
+                let b = covers(&scene.sampled(scene.find(&["stack", k]).unwrap(), t).unwrap());
+                assert!(
+                    (b.1 - r.1).abs() <= 4.0 && (b.3 - r.3).abs() <= 4.0,
+                    "frame {n}: {k} at {b:?}, rests at {r:?}"
+                );
+            }
+        }
         for n in 0..30 {
             let t = 1.0 + n as f64 / 30.0;
             scene.sample(t);
