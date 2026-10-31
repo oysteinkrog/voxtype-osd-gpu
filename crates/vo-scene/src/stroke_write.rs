@@ -43,6 +43,11 @@
 //! along the nib's edge and full across it, and the word's voice presses it up to 15 %
 //! wider or lighter ([`Writing::draw_wet_voiced`]). Small pools of ink sit at stroke ends
 //! and at turns sharper than 60 degrees, and dry with their stroke.
+//!
+//! [`Pen`] (SW-08) names the pens a look picks from: `Ink` (the wet ink above), `Light` (a
+//! round line with a glow that settles and a 40 ms trail of nib light), `Phosphor` (a beam
+//! spot with a 0.6 s afterglow, leaving swept words to the look's own beam) and `Script`
+//! (the Hershey strokes in wet ink with ink bleeding into larger pools).
 
 use std::sync::{Arc, OnceLock};
 
@@ -513,6 +518,63 @@ pub struct WetInk {
     /// Ink pools at stroke ends and sharp turns: dots this many times the stroke's width
     /// there, drying with the stroke; 0 for none.
     pub pool: f32,
+    /// A glow this many px around each wet stroke in `nib_color`, settling as the stroke
+    /// dries; 0 for none.
+    pub glow: f32,
+    /// A light trail behind the nib: the last this-many seconds of the live stroke in
+    /// `nib_color`; 0 for none.
+    pub trail_secs: f64,
+    /// Whether a swept word shows wet ink. A look that sweeps words in its own way (a
+    /// beam) sets it false.
+    pub swept_ink: bool,
+}
+
+/// The named pens a look picks from (SW-08): each a [`WetInk`] in the look's text and
+/// accent colours, and where its strokes come from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pen {
+    /// Wet ink with the [`Nib::INK`] pen at 30 degrees ([`WetInk::new`]).
+    #[default]
+    Ink,
+    /// A light pen: a round line in the text colour with a glow that settles, and a nib
+    /// light in the accent trailing 40 ms behind it. No pools, no shine.
+    Light,
+    /// A beam: the spot as the nib, a round line with an afterglow that fades over
+    /// 0.6 s, no shine or pools. A swept word shows no ink, so the look's own beam (or the
+    /// type) brings it in.
+    Phosphor,
+    /// Script: the Hershey script strokes over the type in wet ink, with ink that bleeds
+    /// into larger pools at stroke ends and turns.
+    Script,
+}
+
+impl Pen {
+    /// This pen's wet ink for `text` with the nib light in `accent`.
+    pub fn wet(self, text: Color, accent: Color) -> WetInk {
+        let ink = WetInk::new(text, accent);
+        match self {
+            Pen::Ink => ink,
+            Pen::Light => WetInk { nib: 7.0, sheen: 0.0, pen: None, pool: 0.0, glow: 4.0, trail_secs: 0.04, ..ink },
+            Pen::Phosphor => WetInk {
+                ink: text,
+                nib: 4.0,
+                dry_secs: 0.6,
+                sheen: 0.0,
+                pen: None,
+                pool: 0.0,
+                glow: 3.0,
+                swept_ink: false,
+                ..ink
+            },
+            Pen::Script => WetInk { pool: 1.8, ..ink },
+        }
+    }
+
+    /// Whether the strokes are the Hershey script's rather than the glyph's own centre
+    /// lines.
+    pub fn script(self) -> bool {
+        self == Pen::Script
+    }
 }
 
 /// A broad nib (SW-05). A stroke heading in direction `d` is `min + (1 - min) * |sin(d -
@@ -565,6 +627,9 @@ impl WetInk {
             ink_floor: 0.7,
             pen: Some(Nib::INK),
             pool: 1.3,
+            glow: 0.0,
+            trail_secs: 0.0,
+            swept_ink: true,
         }
     }
 
@@ -583,6 +648,9 @@ impl Writing {
             let x = ((t - from) / wet.dry_secs.max(1e-6)).clamp(0.0, 1.0) as f32;
             1.0 - x * x * (3.0 - 2.0 * x)
         };
+        if slot.swept && !wet.swept_ink {
+            return vec![0.0; self.strokes.len()];
+        }
         if slot.swept {
             let n = self.word.glyphs.len().max(1) as f32;
             let k = (((t - slot.start) / (slot.end - slot.start).max(1e-9)) as f32).clamp(0.0, 1.0);
@@ -668,6 +736,15 @@ impl Writing {
                     let piece = if along >= len { c.clone() } else { c.trim(0.0, along) };
                     pools(p, &c, along, width, 1.0, wet);
                     self.wet_stroke(p, &piece, width, 1.0, wet);
+                    if wet.trail_secs > 0.0 {
+                        // The pen's distance over the trail's time, at its average speed.
+                        let speed = self.total as f64 / (slot.end - slot.start).max(1e-6);
+                        let from = (along - (speed * wet.trail_secs) as f32).max(0.0);
+                        p.stroke(
+                            &c.trim(from, along),
+                            &StrokeStyle::solid(0.6 * width, wet.nib_color).glow(0.5 * wet.nib),
+                        );
+                    }
                     if let (Some((at, _)), true) = (s.contour.at(along), wet.nib > 0.0) {
                         p.stroke(
                             &Contour::polyline(&[at, Point::new(at.x + 0.01, at.y)], false),
@@ -689,6 +766,9 @@ impl Writing {
 
     /// One stroke of wet ink at `wetness`, with its shine.
     fn wet_stroke(&self, p: &mut Painter, c: &Contour, width: f32, wetness: f32, wet: &WetInk) {
+        if wet.glow > 0.0 {
+            p.stroke(c, &StrokeStyle::solid(width, wet.nib_color.fade(0.5 * wetness)).glow(wet.glow * wetness));
+        }
         p.stroke(c, &StrokeStyle::solid(width, wet.ink.fade(wetness)));
         if wet.sheen > 0.0 {
             p.stroke(c, &StrokeStyle::solid(width / 3.0, wet.sheen_color.fade(wet.sheen * wetness)));
@@ -1022,6 +1102,33 @@ mod tests {
     fn shaped_word(fonts: &FontRegistry, id: u32, text: &str) -> WordOutline {
         let shaped = ShapedLayout::new(fonts.clone()).layout(text, &TextStyle::new(id, 40.0, 48.0), None);
         WordOutline::new(fonts, &shaped, 40.0, Point::new(10.0, 20.0))
+    }
+
+    #[test]
+    fn each_pen_preset_keeps_its_own_ink() {
+        let fonts = FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let w = Writing::with_source(&fonts, "pen", shaped_word(&fonts, id, "pen"), 4.0, StrokeSource::FontNow);
+        let (text, accent) = (Color::hex(0xffffff, 1.0), Color::hex(0x22d3ee, 1.0));
+        let swept = PenSlot { arrive: 1.0, start: 1.0, end: 1.08, swept: true };
+        let written = PenSlot { swept: false, end: 1.2, ..swept };
+        let ink = Pen::Ink.wet(text, accent);
+        assert_eq!(ink, WetInk::new(text, accent));
+        // A swept word shows wet ink, except with the beam, which leaves the sweep to the look.
+        assert!(w.wetness(&swept, 1.08, &ink).iter().any(|&a| a > 0.0));
+        let beam = Pen::Phosphor.wet(text, accent);
+        assert!(w.wetness(&swept, 1.08, &beam).iter().all(|&a| a == 0.0));
+        // The beam's afterglow outlasts the ink's drying.
+        assert!(beam.until(&written) > ink.until(&written) + 0.3);
+        assert!(w.wetness(&written, 1.5, &beam).iter().any(|&a| a > 0.0));
+        assert!(w.wetness(&written, 1.5, &ink).iter().all(|&a| a == 0.0));
+        // The light pen trails 40 ms and glows; neither ink pen does.
+        let light = Pen::Light.wet(text, accent);
+        assert!((light.trail_secs - 0.04).abs() < 1e-9 && light.glow > 0.0 && light.pen.is_none());
+        assert!(ink.trail_secs == 0.0 && ink.glow == 0.0);
+        // Script writes the Hershey strokes with bigger pools.
+        assert!(Pen::Script.script() && !Pen::Ink.script());
+        assert!(Pen::Script.wet(text, accent).pool > ink.pool);
     }
 
     #[test]
