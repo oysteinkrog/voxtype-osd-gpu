@@ -84,9 +84,10 @@ pub const DRIFT_MAX: f32 = 2.0;
 /// `DRIFT_MAX / DRIFT_STEP` (8) times a second.
 const DRIFT_STEP: f64 = 0.25;
 /// Where the desktop's screen sits in the environment, in texture coordinates: across
-/// (0.5 faces the viewer) and down (0 is straight up).
-const SCREEN_U: [f32; 2] = [0.32, 0.68];
-const SCREEN_V: [f32; 2] = [0.3, 0.64];
+/// (0.5 faces the viewer) and down (0 is straight up). Every [`DesktopWindow`] starts inside
+/// it; a flat reflection maps this span onto its panel.
+pub const SCREEN_U: [f32; 2] = [0.32, 0.68];
+pub const SCREEN_V: [f32; 2] = [0.3, 0.64];
 /// The panel bar along the screen's foot, in texture rows.
 const PANEL_V: [f32; 2] = [0.64, 0.675];
 
