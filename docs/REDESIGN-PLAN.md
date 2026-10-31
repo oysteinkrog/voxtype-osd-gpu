@@ -147,6 +147,8 @@ Island with its idle motion (ucu: a 12 px glow at 35 % alpha orbits the capsule'
 
 Particles with its idle motion (unz: 30 dots at most 25 % alpha circle the text box at 10 degrees a second, 20 to 60 px out, and fade out 2 px before the newest line's band), measure build, popup 80bf770, 2026-10-31: recording 7.40 % CPU, 49.4 frames/s, GPU 0.078 / 0.083 ms; idle-open 2.19 % CPU, 15.4 frames/s, GPU 0.054 / 0.072 ms. The same run without the dots gave idle-open 2.43 %, so the difference is noise. Over the 2 % limit above and under the 3 % limit the idle beads use. The look's own GPU particles (strands, dust and the newest word's trail) already change pixels in the newest line's box between idle frames, so the bead's "none inside the newest line's box" holds for the new dots only.
 
+River with its effects and idle motion (7kg: kinetic-lattice, sound-sculpture and stroke-write on by default; 14 specks of light at most 40 % alpha drift along the ribbon at 30 px a second), measure build, popup b606fe6, 2026-10-31: recording 7.21 % CPU, 53.2 frames/s, GPU 0.257 / 0.261 ms; idle-open 2.44 % CPU, 15.4 frames/s, GPU 0.258 / 0.267 ms. Over the 2 % limit above and under the 3 % limit the idle beads use; the ribbon itself redraws while listening.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
