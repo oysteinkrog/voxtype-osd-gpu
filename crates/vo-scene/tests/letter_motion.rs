@@ -112,6 +112,27 @@ fn the_wave_moves_older_lines_and_never_the_newest() {
 }
 
 #[test]
+fn a_line_cut_does_not_turn_the_line_just_read() {
+    // A longer first word pushes the last word, said long ago, onto a new line: the line
+    // just read waits `WAVE_HOLD_SECS` before it joins the wave, as if a new word came.
+    let mut s = scene(false);
+    s.apply(view(&words("we read it"), WAVE), 0.0);
+    let rows = |l: &DisplayList| {
+        let mut ys: Vec<i32> = l.glyphs.iter().map(|g| g.pos.y.round() as i32).collect();
+        ys.sort();
+        ys.dedup();
+        ys.len()
+    };
+    assert_eq!(rows(&s.sample(1.0)), 1);
+    s.apply(view(&words("whereupon read it"), WAVE), 3.0);
+    assert_eq!(rows(&s.sample(3.3)), 2, "the cut makes a second line");
+    for k in 0..12 {
+        let t = 3.0 + k as f64 * WAVE_HOLD_SECS / 12.0;
+        assert!(s.sample(t).glyphs.iter().all(|g| g.xform.is_identity()), "turned at {t:.3} s");
+    }
+}
+
+#[test]
 fn digits_lean_with_pace_and_stand_up_in_a_pause() {
     assert_eq!(digit_lean(0.0, 0.0, false), 0.0);
     assert!((digit_lean(400.0, 0.0, false) - LEAN_MAX).abs() < 1e-6, "at most 12 degrees");

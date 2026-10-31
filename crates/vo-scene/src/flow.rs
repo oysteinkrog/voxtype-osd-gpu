@@ -690,6 +690,12 @@ struct FlowWord {
     roll: Channel,
     look_scale: Channel,
     look_opacity: Channel,
+    /// When the word's line stopped being the newest, for the line wave (EG-16); infinite
+    /// while it is the newest.
+    older_since: f64,
+    /// When the word first shows (a glyph over `SEEN_INK`), for the line wave; infinite while
+    /// it has not.
+    shown_at: f64,
 }
 
 /// A glyph's own motion: where it sits in its word, and its enter or change.
@@ -1092,6 +1098,24 @@ fn hold_new_glyphs(
     waits
 }
 
+/// Ink over which a glyph counts as shown, for the line wave.
+const SEEN_INK: f64 = 0.05;
+
+/// The first time from `t` that a glyph of `w` shows, within `REWRAP_WAIT_MAX` plus a second;
+/// infinite when none does by then (the next apply looks again).
+fn first_shown(w: &FlowWord, t: f64) -> f64 {
+    const STEP: f64 = 1.0 / 240.0;
+    let mut at = t;
+    while at <= t + REWRAP_WAIT_MAX + 1.0 {
+        let ink = w.ink.value(at) * w.look_opacity.value(at);
+        if w.glyphs.iter().any(|g| g.opacity.value(at) * ink > SEEN_INK) {
+            return at;
+        }
+        at += STEP;
+    }
+    f64::INFINITY
+}
+
 /// A rewrapped word shows once the words still sliding along its new line have left its
 /// place, so text never draws over text: the words a reflow pushes along a line start
 /// where the newcomer lands. On the newest line it then shows whole, in the frame its old
@@ -1423,6 +1447,8 @@ impl Flow {
                     roll: make.ch(stage.roll, FLIP, Rest::PIXELS),
                     look_scale: make.ch(stage.look(p.line).scale, FLIP, Rest::UNIT),
                     look_opacity: make.ch(stage.look(p.line).opacity, FLIP, Rest::UNIT),
+                    older_since: f64::INFINITY,
+                    shown_at: f64::INFINITY,
                 });
                 if let Some(o) = next.last_mut() {
                     settle(o, true, motion, &make, reduced);
@@ -1618,6 +1644,17 @@ impl Flow {
         }
         self.words = next;
         self.index = index;
+        let newest = self.words.last().map(|w| w.line);
+        for w in &mut self.words {
+            if Some(w.line) == newest {
+                w.older_since = f64::INFINITY;
+            } else if w.older_since == f64::INFINITY {
+                w.older_since = t;
+            }
+            if w.shown_at > t {
+                w.shown_at = first_shown(w, t);
+            }
+        }
         self.update_margin(t, motion.margin, reduced);
         self.update_bell(t, motion.bell, width, reduced);
         self.ghosts.retain(|g| g.opacity.target() > 0.0 || g.opacity.settled_at() > t);
@@ -2166,13 +2203,15 @@ impl Flow {
             xform.skew_deg = letter_motion::italic_skew(arrived, t);
         }
         if m.wave && !newest {
-            // The line eases in from when the line after it started, so it never jumps.
-            let next = self
-                .words
-                .iter()
-                .filter(|o| o.line > w.line)
-                .flat_map(|o| o.glyphs.iter().map(|g| g.born))
-                .fold(f64::INFINITY, f64::min);
+            // The line eases in from when it stopped being the newest, so it never jumps. Not
+            // from when the words after it were born: at a cut, words said long ago wrap onto
+            // a new line, and the line just read would start the wave in full while still read.
+            // And not before a word of a newer line shows: a look may hold the new line back,
+            // and until it shows this line is still the one read.
+            let older =
+                self.words.iter().filter(|o| o.line == w.line).map(|o| o.older_since).fold(f64::INFINITY, f64::min);
+            let shown = self.words.iter().filter(|o| o.line > w.line).map(|o| o.shown_at).fold(f64::INFINITY, f64::min);
+            let next = older.max(shown);
             let k = letter_motion::wave_share(next, t);
             if k > 0.0 {
                 let (wy, turn) = letter_motion::wave(w.x.target() as f32 + g.x.target() as f32, t);

@@ -12,8 +12,8 @@
 //!   [`ITALIC_SKEW`] degrees and straightens over [`ITALIC_SECS`].
 //! - Wave (`LetterMotions::wave`): glyphs of the older lines, never the newest, ride
 //!   `y = A sin(kx - wt)` with `A` at most [`WAVE_AMP`] px, turned to follow the slope. A
-//!   line eases into the wave over [`WAVE_EASE_SECS`], [`WAVE_HOLD_SECS`] after the line
-//!   after it starts.
+//!   line eases into the wave over [`WAVE_EASE_SECS`], [`WAVE_HOLD_SECS`] after it stops
+//!   being the newest line.
 //! - Lean ([`digit_lean`]): digits of a counter label lean forward with the words per
 //!   minute, up to [`LEAN_MAX`] degrees, and spring back upright in a pause. For labels, not
 //!   live text.
@@ -113,8 +113,8 @@ pub fn italic_skew(arrived: f64, t: f64) -> f32 {
     ITALIC_SKEW * (1.0 - ease_out(u))
 }
 
-/// How far into the wave a line is at `t` when the line after it started at `next`: 0 up
-/// to [`WAVE_HOLD_SECS`] later, then easing to 1 over [`WAVE_EASE_SECS`].
+/// How far into the wave a line is at `t` when it stopped being the newest line at `next`: 0
+/// up to [`WAVE_HOLD_SECS`] later, then easing to 1 over [`WAVE_EASE_SECS`].
 pub fn wave_share(next: f64, t: f64) -> f32 {
     let u = ((t - next - WAVE_HOLD_SECS) / WAVE_EASE_SECS).clamp(0.0, 1.0) as f32;
     u * u * (3.0 - 2.0 * u)
