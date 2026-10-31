@@ -135,6 +135,8 @@ Jarvis with its idle motion (qwq: ring segments counter-turning at 4, -3 and 2 d
 
 Swissfi with its idle motion (di6: the waveform's tick row drifts 1 px every 4 s, out to 4 px and back over 32 s, standing in for a background grid; a 40 px accent highlight runs along the baseline once every 7 s, standing in for an accent bar; both draw in the ticks canvas, which redraws while listening anyway), measure build, popup 3a92791, 2026-10-31: recording 7.20 % CPU, 52.0 frames/s, GPU 0.072 / 0.076 ms; idle-open 1.96 % CPU, 15.4 frames/s, GPU 0.056 / 0.061 ms. Idle-open was 2.68 % in the run before the change, so the difference is noise. All within the budget.
 
+Island with its idle motion (ucu: a 12 px glow at 35 % alpha orbits the capsule's edge once every 6 s, drawn under an opaque underlay so only its outer half shows; bars at their flat height rise by at most 1 px with the room's noise floor), measure build, popup d2b28c5, 2026-10-31: recording 6.39 % CPU, 51.6 frames/s, GPU 0.087 / 0.090 ms; idle-open 2.20 % CPU, 15.4 frames/s, GPU 0.049 / 0.052 ms. The same run without the motion gave idle-open 2.68 %, so the difference is noise. Over the 2 % limit above and under the 3 % limit the idle beads use.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
