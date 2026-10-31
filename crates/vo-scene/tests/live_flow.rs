@@ -746,13 +746,9 @@ fn word_boxes(list: &DisplayList) -> Vec<(u32, f32, f32, f32)> {
 }
 
 /// As `capped`, but the app drops whole lines: while the text takes more than `lines`
-/// lines, every word of the first line goes.
-fn capped_by_lines(all: &[(u32, &str)], width: f32, lines: usize) -> Vec<Word> {
-    capped_lines(all, width, lines, true)
-}
-
-/// As `capped_by_lines`; with `inline` false the "…" hangs in the margin, as type and swiss
-/// draw it, so no word changes and the lines below keep their words.
+/// lines, every word of the first line goes. With `inline` the "…" goes on the first word;
+/// without it the "…" hangs in the margin, as type and swiss draw it, so no word changes and
+/// the lines below keep their words.
 fn capped_lines(all: &[(u32, &str)], width: f32, lines: usize, inline: bool) -> Vec<Word> {
     let mut start = 0;
     loop {
