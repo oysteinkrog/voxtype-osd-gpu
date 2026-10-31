@@ -246,6 +246,9 @@ struct Live<A: App> {
     no_blur_logged: bool,
     /// When a capped-rate animation (glass at 30 fps, FX08) wants its next frame.
     paced: Option<f64>,
+    /// The step that request is for: `paced` asks half a refresh early, and a frame that
+    /// comes in that half refresh shows this step ([`Live::frame_time`]).
+    aim: Option<f64>,
     /// The time of the last main frame, for the app's frame pace (`App::frame_pace`).
     last_frame: Option<f64>,
     frames: u64,
@@ -507,6 +510,17 @@ impl<A: App> Live<A> {
         self.after_change(host);
     }
 
+    /// The time a main frame at host time `t` shows: the step it was asked for when it comes
+    /// in the half refresh before it. Without this, a vblank in that half refresh drew the
+    /// step on screen again and asked once more, so a 30 fps loop drew about 55 frames a
+    /// second in runs whose vblanks fell there (thch).
+    fn frame_time(&self, t: f64) -> f64 {
+        match self.aim {
+            Some(w) if t < w && w - t <= EARLY + 1e-6 => w,
+            _ => t,
+        }
+    }
+
     fn finish(&mut self, host: &mut dyn HostCtl) {
         if std::mem::replace(&mut self.finished, true) {
             return;
@@ -665,6 +679,7 @@ impl<A: App> Live<A> {
             }
         }
         self.paced = None;
+        self.aim = None;
         if moving {
             // Glass animates at a capped rate (FX08): a wake time after `t` is a timer, not
             // the next vblank.
@@ -678,7 +693,8 @@ impl<A: App> Live<A> {
                 Some(w) if w > t => {
                     // The frame comes at the first vblank after the request, so ask half a
                     // 60 Hz refresh early, or a 30 fps loop lands at 20 fps.
-                    let w = (w - 1.0 / 120.0).max(t);
+                    self.aim = Some(w);
+                    let w = (w - EARLY).max(t);
                     self.paced = Some(w);
                     let timer = self.driver().next_timer_at();
                     host.wake_at(Some(timer.map_or(w, |x| x.min(w))));
@@ -795,10 +811,11 @@ impl<A: App> HostApp for Live<A> {
             self.extra_frame(host, frame);
             return;
         }
+        let t = self.frame_time(frame.t);
         self.cpu = None;
         self.first_gpu_frame.get_or_insert(frame.frame);
-        if self.prepared.take() != Some(frame.t) {
-            self.sample(host, frame.id, frame.t);
+        if self.prepared.take() != Some(t) {
+            self.sample(host, frame.id, t);
         }
         let mut target = Target::from_texture(frame.texture.clone());
         self.renderer.as_mut().expect("GPU ready").render_at(&self.list, frame.scale, &mut target);
@@ -809,7 +826,7 @@ impl<A: App> HostApp for Live<A> {
                 d.startup(&host_diag);
             }
         }
-        self.after_frame(host, frame.id, frame.t, true);
+        self.after_frame(host, frame.id, t, true);
     }
 
     /// RD-14: under the app's frame pace, a frame whose display list draws the same pixels as
@@ -817,6 +834,7 @@ impl<A: App> HostApp for Live<A> {
     /// waveform holds still then costs one scene sample per paced frame. Frames the host
     /// asked for, the first GPU frames and frames without a pace are always drawn.
     fn prepare_frame(&mut self, host: &mut dyn HostCtl, id: SurfaceId, t: f64) -> bool {
+        let t = if id == self.surface { self.frame_time(t) } else { t };
         // A prepared frame that was never drawn (the host could not get a texture) left `list`
         // holding pixels that are not on screen; `shown` still holds those that are.
         let undrawn = self.prepared.take().is_some();
@@ -845,16 +863,21 @@ impl<A: App> HostApp for Live<A> {
         if self.cpu.is_none() {
             return false;
         }
-        self.sample(host, frame.id, frame.t);
+        let t = self.frame_time(frame.t);
+        self.sample(host, frame.id, t);
         let [w, h] = frame.size;
         self.cpu.as_mut().unwrap().draw_bgra(&self.list, frame.scale, w, h, frame.stride, frame.pixels);
-        self.after_frame(host, frame.id, frame.t, true);
+        self.after_frame(host, frame.id, t, true);
         true
     }
 }
 
 /// The main surface's renderer: the warm one if it reads the same font table, else a new one.
 /// A warm renderer keeps its `renderer_setup` from the session that made it.
+/// How early a capped-rate frame is asked for: half a 60 Hz refresh, since the frame comes at
+/// the first vblank after the request.
+const EARLY: f64 = 1.0 / 120.0;
+
 /// Seconds between frames under an app frame pace (`App::frame_pace`), when it caps anything.
 fn pace_period(pace: Option<f64>) -> Option<f64> {
     pace.filter(|f| f.is_finite() && *f > 0.0).map(|f| 1.0 / f)
@@ -927,6 +950,7 @@ impl<A: App> Live<A> {
             blur_cache: Default::default(),
             no_blur_logged: false,
             paced: None,
+            aim: None,
             last_frame: None,
             frames: 0,
             extras: Vec::new(),
@@ -1488,6 +1512,48 @@ mod pace_tests {
         live.host_asked = false;
         live.driver().app.pace.set(None);
         assert!(live.prepare_frame(&mut host, 7, 1.12));
+    }
+
+    /// An app with one 30 fps ambient loop, as the idle_loop example.
+    struct Breathing;
+
+    impl App for Breathing {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            use vo_scene::{Loop, LoopProp};
+            vo_scene::element::Element::column("root").size(40.0, 40.0).ambient(LoopProp::Scale, Loop::pulse(0.2, 1.6))
+        }
+    }
+
+    /// thch: frames at a vblank that falls in the half refresh before each 30 fps step draw
+    /// that step, once. They drew the step on screen again and asked once more, so the loop
+    /// ran at about 55 frames a second.
+    #[test]
+    fn a_30_fps_loop_draws_one_frame_a_step_at_any_vblank_phase() {
+        for phase in [0.0, 0.002, 0.005, 0.008, 0.012, 0.015] {
+            let mut live = Live::new(Breathing, OverlaySpec::default(), crate::Options::default(), None);
+            let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
+            live.driver = Some(driver);
+            live.surface = 7;
+            let mut host = Clock { now: 0.0, ..Clock::default() };
+            live.sample(&mut host, 7, 0.0);
+            live.after_frame(&mut host, 7, 0.0, true);
+            // A 60 Hz display: the frame comes at the first vblank after the request.
+            let vblank = |at: f64| ((at - phase) * 60.0 - 1e-9).ceil() / 60.0 + phase;
+            let mut drawn = 0;
+            let mut t = 0.0;
+            while t < 2.0 {
+                let ask = live.paced.unwrap_or(t);
+                t = vblank(ask.max(t + 1e-6));
+                host.now = t;
+                let shown = live.frame_time(t);
+                live.sample(&mut host, 7, shown);
+                live.after_frame(&mut host, 7, shown, true);
+                drawn += 1;
+            }
+            assert!((58..=62).contains(&drawn), "phase {phase}: {drawn} frames in 2 s");
+        }
     }
 
     #[test]
