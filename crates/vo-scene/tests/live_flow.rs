@@ -788,8 +788,7 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
         let mut s = scene();
         for n in 1..=all.len() {
             let t = n as f64 * 0.3;
-            let shown =
-                if by_lines { capped_lines(&all[..n], 300.0, 5, inline) } else { capped(&all[..n], 300.0, 5) };
+            let shown = if by_lines { capped_lines(&all[..n], 300.0, 5, inline) } else { capped(&all[..n], 300.0, 5) };
             s.apply(view(&shown, Some(300.0), false), t);
             for k in 0..36 {
                 let at = t + k as f64 / 120.0;
