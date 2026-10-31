@@ -685,7 +685,8 @@ impl Tracker {
             })
         };
 
-        let line_at: Vec<Option<f32>> = (0..self.frames.len()).map(|n| self.reading_line(n, &rests, env)).collect();
+        let line_at: Vec<Option<f32>> =
+            (0..self.frames.len()).map(|n| self.reading_line(n, &rests, &level, &level_rests, env)).collect();
         // Whether sample `k` of track `ti` belongs to another line on its way to a rest: it
         // left a rest on a row that was not the reading line then, and it is not on the reading
         // line when it rests again. An older line that moves on (jarvis tilts its last line back
@@ -809,8 +810,16 @@ impl Tracker {
 
     /// The height of the reading line in frame `n`: where the newest word comes to rest, the
     /// next new word to show within `pending` when there is one. `None` with no transcript word
-    /// drawn or about to show.
-    fn reading_line(&self, n: usize, rests: &[Vec<Option<usize>>], env: &Envelope) -> Option<f32> {
+    /// drawn or about to show. `level` and `level_rests` are the tracks with their row's scroll
+    /// taken out and their rests ([`Tracker::check`]).
+    fn reading_line(
+        &self,
+        n: usize,
+        rests: &[Vec<Option<usize>>],
+        level: &[Track],
+        level_rests: &[Vec<Option<usize>>],
+        env: &Envelope,
+    ) -> Option<f32> {
         if let Some(y) = self.caret_line(n, env) {
             return Some(y);
         }
@@ -827,14 +836,19 @@ impl Tracker {
             .collect();
         // Words about to show, with where each glyph comes to rest, or where it shows when it
         // never holds still (a word that drifts on as a cancel dims the text is still read
-        // where it shows).
+        // where it shows). The rest is on its row as the row stands when the word shows: a
+        // word that only rests after its line scrolls up would otherwise put the reading line
+        // where the line goes, not where it is read now.
         let soon = self.frames[n + 1..].iter().enumerate().take_while(|(_, f)| f.t <= fr.t + env.pending);
         // (word, rest y, frames from now until it shows)
         let pending: Vec<(u32, f32, usize)> = soon
             .flat_map(|(i, f)| {
                 f.tracks.iter().filter(move |&&ti| self.tracks[ti].first == n + 1 + i).filter_map(move |&ti| {
                     let tr = &self.tracks[ti];
-                    let at = tr.samples[rests[ti][0].unwrap_or(0)].pos.y;
+                    let at = match level_rests[ti][0] {
+                        Some(r) => level[ti].samples[r].pos.y,
+                        None => tr.samples[rests[ti][0].unwrap_or(0)].pos.y,
+                    };
                     env.transcript.contains(&tr.key.0).then_some((tr.key.0, at, i))
                 })
             })
@@ -1653,6 +1667,35 @@ mod tests {
         // A word that slides a whole row while it arrives is still off its row.
         let r = run(6.0);
         assert!(before(&r) > 0, "{r}");
+    }
+
+    #[test]
+    fn a_pending_word_that_rests_after_its_line_scrolls_keeps_the_reading_line_on_its_row() {
+        // Words 1 and 2 on the line above, tilted 4 degrees (an older line in a wave), word 3
+        // on the line being read, sinking 6 px below it and back over frames 3 to 7. Word 4
+        // shows on word 3's line in frame 10, still rising, and the block scrolls up a row
+        // over frames 12 to 18 before word 4 holds still, so it first rests on the row above.
+        let mut tr = Tracker::new();
+        for n in 0..40usize {
+            let up = (n.saturating_sub(12).min(6) as f32) * 4.0;
+            let mut g = word(1, 10.0, 40.0 - up, 9.0, 1.0);
+            g.extend(word(2, 50.0, 40.0 - up, 9.0, 1.0));
+            for q in &mut g {
+                q.xform.rot_deg = 4.0;
+            }
+            let sink = (6.0 - 2.0 * (n as f32 - 5.0).abs()).max(0.0);
+            g.extend(word(3, 10.0, 64.0 - up + sink, 9.0, 1.0));
+            if n >= 10 {
+                g.extend(word(4, 50.0, 64.0 - up + 0.5 * (30.0 - n as f32).max(0.0), 9.0, 1.0));
+            }
+            tr.push(n as f64 / 60.0, &list(g));
+        }
+        let r = tr.check(&Envelope::default());
+        let before: Vec<_> = r.violations.iter().filter(|v| v.frame < 10).collect();
+        // Before word 4 shows, the line read is word 3's: its dip is reported, and the tilted
+        // line above is not read.
+        assert!(before.iter().any(|v| v.word == 3 && matches!(v.breach, Breach::Baseline(_))), "{r}");
+        assert!(before.iter().all(|v| v.word == 3), "{r}");
     }
 
     /// Word 1 resting, then word 2 drawn from frame 4 on at `at(k)` = `(dy, alpha)` in its
