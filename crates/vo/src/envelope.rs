@@ -98,14 +98,17 @@ impl Default for Envelope {
 }
 
 impl Envelope {
-    /// The slowest sample rate the check can be read at: two samples must fall inside the
-    /// hold that makes a rest (`still_frames - 1` frame times at [`STILL_FPS`], 15 fps by
-    /// default). Sampled slower, a new word that holds where it shows for less than two
-    /// sample times and then moves on (jarvis under reduced motion: 100 ms, then the line
-    /// re-centres, scrolls and tilts back) is drawn there once, takes its rest from after
-    /// the moves, and its first frame reads as a breach that is not on screen.
+    /// The slowest sample rate the check can be read at: [`STILL_FPS`], the rate its limits
+    /// are given at. A hold is seen as a rest only when samples span the rest window
+    /// (`still_frames - 1` frame times, 67 ms by default) inside it, and samples fall
+    /// anywhere in the hold, so the hold must last the window plus one sample time. The
+    /// shortest holds the looks make are about 100 ms (jarvis under reduced motion: a new
+    /// word shows, then the line re-centres, scrolls and tilts back; the depth stack's line
+    /// that leaves the reading place). Sampled slower, such a word takes its rest from
+    /// after the moves, and a frame reads as a breach that is not on screen: jarvis at 15 to
+    /// 24 fps, scale 102 to 105 % and rotation up to 1.7 degrees as a line tilts back.
     pub fn slowest_fps(&self) -> f64 {
-        STILL_FPS / (self.still_frames.max(2) - 1) as f64
+        STILL_FPS
     }
 }
 
@@ -1433,13 +1436,15 @@ mod tests {
         }
     }
 
-    /// Two samples fit in the hold that makes a rest: 15 fps for the default 67 ms hold, and
-    /// slower for a longer one.
+    /// The check reads at the rate its limits are given at or faster, whatever the rest
+    /// window: a 100 ms hold is seen at 30 fps (67 ms window plus one 33 ms sample time).
     #[test]
-    fn the_slowest_rate_puts_two_samples_in_a_rest() {
-        assert_eq!(Envelope::default().slowest_fps(), 15.0);
-        assert_eq!(Envelope { still_frames: 5, ..Envelope::default() }.slowest_fps(), 7.5);
+    fn the_slowest_rate_is_the_rate_the_limits_are_given_at() {
+        assert_eq!(Envelope::default().slowest_fps(), STILL_FPS);
+        assert_eq!(Envelope { still_frames: 5, ..Envelope::default() }.slowest_fps(), STILL_FPS);
         assert_eq!(Envelope { still_frames: 1, ..Envelope::default() }.slowest_fps(), STILL_FPS);
+        let window = (Envelope::default().still_frames - 1) as f64 / STILL_FPS;
+        assert!(window + 1.0 / STILL_FPS <= 0.1 + 1e-9);
     }
 
     /// A typographic tracking channel at full strength either way on the reading line (the
