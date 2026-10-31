@@ -66,6 +66,9 @@ pub mod revisions;
 #[path = "motion/letter_physics.rs"]
 pub mod letter_physics;
 
+#[path = "motion/letter_motion.rs"]
+pub mod letter_motion;
+
 #[path = "motion/magnet.rs"]
 pub mod magnet;
 
@@ -464,6 +467,8 @@ pub struct LiveMotion {
     pub revisions: revisions::RevisionMotion,
     /// New letters drop into the line as small rigid bodies (MO-83).
     pub letters: Option<letter_physics::LetterPhysics>,
+    /// Per-letter motions: tumbling arrivals, italic arrival, older lines on a wave (EG-16).
+    pub letter_motion: letter_motion::LetterMotions,
     /// The caret as a magnet that pulls new words in, with its field drawn (MO-89).
     pub magnet: Option<magnet::Magnet>,
     /// Words set in a font of their own, such as a variable font instance (MO-81).
@@ -595,6 +600,7 @@ impl LiveMotion {
             case: CaseChange::default(),
             settle: None,
             letters: None,
+            letter_motion: letter_motion::LetterMotions::NONE,
             magnet: None,
             revisions: revisions::RevisionMotion::default(),
             bell: None,
@@ -748,10 +754,19 @@ pub(crate) struct GlyphMotion {
     pub scale: f32,
     /// The settling accent and its share, while the word is new.
     pub tint: Option<(Color, f32)>,
+    /// The glyph's own turn and lean (EG-16).
+    pub xform: crate::display::GlyphXform,
 }
 
 impl GlyphMotion {
-    pub const NONE: GlyphMotion = GlyphMotion { dx: 0.0, dy: 0.0, opacity: 1.0, scale: 1.0, tint: None };
+    pub const NONE: GlyphMotion = GlyphMotion {
+        dx: 0.0,
+        dy: 0.0,
+        opacity: 1.0,
+        scale: 1.0,
+        tint: None,
+        xform: crate::display::GlyphXform::IDENTITY,
+    };
 
     /// `base` with the settling accent mixed in; its alpha stays.
     pub fn tint(&self, base: Color) -> Color {
@@ -1109,6 +1124,7 @@ impl Flow {
         self.line_height = line_height;
         self.accent = motion.settle.and_then(|s| s.accent);
         self.letters = if reduced { None } else { motion.letters };
+        self.letter_motion = if reduced { letter_motion::LetterMotions::NONE } else { motion.letter_motion };
         (self.magnet, self.magnet_still) = (motion.magnet, reduced || motion.magnet.is_some_and(|m| m.still));
         let mut old = std::mem::take(&mut self.words);
         // Words new in this update, and words whose text changed.
@@ -1926,15 +1942,60 @@ impl Flow {
         }
         dx += self.magnet_snap(w, t);
         dx += self.bell_dx(w, w.x.target() as f32 + g.x.target() as f32, t);
+        let (xform, ink) = self.letter_pose(w, g, &mut dy, t);
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
             dx: pos.x - pen.x + dx,
             dy: pos.y - pen.y + dy,
-            opacity: (g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)).clamp(0.0, 1.0) as f32,
+            opacity: ((g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)) as f32).min(ink).clamp(0.0, 1.0),
             scale: scale * look,
             tint: self.accent.map(|c| (c, w.fresh.value(t).clamp(0.0, 1.0) as f32)),
+            xform,
         }
+    }
+
+    /// The per-letter motions of glyph `g` of word `w` at `t` (EG-16): its transform and
+    /// the most ink it may have (a tumbling letter's), with the wave's drop added to `dy`.
+    fn letter_pose(&self, w: &FlowWord, g: &FlowGlyph, dy: &mut f32, t: f64) -> (crate::display::GlyphXform, f32) {
+        let m = self.letter_motion;
+        let mut xform = crate::display::GlyphXform::IDENTITY;
+        let mut ink = 1.0;
+        if !m.any() {
+            return (xform, ink);
+        }
+        let newest = self.words.last().is_none_or(|l| l.line == w.line);
+        if m.tumble {
+            ink = letter_motion::tumble_ink(g.born, t);
+        }
+        if m.italic {
+            let arrived = w.glyphs.iter().map(|g| g.born).fold(f64::INFINITY, f64::min);
+            xform.skew_deg = letter_motion::italic_skew(arrived, t);
+        }
+        if m.wave && !newest {
+            let (wy, turn) = letter_motion::wave(w.x.target() as f32 + g.x.target() as f32, t);
+            *dy += wy;
+            xform.rot_deg = turn;
+        }
+        (xform, ink)
+    }
+
+    /// The tumbling copies of new letters at `t` (EG-16): the shaped glyph each one copies,
+    /// and where it is.
+    pub(crate) fn tumbling(&self, t: f64) -> Vec<(usize, letter_motion::TumblePose)> {
+        if !self.letter_motion.tumble {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (i, at) in self.index.iter().enumerate() {
+            let Some((wi, gi)) = *at else { continue };
+            let w = &self.words[wi as usize];
+            let g = &w.glyphs[gi as usize];
+            if let Some(p) = letter_motion::tumble(g.born, t, w.id.wrapping_mul(131).wrapping_add(gi)) {
+                out.push((i, p));
+            }
+        }
+        out
     }
 
     /// Where the reading stage puts a pen position of word `w` at `t`: scaled about its
@@ -2151,6 +2212,8 @@ pub(crate) struct Flow {
     marks: revisions::Marks,
     /// Letter physics, off under reduced motion.
     letters: Option<letter_physics::LetterPhysics>,
+    /// Per-letter motions (EG-16), off under reduced motion.
+    letter_motion: letter_motion::LetterMotions,
     /// The magnetic caret, and whether it is still (reduced motion).
     magnet: Option<magnet::Magnet>,
     magnet_still: bool,

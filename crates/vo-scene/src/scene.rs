@@ -2359,7 +2359,29 @@ impl<M> Scene<M> {
                                 })
                                 .unwrap_or_else(|| m.tint(color))
                                 .fade(k),
-                            xform: crate::display::GlyphXform::IDENTITY,
+                            xform: m.xform,
+                        });
+                    }
+                    // Tumbling copies of new letters (EG-16): decoration, so `NO_WORD`.
+                    for (i, p) in n.live.tumbling(t) {
+                        let g = &n.shaped.glyphs[i];
+                        let word = word_of(g.cluster);
+                        let (k, dx, dy) = n.word_motion(word, t);
+                        let m = n.live.glyph(i, t);
+                        let a = k * p.alpha;
+                        if a <= 0.0 || g.glyph == OBJECT_GLYPH || live.elsewhere.contains(&word) {
+                            continue;
+                        }
+                        let (x, y) = (g.pos.x + dx + m.dx + p.offset.x, g.pos.y + dy + m.dy + p.offset.y);
+                        push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
+                        out.glyphs.push(GlyphInstance {
+                            pos: Point::new(origin.x + x * z, origin.y + y * z),
+                            size: style.size * m.scale * z,
+                            font: g.font,
+                            glyph: g.glyph,
+                            word: NO_WORD,
+                            color: color.fade(a),
+                            xform: crate::display::GlyphXform::rotate(p.rot_deg),
                         });
                     }
                     for gh in n.live.ghosts(t) {

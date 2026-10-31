@@ -1556,6 +1556,16 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: per-letter motions (EG-16): tumbling arrivals, an italic arrival and the
+    /// older lines on a wave. See [`crate::flow::letter_motion`].
+    pub fn letter_motion(mut self, m: crate::flow::letter_motion::LetterMotions) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => live.letter_motion = m,
+            _ => debug_assert!(false, "letter_motion on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: a mark in the left margin beside the newest line that splits when the
     /// text wraps, one half staying with the previous line and one going to the new line
     /// (MO-32). See [`crate::flow::margin`].
