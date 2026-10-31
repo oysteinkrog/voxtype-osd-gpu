@@ -82,6 +82,10 @@ pub const INSERT_DELAY: f64 = 0.1;
 pub const REWRAP_WAIT_MAX: f64 = 0.3;
 /// When words leave from the front, the rest scroll up together in about 220 ms.
 pub const SCROLL: Spring = Spring::SOFT;
+/// On a front drop, the old copy of a word that moves in the new layout fades out in this
+/// long, and its new copy fades in at its place once it is gone.
+pub const DROP_FADE_SECS: f64 = 0.08;
+const DROP_FADE: Spring = Spring::critical_to_98(DROP_FADE_SECS);
 /// Old and new glyphs of a revised word cross in about 120 ms.
 pub const CROSSFADE: Spring = Spring::SNAP;
 /// A changed letter rolls out and in, and new letters rise in, in about 180 ms.
@@ -894,12 +898,25 @@ fn front_scroll(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>])
     Some(key as f32 / 2.0)
 }
 
+/// Whether kept word `o` has a new place in the layout.
+fn moved(o: &FlowWord, p: &PlacedWord) -> bool {
+    (o.x.target() as f32 - p.x).abs() >= 0.5 || (o.y.target() as f32 - p.y).abs() >= 0.5
+}
+
 /// Whether kept word `o` moved with the scrolling block: only `dy` down from its new place.
 /// On a row in `whole` the line may also have shifted along (a "…" put on the new first word,
 /// a centred line), and the word then slides along its row while it scrolls, instead of
 /// fading out where it was.
 fn in_block(o: &FlowWord, p: &PlacedWord, dy: f32, whole: &[u32]) -> bool {
     ((o.x.target() as f32 - p.x).abs() < 0.5 || whole.contains(&p.line)) && (o.y.target() as f32 - p.y - dy).abs() < 1.0
+}
+
+/// On a front drop, how far up the first kept word moved, when it moved up a row or more.
+fn drop_rows(old: &[FlowWord], words: &[Word], placed: &[Option<PlacedWord>]) -> Option<f32> {
+    let (w, p) = words.iter().zip(placed).find_map(|(w, p)| p.as_ref().map(|p| (w, p)))?;
+    let o = old.iter().find(|o| o.id == w.id)?;
+    let dy = o.y.target() as f32 - p.y;
+    (dy >= 0.5).then_some(dy)
 }
 
 /// A rewrapped word shows once the words still sliding along its new line have left its
@@ -1093,9 +1110,15 @@ impl Flow {
         let mut old = std::mem::take(&mut self.words);
         // Words new in this update, and words whose text changed.
         let (mut new_ids, mut revised_ids) = (Vec::new(), Vec::new());
-        let scroll = front_scroll(&old, words, &placed);
-        let whole = if scroll.is_some() { whole_rows(&old, words, &placed) } else { Vec::new() };
         let front_drop = old.iter().position(|o| words.iter().any(|w| w.id == o.id)).is_some_and(|i| i > 0);
+        // A drop that takes whole lines and rewraps every line below still scrolls the block
+        // by those lines: how far the first kept word moved up.
+        let scroll =
+            front_scroll(&old, words, &placed).or_else(|| front_drop.then(|| drop_rows(&old, words, &placed))?);
+        let whole = if scroll.is_some() { whole_rows(&old, words, &placed) } else { Vec::new() };
+        // A front drop reflows calmly: the block scrolls, and a word that moves in the new
+        // layout fades out where it was and in at its place, never sliding.
+        let calm_drop = front_drop && !reduced;
         // Words that left from the front, which scroll out with the rest.
         let front: Vec<WordId> = match scroll {
             Some(_) => old.iter().map(|o| o.id).take_while(|id| words.iter().all(|w| w.id != *id)).collect(),
@@ -1141,7 +1164,7 @@ impl Flow {
                 arrived = true;
                 new_ids.push(w.id);
                 let back = match line_shift {
-                    Some((line, dx)) if line == p.line && !reduced => dx,
+                    Some((line, dx)) if line == p.line && !reduced && !calm_drop => dx,
                     _ => 0.0,
                 };
                 let mut glyphs: Vec<FlowGlyph> =
@@ -1163,6 +1186,14 @@ impl Flow {
                     for g in &mut glyphs {
                         g.opacity = make.ch(0.0, overflow::DROP_STEP, Rest::UNIT);
                         g.opacity.snap(t + overflow::DROP_HOLD, 1.0);
+                    }
+                }
+                // On a front drop a new word on an older line fades in once the old copies of
+                // the reflowed words are gone.
+                if calm_drop && p.line != stage.newest {
+                    for g in &mut glyphs {
+                        g.opacity = make.ch(0.0, CROSSFADE, Rest::UNIT);
+                        g.opacity.retarget(t + DROP_FADE_SECS, 1.0);
                     }
                 }
                 // A word that joins, in a later update, a line whose words are still held
@@ -1250,6 +1281,40 @@ impl Flow {
                 o.x = make.to(p.x + dx + lag(&o.x), p.x, SCROLL, Rest::PIXELS);
                 o.y = make.to(p.y + dy + lag(&o.y), p.y, SCROLL, Rest::PIXELS);
                 move_to(&mut o.roll, stage.roll, t, stage.travel, reduced);
+            } else if calm_drop && moved(&o, &p) {
+                // The old copy scrolls up with the block and fades out quickly; the new copy
+                // comes up with the block at its place in the new layout and fades in once the
+                // old one is gone. On the newest line it lands at rest and shows whole when its
+                // place is clear (reading-line envelope).
+                let newest = p.line == stage.newest;
+                if newest {
+                    handed.push((o.id, self.ghosts.len()));
+                }
+                self.ghost_word(&o, t, retention);
+                dropped.push(o.id);
+                let dy = scroll.unwrap_or(0.0);
+                for g in self.ghosts.iter_mut().filter(|g| g.word == o.id) {
+                    let (rise, k) = (g.rise.value(t) as f32, g.opacity.value(t) as f32);
+                    g.rise = make.to(rise, rise - dy, SCROLL, Rest::PIXELS);
+                    g.opacity = make.to(k, 0.0, DROP_FADE, Rest::UNIT);
+                }
+                o.x = make.ch(p.x, FLIP, Rest::PIXELS);
+                o.y = if newest {
+                    make.ch(p.y, FLIP, Rest::PIXELS)
+                } else {
+                    make.to(p.y + dy, p.y, SCROLL, Rest::PIXELS)
+                };
+                for g in &mut o.glyphs {
+                    g.opacity = make.ch(if newest { 1.0 } else { 0.0 }, CROSSFADE, Rest::UNIT);
+                    if !newest {
+                        g.opacity.retarget(t + DROP_FADE_SECS, 1.0);
+                    }
+                }
+                if newest {
+                    rewrapped.push(slot as usize);
+                }
+                line_shift = Some((p.line, 0.0));
+                move_to(&mut o.roll, stage.roll, t, stage.travel, newest);
             } else if o.line != p.line && (front_drop || motion.rewrap == Rewrap::Fade) {
                 // A gliding word would cut across the lines it passes, so the word fades out
                 // where it is and in at its place,
@@ -1262,17 +1327,6 @@ impl Flow {
                     handed.push((o.id, self.ghosts.len()));
                 }
                 self.ghost_word(&o, t, retention);
-                if front_drop && !reduced {
-                    dropped.push(o.id);
-                    // The old copy is part of the old block: it scrolls up with it, so the
-                    // lines moving up never pass over it.
-                    if let Some(dy) = scroll {
-                        for g in self.ghosts.iter_mut().filter(|g| g.word == o.id) {
-                            let rise = g.rise.value(t) as f32;
-                            g.rise = make.to(rise, rise - dy, SCROLL, Rest::PIXELS);
-                        }
-                    }
-                }
                 if !reduced && !front_drop && scroll.is_none() {
                     let a = o.x.value(t);
                     left.push((o.id, o.line, a, a + o.width.value(t)));
@@ -1321,7 +1375,7 @@ impl Flow {
                 continue;
             }
             self.ghost_word(&o, t, retention);
-            if front_drop && !reduced {
+            if calm_drop {
                 dropped.push(id);
             }
             if let Some(dy) = scroll.filter(|_| front.contains(&id) && !reduced) {

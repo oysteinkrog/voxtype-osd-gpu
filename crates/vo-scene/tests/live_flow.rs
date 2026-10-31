@@ -464,20 +464,30 @@ fn a_new_first_line_that_shifts_along_scrolls_with_the_block() {
 }
 
 #[test]
-fn a_true_rewrap_still_glides_word_by_word() {
-    // Words that leave from the front and also change the wrap of the rest: only the words
-    // that kept their place relative to the block move with it.
+fn a_front_drop_fades_words_across_instead_of_sliding() {
+    // Words leave from the front and the rest move along their lines: each moved word's old
+    // copy fades out where it was and its new copy fades in at its place, never in between.
     let mut s = scene();
     s.apply(view(&words(&TEN), Some(200.0), false), 0.0);
     let before = s.sample(1.0);
     let kept: Vec<Word> = words(&TEN[1..]);
     s.apply(view(&kept, Some(200.0), false), 1.0);
     let settled = s.sample(5.0);
-    // Word 2 moves to the start of the line: a sideways glide, not a scroll.
-    assert!(first(&before, 2).0 > first(&settled, 2).0 + 10.0);
-    let mid = s.sample(1.08);
-    let x = first(&mid, 2).0;
-    assert!(x > first(&settled, 2).0 + 0.5 && x < first(&before, 2).0 - 0.5, "x {x}");
+    let (from, to) = (first(&before, 2).0, first(&settled, 2).0);
+    assert!(from > to + 10.0, "word 2 moves to the start of the line");
+    // Every pen word 2 has, before and after.
+    let pens: Vec<(f32, f32)> = [&before, &settled]
+        .iter()
+        .flat_map(|l| l.glyphs.iter().filter(|g| g.word == 2))
+        .map(|g| (g.pos.x, g.pos.y))
+        .collect();
+    for k in 0..=30 {
+        let list = s.sample(1.0 + k as f64 / 120.0);
+        for g in list.glyphs.iter().filter(|g| g.word == 2 && g.color.a > 0.02) {
+            let at_rest = pens.iter().any(|p| (p.0 - g.pos.x).abs() < 0.5);
+            assert!(at_rest, "at +{k}/120 a glyph of word 2 slides, at {:?}", g.pos);
+        }
+    }
 }
 
 fn accent_view(w: &[Word]) -> Element<()> {
@@ -745,7 +755,8 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
     // A capped five-line popup: new words drop words from the front, the "…" moves the
     // first line along and the lines below rewrap. The old copies of the dropped and
     // rewrapped words and the reflowed lines never take the same pixels at the same time,
-    // whether the cap drops words one at a time or whole lines.
+    // and no word draws past the column's right edge, whether the cap drops words one at a
+    // time or whole lines.
     let text = "open the configuration file and set the popup theme to swiss so the dictation \
                 window shows the live words in the middle of the screen with the waveform above \
                 them then press the key again to stop and let the final pass punctuation land";
@@ -759,6 +770,16 @@ fn when_a_line_cap_reflows_the_text_no_two_lines_draw_over_each_other() {
             for k in 0..36 {
                 let at = t + k as f64 / 120.0;
                 let boxes = word_boxes(&s.sample(at));
+                // Nothing reaches past the text column's right edge.
+                for b in &boxes {
+                    assert!(
+                        b.2 <= 302.0,
+                        "{n} words (whole lines {by_lines}) at +{:.3}: word {} ends at {:.1}",
+                        at - t,
+                        b.0,
+                        b.2
+                    );
+                }
                 for (i, a) in boxes.iter().enumerate() {
                     for b in &boxes[i + 1..] {
                         let dx = a.2.min(b.2) - a.1.max(b.1);
