@@ -153,8 +153,17 @@ fn a_replaced_letter_leaves_no_copy_under_the_new_one_and_none_goes_missing() {
             .with_default_motion(Motion::Spring(Spring::SOFT))
             .with_reduced_motion(reduced);
         scene.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+        let first = |l: &vo_scene::display::DisplayList| -> f32 {
+            let xs = l.glyphs.iter().filter(|g| g.word == 1).map(|g| g.pos.x);
+            let (a, b) = xs.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+            b - a
+        };
         scene.apply(view(&words("open the file"), Align::Start), 0.0);
-        scene.sample(1.0);
+        let before = first(&scene.sample(1.0));
+        let mut done = Scene::new().with_text(Box::new(ShapedLayout::new(fonts())));
+        done.set_viewport(0.0, vo_scene::geom::Size::new(600.0, 400.0), 1.0);
+        done.apply(view(&words("Open the file"), Align::Start), 0.0);
+        let after = first(&done.sample(1.0));
         scene.apply(view(&words("Open the file"), Align::Start), 1.0);
         for i in 0..120 {
             let t = 1.0 + i as f64 / 120.0;
@@ -171,6 +180,17 @@ fn a_replaced_letter_leaves_no_copy_under_the_new_one_and_none_goes_missing() {
             }
             let readable = first.iter().filter(|g| g.color.a > READABLE).count();
             assert_eq!(readable, 4, "reduced {reduced}: at {t:.3} s the word shows {readable} letters");
+            // No gap opens beside the old letter: the word is as wide as before or as after.
+            let span = |gs: &[&vo_scene::display::GlyphInstance]| {
+                let xs = gs.iter().filter(|g| g.color.a > READABLE).map(|g| g.pos.x);
+                let (a, b) = xs.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+                b - a
+            };
+            let now = span(&first);
+            assert!(
+                (now - before).abs() < 0.5 || (now - after).abs() < 0.5,
+                "reduced {reduced}: at {t:.3} s the word spans {now:.1} px, {before:.1} before and {after:.1} after"
+            );
         }
     }
 }

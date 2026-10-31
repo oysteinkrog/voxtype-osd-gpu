@@ -121,9 +121,19 @@ impl Flow {
             };
             let g = match claimed {
                 Some(mut g) if g.glyph == n.glyph && g.font == n.font => {
-                    // A survivor: it keeps its ink and only follows the layout.
+                    // A survivor: it keeps its ink and only follows the layout. Beside new
+                    // letters it stays where it is drawn until they show and moves in that
+                    // frame, as the old ones go (`Flow::apply`): sliding, it would open a gap
+                    // by the old letter or run under the new one.
                     let x = g.x.value(t) as f32 * s;
-                    g.x = if reduced { make.ch(n.x, FLIP, Rest::PIXELS) } else { make.to(x, n.x, FLIP, Rest::PIXELS) };
+                    g.x = if reduced || replaced {
+                        if replaced && !reduced {
+                            self.swap_x.push((word, gr, x));
+                        }
+                        make.ch(n.x, FLIP, Rest::PIXELS)
+                    } else {
+                        make.to(x, n.x, FLIP, Rest::PIXELS)
+                    };
                     FlowGlyph { grapheme: gr, advance: n.advance, y: n.y, ..g }
                 }
                 Some(g) => {

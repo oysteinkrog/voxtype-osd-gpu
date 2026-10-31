@@ -996,6 +996,7 @@ fn half_space(placed: &[Option<PlacedWord>], size: f32) -> f64 {
 fn hold_new_glyphs(
     next: &mut [FlowWord],
     ghosts: &[Ghost],
+    swaps: &[(WordId, u32, f32)],
     line_height: f32,
     gap: f64,
     make: &Make,
@@ -1012,18 +1013,22 @@ fn hold_new_glyphs(
         }
         let mut o = std::mem::take(&mut next[i].glyphs);
         let me = &next[i];
+        // Kept letters that move to their new places in the frame the new ones show: they
+        // wait with them, for room on the row.
+        let swapped = |g: &FlowGlyph| swaps.iter().any(|s| s.0 == me.id && s.1 == g.grapheme);
         // The other words on the row, while they show.
         let others: Vec<&FlowWord> = next.iter().filter(|q| q.id != me.id && q.line == me.line).collect();
         let row_settles = others.iter().map(|q| q.x.settled_at().max(q.width.settled_at())).fold(t, f64::max);
         // The word's own kept letters, which slide to their new places in it: a wider new
         // letter ("open" to "Open") waits for them too, or they run over it.
-        let kept: Vec<(Channel, f32)> = o.iter().filter(|g| g.born < t).map(|g| (g.x.clone(), g.advance)).collect();
+        let kept: Vec<(Channel, f32)> =
+            o.iter().filter(|g| g.born < t && !swapped(g)).map(|g| (g.x.clone(), g.advance)).collect();
         let kept_settle = kept.iter().map(|k| k.0.settled_at()).fold(t, f64::max);
         let row_settles = row_settles.max(kept_settle);
         // The longest wait any new letter needs: they all take it, so a word's letters come
         // in together and none is missing from the start or the middle of what shows.
         let mut longest = 0.0f64;
-        for g in o.iter().filter(|g| g.born >= t) {
+        for g in o.iter().filter(|g| g.born >= t || swapped(g)) {
             // A letter that arrives in place (the palimpsest's) waits for its word's kept
             // letters; one that rolls in from below (`CaseChange::Roll`) passes under them.
             let in_place = g.rise.value(t).abs() < 0.01;
@@ -1634,13 +1639,23 @@ impl Flow {
         }
         self.clear_ghosts(&next, &rewrapped, &left, gap, t);
         self.clear_dropped(&next, &dropped, line_height, gap, t);
-        let waits =
-            if reduced { Vec::new() } else { hold_new_glyphs(&mut next, &self.ghosts, line_height, gap, &make) };
-        // The old letters a revision replaces go in the frame its new letters show.
+        let waits = if reduced {
+            Vec::new()
+        } else {
+            hold_new_glyphs(&mut next, &self.ghosts, &self.swap_x, line_height, gap, &make)
+        };
+        // The old letters a revision replaces go in the frame its new letters show, and the
+        // letters it keeps move to their new places then.
+        let wait = |id: WordId| waits.iter().find(|w| w.0 == id).map_or(0.0, |w| w.1);
         for g in self.ghosts.iter_mut().filter(|g| g.swap) {
-            let wait = waits.iter().find(|w| w.0 == g.word).map_or(0.0, |w| w.1);
-            g.opacity.snap(t + wait, 0.0);
+            g.opacity.snap(t + wait(g.word), 0.0);
             g.swap = false;
+        }
+        for (id, gr, x) in std::mem::take(&mut self.swap_x) {
+            let Some(o) = next.iter_mut().find(|o| o.id == id) else { continue };
+            if let Some(g) = o.glyphs.iter_mut().find(|g| g.grapheme == gr) {
+                g.x.postpone(t, wait(id), x as f64);
+            }
         }
         self.words = next;
         self.index = index;
@@ -2428,6 +2443,10 @@ pub(crate) struct Flow {
     /// glyph outside any word (an ellipsis).
     index: Vec<Option<(u32, u32)>>,
     ghosts: Vec<Ghost>,
+    /// Kept letters of a word whose other letters a revision replaces, for the revision being
+    /// applied: word, grapheme and the pen offset each is drawn at now. They stay there until
+    /// the new letters show.
+    swap_x: Vec<(WordId, u32, f32)>,
     /// Words in liquid revision (EG-32).
     liquid: Vec<liquid::LiquidWord>,
     /// Lines that left from the front, folding or thinning away (MO-33).
