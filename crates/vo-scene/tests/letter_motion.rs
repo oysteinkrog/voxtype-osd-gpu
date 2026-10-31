@@ -5,8 +5,8 @@ use vo_core::words::Word;
 use vo_scene::display::{DisplayList, GlyphXform, NO_WORD};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::flow::letter_motion::{
-    digit_lean, italic_skew, tumble, tumble_ink, wave, LetterMotions, ITALIC_SECS, ITALIC_SKEW, LEAN_MAX, TUMBLE_FROM,
-    TUMBLE_INK, TUMBLE_SECS, TUMBLE_TURN, WAVE_AMP,
+    digit_lean, italic_skew, tumble, tumble_ink, wave, wave_share, LetterMotions, ITALIC_SECS, ITALIC_SKEW, LEAN_MAX,
+    TUMBLE_FROM, TUMBLE_INK, TUMBLE_SECS, TUMBLE_TURN, WAVE_AMP, WAVE_EASE_SECS,
 };
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
@@ -84,6 +84,8 @@ fn the_wave_moves_older_lines_and_never_the_newest() {
         assert!(dy.abs() <= WAVE_AMP + 1e-4);
         assert!(turn.abs() < 10.0);
     }
+    assert_eq!(wave_share(2.0, 2.0), 0.0, "no jump when the next line starts");
+    assert_eq!(wave_share(2.0, 2.0 + WAVE_EASE_SECS), 1.0);
     let mut s = scene(false);
     let text = "the older lines ride a slow wave while the newest line holds still for reading";
     s.apply(view(&words(text), WAVE), 0.0);

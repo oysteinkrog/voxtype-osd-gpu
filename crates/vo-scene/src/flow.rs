@@ -1973,9 +1973,19 @@ impl Flow {
             xform.skew_deg = letter_motion::italic_skew(arrived, t);
         }
         if m.wave && !newest {
-            let (wy, turn) = letter_motion::wave(w.x.target() as f32 + g.x.target() as f32, t);
-            *dy += wy;
-            xform.rot_deg = turn;
+            // The line eases in from when the line after it started, so it never jumps.
+            let next = self
+                .words
+                .iter()
+                .filter(|o| o.line > w.line)
+                .flat_map(|o| o.glyphs.iter().map(|g| g.born))
+                .fold(f64::INFINITY, f64::min);
+            let k = letter_motion::wave_share(next, t);
+            if k > 0.0 {
+                let (wy, turn) = letter_motion::wave(w.x.target() as f32 + g.x.target() as f32, t);
+                *dy += k * wy;
+                xform.rot_deg = k * turn;
+            }
         }
         (xform, ink)
     }
