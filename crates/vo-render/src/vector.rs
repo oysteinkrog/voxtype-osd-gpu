@@ -290,17 +290,42 @@ pub fn push_tiled(g: GpuVector, segs: &mut Vec<[f32; 4]>, out: &mut Vec<GpuVecto
             Tile::Empty
         }
     };
-    // A stroke's tile also lists the segments that reach it: a run keeps to one list.
-    let reach_list = |c: usize, r: usize| -> Vec<usize> {
-        let rect = [edge(c, x0, x1), edge(r, y0, y1), edge(c + 1, x0, x1), edge(r + 1, y0, y1)];
-        (0..count).filter(|&i| reaches(&hulls[i], rect, pad)).collect()
-    };
+    // A stroke's tile also lists the segments that reach it, in order: a run keeps to one list.
+    // Each segment is tried only on the tiles around its hull, not every tile on every
+    // segment, so a long trace costs its length rather than its length times its tiles. A
+    // stroke's tile is an edge tile exactly when its list has a segment.
+    let mut lists: Vec<Vec<usize>> = Vec::new();
+    if !fill {
+        lists.resize(cols * rows, Vec::new());
+        // The tiles from `lo` to `hi` along one axis, one more each side: the exact test decides.
+        let span = |lo: f32, hi: f32, origin: f32, n: usize| {
+            let a = (((lo - origin) / size).floor() as i64).saturating_sub(1).max(0);
+            let b = (((hi - origin) / size).floor() as i64).saturating_add(1).min(n as i64 - 1);
+            a..=b
+        };
+        for (i, h) in hulls.iter().enumerate() {
+            for r in span(h[1] - pad, h[3] + pad, y0, rows) {
+                for c in span(h[0] - pad, h[2] + pad, x0, cols) {
+                    let (c, r) = (c as usize, r as usize);
+                    let rect = [edge(c, x0, x1), edge(r, y0, y1), edge(c + 1, x0, x1), edge(r + 1, y0, y1)];
+                    if reaches(h, rect, pad) {
+                        lists[r * cols + c].push(i);
+                    }
+                }
+            }
+        }
+    }
     for r in 0..rows {
         let (ty0, ty1) = (edge(r, y0, y1), edge(r + 1, y0, y1));
         let mut run: Option<(usize, Tile, Vec<usize>)> = None;
         for c in 0..=cols {
-            let t = if c < cols { tile(c, r) } else { Tile::Empty };
-            let list = if t == Tile::Edge && !fill { reach_list(c, r) } else { Vec::new() };
+            let t = match (c < cols, fill) {
+                (false, _) => Tile::Empty,
+                (true, true) => tile(c, r),
+                (true, false) if lists[r * cols + c].is_empty() => Tile::Empty,
+                (true, false) => Tile::Edge,
+            };
+            let list = if t == Tile::Edge && !fill { std::mem::take(&mut lists[r * cols + c]) } else { Vec::new() };
             if run.as_ref().is_some_and(|(_, k, l)| *k == t && *l == list) {
                 continue;
             }
@@ -467,6 +492,122 @@ mod tests {
         g.bbox = [0.0, 0.0, 100.0, 100.0];
         push_tiled(g, &mut segs, &mut out);
         assert_eq!(out.len(), 4);
+    }
+
+    /// A stroke through `pts` as straight segments (each control point halfway), and an
+    /// instance for it with half width `hw` and glow `glow`, its box grown by `pad`.
+    fn polyline(pts: &[[f32; 2]], hw: f32, glow: f32, pad: f32) -> (GpuVector, Vec<[f32; 4]>) {
+        let mut segs = Vec::new();
+        let mut b = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        for w in pts.windows(2) {
+            let (a, c) = (w[0], w[1]);
+            segs.push([a[0], a[1], (a[0] + c[0]) / 2.0, (a[1] + c[1]) / 2.0]);
+            segs.push([c[0], c[1], 0.0, 1.0]);
+            segs.push([1.0, 1.0, 0.0, 0.0]);
+            b = [
+                b[0].min(a[0]).min(c[0]),
+                b[1].min(a[1]).min(c[1]),
+                b[2].max(a[0]).max(c[0]),
+                b[3].max(a[1]).max(c[1]),
+            ];
+        }
+        let g = GpuVector {
+            head: [0, 0, (pts.len() - 1) as u32, 1],
+            bbox: [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad],
+            params: [hw, glow, 0.0, 1.0],
+            ..Default::default()
+        };
+        (g, segs)
+    }
+
+    /// The stroke tiling as it was before segments were binned to tiles: every tile tries
+    /// every segment, once for whether it draws and once for its list.
+    fn tiled_trying_every_segment(g: GpuVector, segs: &mut Vec<[f32; 4]>, out: &mut Vec<GpuVector>) {
+        let [x0, y0, x1, y1] = g.bbox;
+        let (first, count) = (g.head[1] as usize, g.head[2] as usize);
+        let (cols, rows) = (((x1 - x0) / STROKE_TILE).ceil(), ((y1 - y0) / STROKE_TILE).ceil());
+        assert!(g.head[0] == 0 && (x1 - x0) * (y1 - y0) >= TILED_AREA && cols * rows * (count as f32) <= 400_000.0);
+        let src = segs[first * SEG_TEXELS..(first + count) * SEG_TEXELS].to_vec();
+        let hulls: Vec<[f32; 4]> = src
+            .as_chunks::<SEG_TEXELS>()
+            .0
+            .iter()
+            .map(|s| {
+                let (xs, ys) = ([s[0][0], s[0][2], s[1][0]], [s[0][1], s[0][3], s[1][1]]);
+                let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
+                let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
+                [min(xs), min(ys), max(xs), max(ys)]
+            })
+            .collect();
+        let inner = hulls.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |b, h| {
+            [b[0].min(h[0]), b[1].min(h[1]), b[2].max(h[2]), b[3].max(h[3])]
+        });
+        let pad = (inner[0] - x0).max(inner[1] - y0).max(x1 - inner[2]).max(y1 - inner[3]).max(0.0);
+        let reaches = |h: &[f32; 4], r: [f32; 4]| {
+            h[0] - pad < r[2] && h[2] + pad > r[0] && h[1] - pad < r[3] && h[3] + pad > r[1]
+        };
+        let (cols, rows) = (cols as usize, rows as usize);
+        let edge = |i: usize, lo: f32, hi: f32| (lo + i as f32 * STROKE_TILE).min(hi);
+        for r in 0..rows {
+            let (ty0, ty1) = (edge(r, y0, y1), edge(r + 1, y0, y1));
+            let mut run: Option<(usize, Vec<usize>)> = None;
+            for c in 0..=cols {
+                let list: Vec<usize> = if c < cols {
+                    let rect = [edge(c, x0, x1), ty0, edge(c + 1, x0, x1), ty1];
+                    (0..count).filter(|&i| reaches(&hulls[i], rect)).collect()
+                } else {
+                    Vec::new()
+                };
+                if run.as_ref().is_some_and(|(_, l)| *l == list) {
+                    continue;
+                }
+                if let Some((from, mine)) = run.take() {
+                    let mut piece = GpuVector { bbox: [edge(from, x0, x1), ty0, edge(c, x0, x1), ty1], ..g };
+                    if mine.len() < count {
+                        piece.head[1] = (segs.len() / SEG_TEXELS) as u32;
+                        piece.head[2] = mine.len() as u32;
+                        for i in mine {
+                            segs.extend_from_slice(&src[i * SEG_TEXELS..(i + 1) * SEG_TEXELS]);
+                        }
+                    }
+                    out.push(piece);
+                }
+                if !list.is_empty() {
+                    run = Some((c, list));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binned_stroke_tiles_match_trying_every_segment() {
+        // An oscilloscope trace: 480 jagged segments across 700 px.
+        let noise = |k: usize| ((k as f32 * 12.9898).sin() * 43758.547).fract().abs();
+        let trace: Vec<[f32; 2]> =
+            (0..481).map(|i| [20.0 + i as f32 * 1.45, 140.0 + (noise(i) - 0.5) * 160.0 * noise(i + 7)]).collect();
+        // A spiral, whose segments cross many rows, and a diagonal off a tile grid's lines.
+        let spiral: Vec<[f32; 2]> = (0..200)
+            .map(|i| {
+                let a = i as f32 * 0.21;
+                [300.0 + a.cos() * (20.0 + 1.2 * i as f32), 300.0 + a.sin() * (20.0 + 1.2 * i as f32)]
+            })
+            .collect();
+        let diagonal: Vec<[f32; 2]> = (0..40).map(|i| [3.3 + i as f32 * 13.7, 7.1 + i as f32 * 9.9]).collect();
+        for (name, pts, hw, glow, pad) in [
+            ("trace glow", &trace, 1.25, 4.0, 9.0),
+            ("trace", &trace, 0.55, 0.0, 1.6),
+            ("spiral", &spiral, 2.0, 0.0, 3.0),
+            ("diagonal", &diagonal, 6.0, 2.0, 15.0),
+        ] {
+            let (g, segs) = polyline(pts, hw, glow, pad);
+            let (mut a, mut b) = (segs.clone(), segs);
+            let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+            push_tiled(g, &mut a, &mut out_a);
+            tiled_trying_every_segment(g, &mut b, &mut out_b);
+            assert!(out_a.len() > 1, "{name}: tiled");
+            assert_eq!(out_a, out_b, "{name}: tiles");
+            assert_eq!(a, b, "{name}: segments");
+        }
     }
 
     #[test]
