@@ -59,7 +59,7 @@ pub mod text3d;
 pub mod timer;
 
 pub use camera::{Camera, Projection};
-pub use env::Env;
+pub use env::{Desktop, DesktopWindow, Env};
 pub use field::TextField;
 pub use frame::{
     Background, CloudShape, Floor, Focus, Frame3d, Light, LightCone, Material, MeshDraw, MeshId, OnStage, Orb,

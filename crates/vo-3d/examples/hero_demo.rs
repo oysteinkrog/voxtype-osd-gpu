@@ -4,20 +4,22 @@
 //! Each is driven by a made-up voice level so it swells and ripples while speech runs and
 //! settles in the pauses. Last, the chrome blob over a panel and a waveform that it reflects
 //! (EG-17, `vo_3d::env`): the layer under it captures a backdrop, and the chrome's environment
-//! is built from it.
+//! is built from it. Then the chrome reflecting a made-up desktop (EG-21, `env::Desktop`):
+//! a blue sky, a few dim windows and a panel bar, drifting 2 texels a second.
 //!
 //!   cargo run --release -p vo-3d --example hero_demo -- [--out DIR]
 //!   cargo run --release -p vo-3d --example hero_demo -- --bench
 //!
 //! The default writes `DIR/hero_demo.png` (default DIR `/var/tmp/claude/fw-hero`): the five
 //! heroes at six moments, one row each, a row of the two scenes under reduced motion, and a
-//! row of the reflecting chrome over its panel and waveform.
+//! row of the reflecting chrome over its panel and waveform, and a row of the chrome
+//! reflecting the desktop.
 //! `--bench` prints GPU time per frame (timestamp queries) for each hero alone, in a box 0.55
 //! of the frame's height wide plus its halo, in a 600x300 and a 1920x1080 frame, at 48 and at
 //! 24 march steps; then the two scenes in a 200 px box at 600x300 and 48 steps against their
 //! 0.5 ms p95 budget; then the chrome over the panel and waveform at 600x300 with and without
-//! its environment, against the 0.1 ms p95 the environment may add, and the environment's
-//! memory. Without timestamp queries it says so and exits 0.
+//! its environment, against the 0.1 ms p95 the environment may add; the chrome alone with
+//! the studio and with the desktop; and the environment's memory. Without timestamp queries it says so and exits 0.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +57,8 @@ enum Kind {
     AuroraChrome,
     /// The chrome blob reflecting the layers under it.
     ChromeEnv,
+    /// The chrome blob reflecting a made-up desktop (EG-21), drifting 2 texels a second.
+    ChromeDesktop,
 }
 
 #[derive(Debug)]
@@ -69,14 +73,22 @@ impl HeroSource for Hero {
         let v = eased(t).min(1.0);
         let phase = t as f32;
         let f = match self.kind {
-            Kind::Chrome | Kind::ChromeEnv => HeroFrame {
+            Kind::Chrome | Kind::ChromeEnv | Kind::ChromeDesktop => HeroFrame {
                 shape: HeroShape::Blob { lobes: 5 },
                 look: HeroLook::Chrome {
                     tint: Color::hex(0xdfe8ff, 1.0),
                     top: Color::hex(0x8ea4d8, 1.0),
                     bottom: Color::hex(0x06070c, 1.0),
                     light: Color::hex(0xffffff, 1.0),
-                    env: matches!(self.kind, Kind::ChromeEnv).then(Env::default),
+                    env: match self.kind {
+                        Kind::ChromeEnv => Some(Env::default()),
+                        Kind::ChromeDesktop => {
+                            let drift = if self.reduced { 0.0 } else { env::DRIFT_MAX };
+                            let desktop = Desktop { drift, ..Desktop::new(Color::hex(0x3d7ae0, 1.0), 4) };
+                            Some(Env { desktop: Some(desktop), ..Env::default() })
+                        }
+                        _ => None,
+                    },
                 },
                 stretch: [1.0, 0.5 + 0.12 * v, 0.8],
                 wobble: 0.25 + 0.75 * v,
@@ -290,6 +302,13 @@ fn bench() {
         "hero_demo bench: chrome over panel and waveform, 600x300: without env {m0:.3} ms median, {p0:.3} ms p95; \
          with env {m1:.3} ms median, {p1:.3} ms p95; adds {added:.3} ms p95, {verdict} the {ENV_BUDGET_MS} ms budget"
     );
+    let (m2, p2) =
+        measure_in(&hero(Hero { kind: Kind::ChromeDesktop, steps: 48, reduced: false }), 600, 300, None, false);
+    let (m3, p3) = measure_in(&hero(Hero { kind: Kind::Chrome, steps: 48, reduced: false }), 600, 300, None, false);
+    println!(
+        "hero_demo bench: chrome, 600x300: studio {m3:.3} ms median, {p3:.3} ms p95; desktop {m2:.3} ms median, \
+         {p2:.3} ms p95"
+    );
     println!(
         "hero_demo bench: env texture {}x{} Rgba16Float, {} KB",
         env::ENV_SIZE[0],
@@ -318,8 +337,9 @@ fn main() {
     install(&mut off.renderer);
     let (cols, gap) = (6u32, 6u32);
     // The five heroes, then a row of the two scenes under reduced motion, three moments each,
-    // then the chrome reflecting its panel and waveform.
-    let rows = KINDS.len() as u32 + 2;
+    // then the chrome reflecting its panel and waveform, then the chrome reflecting a made-up
+    // desktop.
+    let rows = KINDS.len() as u32 + 3;
     let (sw, sh) = (cols * w + (cols + 1) * gap, rows * h + (rows + 1) * gap);
     let mut sheet = vec![0u8; (sw * sh * 4) as usize];
     let rows_of = KINDS.iter().map(|(_, k)| (*k, false)).chain([(Kind::Jellyfish, true), (Kind::AuroraChrome, true)]);
@@ -338,6 +358,7 @@ fn main() {
     }
     for c in 0..cols {
         cells.push((KINDS.len() + 1, c, Kind::ChromeEnv, false, c));
+        cells.push((KINDS.len() + 2, c, Kind::ChromeDesktop, false, c));
     }
     for (r, c, kind, reduced, moment) in cells {
         let src = hero(Hero { kind, steps: 48, reduced });

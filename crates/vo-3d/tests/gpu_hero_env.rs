@@ -211,3 +211,88 @@ fn env_goldens() {
     }
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
+
+/// A made-up desktop (EG-21): no backdrop needed, a blue tint shows on the orb, a still
+/// desktop is built once, and the same seed gives the same pixels.
+fn desktop_orb(seed: u64, drift: f32) -> Arc<dyn GpuSource> {
+    let desktop = Desktop { drift, ..Desktop::new(Color::hex(0x3d7ae0, 1.0), seed) };
+    hero(Look(orb(Some(Env { desktop: Some(desktop), ..Env::default() }))))
+}
+
+/// Mean linear red, green and blue over the orb's middle.
+fn orb_mean(px: &[u8], w: u32) -> [f32; 3] {
+    let r = 0.5 * D * 0.9 * 0.7;
+    let (mut sum, mut n) = ([0.0; 3], 0);
+    for y in (CY - r) as u32..(CY + r) as u32 {
+        for x in (CX - r) as u32..(CX + r) as u32 {
+            let (dx, dy) = (x as f32 + 0.5 - CX, y as f32 + 0.5 - CY);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let i = ((y * w + x) * 4) as usize;
+            for c in 0..3 {
+                sum[c] += linear(px[i + c]);
+            }
+            n += 1;
+        }
+    }
+    sum.map(|s| s / n as f32)
+}
+
+#[test]
+fn the_orb_reflects_a_desktop_in_its_tint() {
+    let gpu = support::gpu();
+    let mut r = renderer(&gpu);
+    let (w, _, px) = render(&gpu, &mut r, &sample(&desktop_orb(4, 0.0), DARK, false, 1.0), 1.0);
+    let [red, green, blue] = orb_mean(&px, w);
+    eprintln!("desktop orb mean linear rgb: {red:.3} {green:.3} {blue:.3}");
+    assert!(blue > red * 1.5 && blue > green * 1.1, "{red:.3} {green:.3} {blue:.3}");
+    // The studio alone is near grey.
+    let (w, _, px) = render(&gpu, &mut r, &sample(&hero(Look(orb(None))), DARK, false, 1.0), 1.0);
+    let [sr, _, sb] = orb_mean(&px, w);
+    assert!(sb < sr * 1.5, "studio {sr:.3} {sb:.3}");
+}
+
+#[test]
+fn a_still_desktop_is_built_once_and_a_seed_repeats() {
+    let gpu = support::gpu();
+    let mut r = renderer(&gpu);
+    let h = desktop_orb(4, 0.0);
+    let before = env::rebuilds();
+    for i in 0..30 {
+        render(&gpu, &mut r, &sample(&h, DARK, false, 1.0 + i as f64 / 60.0), 1.0);
+    }
+    assert_eq!(env::rebuilds() - before, 1);
+    // A drift of 2 texels a second: 8 quarter-texel steps a second, so 4 or 5 builds in half
+    // a second.
+    let h = desktop_orb(4, 2.0);
+    let before = env::rebuilds();
+    for i in 0..30 {
+        render(&gpu, &mut r, &sample(&h, DARK, false, 1.0 + i as f64 / 60.0), 1.0);
+    }
+    let n = env::rebuilds() - before;
+    eprintln!("drifting desktop, 30 frames at 60 fps: {n} builds");
+    assert!((4..=5).contains(&n), "{n}");
+    let list = sample(&desktop_orb(9, 0.0), DARK, false, 1.0);
+    let a = render(&gpu, &mut renderer(&gpu), &list, 1.0).2;
+    let b = render(&gpu, &mut renderer(&gpu), &list, 1.0).2;
+    assert!(a == b, "same seed, different pixels");
+    let c = render(&gpu, &mut renderer(&gpu), &sample(&desktop_orb(10, 0.0), DARK, false, 1.0), 1.0).2;
+    assert!(a != c, "another seed, the same pixels");
+}
+
+#[test]
+fn desktop_goldens() {
+    let gpu = support::gpu();
+    let h = desktop_orb(4, 0.0);
+    let mut errors = Vec::new();
+    for (name, back, scale) in
+        [("hero-desktop", DARK, 1.0f32), ("hero-desktop-1.5x", DARK, 1.5), ("hero-desktop-light", LIGHT, 1.0)]
+    {
+        let (w, hgt, px) = render(&gpu, &mut renderer(&gpu), &sample(&h, back, false, 1.0), scale);
+        if let Err(e) = support::check(&Image { name: name.into(), w, h: hgt, channels: 4, px }, Tolerance::default()) {
+            errors.push(e);
+        }
+    }
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
