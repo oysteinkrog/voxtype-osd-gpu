@@ -333,6 +333,23 @@ pub trait TextLayout {
         let _ = fonts;
         self.layout_objects(text, style, max_width, objects)
     }
+
+    /// As `layout_fonts`, with each range in `fonts` keeping the advances `style.font` gives
+    /// it: its own font changes how its glyphs are drawn, never where they or the words after
+    /// them stand, nor where lines break. A range's advances are scaled to the width the
+    /// style's font shapes it to. For a voice that breathes through a variable font (MO-81)
+    /// without moving the text.
+    fn layout_fonts_in_place(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+    ) -> ShapedText {
+        let _ = fonts;
+        self.layout_objects(text, style, max_width, objects)
+    }
 }
 
 /// Logical units a line may overshoot its width and still count as fitting.
@@ -538,6 +555,24 @@ impl ShapedLayout {
     }
 }
 
+/// Scales the advances (and offsets) of the glyphs in each range of `fonts` so the range is
+/// as wide as `base`, the same text shaped in the style's font alone.
+fn hold_advances(glyphs: &mut [Shaped], base: &[Shaped], fonts: &[(Range<usize>, FontId)]) {
+    let within = |g: &Shaped, r: &Range<usize>| r.contains(&(g.cluster as usize));
+    for (range, _) in fonts {
+        let want: f32 = base.iter().filter(|g| within(g, range)).map(|g| g.advance).sum();
+        let have: f32 = glyphs.iter().filter(|g| within(g, range)).map(|g| g.advance).sum();
+        if have <= 0.0 {
+            continue;
+        }
+        let k = want / have;
+        for g in glyphs.iter_mut().filter(|g| within(g, range)) {
+            g.advance *= k;
+            g.dx *= k;
+        }
+    }
+}
+
 /// A run between two break opportunities.
 struct Segment {
     glyphs: Range<usize>,
@@ -567,6 +602,32 @@ impl TextLayout for ShapedLayout {
         objects: &[f32],
         fonts: &[(Range<usize>, FontId)],
     ) -> ShapedText {
+        self.lay(text, style, max_width, objects, fonts, false)
+    }
+
+    fn layout_fonts_in_place(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+    ) -> ShapedText {
+        self.lay(text, style, max_width, objects, fonts, true)
+    }
+}
+
+impl ShapedLayout {
+    /// `layout_fonts`, or with `in_place` `layout_fonts_in_place`.
+    fn lay(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+        in_place: bool,
+    ) -> ShapedText {
         let Some(face) = self.fonts.get(style.font) else {
             return EstimateText::default().layout_objects(text, style, max_width, objects);
         };
@@ -592,6 +653,11 @@ impl TextLayout for ShapedLayout {
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let runs = self.runs_in(text, style.font, fonts);
         let mut glyphs = self.shape_these(text, style, (&face, &shaper), k, (&[], Direction::LeftToRight), runs);
+        if in_place && !fonts.is_empty() {
+            let plain = self.runs_one(text, style.font);
+            let base = self.shape_these(text, style, (&face, &shaper), k, (&[], Direction::LeftToRight), plain);
+            hold_advances(&mut glyphs, &base, fonts);
+        }
         size_objects(text, &mut glyphs, objects, style.tracking);
         let mut segments = segments(text, &glyphs, style.tracking);
         if let Some(max) = max_width {

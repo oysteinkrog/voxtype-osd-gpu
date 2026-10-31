@@ -62,14 +62,21 @@ impl<M> LayoutView<'_, M> {
         let text_layout = self.text;
         let n = self.node(node_id);
         type Fonts = Vec<(std::ops::Range<usize>, crate::font::FontId)>;
-        let content: Option<(String, TextStyle, Vec<f32>, Fonts)> = match &n.kind {
-            Kind::Label { text, style } => Some((text.clone(), *style, Vec::new(), Vec::new())),
+        let content: Option<(String, TextStyle, Vec<f32>, Fonts, bool)> = match &n.kind {
+            Kind::Label { text, style } => Some((text.clone(), *style, Vec::new(), Vec::new(), false)),
             Kind::LiveText { words, style, inline, live, edit, .. } => {
                 let spans = crate::flow::live_spans(words, live.source.as_deref());
                 let fonts = crate::flow::word_font_ranges(words, &spans.ranges, &live.word_fonts);
                 // An edit decor needs caret stops.
                 let style = TextStyle { stops: style.stops || edit.is_some(), ..*style };
-                Some((spans.text.into_owned(), style, crate::inline::widths(words, inline, style.size), fonts))
+                let in_place = live.word_fonts_in_place;
+                Some((
+                    spans.text.into_owned(),
+                    style,
+                    crate::inline::widths(words, inline, style.size),
+                    fonts,
+                    in_place,
+                ))
             }
             _ => None,
         };
@@ -79,14 +86,18 @@ impl<M> LayoutView<'_, M> {
             &n.style,
             |_, _| 0.0,
             |known, available| {
-                let Some((text, style, objects, fonts)) = &content else { return taffy::Size::ZERO };
+                let Some((text, style, objects, fonts, in_place)) = &content else { return taffy::Size::ZERO };
                 let max = known.width.or(match available.width {
                     AvailableSpace::Definite(w) => Some(w),
                     AvailableSpace::MinContent => Some(0.0),
                     AvailableSpace::MaxContent => None,
                 });
                 let st = fitted(text_layout, text, style, max, known.height);
-                let s = text_layout.layout_fonts(text, &st, max, objects, fonts);
+                let s = if *in_place {
+                    text_layout.layout_fonts_in_place(text, &st, max, objects, fonts)
+                } else {
+                    text_layout.layout_fonts(text, &st, max, objects, fonts)
+                };
                 let size =
                     taffy::Size { width: known.width.unwrap_or(s.size.w), height: known.height.unwrap_or(s.size.h) };
                 shaped = Some(s);
@@ -94,13 +105,19 @@ impl<M> LayoutView<'_, M> {
             },
         );
         if inputs.run_mode == RunMode::PerformLayout {
-            if let Some((text, style, objects, fonts)) = &content {
+            if let Some((text, style, objects, fonts, in_place)) = &content {
                 // The measure function did not run when the style fixes both sides.
                 // A label that fits itself is laid out again in its final box.
                 let st = fitted(text_layout, text, style, Some(out.size.width), Some(out.size.height));
                 let shaped = if style.fit.is_some() { None } else { shaped };
-                let mut s =
-                    shaped.unwrap_or_else(|| text_layout.layout_fonts(text, &st, Some(out.size.width), objects, fonts));
+                let mut s = shaped.unwrap_or_else(|| {
+                    let max = Some(out.size.width);
+                    if *in_place {
+                        text_layout.layout_fonts_in_place(text, &st, max, objects, fonts)
+                    } else {
+                        text_layout.layout_fonts(text, &st, max, objects, fonts)
+                    }
+                });
                 // A box wider than its text (a fixed or stretched width) holds the lines by
                 // their alignment.
                 s.align_in(style.align, out.size.width);

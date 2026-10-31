@@ -468,6 +468,9 @@ pub struct LiveMotion {
     pub magnet: Option<magnet::Magnet>,
     /// Words set in a font of their own, such as a variable font instance (MO-81).
     pub word_fonts: Vec<(WordId, FontId)>,
+    /// The words in `word_fonts` keep the advances of the style's font, so their own font
+    /// changes only how they are drawn (`Element::word_fonts_in_place`).
+    pub word_fonts_in_place: bool,
     /// The text as typed, when it is more than the words joined by single spaces: runs of
     /// spaces and hard newlines (`Element::live_source`). See `live_spans`.
     pub source: Option<String>,

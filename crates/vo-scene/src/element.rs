@@ -1483,6 +1483,21 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: as [`Element::word_fonts`], with each word keeping the width the style's font
+    /// gives it: its own font changes how its letters are drawn, never where it or the words
+    /// after it stand, nor where lines break. For a voice that breathes through a variable
+    /// font without moving the text (MO-81).
+    pub fn word_fonts_in_place(mut self, fonts: Vec<(vo_core::words::WordId, crate::font::FontId)>) -> Element<M> {
+        match &mut self.kind {
+            Kind::LiveText { live, .. } => {
+                live.word_fonts = fonts;
+                live.word_fonts_in_place = true;
+            }
+            _ => debug_assert!(false, "word_fonts_in_place on a node that is not live text: {}", self.key),
+        }
+        self
+    }
+
     /// Live text: draws a caret, a selection and edit marks with the words, at their sprung
     /// places (`flow::EditDecor`). Pass the buffer with `Element::live_source` so the decor's
     /// bytes match the text. While a node has a decor it lays out with caret stops and does
