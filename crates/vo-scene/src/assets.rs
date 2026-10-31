@@ -5,6 +5,11 @@
 //! The fonts are Latin subsets (and one Japanese label subset) of SIL Open Font License
 //! fonts, about 1 MB in all. `assets/fonts/subset.sh` remakes them and `assets/fonts/README.md`
 //! lists their sources and copyrights. `FontRegistry::asset` loads one by name.
+//!
+//! The textures (EG-25) are four 256 x 256 greyscale tiles that wrap at every edge, 64 KB each:
+//! paper fibre, a woven ribbon, rubber and film grain. `crates/vo/examples/make_textures.rs`
+//! makes them from fixed seeds, so they carry no third-party licence; `Material::paper` and its
+//! siblings draw them.
 
 /// What an asset holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +42,20 @@ macro_rules! font {
         }
     };
 }
+
+macro_rules! tile {
+    ($name:literal, $about:literal) => {
+        Asset {
+            name: $name,
+            kind: AssetKind::Texture,
+            bytes: include_bytes!(concat!("../../../assets/textures/", $name, ".gray")),
+            about: $about,
+        }
+    };
+}
+
+/// The side of a built-in texture tile in pixels: one byte a pixel, row by row.
+pub const TILE: usize = 256;
 
 /// Every built-in asset.
 pub static ASSETS: &[Asset] = &[
@@ -75,6 +94,10 @@ pub static ASSETS: &[Asset] = &[
     font!("music", "Bravura-Music.otf", "Bravura (SMuFL): staff lines, clefs, note heads, flags, accidentals and rests"),
     font!("jp-labels", "NotoSansJP-Regular-Labels.otf", "Noto Sans CJK JP Regular: kana and label kanji"),
     font!("jp-labels-bold", "NotoSansJP-Bold-Labels.otf", "Noto Sans CJK JP Bold: kana and label kanji"),
+    tile!("paper", "Paper fibre: soft mottling with short light and dark fibres"),
+    tile!("fabric", "A woven ribbon: a plain weave of round threads"),
+    tile!("rubber", "Rubber: a fine stipple with small pores"),
+    tile!("film-grain", "Film grain: clumped per-pixel noise"),
 ];
 
 /// The built-in asset called `name`.
@@ -100,6 +123,53 @@ mod tests {
         }
         assert!(get("no-such-asset").is_none());
         assert!(names(AssetKind::Font).any(|n| n == "condensed-bold"));
+    }
+
+    /// The mean step between column (or row) `a` and `b` of a tile.
+    fn step(tile: &[u8], a: usize, b: usize, rows: bool) -> f64 {
+        let at = |i: usize, k: usize| if rows { tile[i * TILE + k] } else { tile[k * TILE + i] } as f64;
+        (0..TILE).map(|k| (at(a, k) - at(b, k)).abs()).sum::<f64>() / TILE as f64
+    }
+
+    /// How much the step across a tile's wrap edge is, against the mean step between
+    /// neighbouring interior columns (or rows).
+    fn wrap_ratio(tile: &[u8], rows: bool) -> f64 {
+        let inner = (1..TILE - 2).map(|i| step(tile, i, i + 1, rows)).sum::<f64>() / (TILE - 3) as f64;
+        step(tile, 0, TILE - 1, rows) / inner
+    }
+
+    #[test]
+    fn the_wrap_check_finds_a_seam() {
+        // A ramp left to right steps 255 at its wrap edge and 1 inside.
+        let ramp: Vec<u8> = (0..TILE * TILE).map(|i| (i % TILE) as u8).collect();
+        assert!(wrap_ratio(&ramp, false) > 100.0);
+        // A wave with 8 periods across the tile wraps both ways.
+        let wave: Vec<u8> = (0..TILE * TILE)
+            .map(|i| {
+                let (x, y) = ((i % TILE) as f32, (i / TILE) as f32);
+                let k = std::f32::consts::TAU * 8.0 / TILE as f32;
+                (128.0 + 60.0 * (k * x).cos() + 60.0 * (k * y).cos()) as u8
+            })
+            .collect();
+        assert!(wrap_ratio(&wave, false) <= 1.5);
+        assert!(wrap_ratio(&wave, true) <= 1.5);
+    }
+
+    /// EG-25: four tiles of 64 KB, each wrapping: the step across its edge is at most 1.5
+    /// times the mean step inside, both ways. Never black, as an empty image slot is.
+    #[test]
+    fn the_texture_tiles_wrap() {
+        let names: Vec<_> = names(AssetKind::Texture).collect();
+        assert_eq!(names, ["paper", "fabric", "rubber", "film-grain"]);
+        for name in names {
+            let tile = get(name).unwrap().bytes;
+            assert_eq!(tile.len(), TILE * TILE, "{name}");
+            assert!(tile.iter().all(|&v| v > 0), "{name}");
+            for rows in [false, true] {
+                let r = wrap_ratio(tile, rows);
+                assert!(r <= 1.5, "{name} {}: {r:.2}", if rows { "rows" } else { "columns" });
+            }
+        }
     }
 
     #[test]
