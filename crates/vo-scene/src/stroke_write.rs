@@ -170,8 +170,12 @@ pub struct Writing {
     glyph_begin: Vec<f32>,
     glyph_end: Vec<f32>,
     total: f32,
+    /// The pen distance a lift between strokes costs.
+    lift: f32,
     /// Each glyph's centre-line analysis, for the font sources.
     centres: Vec<Option<Arc<GlyphCentre>>>,
+    /// Glyphs with ink that no pen line stands for (SW-07): swept in, never traced.
+    sweep: Vec<bool>,
     pending: bool,
     /// Word id the drawn glyphs carry (`GlyphInstance::word`).
     word_id: u32,
@@ -203,10 +207,18 @@ impl Writing {
         let pen = PenFont::script();
         let mut placed_all: Vec<(usize, Contour, bool)> = Vec::new();
         let mut centres = Vec::with_capacity(word.glyphs.len());
+        let mut sweep = Vec::with_capacity(word.glyphs.len());
         let mut pending = false;
         for (i, g) in word.glyphs.iter().enumerate() {
             let c = text.get(g.cluster as usize..).and_then(|s| s.chars().next()).unwrap_or(' ');
-            let centre = match (source, g.has_ink(), fonts.get(g.font)) {
+            let face = fonts.get(g.font);
+            // A colour glyph, a missing one, a right-to-left letter or an emoji has no pen
+            // line that stands for it: it is swept in (SW-07).
+            // A bitmap glyph has no outline but still shows.
+            let colour = face.as_ref().is_some_and(|f| centreline::is_colour(f, g.glyph));
+            let shows = g.has_ink() || colour;
+            let unwritable = shows && (colour || g.glyph == 0 || right_to_left(c) || pictograph(c));
+            let centre = match (source, g.has_ink() && !unwritable, face) {
                 (StrokeSource::Font, true, Some(face)) => match centreline::lookup(&face, g.glyph) {
                     Lookup::Ready(x) => Some(x),
                     Lookup::Pending => {
@@ -220,6 +232,9 @@ impl Writing {
             let cap = cap_height(fonts, g.font, g.size);
             let k = cap / HERSHEY_CAP;
             let hershey = if source == StrokeSource::Hershey { pen.glyph(c).filter(|p| !p.strokes.is_empty()) } else { None };
+            // Centre lines that miss the glyph's ink do not stand for it either.
+            let centre = centre.filter(|cl| cl.coverage.writes() && !cl.strokes.is_empty());
+            let hershey = hershey.filter(|_| !unwritable);
             let placed: Vec<(Contour, bool)> = match (&centre, hershey) {
                 (Some(cl), _) => cl
                     .strokes
@@ -251,11 +266,12 @@ impl Writing {
                         })
                         .collect()
                 }
-                // No pen letter, or its centre lines are not ready: trace the outline,
-                // contour by contour.
-                (None, None) => g.outline.contours.iter().map(|c| (c.clone(), false)).collect(),
+                // No pen line for it, or its centre lines are not ready: swept in.
+                (None, None) => Vec::new(),
             };
-            placed_all.extend(placed.into_iter().filter(|(c, _)| c.length() > 0.0).map(|(c, d)| (i, c, d)));
+            let placed: Vec<(Contour, bool)> = placed.into_iter().filter(|(c, _)| c.length() > 0.0).collect();
+            sweep.push(shows && placed.is_empty());
+            placed_all.extend(placed.into_iter().map(|(c, d)| (i, c, d)));
             centres.push(centre);
         }
         // Base strokes glyph by glyph, then the delayed ones (dots, crossbars, marks) at the
@@ -266,32 +282,52 @@ impl Writing {
         let mut glyph_begin = vec![f32::NAN; n];
         let mut glyph_end = vec![f32::NAN; n];
         let mut at = 0.0f32;
-        for late in [false, true] {
-            for (i, c, delayed) in placed_all.iter().filter(|t| t.2 == late) {
-                let len = c.length();
-                if glyph_begin[*i].is_nan() {
-                    glyph_begin[*i] = at;
-                }
-                strokes.push(Stroke { contour: c.clone(), start: at, glyph: *i, delayed: *delayed });
-                at += len + lift;
-                if !late || glyph_end[*i].is_nan() {
-                    glyph_end[*i] = at;
-                }
+        let mut push = |i: usize, c: &Contour, delayed: bool, at: &mut f32, begin: &mut [f32], end: &mut [f32]| {
+            if begin[i].is_nan() {
+                begin[i] = *at;
             }
-            if !late {
-                // A glyph with no strokes holds its place after the glyph before it.
-                let mut last = 0.0f32;
-                for i in 0..n {
-                    if glyph_end[i].is_nan() && !placed_all.iter().any(|t| t.0 == i) {
-                        (glyph_begin[i], glyph_end[i]) = (last, last);
-                    }
-                    if !glyph_end[i].is_nan() {
-                        last = glyph_end[i];
-                    }
-                }
+            strokes.push(Stroke { contour: c.clone(), start: *at, glyph: i, delayed });
+            *at += c.length() + lift;
+            if !delayed || end[i].is_nan() {
+                end[i] = *at;
+            }
+        };
+        // Base strokes glyph by glyph. A swept glyph takes its place in the pen's path, its
+        // ink box wide: the pen passes over it with no ink while its fill rises (SW-07).
+        let mut last = 0.0f32;
+        for i in 0..n {
+            if sweep[i] {
+                let g = &word.glyphs[i];
+                glyph_begin[i] = at;
+                at += g.ink.w.max(0.5 * g.advance).max(1.0) + lift;
+                glyph_end[i] = at;
+            }
+            for (_, c, _) in placed_all.iter().filter(|t| t.0 == i && !t.2) {
+                push(i, c, false, &mut at, &mut glyph_begin, &mut glyph_end);
+            }
+            // A glyph with no strokes and no ink holds its place after the glyph before it.
+            if glyph_end[i].is_nan() && !placed_all.iter().any(|t| t.0 == i) {
+                (glyph_begin[i], glyph_end[i]) = (last, last);
+            }
+            if !glyph_end[i].is_nan() {
+                last = glyph_end[i];
             }
         }
-        Writing { word, strokes, glyph_begin, glyph_end, total: at, centres, pending, word_id: crate::display::NO_WORD }
+        for (i, c, _) in placed_all.iter().filter(|t| t.2) {
+            push(*i, c, true, &mut at, &mut glyph_begin, &mut glyph_end);
+        }
+        Writing {
+            word,
+            strokes,
+            glyph_begin,
+            glyph_end,
+            total: at,
+            lift,
+            centres,
+            sweep,
+            pending,
+            word_id: crate::display::NO_WORD,
+        }
     }
 
     /// The part of this writing that writes glyphs `range` (SW-06), for a revision that
@@ -305,25 +341,20 @@ impl Writing {
         let mut glyph_end = vec![f32::NAN; n];
         let mut base = vec![false; n];
         let mut at = 0.0f32;
-        for (j, s) in self.strokes.iter().enumerate() {
-            if !range.contains(&s.glyph) {
-                continue;
-            }
-            let len = s.contour.length();
-            let next = self.strokes.get(j + 1).map_or(self.total, |x| x.start);
-            let lift = (next - s.start - len).max(0.0);
-            let i = s.glyph;
-            if glyph_begin[i].is_nan() {
+        // Base strokes and sweeps glyph by glyph, then the delayed strokes, as written.
+        for i in range.clone().filter(|&i| i < n) {
+            if self.sweep[i] {
+                let span = self.glyph_end[i] - self.glyph_begin[i];
                 glyph_begin[i] = at;
-            }
-            strokes.push(Stroke { start: at, ..s.clone() });
-            at += len + lift;
-            // A glyph is done at the end of its last base stroke, or of its last delayed one
-            // when it has only those.
-            if !s.delayed || !base[i] {
+                at += span;
                 glyph_end[i] = at;
             }
-            base[i] |= !s.delayed;
+            for s in self.strokes.iter().filter(|s| s.glyph == i && !s.delayed) {
+                self.rewrite_stroke(s, &mut at, &mut strokes, (&mut glyph_begin, &mut glyph_end, &mut base));
+            }
+        }
+        for s in self.strokes.iter().filter(|s| range.contains(&s.glyph) && s.delayed) {
+            self.rewrite_stroke(s, &mut at, &mut strokes, (&mut glyph_begin, &mut glyph_end, &mut base));
         }
         let mut last = 0.0f32;
         for i in 0..n {
@@ -343,10 +374,34 @@ impl Writing {
             glyph_begin,
             glyph_end,
             total: at,
+            lift: self.lift,
             centres: self.centres.clone(),
+            sweep: self.sweep.clone(),
             pending: self.pending,
             word_id: self.word_id,
         }
+    }
+
+    /// Stroke `s` appended to a part writing at pen distance `at`, with the word's lift.
+    fn rewrite_stroke(
+        &self,
+        s: &Stroke,
+        at: &mut f32,
+        strokes: &mut Vec<Stroke>,
+        (glyph_begin, glyph_end, base): (&mut [f32], &mut [f32], &mut [bool]),
+    ) {
+        let i = s.glyph;
+        if glyph_begin[i].is_nan() {
+            glyph_begin[i] = *at;
+        }
+        strokes.push(Stroke { start: *at, ..s.clone() });
+        *at += s.contour.length() + self.lift;
+        // A glyph is done at the end of its last base stroke, or of its last delayed one
+        // when it has only those.
+        if !s.delayed || !base[i] {
+            glyph_end[i] = *at;
+        }
+        base[i] |= !s.delayed;
     }
 
     /// The word id the drawn glyphs carry, so per-word tools (the reading-line envelope)
@@ -358,6 +413,13 @@ impl Writing {
 
     /// Whether some glyph's centre lines were still being analysed ([`StrokeSource::Font`]):
     /// it is written by its outline, and building the writing again later gives its strokes.
+    /// Whether glyph `i` is swept in rather than written: a colour or missing glyph, a
+    /// right-to-left letter, an emoji, or one whose centre lines do not cover its ink
+    /// ([`centreline::Coverage::writes`]).
+    pub fn swept(&self, i: usize) -> bool {
+        self.sweep.get(i).copied().unwrap_or(false)
+    }
+
     pub fn pending(&self) -> bool {
         self.pending
     }
@@ -943,6 +1005,19 @@ fn joined(a: &VectorSeg, b: &VectorSeg) -> bool {
 /// `c` with each segment end's width multiplied by `nib`'s factor for its heading and by
 /// `press`. Where two segments join, both take the mean of their two factors, so the width
 /// turns with the stroke instead of stepping. Without a nib, `c` as it is.
+/// A letter of a right-to-left script (Hebrew, Arabic, Syriac, Thaana, NKo and their
+/// presentation forms). The layout sets them left to right, so a pen would write them
+/// backwards.
+fn right_to_left(c: char) -> bool {
+    matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
+}
+
+/// An emoji or pictograph, which a font fallback may draw as an outline but which no pen
+/// line stands for.
+fn pictograph(c: char) -> bool {
+    matches!(c as u32, 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F000..=0x1FAFF)
+}
+
 fn nibbed(c: &Contour, nib: Option<Nib>, press: f32) -> Contour {
     let Some(nib) = nib else { return c.clone() };
     let heads: Vec<(f32, f32)> = c.segs.iter().map(headings).collect();
@@ -1093,10 +1168,11 @@ mod tests {
                 assert!(q.y > g.pos.y - 45.0 && q.y < g.pos.y + 20.0, "y {q:?}");
             }
         }
-        // 'å' has no pen letter: its strokes are its outline contours.
+        // 'å' has no pen letter: it is swept in, with no strokes, never traced (SW-07).
         let a = w.word.glyphs.iter().position(|g| g.cluster as usize == text.find('å').unwrap()).unwrap();
-        let n = w.strokes.iter().filter(|t| t.glyph == a).count();
-        assert_eq!(n, w.word.glyphs[a].outline.contours.len());
+        assert_eq!(w.strokes.iter().filter(|t| t.glyph == a).count(), 0);
+        assert!(w.swept(a));
+        assert!(w.glyph_end[a] > w.glyph_begin[a], "the sweep takes its place in the pen's path");
     }
 
     fn shaped_word(fonts: &FontRegistry, id: u32, text: &str) -> WordOutline {
@@ -1167,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn font_source_never_waits_and_falls_back_to_outlines() {
+    fn font_source_never_waits_and_sweeps_a_glyph_not_ready() {
         let fonts = FontRegistry::new();
         let id = fonts.asset("serif").unwrap();
         let text = "Qz";
@@ -1178,7 +1254,8 @@ mod tests {
                 Some(c) => assert_eq!(n, c.strokes.len()),
                 None => {
                     assert!(w.pending());
-                    assert_eq!(n, g.outline.contours.len());
+                    assert!(g.has_ink() && w.swept(i));
+                    assert_eq!(n, 0, "no outline trace");
                 }
             }
         }
@@ -1187,12 +1264,82 @@ mod tests {
         loop {
             let w = Writing::with_source(&fonts, text, shaped_word(&fonts, id, text), 4.0, StrokeSource::Font);
             if !w.pending() {
-                assert!(w.centre(0).is_some() && w.centre(1).is_some());
+                assert!((0..2).all(|i| w.centre(i).is_some() != w.swept(i)));
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "never ready");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// SW-07: every glyph of a mixed word is written by its centre lines or swept in; none
+    /// is traced by its outline, and the emoji is swept.
+    #[test]
+    fn non_ascii_marks_and_emoji_are_written_or_swept_never_traced() {
+        let fonts = FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let text = "på økt naïve 東京 🙂";
+        let w = Writing::with_source(&fonts, text, shaped_word(&fonts, id, text), 4.0, StrokeSource::FontNow);
+        assert!(!w.pending());
+        let char_at = |g: &crate::glyph_morph::GlyphOutline| text[g.cluster as usize..].chars().next().unwrap();
+        for (i, g) in w.word.glyphs.iter().enumerate() {
+            let n = w.strokes().filter(|t| t.glyph == i).count();
+            let c = char_at(g);
+            if !g.has_ink() {
+                assert!(n == 0 && !w.swept(i), "{c:?} has no ink");
+                continue;
+            }
+            match w.centre(i) {
+                Some(cl) => {
+                    assert!(!w.swept(i), "{c:?} written");
+                    assert!(cl.coverage.writes(), "{c:?} covers its ink");
+                    assert_eq!(n, cl.strokes.len(), "{c:?} by its centre lines");
+                }
+                None => assert!(w.swept(i) && n == 0, "{c:?} swept, not traced"),
+            }
+        }
+        // The emoji is swept, or draws nothing where the font has no glyph for it.
+        let emoji = w.word.glyphs.iter().position(|g| char_at(g) == '🙂').expect("the emoji is shaped");
+        assert!(w.centre(emoji).is_none() && (w.swept(emoji) || !w.word.glyphs[emoji].has_ink()));
+        assert!(pictograph('🙂') && pictograph('☀') && !pictograph('å') && !pictograph('東'));
+        assert!(right_to_left('ש') && right_to_left('ب') && !right_to_left('ø'));
+        // The pen still writes the plain letters.
+        let p = w.word.glyphs.iter().position(|g| char_at(g) == 'p').unwrap();
+        assert!(!w.swept(p) && w.strokes().any(|t| t.glyph == p));
+        // Each glyph's fill starts where the one before it starts or later.
+        for i in 1..w.word.glyphs.len() {
+            assert!(w.glyph_begin[i] + 1e-3 >= w.glyph_begin[i - 1], "glyph {i}");
+        }
+    }
+
+    /// With a colour emoji font installed, the emoji comes from it and is swept.
+    #[test]
+    fn a_colour_emoji_is_swept() {
+        let fonts = FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let Ok(emoji) = fonts.add_system("Noto Color Emoji") else {
+            eprintln!("no Noto Color Emoji here; skipped");
+            return;
+        };
+        fonts.set_fallbacks(id, &[emoji]);
+        let text = "a🙂";
+        let w = Writing::with_source(&fonts, text, shaped_word(&fonts, id, text), 4.0, StrokeSource::FontNow);
+        let g = w.word.glyphs.iter().position(|g| g.font == emoji).expect("drawn from the emoji font");
+        assert!(w.swept(g) && w.strokes().all(|t| t.glyph != g));
+        assert!(w.glyph_end[g] > w.glyph_begin[g]);
+    }
+
+    #[test]
+    fn a_glyph_range_keeps_a_swept_glyph_s_span() {
+        let fonts = FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let text = "aå";
+        let w = Writing::new(&fonts, text, shaped_word(&fonts, id, text), 4.0);
+        assert!(w.swept(1));
+        let part = w.glyphs(1..2);
+        assert_eq!(part.strokes().count(), 0);
+        assert!((part.glyph_end[1] - part.glyph_begin[1]) - (w.glyph_end[1] - w.glyph_begin[1]) < 1e-3);
+        assert!(part.glyph_begin[1] >= 0.0 && part.length() > 0.0);
     }
 
     #[test]

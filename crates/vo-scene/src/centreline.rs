@@ -49,6 +49,10 @@ pub const GRID: f32 = 96.0;
 /// may fall outside the ink, for [`Coverage::passes`].
 pub const MIN_COVERED: f32 = 0.95;
 pub const MAX_OUTSIDE: f32 = 0.05;
+/// The share of the ink a pen's strokes must cover to write the glyph ([`Coverage::writes`]).
+pub const WRITE_MIN_COVERED: f32 = 0.9;
+/// The share of a pen's strokes that may fall outside the ink ([`Coverage::writes`]).
+pub const WRITE_MAX_OUTSIDE: f32 = 0.1;
 
 /// One pen stroke, in em units with the pen origin at 0 and y down (multiply by the em size
 /// and add the glyph's pen position to place it).
@@ -78,6 +82,15 @@ impl Coverage {
     /// at most [`MAX_OUTSIDE`] of the strokes outside it.
     pub fn passes(&self) -> bool {
         self.covered >= MIN_COVERED && self.outside <= MAX_OUTSIDE
+    }
+
+    /// Whether a pen may write the glyph by these strokes (SW-07): at least
+    /// [`WRITE_MIN_COVERED`] of its ink covered, at most [`WRITE_MAX_OUTSIDE`] outside it.
+    /// Looser than [`Coverage::passes`], since wet ink dries into the type within a fifth of
+    /// a second: the near misses (grotesk `ø` at 6 % outside, Saira ExtraBold `w` at 93 %)
+    /// are still written, and only analyses that miss the letter are swept instead.
+    pub fn writes(&self) -> bool {
+        self.covered >= WRITE_MIN_COVERED && self.outside <= WRITE_MAX_OUTSIDE
     }
 }
 
@@ -600,6 +613,19 @@ fn queue(k: u64, path: BezPath, xh: f32) {
         tx
     });
     let _ = tx.send((k, path, xh));
+}
+
+/// Whether `glyph` in `face` is drawn in colour (a COLR layer set or a bitmap, as emoji
+/// are): no single pen line stands for it (SW-07).
+pub fn is_colour(face: &Face, glyph: u32) -> bool {
+    use skrifa::{GlyphId, MetadataProvider};
+    let font = face.skrifa();
+    let id = GlyphId::new(glyph);
+    if font.color_glyphs().get(id).is_some() {
+        return true;
+    }
+    let strikes = font.bitmap_strikes();
+    (0..strikes.len()).filter_map(|i| strikes.get(i)).any(|s| s.get(id).is_some())
 }
 
 /// The strokes of `glyph` in `face` if they are cached; on a miss the glyph is queued on the
