@@ -50,24 +50,27 @@ impl PartialEq for GpuRef {
 /// letters, where a separate GPU element laid from a resting layout would drift off them.
 pub trait GlyphFollow: Debug + Send + Sync {
     /// What to paint over (or under) `glyphs`: the live text's glyphs in this frame, pen
-    /// positions in the live text's box (logical units from its top left). `None` paints
-    /// nothing this frame.
+    /// positions in the follower's area (logical units from its top left; the live text's
+    /// box unless [`Follow::area`] says otherwise). `None` paints nothing this frame.
     fn follow(&self, glyphs: &[crate::display::GlyphInstance], t: f64) -> Option<Arc<dyn GpuSource>>;
     /// Scene time after which the drawing no longer changes for unchanged glyphs.
     fn until(&self) -> f64;
 }
 
-/// A follower and where it draws: under the live text's glyphs or over them. Compared by
-/// identity, as [`GpuRef`] is.
+/// A follower and where it draws: under the live text's glyphs or over them, in the live
+/// text's box or in `area`. Compared by identity, as [`GpuRef`] is.
 #[derive(Clone, Debug)]
 pub struct Follow {
     pub source: Arc<dyn GlyphFollow>,
     pub over: bool,
+    /// The drawing's box relative to the live text's box, when it reaches past it: a light
+    /// that falls on the whole panel while the text is one line on it.
+    pub area: Option<crate::geom::Rect>,
 }
 
 impl PartialEq for Follow {
     fn eq(&self, o: &Follow) -> bool {
-        Arc::ptr_eq(&self.source, &o.source) && self.over == o.over
+        Arc::ptr_eq(&self.source, &o.source) && self.over == o.over && self.area == o.area
     }
 }
 

@@ -1447,11 +1447,24 @@ impl<M> Element<M> {
     /// Live text: a GPU drawing under (`over` false) or over its glyphs that follows them as
     /// they are drawn in each frame (`crate::gpu::GlyphFollow`). Several stack in the order
     /// given.
-    pub fn glyph_follow(mut self, source: std::sync::Arc<dyn crate::gpu::GlyphFollow>, over: bool) -> Element<M> {
+    pub fn glyph_follow(self, source: std::sync::Arc<dyn crate::gpu::GlyphFollow>, over: bool) -> Element<M> {
+        self.follow(crate::gpu::Follow { source, over, area: None })
+    }
+
+    /// [`Element::glyph_follow`] drawn in `area`, a box relative to the live text's box,
+    /// rather than in the live text's box.
+    pub fn glyph_follow_in(
+        self,
+        source: std::sync::Arc<dyn crate::gpu::GlyphFollow>,
+        over: bool,
+        area: Rect,
+    ) -> Element<M> {
+        self.follow(crate::gpu::Follow { source, over, area: Some(area) })
+    }
+
+    fn follow(mut self, f: crate::gpu::Follow) -> Element<M> {
         match &mut self.kind {
-            Kind::LiveText { follow, .. } => {
-                std::sync::Arc::make_mut(follow.get_or_insert_default()).push(crate::gpu::Follow { source, over })
-            }
+            Kind::LiveText { follow, .. } => std::sync::Arc::make_mut(follow.get_or_insert_default()).push(f),
             _ => debug_assert!(false, "glyph_follow on a node that is not live text: {}", self.key),
         }
         self

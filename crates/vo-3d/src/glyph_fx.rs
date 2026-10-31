@@ -298,7 +298,8 @@ impl GlyphFx {
 
 /// Following the live text (`Element::glyph_follow`): each word's glyphs move by how far that
 /// word's first glyph is drawn from its first glyph here, and glyphs of words not drawn are
-/// left out.
+/// left out. A live text that draws words but none of these paints nothing: one line of a
+/// stack that is not the line the effect is for.
 impl GlyphFollow for GlyphFx {
     fn follow(&self, drawn: &[GlyphInstance], _t: f64) -> Option<Arc<dyn GpuSource>> {
         let mut live: HashMap<u32, Point> = HashMap::new();
@@ -308,6 +309,9 @@ impl GlyphFollow for GlyphFx {
         let mut here: HashMap<u32, Point> = HashMap::new();
         for g in self.glyphs.iter().filter(|g| g.word != NO_WORD) {
             here.entry(g.word).or_insert(g.pos);
+        }
+        if !live.is_empty() && !here.is_empty() && !here.keys().any(|w| live.contains_key(w)) {
+            return None;
         }
         let glyphs: Vec<FxGlyph> = self
             .glyphs
@@ -1016,6 +1020,10 @@ mod tests {
         let moved = src.as_any().downcast_ref::<GlyphFx>().unwrap();
         let at: Vec<(f32, f32)> = moved.glyphs.iter().map(|g| (g.pos.x, g.pos.y)).collect();
         assert_eq!(at, vec![(12.0, 26.0), (21.0, 26.0), (50.0, 26.0)], "word 3 is not drawn");
+        // Another line's words only: nothing to paint. No words drawn yet: the effect alone.
+        assert!(fx.follow(&[drawn(7, 0.0, 0.0)], 0.0).is_none());
+        let bare = fx.follow(&[], 0.0).unwrap();
+        assert!(bare.as_any().downcast_ref::<GlyphFx>().unwrap().glyphs.is_empty());
         assert_eq!(GlyphFollow::until(&fx), fx.settled_at());
     }
 

@@ -93,3 +93,27 @@ fn followers_get_the_drawn_glyphs_in_every_frame_in_order() {
     }
     assert!(moved, "the centred line slides, and the follower sees it slide");
 }
+
+#[test]
+fn a_follower_with_an_area_draws_there_and_sees_the_glyphs_from_its_corner() {
+    let spy = Arc::new(Spy::default());
+    let w = vec![Word { id: 1, text: "the".into() }];
+    let live = Element::live_text("live", &w).text_style(TextStyle::new(0, 20.0, 26.0)).width(400.0).glyph_follow_in(
+        spy.clone(),
+        true,
+        vo_scene::geom::Rect::new(-10.0, -20.0, 500.0, 80.0),
+    );
+    let view = Element::column("root").child(live.layout(|s| {
+        s.position = taffy::style::Position::Absolute;
+        s.inset.left = taffy::style::LengthPercentageAuto::length(30.0);
+        s.inset.top = taffy::style::LengthPercentageAuto::length(50.0);
+    }));
+    let mut s = scene();
+    s.apply(view, 0.0);
+    let list = s.sample(1.0);
+    let rect = list.gpu.last().unwrap().rect;
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (20.0, 30.0, 500.0, 80.0));
+    let got = spy.0.lock().unwrap().clone();
+    let first = list.glyphs.iter().find(|g| g.word == 1).unwrap();
+    assert!((got[0].pos.x + 20.0 - first.pos.x).abs() < 1e-3 && (got[0].pos.y + 30.0 - first.pos.y).abs() < 1e-3);
+}

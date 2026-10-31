@@ -1985,9 +1985,13 @@ impl<M> Scene<M> {
                 Kind::LiveText { follow: Some(follow), .. } => follow,
                 _ => &[],
             };
-            let item = |source: std::sync::Arc<dyn crate::gpu::GpuSource>| crate::gpu::GpuItem {
+            let area = |f: &crate::gpu::Follow| match f.area {
+                Some(a) => Rect::new(m.e + a.x, m.f + a.y, a.w, a.h),
+                None => Rect::new(m.e, m.f, size.w, size.h),
+            };
+            let item = |source: std::sync::Arc<dyn crate::gpu::GpuSource>, rect: Rect| crate::gpu::GpuItem {
                 source: crate::gpu::GpuRef(source),
-                rect: Rect::new(m.e, m.f, size.w, size.h),
+                rect,
                 t,
                 opacity: alpha,
                 part: crate::gpu::GpuPart::Whole,
@@ -1995,26 +1999,31 @@ impl<M> Scene<M> {
             };
             let mut under = Vec::new();
             for f in follow.iter().filter(|f| !f.over) {
-                out.gpu.push(item(std::sync::Arc::new(crate::gpu::NoPaint)));
+                out.gpu.push(item(std::sync::Arc::new(crate::gpu::NoPaint), area(f)));
                 push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
                 under.push((out.gpu.len() - 1, f));
             }
             let first_glyph = out.glyphs.len();
             self.draw(n, t, Point::new(m.e, m.f), size, alpha, layer, items, out);
             if !follow.is_empty() {
-                let drawn: Vec<GlyphInstance> = out.glyphs[first_glyph..]
-                    .iter()
-                    .filter(|g| g.word != NO_WORD)
-                    .map(|g| GlyphInstance { pos: Point::new(g.pos.x - m.e, g.pos.y - m.f), ..*g })
-                    .collect();
+                let drawn: Vec<GlyphInstance> =
+                    out.glyphs[first_glyph..].iter().filter(|g| g.word != NO_WORD).copied().collect();
+                // The glyphs in a follower's area, from its top left.
+                let seen = |rect: Rect| -> Vec<GlyphInstance> {
+                    drawn
+                        .iter()
+                        .map(|g| GlyphInstance { pos: Point::new(g.pos.x - rect.x, g.pos.y - rect.y), ..*g })
+                        .collect()
+                };
                 for (i, f) in under {
-                    if let Some(source) = f.source.follow(&drawn, t) {
+                    if let Some(source) = f.source.follow(&seen(out.gpu[i].rect), t) {
                         out.gpu[i].source = crate::gpu::GpuRef(source);
                     }
                 }
                 for f in follow.iter().filter(|f| f.over) {
-                    if let Some(source) = f.source.follow(&drawn, t) {
-                        out.gpu.push(item(source));
+                    let rect = area(f);
+                    if let Some(source) = f.source.follow(&seen(rect), t) {
+                        out.gpu.push(item(source, rect));
                         push_item(items, ItemKind::Gpu, out.gpu.len() as u32 - 1);
                     }
                 }
