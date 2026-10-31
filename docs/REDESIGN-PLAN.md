@@ -159,6 +159,8 @@ Type with its idle motion (09b: the status square breathes 100 to 60 % every 2 s
 
 Showcase (lq9: no new motion; its orbs already drift like a nebula and its ring's particles orbit above the ribbon; reduced motion now leaves out the ring, the orbs and the rim's light head), measure build, popup e24b0f1, 2026-10-31, four runs: idle-open 2.49, 2.51, 3.49 and 3.99 % CPU at 15 frames/s, recording 8.2 to 12.4 % CPU, GPU median 0.29 to 0.49 ms. Idle-open is over the 3 % limit in two runs of four, without any new idle motion; one run with `no-variable-breath` gave 4.50 %, so the spread is load noise, not one feature.
 
+Showcase at 10 frames a second on room tone (lq9, popup 06666ee: the orbs, the ring and the rim's light head step 10 times a second; variable-breath holds the newest word still on room tone), measure build, 2026-10-31, two runs: idle-open 2.25 and 1.50 % CPU at 10.2 frames/s, recording 8.2 % CPU, GPU median 0.29 to 0.48 ms. Within the 3 % limit of the idle beads.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
