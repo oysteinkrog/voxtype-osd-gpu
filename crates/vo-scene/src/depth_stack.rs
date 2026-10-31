@@ -19,6 +19,11 @@
 //! takes that turned, pushed-back spot for where the line came to rest; in a box that keeps
 //! its size, the line turns while it still sits on the new line's row.
 //!
+//! While a held line glides up out of the new line's row, the new reading line waits, then
+//! shows whole in one frame ([`DepthStack::newest_shows_at`]): text never draws over text,
+//! and the reading line is readable in the frame it arrives. The host views the stack again
+//! by then.
+//!
 //! Under reduced motion every sheet jumps to its place: the same stack, still.
 
 use vo_core::spring::Spring;
@@ -90,6 +95,10 @@ impl Hold {
         self.since + self.secs
     }
 }
+
+/// Share of a row a gliding held line has risen when the new reading line shows: its text
+/// is then clear of the new line's.
+const GLIDE_CLEAR: f64 = 0.9;
 
 /// The glass pane under a line.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,6 +178,22 @@ impl DepthStack {
         Place { offset: (0.0, -hold.rise), ..self.place(0) }
     }
 
+    /// When the newest sheet shows with `hold` on the line behind it: once a gliding line has
+    /// risen out of its row (`GLIDE_CLEAR` of the way on the newest sheet's spring), or at
+    /// once when the box grew and the held line stays where it was read.
+    pub fn newest_shows_at(&self, hold: &Hold) -> f64 {
+        if !hold.glide {
+            return hold.since;
+        }
+        let mut ch = vo_core::channel::Channel::new(0.0, 0.0, self.spring(0));
+        ch.retarget(0.0, 1.0);
+        let mut t = 0.0;
+        while t < 1.0 && ch.value(t) < GLIDE_CLEAR {
+            t += 1.0 / 480.0;
+        }
+        hold.since + t
+    }
+
     /// The spring that moves a sheet to place `d`.
     pub fn spring(&self, d: usize) -> Spring {
         Spring::critical_to_98(self.spring_secs + self.slowdown * d as f64)
@@ -218,6 +243,9 @@ impl DepthStack {
     ) -> Element<M> {
         let n = lines.len();
         let keep = self.depth + 2;
+        // A hold on the line just behind the newest: when the newest sheet shows.
+        let behind = n.checked_sub(2).map(|i| &lines[i].0);
+        let shows = hold.filter(|h| behind == Some(&h.key)).map(|h| self.newest_shows_at(h));
         let mut root = Element::layer(key).size(size.w, size.h);
         for (i, (k, line)) in lines.iter().enumerate() {
             let d = n - 1 - i;
@@ -227,7 +255,8 @@ impl DepthStack {
             let held = hold.filter(|h| d == 1 && h.key == *k && h.holds(now));
             let place = held.map_or_else(|| self.place(d), |h| self.held_place(h));
             let body = content(line, d, &place);
-            root = root.child(self.sheet_view(k.clone(), d, size, sheet, body, reduced, held));
+            let waits = shows.filter(|_| d == 0).map(|at| now < at);
+            root = root.child(self.sheet_view(k.clone(), d, size, sheet, body, reduced, held, waits));
         }
         root
     }
@@ -242,8 +271,11 @@ impl DepthStack {
         content: Element<M>,
         reduced: bool,
         held: Option<&Hold>,
+        waits: Option<bool>,
     ) -> Element<M> {
         let p = held.map_or_else(|| self.place(d), |h| self.held_place(h));
+        // The newest sheet while a line glides out of its row: clear, then whole in one step.
+        let ink = if waits == Some(true) { 0.0 } else { p.ink };
         let motion = match held {
             // It jumps with its box, so it stays where it was read.
             Some(h) if !h.glide => Motion::Snap,
@@ -275,10 +307,10 @@ impl DepthStack {
             .translate_z(p.z)
             .rotate_y(p.turn)
             .offset(p.offset.0, p.offset.1)
-            .opacity(p.ink)
+            .opacity(ink)
             .motion(Prop::Tilt, motion)
             .motion(Prop::Offset, motion)
-            .motion(Prop::Opacity, motion)
+            .motion(Prop::Opacity, if waits.is_some() { Motion::Snap } else { motion })
             .child(pane);
         let layer = if held.is_some() { layer.motion(Prop::Position, motion) } else { layer };
         // A new reading line is readable in the frame it arrives: it rises at most 3 px
@@ -419,6 +451,36 @@ mod tests {
             last = pos.1;
         }
         assert!((last - (read.1 - 40.0)).abs() < 0.5, "a row up: {last} from {}", read.1);
+    }
+
+    #[test]
+    fn the_new_line_waits_while_the_held_line_glides_out_of_its_row() {
+        // A full box: "a" glides up a row as "b" arrives on its row. "b" shows once "a" is
+        // nearly a row up, whole in one step, and never while the two rows overlap.
+        let s = DepthStack::default();
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(view_held(&s, &["a"], 2.0, None, 0.0), 0.0);
+        let (read, _, _) = at(&scene, "a", 0.5);
+        let h = hold("a", 1.0, 0.05, true);
+        let shows = s.newest_shows_at(&h);
+        assert!(shows > 1.05 && shows < 1.25, "shows at {shows}");
+        let mut t = 1.0;
+        while t < 1.6 {
+            scene.apply(view_held(&s, &["a", "b"], 2.0, Some(&h), t), t);
+            let (b, ink, _) = at(&scene, "b", t);
+            let (a, _, _) = at(&scene, "a", t);
+            if t < shows {
+                assert_eq!(ink, 0.0, "at {t} the new line waits");
+            } else {
+                assert!((ink - 1.0).abs() < 1e-4, "at {t} the new line is whole: {ink}");
+                assert!(b.1 - a.1 >= 0.9 * 40.0 - 0.5, "at {t} a is {} above b", b.1 - a.1);
+            }
+            assert!((b.1 - read.1).abs() < 3.5, "at {t} the reading line stays: {b:?}");
+            t += 1.0 / 60.0;
+        }
+        // The box grew: the held line stays where it was read and the new one shows at once.
+        assert_eq!(s.newest_shows_at(&hold("a", 1.0, 0.35, false)), 1.0);
     }
 
     #[test]
