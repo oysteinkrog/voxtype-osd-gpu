@@ -252,3 +252,30 @@ fn spoken_ink_never_tracks_a_word_past_the_envelope() {
     let wide = loose / set - 1.0;
     assert!(wide > 0.03 && wide <= vo_scene::final_pass::LOOSE_SPAN + 1e-4, "{loose} {set}");
 }
+
+#[test]
+fn spoken_ink_leaves_the_spaces_beside_a_long_word_open() {
+    // "punctuation" (pens 0 to 110) may widen by LOOSE_SPAN of its span, 4.4 px, but that
+    // would take most of each 6 px space; it is held to LOOSE_GAP em, 2.4 px in all.
+    let view = |at: f32| {
+        let words: Vec<Word> =
+            [(1, "punctuation"), (2, "be")].into_iter().map(|(id, t)| Word { id, text: t.into() }).collect();
+        let live = Element::live_text("live", &words)
+            .text_style(TextStyle::new(0, 20.0, 26.0))
+            .width(400.0)
+            .color(INK)
+            .final_pass(FinalPass::new(at));
+        Element::column("root").child(live)
+    };
+    let span = |list: &DisplayList| {
+        let xs: Vec<f32> = list.glyphs.iter().filter(|g| g.word == 1).map(|g| g.pos.x).collect();
+        xs.last().unwrap() - xs[0]
+    };
+    let mut s = Scene::<()>::new();
+    s.apply(view(0.0), 0.0);
+    let loose = span(&s.sample(1.0));
+    s.apply(view(1.0), 1.0);
+    let set = span(&s.sample(2.0));
+    let wider = loose - set;
+    assert!(wider > 1.0 && wider <= vo_scene::final_pass::LOOSE_GAP * 20.0 + 1e-3, "{loose} {set}");
+}

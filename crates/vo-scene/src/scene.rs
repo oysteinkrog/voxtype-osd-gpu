@@ -2239,9 +2239,13 @@ impl<M> Scene<M> {
                             k *= 1.0 - (1.0 - p.ink) * a;
                             if let Some(c) = counts.iter_mut().find(|c| c.0 == word) {
                                 // At most LOOSE_SPAN of the word's own span, so a short word
-                                // of narrow letters stays inside the envelope's tracking too.
+                                // of narrow letters stays inside the envelope's tracking too,
+                                // and at most LOOSE_GAP em in all, so a long word leaves the
+                                // spaces beside it open.
                                 let gaps = (c.1 as f32 - 1.0).max(1.0);
-                                let per = (p.loose * style.size).min(final_pass::LOOSE_SPAN * (c.4 - c.3) / gaps);
+                                let per = (p.loose * style.size)
+                                    .min(final_pass::LOOSE_SPAN * (c.4 - c.3) / gaps)
+                                    .min(final_pass::LOOSE_GAP * style.size / gaps);
                                 dx += per * (c.2 as f32 - 0.5 * (c.1 as f32 - 1.0)) * a;
                                 c.2 += 1;
                             }

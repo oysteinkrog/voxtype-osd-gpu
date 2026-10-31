@@ -118,6 +118,11 @@ pub fn pulse(dt: f64) -> f32 {
 /// last: under the reading-line envelope's 5 % tracking change. At 0.018 em a glyph, a short
 /// word of narrow letters ("into" in 22 px type) would read 5.7 % wide.
 pub const LOOSE_SPAN: f32 = 0.04;
+/// The most spoken ink widens a word, in em: 0.06 em into each word space (a space is about
+/// 0.25 em), so neighbouring words that both widen keep a gap. A long word under
+/// `LOOSE_SPAN` alone ("punctuation" in 31 px type grows 3 px on each side) left the next
+/// word touching it.
+pub const LOOSE_GAP: f32 = 0.12;
 /// The nod lasts this long.
 pub const NOD: f64 = 0.220;
 /// Punctuation pops in over this long; a capital grows over `GROW`.
