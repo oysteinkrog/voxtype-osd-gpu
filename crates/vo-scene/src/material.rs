@@ -20,6 +20,12 @@
 //! - [`Material::aurora`]: a mesh gradient of up to four soft colour blobs drifting over the
 //!   element's box, brighter and larger with the app's energy. [`Material::haze`] is the same
 //!   function as a warm glow that fades out between its blobs.
+//! - [`Material::paper`], [`Material::fabric`], [`Material::rubber`] and [`Material::film_grain`]
+//!   (EG-25): the paint's colour lifted and darkened by one of the built-in tiles (paper fibre,
+//!   a woven ribbon, rubber, film grain) repeated across the layer. Film grain changes 24
+//!   times a second and stands still under reduced motion. The tiles come through an image
+//!   slot ([`GRAIN_SLOT`] by default), which the renderer fills with its tile texture when
+//!   the slot is empty. The CPU first frame draws the plain paint.
 //!
 //! Phosphor persistence is a layer property, not a material: see `Element::phosphor`.
 //!
@@ -57,6 +63,7 @@ pub mod func {
     pub const CHROME: u32 = 3;
     pub const GRADIENT: u32 = 4;
     pub const AURORA: u32 = 5;
+    pub const GRAIN: u32 = 6;
 }
 
 /// `Material::flags` bit for chrome: key the bands to layer y instead of the glyph's em y.
@@ -87,6 +94,45 @@ pub const READS_TEXTURES: u32 = READS_BACKDROP | READS_IMAGES | READS_TEXT;
 
 /// Image slots a material can read with `tex_image (slot, uv)`.
 pub const IMAGE_SLOTS: usize = 4;
+
+/// The image slot the grain materials read by default (EG-25). When it is empty the renderer
+/// puts its tile texture there; an app that fills it itself picks another with
+/// [`Grain::slot`].
+pub const GRAIN_SLOT: usize = 2;
+
+/// Film grain's frames a second (EG-25).
+pub const GRAIN_FPS: f32 = 24.0;
+
+/// The film grain frame `age` seconds after the element appeared: the grain moves to a new
+/// place from a hash of this number, so a frame is a pure function of the time. The WGSL
+/// side (`mat_grain`) works it out the same way.
+pub fn grain_frame(age: f32) -> u32 {
+    (age.max(0.0) * GRAIN_FPS).floor() as u32
+}
+
+/// The built-in tiles a grain material draws (EG-25), in the order of their channels in the
+/// renderer's tile texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tile {
+    Paper,
+    Fabric,
+    Rubber,
+    FilmGrain,
+}
+
+impl Tile {
+    pub const ALL: [Tile; 4] = [Tile::Paper, Tile::Fabric, Tile::Rubber, Tile::FilmGrain];
+
+    /// Its name in `crate::assets`.
+    pub fn asset(self) -> &'static str {
+        match self {
+            Tile::Paper => "paper",
+            Tile::Fabric => "fabric",
+            Tile::Rubber => "rubber",
+            Tile::FilmGrain => "film-grain",
+        }
+    }
+}
 
 /// One material: a function and its parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -187,6 +233,7 @@ impl Material {
             func::NEON if p[1][3] > 0.0 => Some(1.0 / 30.0),
             func::HOLOGRAM if p[1][2] != 0.0 || p[2][0] > 0.0 => Some(1.0 / 30.0),
             func::AURORA if p[5][1] > 0.0 => Some(1.0 / 30.0),
+            func::GRAIN if p[0][3] > 0.0 => Some(1.0 / p[0][3] as f64),
             f if f >= CUSTOM_FIRST && self.fps > 0.0 => Some(1.0 / self.fps as f64),
             _ => None,
         }
@@ -303,6 +350,26 @@ impl Material {
             additive: 0.85,
             glow: true,
         }
+    }
+
+    /// Typewriter paper: soft mottling and fibres, a texel a layer unit, contrast 0.1.
+    pub fn paper() -> Grain {
+        Grain { tile: Tile::Paper, scale: 1.0, contrast: 0.1, slot: GRAIN_SLOT }
+    }
+
+    /// A woven ribbon: a plain weave with threads 8 layer units apart, contrast 0.3.
+    pub fn fabric() -> Grain {
+        Grain { tile: Tile::Fabric, scale: 1.0, contrast: 0.3, slot: GRAIN_SLOT }
+    }
+
+    /// Rubber: a fine stipple with small pores, contrast 0.12.
+    pub fn rubber() -> Grain {
+        Grain { tile: Tile::Rubber, scale: 1.0, contrast: 0.12, slot: GRAIN_SLOT }
+    }
+
+    /// Film grain that moves 24 times a second, contrast 0.08. Still under reduced motion.
+    pub fn film_grain() -> Grain {
+        Grain { tile: Tile::FilmGrain, scale: 1.0, contrast: 0.08, slot: GRAIN_SLOT }
     }
 
     /// Three stops: `c0` at `p0`, `c1` at fraction `mid` of the way, `c2` at `p1`.
@@ -460,6 +527,42 @@ impl From<Aurora> for Material {
     }
 }
 
+/// A tile over the paint (EG-25), built with [`Material::paper`], [`Material::fabric`],
+/// [`Material::rubber`] or [`Material::film_grain`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grain {
+    pub tile: Tile,
+    /// Layer units a tile texel covers: 2 draws the tile twice as large.
+    pub scale: f32,
+    /// How far the tile moves the paint's lightness, in OKLab L: a texel at the tile's
+    /// lightest lifts it by about half this, the darkest lowers it by as much.
+    pub contrast: f32,
+    /// The image slot it reads ([`GRAIN_SLOT`] by default).
+    pub slot: usize,
+}
+
+impl Grain {
+    pub fn scale(self, scale: f32) -> Grain {
+        Grain { scale: scale.max(0.05), ..self }
+    }
+    pub fn contrast(self, contrast: f32) -> Grain {
+        Grain { contrast: contrast.clamp(0.0, 1.0), ..self }
+    }
+    pub fn slot(self, slot: usize) -> Grain {
+        Grain { slot: slot.min(IMAGE_SLOTS - 1), ..self }
+    }
+}
+
+impl From<Grain> for Material {
+    fn from(g: Grain) -> Material {
+        let fps = if g.tile == Tile::FilmGrain { GRAIN_FPS } else { 0.0 };
+        Material::builtin(func::GRAIN)
+            .param(0, [g.tile as u32 as f32, g.scale, g.contrast, fps])
+            .param(1, [g.slot as f32, 0.0, 0.0, 0.0])
+            .reads_images()
+    }
+}
+
 /// A chrome fill, built with [`Material::chrome`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chrome {
@@ -527,6 +630,28 @@ mod tests {
     }
 
     use super::*;
+
+    /// EG-25: film grain holds still within a 24th of a second and moves at the next.
+    #[test]
+    fn the_grain_clock_steps_24_times_a_second() {
+        for t in [0.0f32, 1.0, 2.5, 7.25] {
+            assert_eq!(grain_frame(t), grain_frame(t + 0.01), "{t}");
+            assert_ne!(grain_frame(t), grain_frame(t + 1.0 / 24.0), "{t}");
+        }
+        let grain: Material = Material::film_grain().into();
+        assert_eq!(grain.next_frame(3.0), Some(1.0 / 24.0));
+        assert!(grain.reads_textures());
+        // The other tiles are still.
+        for m in [Material::paper(), Material::fabric(), Material::rubber()] {
+            assert_eq!(Material::from(m).next_frame(3.0), None);
+        }
+        let m: Material = Material::fabric().scale(2.0).contrast(0.5).slot(1).into();
+        assert_eq!(m.params[0], [1.0, 2.0, 0.5, 0.0]);
+        assert_eq!(m.params[1][0], 1.0);
+        for t in Tile::ALL {
+            assert!(crate::assets::get(t.asset()).is_some(), "{t:?}");
+        }
+    }
 
     #[test]
     fn color_slots_are_marked_and_unmarked() {

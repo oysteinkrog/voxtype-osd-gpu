@@ -770,6 +770,8 @@ pub struct Renderer {
     /// Material textures (EG-02), made on first use, and the image slots.
     mat_tex: Option<MatTextures>,
     material_images: [Option<wgpu::TextureView>; IMAGE_SLOTS],
+    /// The built-in tiles (EG-25), made the first time a grain material finds its slot empty.
+    tiles: Option<wgpu::TextureView>,
     /// A material read a backdrop that was not there: warned once.
     warned_backdrop: bool,
     /// The text field and the word table bytes for materials that read text (EG-31).
@@ -861,6 +863,7 @@ impl Renderer {
             blur: None,
             mat_tex: None,
             material_images: Default::default(),
+            tiles: None,
             warned_backdrop: false,
             text_view: None,
             text_words: crate::text_field::WordTable::default().gpu_bytes(None),
@@ -2638,6 +2641,22 @@ impl Renderer {
         }
     }
 
+    /// Puts the built-in tiles in each empty image slot that this frame's grain materials read
+    /// (EG-25). A slot the app filled keeps its texture.
+    fn fill_tile_slots(&mut self) {
+        for m in &self.materials {
+            let slot = m.params[1][0] as usize;
+            if m.head[0] != vo_scene::material::func::GRAIN
+                || slot >= IMAGE_SLOTS
+                || self.material_images[slot].is_some()
+            {
+                continue;
+            }
+            let tiles = self.tiles.get_or_insert_with(|| crate::material::tile_texture(&self.device, &self.queue));
+            self.material_images[slot] = Some(tiles.clone());
+        }
+    }
+
     /// The textured group 2 for each backdrop this frame's textured draws read (EG-02). A frame
     /// without one makes nothing.
     fn bind_material_textures(&mut self) {
@@ -2653,6 +2672,7 @@ impl Renderer {
         if keys.is_empty() {
             return;
         }
+        self.fill_tile_slots();
         let t = self.mat_tex.get_or_insert_with(|| MatTextures::new(&self.device));
         self.queue.write_buffer(&t.words, 0, &self.text_words);
         let materials = &self.material_buf.as_ref().expect("uploaded").0;

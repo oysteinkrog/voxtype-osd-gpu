@@ -19,10 +19,15 @@
 //! pipelines, whose group 2 also binds the text field (binding 7) and the word table (binding
 //! 8) from [`crate::text_field`]. `text_dist`, `word_near`, `text_word` and `text_word_count`
 //! are stubs in `materials.wgsl` and real in `material_tex.wgsl`.
+//!
+//! Tiles (EG-25): the grain materials (`Material::paper` and its siblings) read the built-in
+//! tiles through an image slot. A frame that draws one whose slot is empty gets the slot
+//! filled with [`tile_texels`] as a texture, made once and kept.
 
 use bytemuck::{Pod, Zeroable};
+use vo_scene::assets::{self, TILE};
 use vo_scene::geom::Color;
-use vo_scene::material::{Material, PARAM_SLOTS};
+use vo_scene::material::{Material, Tile, PARAM_SLOTS};
 
 use crate::color::oklab_alpha;
 
@@ -35,6 +40,49 @@ const TEX_END: &str = "// vo: texture helpers end\n";
 
 /// The line in `materials.wgsl` where app cases go.
 const CASES_MARK: &str = "    // vo: custom material cases\n";
+
+/// The side of the tile texture: a tile with a one-texel border on each side.
+pub const TILE_TEXTURE: usize = TILE + 2;
+
+/// The tile texture's RGBA8 texels (EG-25): the four built-in tiles one to a channel, in
+/// [`Tile::ALL`] order, each with a one-texel border copied from its opposite edges, so a
+/// bilinear sample near an edge blends with the texels across the wrap.
+pub fn tile_texels() -> Vec<u8> {
+    let tiles: Vec<&[u8]> = Tile::ALL.iter().map(|t| assets::get(t.asset()).expect("built-in tile").bytes).collect();
+    let mut out = vec![0u8; TILE_TEXTURE * TILE_TEXTURE * 4];
+    for y in 0..TILE_TEXTURE {
+        for x in 0..TILE_TEXTURE {
+            let (tx, ty) = ((x + TILE - 1) % TILE, (y + TILE - 1) % TILE);
+            for (c, tile) in tiles.iter().enumerate() {
+                out[(y * TILE_TEXTURE + x) * 4 + c] = tile[ty * TILE + tx];
+            }
+        }
+    }
+    out
+}
+
+/// The tile texture on the GPU.
+pub(crate) fn tile_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let n = TILE_TEXTURE as u32;
+    let size = wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vo-material-tiles"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        tex.as_image_copy(),
+        &tile_texels(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * n), rows_per_image: Some(n) },
+        size,
+    );
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
 
 /// One material as the shader reads it.
 #[repr(C)]

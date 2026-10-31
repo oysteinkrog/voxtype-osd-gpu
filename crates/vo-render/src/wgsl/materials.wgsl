@@ -364,6 +364,33 @@ fn mat_aurora (m: Material, i: MatIn) -> vec4f {
   return vec4f (max (rgb, vec3f (0.0)) * cov, cov * (1.0 - m.p[5].w));
 }
 
+// Paper, fabric, rubber and film grain (EG-25). p0: the tile (its channel in the tile texture:
+// 0 paper, 1 fabric, 2 rubber, 3 film grain), layer units per texel, contrast (OKLab L),
+// frames a second (0 for a still tile). p1.x: the image slot. The renderer's tile texture is
+// 258 texels square, each 256 tile with a one-texel border copied from its opposite edges, so
+// bilinear sampling wraps without a seam. An empty slot reads 0 and draws plain paint.
+fn mat_grain (m: Material, i: MatIn) -> vec4f {
+  let a = i.color.a;
+  if (a <= 0.0 || i.cov <= 0.0) {
+    return vec4f (0.0);
+  }
+  var uv = i.p / (max (m.p[0].y, 0.05) * 256.0);
+  if (m.p[0].w > 0.0) {
+    // A new place each frame, from a hash of the frame number (`grain_frame` in vo_scene).
+    let f = floor (max (m.timing.x, 0.0) * m.p[0].w);
+    uv += vec2f (mat_rand (f, 17.0), mat_rand (f, 29.0));
+  }
+  let t = tex_image (u32 (m.p[1].x), (1.0 + fract (uv) * 256.0) / 258.0);
+  if (all (t == vec4f (0.0))) {
+    return i.color * i.cov;
+  }
+  let v = t[min (u32 (m.p[0].x), 3u)];
+  var lab = mat_linear_to_lab (i.color.rgb / a);
+  lab.x = max (lab.x + m.p[0].z * (v - 0.5), 0.0);
+  let rgb = max (mat_lab_to_linear (lab), vec3f (0.0));
+  return vec4f (rgb * a, a) * i.cov;
+}
+
 // Material `id` (1-based) at one fragment. 0 is plain paint.
 fn material (id: u32, i: MatIn) -> vec4f {
   if (id == 0u) {
@@ -376,6 +403,7 @@ fn material (id: u32, i: MatIn) -> vec4f {
     case 3u: { return mat_chrome (m, i); }
     case 4u: { return mat_gradient (m, i); }
     case 5u: { return mat_aurora (m, i); }
+    case 6u: { return mat_grain (m, i); }
     // vo: custom material cases
     default: { return i.color * i.cov; }
   }
