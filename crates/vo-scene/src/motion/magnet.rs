@@ -1,9 +1,10 @@
 //! Magnetic caret (MO-89): the caret as a small magnet that pulls new words into place.
 //!
-//! - **Field lines.** Around the caret bar, the field lines of a vertical dipole (in polar
-//!   form `r = k sin²θ` about the bar's centre) on both sides, fainter over the text on the
-//!   left. A soft light runs along each line toward the poles, brighter as the voice gets
-//!   louder.
+//! - **Field lines.** Right of the caret bar, the field lines of a vertical dipole (in polar
+//!   form `r = k sin²θ`), about a point [`CLEAR_EMS`] of an em plus the snap right of the bar:
+//!   the field keeps at least a space clear of the last word, also while a word snaps in,
+//!   and never crosses a glyph of it. A soft light runs along each line toward the poles,
+//!   brighter as the voice gets louder.
 //! - **Strength follows the voice.** The field's strength is the voice level from the signal
 //!   bus (fast attack, 250 ms release). A loud voice tightens and brightens the field; each
 //!   new word adds a short pulse, so the field also lives without voice features.
@@ -15,7 +16,7 @@
 //!   snap the same way.
 //!
 //! Rule 1 holds: the snap moves a word along its line, never off its baseline, and the
-//! field is drawn behind nothing and over the text only at low opacity. Under reduced
+//! field is never drawn over the text. Under reduced
 //! motion words land in place and the field is drawn still, as its rings.
 
 use vo_core::signals::{Sig, Signals};
@@ -25,6 +26,8 @@ use crate::geom::{Color, Point, Rect};
 
 /// Most pixels a word starts from its place.
 pub const MAX_SNAP: f32 = 8.0;
+/// The room between the caret bar and the field, in ems, on top of the snap: about a space.
+pub const CLEAR_EMS: f32 = 0.3;
 /// A new word keeps the field awake this long, while it pulses and relaxes.
 pub const AWAKE_SECS: f64 = 1.6;
 
@@ -43,7 +46,8 @@ pub struct Magnet {
     pub snap_secs: f64,
     /// Line width in pixels.
     pub width: f32,
-    /// Share of the field's opacity drawn on the text side (left of the caret).
+    /// Unused: the field is drawn only right of the caret, clear of the text. Kept so a
+    /// look that sets it still builds.
     pub text_side: f32,
     /// The static form: words land in place and the field is still rings, as under reduced
     /// motion. For a look that takes reduced motion from its own settings.
@@ -59,7 +63,7 @@ impl Default for Magnet {
             snap: 5.0,
             snap_secs: 0.11,
             width: 1.0,
-            text_side: 0.45,
+            text_side: 0.0,
             still: false,
         }
     }
@@ -135,7 +139,9 @@ impl Magnet {
     pub fn segments(&self, bar: Rect, size: f32, f: FieldState) -> Vec<(Point, Point, f32)> {
         const STEPS: usize = 18;
         let n = self.lines.max(1);
-        let centre = Point::new(bar.x + 0.5 * bar.w, bar.y + 0.5 * bar.h);
+        // Right of the bar by a space and the snap, so no line meets the last word.
+        let clear = CLEAR_EMS * size + self.snap.clamp(0.0, MAX_SNAP);
+        let centre = Point::new(bar.x + bar.w + clear, bar.y + 0.5 * bar.h);
         let half = 0.5 * bar.h;
         let reach = self.reach * size * (1.12 - 0.3 * f.strength);
         let mut out = Vec::with_capacity(2 * n as usize * STEPS);
@@ -148,26 +154,23 @@ impl Magnet {
             let span = std::f32::consts::PI - 2.0 * start;
             let base = 0.16 + 0.45 * f.strength + 0.3 * f.pulse;
             let base = base * (1.0 - 0.45 * share) * (1.0 - f.relax) + f.relax * 0.2 * (1.0 - 0.6 * share);
-            for side in [1.0f32, -1.0] {
-                let side_k = if side > 0.0 { 1.0 } else { self.text_side };
-                let at = |j: usize| {
-                    let th = start + span * j as f32 / STEPS as f32;
-                    let s = th.sin();
-                    let r = (1.0 - f.relax) * k * s * s + f.relax * ring;
-                    Point::new(centre.x + side * r * s, centre.y - r * th.cos())
-                };
-                for j in 0..STEPS {
-                    let u = (j as f32 + 0.5) / STEPS as f32;
-                    // 0 at the equator, 1 at the poles; the light runs toward the poles.
-                    let toward = (2.0 * u - 1.0).abs();
-                    let light = 0.6 + 0.4 * (std::f32::consts::TAU * (2.0 * toward + f.phase)).cos();
-                    let light = 1.0 + (light - 1.0) * (1.0 - f.relax);
-                    // The outer ends of a line taper where it meets the bar.
-                    let taper = 1.0 - (1.0 - f.relax) * toward.powi(6) * 0.7;
-                    let a = base * side_k * light * taper;
-                    if a > 0.004 {
-                        out.push((at(j), at(j + 1), a.min(1.0)));
-                    }
+            let at = |j: usize| {
+                let th = start + span * j as f32 / STEPS as f32;
+                let s = th.sin();
+                let r = (1.0 - f.relax) * k * s * s + f.relax * ring;
+                Point::new(centre.x + r * s, centre.y - r * th.cos())
+            };
+            for j in 0..STEPS {
+                let u = (j as f32 + 0.5) / STEPS as f32;
+                // 0 at the equator, 1 at the poles; the light runs toward the poles.
+                let toward = (2.0 * u - 1.0).abs();
+                let light = 0.6 + 0.4 * (std::f32::consts::TAU * (2.0 * toward + f.phase)).cos();
+                let light = 1.0 + (light - 1.0) * (1.0 - f.relax);
+                // The outer ends of a line taper where it meets the bar.
+                let taper = 1.0 - (1.0 - f.relax) * toward.powi(6) * 0.7;
+                let a = base * light * taper;
+                if a > 0.004 {
+                    out.push((at(j), at(j + 1), a.min(1.0)));
                 }
             }
         }
@@ -288,7 +291,7 @@ mod tests {
     fn relaxed_lines_are_concentric_rings() {
         let m = Magnet::default();
         let bar = Rect::new(100.0, 40.0, 2.0, 20.0);
-        let c = Point::new(101.0, 50.0);
+        let c = Point::new(102.0 + CLEAR_EMS * 20.0 + m.snap, 50.0);
         let segs = m.segments(bar, 20.0, FieldState::RINGS);
         assert!(!segs.is_empty());
         let mut radii: Vec<f32> = Vec::new();
@@ -307,13 +310,28 @@ mod tests {
         let bar = Rect::new(100.0, 40.0, 2.0, 20.0);
         let f = FieldState { strength: 0.8, relax: 0.0, pulse: 0.0, phase: 0.0 };
         let segs = m.segments(bar, 20.0, f);
-        // Every point lies on r = k sin²θ for its line, so the loop passes the bar's tips.
+        // Every point lies on r = k sin²θ for its line, so the loop starts level with the
+        // bar's tips.
+        let cx = 102.0 + CLEAR_EMS * 20.0 + m.snap;
         let first = segs[0].0;
-        let (dx, dy) = (first.x - 101.0, first.y - 50.0);
-        assert!((dx.hypot(dy) - 10.0).abs() < 0.5, "starts at the tip, r = {}", dx.hypot(dy));
-        // The right side is brighter than the text side.
-        let right: f32 = segs.iter().filter(|s| s.0.x > 101.5).map(|s| s.2).sum();
-        let left: f32 = segs.iter().filter(|s| s.0.x < 100.5).map(|s| s.2).sum();
-        assert!(right > 1.5 * left);
+        let (dx, dy) = (first.x - cx, first.y - 50.0);
+        assert!((dx.hypot(dy) - 10.0).abs() < 0.5, "starts level with the tip, r = {}", dx.hypot(dy));
+    }
+
+    /// The field never reaches back over the text: every line, active or relaxed, at any
+    /// strength, stays a space plus the snap right of the bar, whatever `text_side` says.
+    #[test]
+    fn the_field_keeps_a_space_clear_of_the_last_word() {
+        let bar = Rect::new(100.0, 40.0, 2.0, 20.0);
+        for m in [Magnet::default(), Magnet { text_side: 0.45, reach: 1.4, ..Magnet::default() }] {
+            for f in [
+                FieldState::RINGS,
+                FieldState { strength: 1.0, relax: 0.0, pulse: 1.0, phase: 0.3 },
+                FieldState { strength: 0.2, relax: 0.5, pulse: 0.0, phase: 0.0 },
+            ] {
+                let left = m.segments(bar, 20.0, f).iter().flat_map(|s| [s.0.x, s.1.x]).fold(f32::INFINITY, f32::min);
+                assert!(left >= bar.x + bar.w + 0.25 * 20.0 + m.snap - 1e-3, "{f:?}: a line at {left}");
+            }
+        }
     }
 }
