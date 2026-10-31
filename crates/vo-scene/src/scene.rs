@@ -2066,10 +2066,11 @@ impl<M> Scene<M> {
                     ShapeInstance::band(origin.x, rect.right(), origin.y + half, half, half, fill())
                 }
             }),
-            Kind::Label { style, .. } => {
+            Kind::Label { style, lean, .. } => {
                 let color = n.color(Slot::Text, t).fade(alpha);
                 let size = if n.fitted > 0.0 { n.fitted } else { style.size };
-                self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, items, out);
+                let xform = crate::display::GlyphXform { skew_deg: *lean, ..crate::display::GlyphXform::IDENTITY };
+                self.glyphs(n, size, origin, color, alpha, t, |_| NO_WORD, xform, items, out);
                 None
             }
             Kind::LiveText { words, style, particles, mark, inline, pass, live, edit, .. } => {
@@ -2147,7 +2148,18 @@ impl<M> Scene<M> {
                 }
                 let accent = mark.as_deref().filter(|m| m.tints());
                 if n.words.is_empty() || color.a <= 0.0 {
-                    self.glyphs(n, style.size, origin, color, alpha, t, word_of, items, out);
+                    self.glyphs(
+                        n,
+                        style.size,
+                        origin,
+                        color,
+                        alpha,
+                        t,
+                        word_of,
+                        crate::display::GlyphXform::IDENTITY,
+                        items,
+                        out,
+                    );
                 } else {
                     let fx = n.text_fx(t).faded(alpha);
                     let spans = glyph_spans(&n.shaped, style.size);
@@ -2767,6 +2779,7 @@ impl<M> Scene<M> {
         alpha: f32,
         t: f64,
         word_of: impl Fn(u32) -> u32,
+        xform: crate::display::GlyphXform,
         items: &mut Vec<Item>,
         out: &mut DisplayList,
     ) {
@@ -2792,7 +2805,7 @@ impl<M> Scene<M> {
                 glyph: g.glyph,
                 word: word_of(g.cluster),
                 color,
-                xform: crate::display::GlyphXform::IDENTITY,
+                xform,
             });
         }
     }

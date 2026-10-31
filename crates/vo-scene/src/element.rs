@@ -527,6 +527,8 @@ pub(crate) enum Kind {
     Label {
         text: String,
         style: TextStyle,
+        /// Every glyph's lean in degrees, as an italic (`Element::glyph_lean`).
+        lean: f32,
     },
     Shape(ShapeKind),
     /// A container drawn as its own display-list layer.
@@ -878,7 +880,7 @@ impl<M> Element<M> {
 
     /// One run of text, measured by the scene's `TextLayout`. Wraps at its width.
     pub fn label(key: impl Into<Key>, text: impl Into<String>) -> Element<M> {
-        let kind = Kind::Label { text: text.into(), style: TextStyle::default() };
+        let kind = Kind::Label { text: text.into(), style: TextStyle::default(), lean: 0.0 };
         let mut e = Element::new(key, kind, taffy::Style::default());
         e.set(Slot::Text as u8, Color::WHITE);
         e
@@ -1404,6 +1406,17 @@ impl<M> Element<M> {
     /// Text colour for labels and live text.
     pub fn color(mut self, c: Color) -> Element<M> {
         self.set(Slot::Text as u8, c);
+        self
+    }
+
+    /// Label: every glyph leans `deg` degrees about its own baseline origin, the top to the
+    /// right for positive, as an italic does (`GlyphXform::skew_deg`). Layout is unchanged.
+    /// For a counter whose digits lean with pace (EG-16, `flow::letter_motion::digit_lean`).
+    pub fn glyph_lean(mut self, deg: f32) -> Element<M> {
+        match &mut self.kind {
+            Kind::Label { lean, .. } => *lean = deg,
+            _ => debug_assert!(false, "glyph_lean on a node that is not a label: {}", self.key),
+        }
         self
     }
 

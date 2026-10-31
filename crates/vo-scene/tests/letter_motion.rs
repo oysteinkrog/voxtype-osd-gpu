@@ -144,3 +144,24 @@ fn two_runs_draw_the_same_frames() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn a_counter_label_leans_its_digits_and_keeps_its_layout() {
+    let label = |lean: f32| -> Element<()> {
+        let l = Element::label("wpm", "142").text_style(TextStyle::new(0, 20.0, 26.0)).glyph_lean(lean);
+        Element::column("root").child(l)
+    };
+    let draw = |lean: f32| {
+        let mut s = scene(false);
+        s.apply(label(lean), 0.0);
+        s.sample(0.0).glyphs
+    };
+    let lean = digit_lean(150.0, 0.0, false);
+    let (upright, leaning) = (draw(0.0), draw(lean));
+    assert_eq!(upright.len(), 3);
+    for (u, l) in upright.iter().zip(&leaning) {
+        assert!(u.xform.is_identity());
+        assert_eq!(l.xform.skew_deg, lean);
+        assert_eq!(u.pos, l.pos, "the lean moves no glyph");
+    }
+}
