@@ -1,8 +1,9 @@
 //! Materials (FX15) through elements: a neon pill that flickers on, a neon wavy line, chrome
 //! type, a hologram card, a gradient across the newest word, a phosphor scope whose white
-//! trace cools to green, an aurora mesh whose energy follows the scope's level, and a warm
-//! haze. Offline it writes a contact sheet over time and measures GPU time
-//! per frame at 600x300 and 1920x1080, with the materials on and off:
+//! trace cools to green, an aurora mesh whose energy follows the scope's level, a warm
+//! haze, and a sheet of typewriter paper beside an inked fabric ribbon (EG-25). Offline it
+//! writes a contact sheet over time and measures GPU time per frame at 600x300 and
+//! 1920x1080, with the materials on and off:
 //!
 //!   cargo run --release -p vo --example material_demo -- --offline /var/tmp/claude/material
 //!
@@ -31,7 +32,7 @@ use vo_render::{Renderer, Target};
 /// The font id of Noto Sans Bold, the first one loaded.
 const BOLD: u32 = 0;
 const W: f32 = 600.0;
-const H: f32 = 360.0;
+const H: f32 = 426.0;
 const FPS: f64 = 30.0;
 
 fn hex(rgb: u32) -> Color {
@@ -97,6 +98,24 @@ fn view(t: f64, materials: bool) -> Element<()> {
         haze = haze.child(glow.material(Material::from(Material::haze(Color::hex(0xffa860, 0.6)))));
     }
     let glow = Element::row("glow").gap(24.0).child(aurora).child(haze);
+    // EG-25: a sheet of typewriter paper with a line typed on it, and an inked ribbon.
+    let paper = on(
+        Element::panel("paper")
+            .size(300.0, 44.0)
+            .radius(3.0)
+            .fill(hex(0xefe8d8))
+            .align_items(AlignItems::CENTER)
+            .child(
+                Element::label("typed", "Dear reader,")
+                    .text_style(style(BOLD, 22.0))
+                    .color(hex(0x2a2622))
+                    .margin_edges(14.0, 0.0, 0.0, 0.0),
+            ),
+        Material::paper().into(),
+    );
+    let ribbon =
+        on(Element::panel("ribbon").size(220.0, 44.0).radius(2.0).fill(hex(0x7a1f24)), Material::fabric().into());
+    let sheet = Element::row("sheet").gap(24.0).child(paper).child(ribbon);
     Element::panel("root")
         .size(W, H)
         .fill(hex(0x07060f))
@@ -106,6 +125,7 @@ fn view(t: f64, materials: bool) -> Element<()> {
         .child(middle)
         .child(bottom)
         .child(glow)
+        .child(sheet)
 }
 
 /// The scope's level history, sample `i` at 40 a second, fixed so frames compare.
@@ -306,8 +326,9 @@ fn offline(dir: &Path) {
         median(times),
         median(plain)
     );
-    // 1920x1080: the same card at 3 times, on a viewport 640 units wide.
-    let big = Size::new(640.0, H);
+    // 1920x1080: the same card at 3 times, on a viewport 640 by 360 units; the paper row
+    // (EG-25) falls below it, so the numbers compare with runs before it.
+    let big = Size::new(640.0, 360.0);
     let (on, frames) = run(&g, &fonts, big, 3.0, true, 3.0, &[3.0]);
     let (off, _) = run(&g, &fonts, big, 3.0, false, 3.0, &[]);
     println!(

@@ -77,6 +77,7 @@ const CASES: &[&str] = &[
     "glyphs-2000-rotating",
     "panes-20",
     "image-icon",
+    "paper-panel",
 ];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
@@ -185,6 +186,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
         "glass prism" => card = card.fill(Color::TRANSPARENT).glass(Glass::prism(GlassKind::Dark)),
         // EG-24: an app icon at text height, a full-colour SVG through the image painter.
         "image-icon" => card = card.child(Element::image("icon", icon()).size(24.0 * k, 24.0 * k)),
+        // EG-25: the card's panel as paper, a built-in tile through an image slot.
+        "paper-panel" => card = card.material(Material::paper()),
         _ => {}
     }
     if case == "frost stack" {
