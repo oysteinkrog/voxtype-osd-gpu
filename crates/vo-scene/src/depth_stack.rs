@@ -316,7 +316,10 @@ impl DepthStack {
         // A new reading line is readable in the frame it arrives: it rises at most 3 px
         // and starts at 70 % ink (rule 1).
         let enter = if reduced { Transition::NONE } else { Transition::fade().opacity(0.7).offset(0.0, 3.0) };
-        layer.presence(enter, Transition::fade())
+        // A sheet leaves in one frame. A line pushed past the depth has faded to no ink by
+        // then; a sheet that goes while it still shows is a whole relayout (the final pass),
+        // where a fading old stack would overprint the new one at the same places.
+        layer.presence(enter, Transition::NONE)
     }
 }
 
@@ -369,6 +372,45 @@ mod tests {
         assert!((ink("c") - 1.0).abs() < 1e-3);
         assert!((ink("b") - s.place(1).ink).abs() < 1e-3);
         assert!((ink("a") - s.place(2).ink).abs() < 1e-3);
+    }
+
+    /// The box a sampled node covers on the surface, `(left, top, right, bottom)`.
+    fn covers(s: &crate::scene::Sampled) -> (f32, f32, f32, f32) {
+        let m = s.transform;
+        let corners = [(0.0, 0.0), (s.size.w, 0.0), (0.0, s.size.h), (s.size.w, s.size.h)]
+            .map(|(x, y)| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f));
+        let (xs, ys) = (corners.map(|p| p.0), corners.map(|p| p.1));
+        let lo = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+        let hi = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        (lo(xs), lo(ys), hi(xs), hi(ys))
+    }
+
+    /// A full relayout (the final pass, every line new): the old sheets are gone in the frame
+    /// the new ones show, so two stacks never overprint.
+    #[test]
+    fn a_new_layout_never_draws_over_the_old_one() {
+        let s = DepthStack::default();
+        let mut scene: Scene<()> = Scene::new();
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(view(&s, &["a", "b", "c"], false), 0.0);
+        scene.sample(1.0);
+        let old: Vec<_> = ["a", "b", "c"].iter().map(|k| scene.find(&["stack", k]).unwrap()).collect();
+        scene.apply(view(&s, &["x", "y", "z"], false), 1.0);
+        for n in 0..30 {
+            let t = 1.0 + n as f64 / 30.0;
+            scene.sample(t);
+            let shown =
+                |id| scene.nodes.contains_key(id).then(|| scene.sampled(id, t)).flatten().filter(|s| s.opacity > 0.0);
+            let new: Vec<_> =
+                ["x", "y", "z"].iter().filter_map(|k| scene.find(&["stack", k])).filter_map(shown).collect();
+            for o in old.iter().filter_map(|&id| shown(id)) {
+                let a = covers(&o);
+                for b in new.iter().map(covers) {
+                    let apart = a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1;
+                    assert!(apart, "frame {n}: an old sheet at ink {} overlaps a new one", o.opacity);
+                }
+            }
+        }
     }
 
     #[test]
