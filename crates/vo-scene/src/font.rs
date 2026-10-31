@@ -176,7 +176,95 @@ pub struct FontRegistry {
     instances: Arc<RwLock<InstanceTable>>,
     /// Faces added by `system`, by pattern; `None` for a pattern fontconfig did not find.
     system: Arc<RwLock<HashMap<String, Option<FontId>>>>,
+    /// `glyph_ink` by font and glyph.
+    ink: Arc<RwLock<InkTable>>,
 }
+
+/// The area and outline length of `path` filled by the nonzero rule, as drawn: contours that
+/// overlap, as variable fonts keep them, count once, and edges inside the ink not at all.
+/// From scanlines 1/512 em apart: the area across them, and the length by Cauchy-Crofton,
+/// counting where the scanlines enter and leave the ink in sixteen directions.
+fn filled_ink(path: &kurbo::BezPath) -> (f32, f32) {
+    const PITCH: f64 = 1.0 / 512.0;
+    const TURNS: usize = 16;
+    let mut segments: Vec<(kurbo::Point, kurbo::Point)> = Vec::new();
+    let (mut start, mut last) = (kurbo::Point::ZERO, kurbo::Point::ZERO);
+    kurbo::flatten(path, 1e-4, |e| match e {
+        kurbo::PathEl::MoveTo(p) => (start, last) = (p, p),
+        kurbo::PathEl::LineTo(p) => {
+            segments.push((last, p));
+            last = p;
+        }
+        kurbo::PathEl::ClosePath => {
+            segments.push((last, start));
+            last = start;
+        }
+        _ => {}
+    });
+    if segments.is_empty() {
+        return (0.0, 0.0);
+    }
+    let (mut area, mut crossings) = (0.0f64, 0.0f64);
+    let mut hits: Vec<(f64, i32)> = Vec::new();
+    for turn in 0..TURNS {
+        let a = std::f64::consts::PI * turn as f64 / TURNS as f64;
+        let (sin, cos) = a.sin_cos();
+        let turned: Vec<(kurbo::Point, kurbo::Point)> = segments
+            .iter()
+            .map(|(p, q)| {
+                let r = |p: &kurbo::Point| kurbo::Point::new(p.x * cos - p.y * sin, p.x * sin + p.y * cos);
+                (r(p), r(q))
+            })
+            .collect();
+        let lo = turned.iter().map(|(p, q)| p.y.min(q.y)).fold(f64::INFINITY, f64::min);
+        let hi = turned.iter().map(|(p, q)| p.y.max(q.y)).fold(f64::NEG_INFINITY, f64::max);
+        let mut y = (lo / PITCH).floor() * PITCH + 0.5 * PITCH;
+        while y < hi {
+            hits.clear();
+            for (p, q) in &turned {
+                if (p.y <= y) != (q.y <= y) {
+                    let x = p.x + (y - p.y) * (q.x - p.x) / (q.y - p.y);
+                    hits.push((x, if q.y > p.y { 1 } else { -1 }));
+                }
+            }
+            hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut winding = 0;
+            let mut entered = 0.0;
+            for &(x, w) in &hits {
+                let was = winding != 0;
+                winding += w;
+                if was != (winding != 0) {
+                    crossings += 1.0;
+                    if turn == 0 {
+                        if was {
+                            area += (x - entered) * PITCH;
+                        } else {
+                            entered = x;
+                        }
+                    }
+                }
+            }
+            y += PITCH;
+        }
+    }
+    let perimeter = 0.5 * std::f64::consts::PI * crossings * PITCH / TURNS as f64;
+    (area as f32, perimeter as f32)
+}
+
+/// A glyph's ink at 1 em (`FontRegistry::glyph_ink`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlyphInk {
+    /// Inked area in square ems.
+    pub area: f32,
+    /// Length of the outline in ems: the area an edge grown by `d` ems adds is about
+    /// `perimeter * d`.
+    pub perimeter: f32,
+    /// Advance in ems.
+    pub advance: f32,
+}
+
+/// `FontRegistry::glyph_ink` by font and glyph.
+type InkTable = HashMap<(FontId, u32), GlyphInk, Fnv>;
 
 /// Variable font instances by base font, then by axis values (tag, hundredths).
 type InstanceTable = HashMap<FontId, HashMap<Vec<([u8; 4], i32)>, FontId, Fnv>>;
@@ -369,6 +457,32 @@ impl FontRegistry {
         self.faces.read().expect("font table lock").get(id as usize).cloned()
     }
 
+    /// The ink of glyph `glyph` of font `id` at 1 em, measured from its outline once and
+    /// cached: how a variable font's weight between two instances becomes edge growth
+    /// (EG-23). `None` when there is no such font.
+    pub fn glyph_ink(&self, id: FontId, glyph: u32) -> Option<GlyphInk> {
+        if let Some(&ink) = self.ink.read().expect("ink lock").get(&(id, glyph)) {
+            return Some(ink);
+        }
+        let face = self.get(id)?;
+        // Drawn in font units and scaled down after: skrifa scales outlines in 1/64 of a
+        // pixel, which at 1 em to the pixel would round away a weight step. In HarfBuzz's
+        // style, as the glyph renderer draws it.
+        let upem = face.units_per_em() as f32;
+        let outline = crate::path::glyph_path_styled(&face, glyph, upem, skrifa::outline::pen::PathStyle::HarfBuzz);
+        let path = kurbo::Affine::scale(1.0 / upem as f64) * outline;
+        let advance = face
+            .skrifa()
+            .glyph_metrics(Size::unscaled(), face.location())
+            .advance_width(skrifa::GlyphId::new(glyph))
+            .unwrap_or(0.0)
+            / upem;
+        let (area, perimeter) = filled_ink(&path);
+        let ink = GlyphInk { area, perimeter, advance };
+        self.ink.write().expect("ink lock").insert((id, glyph), ink);
+        Some(ink)
+    }
+
     /// `Face::line_height` of font `id` at `size`, or `None` when there is no such font.
     pub fn line_height(&self, id: FontId, size: f32) -> Option<f32> {
         self.get(id).map(|face| face.line_height(size))
@@ -473,6 +587,24 @@ pub fn test_font_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filled_ink_counts_overlaps_once() {
+        use kurbo::Shape;
+        let square = kurbo::Rect::new(0.0, 0.0, 0.5, 0.5).to_path(1e-6);
+        let (a, p) = filled_ink(&square);
+        assert!((a - 0.25).abs() < 2e-3 && (p - 2.0).abs() < 0.03, "{a} {p}");
+        // Two squares overlapping by half: the union, 0.375 square ems with a 2.5 em edge.
+        let mut two = square.clone();
+        two.extend(kurbo::Rect::new(0.25, 0.0, 0.75, 0.5).to_path(1e-6));
+        let (a, p) = filled_ink(&two);
+        assert!((a - 0.375).abs() < 2e-3 && (p - 2.5).abs() < 0.04, "{a} {p}");
+        let circle = kurbo::Circle::new((0.0, 0.0), 0.4).to_path(1e-6);
+        let (a, p) = filled_ink(&circle);
+        let r = 0.4f32;
+        assert!((a - std::f32::consts::PI * r * r).abs() < 2e-3, "{a}");
+        assert!((p - 2.0 * std::f32::consts::PI * r).abs() < 0.02, "{p}");
+    }
 
     #[test]
     fn faces_of_one_file_share_its_bytes() {

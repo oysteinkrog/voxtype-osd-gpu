@@ -75,6 +75,7 @@ const CASES: &[&str] = &[
     "grid-words",
     "grid-words-moving",
     "glyphs-2000-rotating",
+    "flex-breathing",
     "panes-20",
     "image-icon",
     "paper-panel",
@@ -152,6 +153,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
             Element::live_text("l2", grid_words(t).words())
                 .text_style(TextStyle::new(0, 17.0 * k, 17.0 * 1.25 * k))
                 .color(Color::hex(0xc8d3e0, 1.0))
+        } else if case == "flex-breathing" {
+            flex_breathing(t, k)
         } else {
             text("l2", "so the window shows the live words", 17.0, 0xc8d3e0)
         })
@@ -522,11 +525,42 @@ fn water_sim_ms(g: &Gpu, size: Size) -> f64 {
     water.gpu_cost(2).map_or(0.0, |c| c.tick_ms * 2.0 + c.output_ms)
 }
 
+/// The one font table: a handle to the same table every time, so a case can add variable
+/// font instances to the table the renderer draws from.
 fn fonts() -> FontRegistry {
-    let fonts = FontRegistry::new();
-    let path = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
-    fonts.add_file(path.as_ref()).unwrap_or_else(|e| panic!("cannot load {path}: {e}"));
-    fonts
+    static FONTS: std::sync::OnceLock<FontRegistry> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let fonts = FontRegistry::new();
+            let path = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
+            fonts.add_file(path.as_ref()).unwrap_or_else(|e| panic!("cannot load {path}: {e}"));
+            fonts
+        })
+        .clone()
+}
+
+/// EG-23: the second line in Roboto Flex, every word breathing on its own through weight,
+/// width and slant, smoothly between the quantised instances (`var_axes::breathe`).
+fn flex_breathing(t: f64, k: f32) -> Element<Msg> {
+    use vo::scene::font::var_axes::{breathe, Axes};
+    let fonts = fonts();
+    let base = fonts.asset("flex").expect("flex");
+    let mut model = vo_core::words::WordModel::new();
+    model.update("so the window shows the live words");
+    let words = model.words();
+    let breaths = words
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| {
+            let p = (t * 1.3 + i as f64 * 0.7).sin() as f32;
+            let axes = Axes { wght: 480.0 + 120.0 * p, wdth: 100.0 + 4.0 * p, slnt: -2.5 - 2.5 * p, ..Axes::REST };
+            breathe(&fonts, base, &w.text, axes).map(|b| (w.id, b))
+        })
+        .collect();
+    Element::live_text("l2", words)
+        .text_style(TextStyle::new(base, 17.0 * k, 17.0 * 1.25 * k))
+        .color(Color::hex(0xc8d3e0, 1.0))
+        .word_breath(breaths)
 }
 
 /// Cycles through the cases, for the preview and contact sheets.

@@ -15,7 +15,10 @@ use taffy::{
 use crate::element::{Kind, TextStyle};
 use crate::geom::Size;
 use crate::scene::{Node, NodeId};
-use crate::text::{fit_size, ShapedText, TextLayout};
+use crate::text::{fit_size, FontRange, ShapedText, TextLayout, TowardRange};
+
+/// A text's words in fonts of their own, and those a share of the way to another's advances.
+type Ranges = (Vec<FontRange>, Vec<TowardRange>);
 
 pub(crate) struct LayoutView<'a, M> {
     pub nodes: &'a mut SlotMap<NodeId, Node<M>>,
@@ -61,20 +64,28 @@ impl<M> LayoutView<'_, M> {
     fn leaf(&mut self, node_id: taffy::NodeId, inputs: LayoutInput) -> LayoutOutput {
         let text_layout = self.text;
         let n = self.node(node_id);
-        type Fonts = Vec<(std::ops::Range<usize>, crate::font::FontId)>;
-        let content: Option<(String, TextStyle, Vec<f32>, Fonts, bool)> = match &n.kind {
-            Kind::Label { text, style, .. } => Some((text.clone(), *style, Vec::new(), Vec::new(), false)),
+        type Toward = Vec<TowardRange>;
+        let content: Option<(String, TextStyle, Vec<f32>, Ranges, bool)> = match &n.kind {
+            Kind::Label { text, style, .. } => {
+                Some((text.clone(), *style, Vec::new(), (Vec::new(), Vec::new()), false))
+            }
             Kind::LiveText { words, style, inline, live, edit, .. } => {
                 let spans = crate::flow::live_spans(words, live.source.as_deref());
                 let fonts = crate::flow::word_font_ranges(words, &spans.ranges, &live.word_fonts);
                 // An edit decor needs caret stops.
                 let style = TextStyle { stops: style.stops || edit.is_some(), ..*style };
                 let in_place = live.word_fonts_in_place;
+                // Words between two width instances (EG-23); in place the advances are held.
+                let toward: Toward = if in_place {
+                    Vec::new()
+                } else {
+                    crate::flow::breath_toward(words, &spans.ranges, &live.word_breath)
+                };
                 Some((
                     spans.text.into_owned(),
                     style,
                     crate::inline::widths(words, inline, style.size),
-                    fonts,
+                    (fonts, toward),
                     in_place,
                 ))
             }
@@ -93,11 +104,7 @@ impl<M> LayoutView<'_, M> {
                     AvailableSpace::MaxContent => None,
                 });
                 let st = fitted(text_layout, text, style, max, known.height);
-                let s = if *in_place {
-                    text_layout.layout_fonts_in_place(text, &st, max, objects, fonts)
-                } else {
-                    text_layout.layout_fonts(text, &st, max, objects, fonts)
-                };
+                let s = lay_fonts(text_layout, text, &st, max, objects, fonts, *in_place);
                 let size =
                     taffy::Size { width: known.width.unwrap_or(s.size.w), height: known.height.unwrap_or(s.size.h) };
                 shaped = Some(s);
@@ -111,12 +118,7 @@ impl<M> LayoutView<'_, M> {
                 let st = fitted(text_layout, text, style, Some(out.size.width), Some(out.size.height));
                 let shaped = if style.fit.is_some() { None } else { shaped };
                 let mut s = shaped.unwrap_or_else(|| {
-                    let max = Some(out.size.width);
-                    if *in_place {
-                        text_layout.layout_fonts_in_place(text, &st, max, objects, fonts)
-                    } else {
-                        text_layout.layout_fonts(text, &st, max, objects, fonts)
-                    }
+                    lay_fonts(text_layout, text, &st, Some(out.size.width), objects, fonts, *in_place)
                 });
                 // A box wider than its text (a fixed or stretched width) holds the lines by
                 // their alignment.
@@ -278,5 +280,25 @@ impl<M> LayoutBlockContainer for LayoutView<'_, M> {
         block: Option<&mut BlockContext<'_>>,
     ) -> LayoutOutput {
         self.compute(id, inputs, block)
+    }
+}
+
+/// Lays out text with words in fonts of their own: in place, toward the next width instance
+/// (EG-23), or plainly.
+fn lay_fonts(
+    text_layout: &dyn TextLayout,
+    text: &str,
+    style: &TextStyle,
+    max: Option<f32>,
+    objects: &[f32],
+    (fonts, toward): &Ranges,
+    in_place: bool,
+) -> ShapedText {
+    if in_place {
+        text_layout.layout_fonts_in_place(text, style, max, objects, fonts)
+    } else if toward.is_empty() {
+        text_layout.layout_fonts(text, style, max, objects, fonts)
+    } else {
+        text_layout.layout_fonts_toward(text, style, max, objects, fonts, toward)
     }
 }

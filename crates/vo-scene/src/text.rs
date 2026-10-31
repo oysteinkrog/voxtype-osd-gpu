@@ -350,7 +350,32 @@ pub trait TextLayout {
         let _ = fonts;
         self.layout_objects(text, style, max_width, objects)
     }
+
+    /// As `layout_fonts`, with each range in `toward` set `share` (0 to 1) of the way from
+    /// the advances its own font gives it to those `font` gives it: a word between two
+    /// instances of a variable font (EG-23) widens smoothly and the line breaks with it. The
+    /// glyphs stay its own font's. `toward` ranges are among `fonts`' ranges; a range may come
+    /// twice, once per axis, and each takes its share in turn.
+    fn layout_fonts_toward(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+        toward: &[(Range<usize>, FontId, f32)],
+    ) -> ShapedText {
+        let _ = toward;
+        self.layout_fonts(text, style, max_width, objects, fonts)
+    }
 }
+
+/// Bytes of a text set in a font of their own (`TextLayout::layout_fonts`).
+pub type FontRange = (Range<usize>, FontId);
+
+/// Bytes of a text whose advances go a share of the way to another font's
+/// (`TextLayout::layout_fonts_toward`).
+pub type TowardRange = (Range<usize>, FontId, f32);
 
 /// Logical units a line may overshoot its width and still count as fitting.
 const FIT_TOLERANCE: f32 = 1e-3;
@@ -573,6 +598,33 @@ fn hold_advances(glyphs: &mut [Shaped], base: &[Shaped], fonts: &[(Range<usize>,
     }
 }
 
+/// Moves the advances of each range in `toward` its share of the way to the same range's in
+/// `there`, glyph by glyph; by the range's total when the two shaped it to a different number
+/// of glyphs.
+fn advances_toward(glyphs: &mut [Shaped], there: &[Shaped], toward: &[(Range<usize>, FontId, f32)]) {
+    let within = |g: &Shaped, r: &Range<usize>| r.contains(&(g.cluster as usize));
+    for (range, _, share) in toward {
+        let to: Vec<&Shaped> = there.iter().filter(|g| within(g, range)).collect();
+        let count = glyphs.iter().filter(|g| within(g, range)).count();
+        if to.len() == count {
+            for (g, o) in glyphs.iter_mut().filter(|g| within(g, range)).zip(to) {
+                g.advance += share * (o.advance - g.advance);
+                g.dx += share * (o.dx - g.dx);
+            }
+            continue;
+        }
+        let want: f32 = to.iter().map(|g| g.advance).sum();
+        let have: f32 = glyphs.iter().filter(|g| within(g, range)).map(|g| g.advance).sum();
+        if have > 0.0 {
+            let k = 1.0 + share * (want / have - 1.0);
+            for g in glyphs.iter_mut().filter(|g| within(g, range)) {
+                g.advance *= k;
+                g.dx *= k;
+            }
+        }
+    }
+}
+
 /// A run between two break opportunities.
 struct Segment {
     glyphs: Range<usize>,
@@ -602,7 +654,7 @@ impl TextLayout for ShapedLayout {
         objects: &[f32],
         fonts: &[(Range<usize>, FontId)],
     ) -> ShapedText {
-        self.lay(text, style, max_width, objects, fonts, false)
+        self.lay(text, style, max_width, objects, (fonts, &[]), false)
     }
 
     fn layout_fonts_in_place(
@@ -613,7 +665,19 @@ impl TextLayout for ShapedLayout {
         objects: &[f32],
         fonts: &[(Range<usize>, FontId)],
     ) -> ShapedText {
-        self.lay(text, style, max_width, objects, fonts, true)
+        self.lay(text, style, max_width, objects, (fonts, &[]), true)
+    }
+
+    fn layout_fonts_toward(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        fonts: &[(Range<usize>, FontId)],
+        toward: &[(Range<usize>, FontId, f32)],
+    ) -> ShapedText {
+        self.lay(text, style, max_width, objects, (fonts, toward), false)
     }
 }
 
@@ -625,7 +689,7 @@ impl ShapedLayout {
         style: &TextStyle,
         max_width: Option<f32>,
         objects: &[f32],
-        fonts: &[(Range<usize>, FontId)],
+        (fonts, toward): (&[FontRange], &[TowardRange]),
         in_place: bool,
     ) -> ShapedText {
         let Some(face) = self.fonts.get(style.font) else {
@@ -653,6 +717,24 @@ impl ShapedLayout {
         let shaper = ShaperFont::new(face.shaping()).with_scale(upem as i32);
         let runs = self.runs_in(text, style.font, fonts);
         let mut glyphs = self.shape_these(text, style, (&face, &shaper), k, (&[], Direction::LeftToRight), runs);
+        // A range's first entry, then its second: each pass shapes ranges that do not overlap.
+        let (mut first, mut second) = (Vec::new(), Vec::new());
+        for t in toward {
+            if first.iter().any(|f: &(Range<usize>, FontId, f32)| f.0 == t.0) {
+                second.push(t.clone());
+            } else {
+                first.push(t.clone());
+            }
+        }
+        for pass in [first, second] {
+            if pass.is_empty() {
+                continue;
+            }
+            let other: Vec<(Range<usize>, FontId)> = pass.iter().map(|(r, f, _)| (r.clone(), *f)).collect();
+            let runs = self.runs_in(text, style.font, &other);
+            let there = self.shape_these(text, style, (&face, &shaper), k, (&[], Direction::LeftToRight), runs);
+            advances_toward(&mut glyphs, &there, &pass);
+        }
         if in_place && !fonts.is_empty() {
             let plain = self.runs_one(text, style.font);
             let base = self.shape_these(text, style, (&face, &shaper), k, (&[], Direction::LeftToRight), plain);

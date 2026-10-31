@@ -477,6 +477,10 @@ pub struct LiveMotion {
     /// The words in `word_fonts` keep the advances of the style's font, so their own font
     /// changes only how they are drawn (`Element::word_fonts_in_place`).
     pub word_fonts_in_place: bool,
+    /// What lies between each breathing word's instance and its axes (EG-23,
+    /// `Element::word_breath`): edge growth, a lean, a stretch, and the advances a share of
+    /// the way to the next width instance.
+    pub word_breath: Vec<(WordId, crate::font::var_axes::Breath)>,
     /// The text as typed, when it is more than the words joined by single spaces: runs of
     /// spaces and hard newlines (`Element::live_source`). See `live_spans`.
     pub source: Option<String>,
@@ -525,6 +529,27 @@ pub(crate) fn word_font_ranges(
     for (w, r) in words.iter().zip(ranges) {
         if let Some(&(_, f)) = fonts.iter().find(|(id, _)| *id == w.id) {
             out.push((r.clone(), f));
+        }
+    }
+    out
+}
+
+/// The byte ranges of the words in `breaths` that lie between two width instances, with the
+/// instance they lean toward and how far: what `TextLayout::layout_fonts_toward` takes.
+pub(crate) fn breath_toward(
+    words: &[Word],
+    ranges: &[std::ops::Range<usize>],
+    breaths: &[(WordId, crate::font::var_axes::Breath)],
+) -> Vec<(std::ops::Range<usize>, FontId, f32)> {
+    if breaths.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (w, r) in words.iter().zip(ranges) {
+        if let Some((_, b)) = breaths.iter().find(|(id, _)| *id == w.id) {
+            for &(font, share) in b.toward.iter().flatten() {
+                out.push((r.clone(), font, share));
+            }
         }
     }
     out

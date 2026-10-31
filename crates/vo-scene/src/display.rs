@@ -882,10 +882,14 @@ pub struct GlyphXform {
     pub skew_deg: f32,
     /// Move in layer units, after the turn and lean.
     pub offset: Point,
+    /// Horizontal scale less one, before the lean: 0.01 draws the glyph 1 % wider (EG-23, the
+    /// part of a width axis between two font instances).
+    pub stretch: f32,
 }
 
 impl GlyphXform {
-    pub const IDENTITY: GlyphXform = GlyphXform { rot_deg: 0.0, skew_deg: 0.0, offset: Point { x: 0.0, y: 0.0 } };
+    pub const IDENTITY: GlyphXform =
+        GlyphXform { rot_deg: 0.0, skew_deg: 0.0, offset: Point { x: 0.0, y: 0.0 }, stretch: 0.0 };
 
     pub fn is_identity(&self) -> bool {
         *self == GlyphXform::IDENTITY
@@ -896,9 +900,9 @@ impl GlyphXform {
         GlyphXform { rot_deg: deg, ..GlyphXform::IDENTITY }
     }
 
-    /// The linear part in layer space (y down): the lean, then the turn.
+    /// The linear part in layer space (y down): the stretch, the lean, then the turn.
     pub fn linear(&self) -> Affine {
-        let lean = Affine { c: -self.skew_deg.to_radians().tan(), ..Affine::IDENTITY };
+        let lean = Affine { a: 1.0 + self.stretch, c: -self.skew_deg.to_radians().tan(), ..Affine::IDENTITY };
         lean.then(&Affine::rotate(self.rot_deg.to_radians()))
     }
 
@@ -1377,6 +1381,15 @@ mod tests {
         let a = x.about(Point::new(0.0, 0.0));
         assert!(near(a.apply(Point::new(0.0, -2.0)), 2.0, -2.0));
         assert!(near(a.apply(Point::new(3.0, 0.0)), 3.0, 0.0));
+    }
+
+    #[test]
+    fn a_stretch_widens_about_the_centre_and_keeps_the_height() {
+        let x = GlyphXform { stretch: 0.5, ..GlyphXform::IDENTITY };
+        let a = x.about(Point::new(10.0, 0.0));
+        assert!(near(a.apply(Point::new(14.0, 0.0)), 16.0, 0.0));
+        assert!(near(a.apply(Point::new(10.0, -3.0)), 10.0, -3.0));
+        assert!(!x.is_identity());
     }
 
     #[test]

@@ -1542,6 +1542,33 @@ impl<M> Element<M> {
         self
     }
 
+    /// Live text: words that breathe through a variable font with smooth axes (EG-23), from
+    /// `var_axes::breathe`. Each word is set in its breath's instance, as with
+    /// [`Element::word_fonts`], and what lies between that instance and its axes is drawn on
+    /// top: weight as edge growth, slant as a lean, width as a stretch, with the advances a
+    /// share of the way to the next width instance.
+    pub fn word_breath(self, breaths: Vec<(vo_core::words::WordId, crate::font::var_axes::Breath)>) -> Element<M> {
+        let fonts = breaths.iter().map(|(w, b)| (*w, b.font)).collect();
+        self.word_fonts(fonts).set_breath(breaths)
+    }
+
+    /// Live text: as [`Element::word_breath`], with each word keeping the width the style's
+    /// font gives it, as with [`Element::word_fonts_in_place`].
+    pub fn word_breath_in_place(
+        self,
+        breaths: Vec<(vo_core::words::WordId, crate::font::var_axes::Breath)>,
+    ) -> Element<M> {
+        let fonts = breaths.iter().map(|(w, b)| (*w, b.font)).collect();
+        self.word_fonts_in_place(fonts).set_breath(breaths)
+    }
+
+    fn set_breath(mut self, breaths: Vec<(vo_core::words::WordId, crate::font::var_axes::Breath)>) -> Element<M> {
+        if let Kind::LiveText { live, .. } = &mut self.kind {
+            live.word_breath = breaths;
+        }
+        self
+    }
+
     /// Live text: draws a caret, a selection and edit marks with the words, at their sprung
     /// places (`flow::EditDecor`). Pass the buffer with `Element::live_source` so the decor's
     /// bytes match the text. While a node has a decor it lays out with caret stops and does

@@ -2377,6 +2377,15 @@ impl<M> Scene<M> {
                         }
                         let (blur, dissolve, wipe) = n.word_fx(word, t);
                         let word_span = ws.map_or(span, |w| (w.1, w.2));
+                        let size = style.size * m.scale * grow * z;
+                        // A word between two variable font instances (EG-23): the weight as
+                        // edge growth, the slant as a lean, the width as a stretch.
+                        let mut xform = m.xform;
+                        if let Some((_, b)) = live.word_breath.iter().find(|(id, _)| *id == word) {
+                            weight += b.weight * size;
+                            xform.skew_deg += b.skew_deg;
+                            xform.stretch = b.stretch;
+                        }
                         let e = GlyphFx {
                             weight: fx.weight + weight,
                             blur: fx.blur + blur,
@@ -2409,7 +2418,7 @@ impl<M> Scene<M> {
                         push_item(items, ItemKind::Glyphs, out.glyphs.len() as u32);
                         out.glyphs.push(GlyphInstance {
                             pos: Point::new(origin.x + (g.pos.x + dx) * z, origin.y + (g.pos.y + dy) * z),
-                            size: style.size * m.scale * grow * z,
+                            size,
                             font: g.font,
                             glyph: g.glyph,
                             word,
@@ -2420,7 +2429,7 @@ impl<M> Scene<M> {
                                 })
                                 .unwrap_or_else(|| m.tint(color))
                                 .fade(k),
-                            xform: m.xform,
+                            xform,
                         });
                     }
                     // Tumbling copies of new letters (EG-16): decoration, so `NO_WORD`.

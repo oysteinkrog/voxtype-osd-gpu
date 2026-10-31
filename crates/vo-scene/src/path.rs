@@ -836,6 +836,18 @@ pub mod make {
 /// A glyph's outline as a path in layer units at `size`, pen origin at 0, y down. For glyph
 /// morphs (TY21) and text drawn as strokes.
 pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
+    glyph_path_styled(face, glyph, size, skrifa::outline::pen::PathStyle::FreeType)
+}
+
+/// As [`glyph_path`], with the outline built the way `style` builds it. The glyph renderer
+/// draws HarfBuzz's, which places the implied points of a variable font's instance
+/// differently from FreeType's.
+pub(crate) fn glyph_path_styled(
+    face: &crate::font::Face,
+    glyph: u32,
+    size: f32,
+    style: skrifa::outline::pen::PathStyle,
+) -> BezPath {
     use skrifa::instance::Size;
     use skrifa::outline::{DrawSettings, OutlinePen};
     use skrifa::MetadataProvider;
@@ -860,7 +872,7 @@ pub fn glyph_path(face: &crate::font::Face, glyph: u32, size: f32) -> BezPath {
     let font = face.skrifa();
     let mut pen = Pen(BezPath::new());
     if let Some(g) = font.outline_glyphs().get(skrifa::GlyphId::new(glyph)) {
-        let _ = g.draw(DrawSettings::unhinted(Size::new(size), face.location()), &mut pen);
+        let _ = g.draw(DrawSettings::unhinted(Size::new(size), face.location()).with_path_style(style), &mut pen);
     }
     pen.0
 }

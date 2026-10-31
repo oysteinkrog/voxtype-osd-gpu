@@ -29,8 +29,11 @@
   // effects by how far they reach in pixels.
   let det0 = g.lin.x * g.lin.w - g.lin.z * g.lin.y;
   let inv = mat2x2f (vec2f (g.lin.w, -g.lin.y), vec2f (-g.lin.z, g.lin.x)) * (1.0 / det0);
-  // A blur tap reaches half the blur plus half its window, a halo twice that per radius.
-  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x + length (g.fx3.xy) + 0.5 * g.fx3.z + max (g.fx3.w, 0.0);
+  // A blur tap reaches half the blur plus half its window, a halo twice that per radius. A
+  // weight grows the quad by whole pixels: a quad that changed size by a hair each frame
+  // would move every pixel's em coordinate by a rounding error, and the ink would flicker
+  // as a weight eases (EG-23).
+  let reach_px = 0.7 * g.fx.x + abs (g.fx.w) + 1.4 * g.fx2.x + length (g.fx3.xy) + 0.5 * g.fx3.z + ceil (max (g.fx3.w, 0.0));
   let em_per_px = abs (inv[0]) + abs (inv[1]);
   let grow = 0.5 * abs (inv * layer.smear.zw) + reach_px * em_per_px;
   let em = mix (g.ext.xy - grow, g.ext.zw + grow, c);
@@ -145,10 +148,14 @@ fn soft_coverage (tc: vec2f, loc: u32, ppe: vec2f, width: f32, px_x: vec2f, px_y
   if (in.fx3.z > 0.0) {
     cov = clamp (0.5 * in.fx3.z + 0.5 - edge_distance_px (in.tc, in.loc, ppe), 0.0, 1.0);
   } else if (in.fx3.w != 0.0 && !blurred) {
-    // Signed distance, outside positive, with the side from the coverage itself.
+    // Signed distance, outside positive, with the side from the coverage itself. The weight
+    // adds what growing the edge adds to the distance's own coverage, on top of Slug's: a
+    // small weight then changes the ink by the outline length times the weight and no more,
+    // and nothing at all at zero, where the distance's coverage alone would differ from
+    // Slug's by a few percent of the ink (EG-23).
     let d = edge_distance_px (in.tc, in.loc, ppe);
     let s = select (d, -d, cov > 0.5);
-    cov = clamp (0.5 - s + in.fx3.w, 0.0, 1.0);
+    cov = clamp (cov + clamp (0.5 - s + in.fx3.w, 0.0, 1.0) - clamp (0.5 - s, 0.0, 1.0), 0.0, 1.0);
   }
   var c = in.color * cov;
   if (in.fx.w != 0.0) {
