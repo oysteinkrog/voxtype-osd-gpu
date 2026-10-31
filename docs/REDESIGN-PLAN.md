@@ -131,6 +131,8 @@ Karaoke with its idle motion (6r7: the mic badge bobs 2 px on a 1.2 s cycle whil
 
 Jarvis with its idle motion (qwq: ring segments counter-turning at 4, -3 and 2 degrees a second, the outer ticks crawling 10 px a second, a 1 px scan line at 10 % down the text frame every 8 s that skips the newest line's band; the slow loops step 10 times a second), measure build, popup 24a4ab0, 2026-10-31: recording 8.98 % CPU, 54.0 frames/s, GPU median 0.343 ms; idle-open 1.96 % CPU, 11.5 frames/s, GPU median 0.180 ms. All within the budget.
 
+Swissfi with its idle motion (di6: the waveform's tick row drifts 1 px every 4 s, out to 4 px and back over 32 s, standing in for a background grid; a 40 px accent highlight runs along the baseline once every 7 s, standing in for an accent bar; both draw in the ticks canvas, which redraws while listening anyway), measure build, popup 3a92791, 2026-10-31: recording 7.20 % CPU, 52.0 frames/s, GPU 0.072 / 0.076 ms; idle-open 1.96 % CPU, 15.4 frames/s, GPU 0.056 / 0.061 ms. Idle-open was 2.68 % in the run before the change, so the difference is noise. All within the budget.
+
 ### Over a limit today
 
 - **Idle-open, every look:** about 56 frames per second and 4.5 to 9 % of one core, against 30 frames per second and 2 %. The popup redraws on every audio frame even on room tone, so this is one popup-wide fix (hold the last frame while the level stays under the noise floor), not 20 look fixes. It must land before the IDLE beads, or no idle motion fits the budget.
