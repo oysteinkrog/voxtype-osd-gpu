@@ -1942,32 +1942,28 @@ impl Flow {
         }
         dx += self.magnet_snap(w, t);
         dx += self.bell_dx(w, w.x.target() as f32 + g.x.target() as f32, t);
-        let (xform, ink) = self.letter_pose(w, g, &mut dy, t);
+        let xform = self.letter_pose(w, g, &mut dy, t);
         let pen = Point::new(w.x.target() as f32 + g.x.target() as f32 + dx, w.y.target() as f32 + g.y + dy);
         let (pos, look) = self.on_stage(w, pen, t);
         GlyphMotion {
             dx: pos.x - pen.x + dx,
             dy: pos.y - pen.y + dy,
-            opacity: ((g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)) as f32).min(ink).clamp(0.0, 1.0),
+            opacity: ((g.opacity.value(t) * w.ink.value(t) * w.look_opacity.value(t)) as f32).clamp(0.0, 1.0),
             scale: scale * look,
             tint: self.accent.map(|c| (c, w.fresh.value(t).clamp(0.0, 1.0) as f32)),
             xform,
         }
     }
 
-    /// The per-letter motions of glyph `g` of word `w` at `t` (EG-16): its transform and
-    /// the most ink it may have (a tumbling letter's), with the wave's drop added to `dy`.
-    fn letter_pose(&self, w: &FlowWord, g: &FlowGlyph, dy: &mut f32, t: f64) -> (crate::display::GlyphXform, f32) {
+    /// The per-letter motions of glyph `g` of word `w` at `t` (EG-16): its transform, with
+    /// the wave's drop added to `dy`.
+    fn letter_pose(&self, w: &FlowWord, g: &FlowGlyph, dy: &mut f32, t: f64) -> crate::display::GlyphXform {
         let m = self.letter_motion;
         let mut xform = crate::display::GlyphXform::IDENTITY;
-        let mut ink = 1.0;
         if !m.any() {
-            return (xform, ink);
+            return xform;
         }
         let newest = self.words.last().is_none_or(|l| l.line == w.line);
-        if m.tumble {
-            ink = letter_motion::tumble_ink(g.born, t);
-        }
         if m.italic {
             let arrived = w.glyphs.iter().map(|g| g.born).fold(f64::INFINITY, f64::min);
             xform.skew_deg = letter_motion::italic_skew(arrived, t);
@@ -1987,7 +1983,7 @@ impl Flow {
                 xform.rot_deg = k * turn;
             }
         }
-        (xform, ink)
+        xform
     }
 
     /// The tumbling copies of new letters at `t` (EG-16): the shaped glyph each one copies,

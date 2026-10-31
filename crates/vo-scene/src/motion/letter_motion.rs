@@ -5,13 +5,15 @@
 //! - Tumble (`LetterMotions::tumble`): a copy of each new letter, drawn as decoration (word
 //!   id `NO_WORD`, so the reading-line envelope ignores it), flies in from up to
 //!   [`TUMBLE_FROM`] px away turning up to [`TUMBLE_TURN`] degrees and lands on the real
-//!   glyph within [`TUMBLE_SECS`]. The real glyph stands in place from its first frame at
-//!   [`TUMBLE_INK`] or more, rising to full ink as the copy lands.
+//!   glyph within [`TUMBLE_SECS`]. The real glyph stands in place with the ink the text
+//!   would give it anyway: the copy never dims it, so it is as readable as without the
+//!   tumble from its first frame.
 //! - Italic arrival (`LetterMotions::italic`): a new word arrives leaning up to
 //!   [`ITALIC_SKEW`] degrees and straightens over [`ITALIC_SECS`].
 //! - Wave (`LetterMotions::wave`): glyphs of the older lines, never the newest, ride
 //!   `y = A sin(kx - wt)` with `A` at most [`WAVE_AMP`] px, turned to follow the slope. A
-//!   line eases into the wave over [`WAVE_EASE_SECS`] from when the line after it starts.
+//!   line eases into the wave over [`WAVE_EASE_SECS`], [`WAVE_HOLD_SECS`] after the line
+//!   after it starts.
 //! - Lean ([`digit_lean`]): digits of a counter label lean forward with the words per
 //!   minute, up to [`LEAN_MAX`] degrees, and spring back upright in a pause. For labels, not
 //!   live text.
@@ -31,8 +33,6 @@ pub const TUMBLE_SECS: f64 = 0.35;
 pub const TUMBLE_FROM: f32 = 40.0;
 /// The most a tumbling copy turns on its way in, in degrees.
 pub const TUMBLE_TURN: f32 = 360.0;
-/// The real glyph's ink while its copy is in flight, at the least.
-pub const TUMBLE_INK: f32 = 0.7;
 /// How far a new word leans as it arrives, in degrees.
 pub const ITALIC_SKEW: f32 = 5.0;
 /// How long a new word takes to straighten, in seconds.
@@ -43,7 +43,11 @@ pub const WAVE_AMP: f32 = 3.0;
 pub const WAVE_LENGTH: f32 = 140.0;
 /// Seconds for the wave to pass one wavelength.
 pub const WAVE_PERIOD: f64 = 3.2;
-/// How long a line takes to join the wave once a newer line starts, in seconds.
+/// How long after a newer line's first letter arrives a line waits before it eases into
+/// the wave, in seconds: a look may hold the new line back (a drop hold, a line wait), and
+/// until it shows the older line is still the one read.
+pub const WAVE_HOLD_SECS: f64 = 0.4;
+/// How long a line takes to join the wave once it starts, in seconds.
 pub const WAVE_EASE_SECS: f64 = 0.8;
 /// The most a digit leans, in degrees.
 pub const LEAN_MAX: f32 = 12.0;
@@ -102,13 +106,6 @@ pub fn tumble(arrived: f64, t: f64, seed: u32) -> Option<TumblePose> {
     })
 }
 
-/// The real glyph's ink while its copy tumbles in: [`TUMBLE_INK`] at arrival, rising to 1
-/// as the copy lands.
-pub fn tumble_ink(arrived: f64, t: f64) -> f32 {
-    let u = ((t - arrived) / TUMBLE_SECS).clamp(0.0, 1.0) as f32;
-    TUMBLE_INK + (1.0 - TUMBLE_INK) * ease_out(u)
-}
-
 /// A new word's lean `t - arrived` seconds after it came, in degrees: [`ITALIC_SKEW`],
 /// straightening over [`ITALIC_SECS`].
 pub fn italic_skew(arrived: f64, t: f64) -> f32 {
@@ -117,9 +114,9 @@ pub fn italic_skew(arrived: f64, t: f64) -> f32 {
 }
 
 /// How far into the wave a line is at `t` when the line after it started at `next`: 0 up
-/// to then, easing to 1 over [`WAVE_EASE_SECS`].
+/// to [`WAVE_HOLD_SECS`] later, then easing to 1 over [`WAVE_EASE_SECS`].
 pub fn wave_share(next: f64, t: f64) -> f32 {
-    let u = ((t - next) / WAVE_EASE_SECS).clamp(0.0, 1.0) as f32;
+    let u = ((t - next - WAVE_HOLD_SECS) / WAVE_EASE_SECS).clamp(0.0, 1.0) as f32;
     u * u * (3.0 - 2.0 * u)
 }
 

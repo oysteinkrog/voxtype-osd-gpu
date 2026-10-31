@@ -5,8 +5,8 @@ use vo_core::words::Word;
 use vo_scene::display::{DisplayList, GlyphXform, NO_WORD};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::flow::letter_motion::{
-    digit_lean, italic_skew, tumble, tumble_ink, wave, wave_share, LetterMotions, ITALIC_SECS, ITALIC_SKEW, LEAN_MAX,
-    TUMBLE_FROM, TUMBLE_INK, TUMBLE_SECS, TUMBLE_TURN, WAVE_AMP, WAVE_EASE_SECS,
+    digit_lean, italic_skew, tumble, wave, wave_share, LetterMotions, ITALIC_SECS, ITALIC_SKEW, LEAN_MAX, TUMBLE_FROM,
+    TUMBLE_SECS, TUMBLE_TURN, WAVE_AMP, WAVE_EASE_SECS, WAVE_HOLD_SECS,
 };
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::text::ShapedLayout;
@@ -46,19 +46,24 @@ fn a_tumbling_copy_flies_in_and_is_gone_by_350_ms() {
         assert!(tumble(1.0, 1.0 + TUMBLE_SECS, seed).is_none());
         assert!(tumble(1.0, 0.99, seed).is_none());
     }
-    assert!((tumble_ink(1.0, 1.0) - TUMBLE_INK).abs() < 1e-6);
-    assert!((tumble_ink(1.0, 1.0 + TUMBLE_SECS) - 1.0).abs() < 1e-6);
 }
 
 #[test]
-fn on_live_text_the_real_glyph_stands_readable_while_its_copy_tumbles() {
+fn on_live_text_the_real_glyph_keeps_its_ink_while_its_copy_tumbles() {
+    let w = words("tumbling letters");
+    let mut plain = scene(false);
+    plain.apply(view(&w, LetterMotions::NONE), 1.0);
     let mut s = scene(false);
-    s.apply(view(&words("tumbling letters"), TUMBLE), 1.0);
-    let at = s.sample(1.0);
-    assert!(copies(&at) > 0, "copies in flight at arrival");
-    for g in at.glyphs.iter().filter(|g| g.word != NO_WORD) {
-        assert!(g.color.a >= TUMBLE_INK - 1e-3, "real glyph at {} ink", g.color.a);
-        assert!(g.xform.is_identity());
+    s.apply(view(&w, TUMBLE), 1.0);
+    for t in [1.0, 1.1, 1.2] {
+        let (a, b) = (plain.sample(t), s.sample(t));
+        assert!(copies(&b) > 0, "copies in flight at {t}");
+        let real: Vec<_> = b.glyphs.iter().filter(|g| g.word != NO_WORD).collect();
+        assert_eq!(real.len(), a.glyphs.len());
+        for (p, q) in a.glyphs.iter().zip(real) {
+            assert_eq!(p.color, q.color, "the copy never dims its letter");
+            assert!(q.xform.is_identity());
+        }
     }
     assert_eq!(copies(&s.sample(1.0 + TUMBLE_SECS)), 0, "the copies are gone at a + 0.35 s");
     assert_eq!(copies(&s.sample(3.0)), 0);
@@ -84,8 +89,8 @@ fn the_wave_moves_older_lines_and_never_the_newest() {
         assert!(dy.abs() <= WAVE_AMP + 1e-4);
         assert!(turn.abs() < 10.0);
     }
-    assert_eq!(wave_share(2.0, 2.0), 0.0, "no jump when the next line starts");
-    assert_eq!(wave_share(2.0, 2.0 + WAVE_EASE_SECS), 1.0);
+    assert_eq!(wave_share(2.0, 2.0 + WAVE_HOLD_SECS), 0.0, "no jump when the next line shows");
+    assert_eq!(wave_share(2.0, 2.0 + WAVE_HOLD_SECS + WAVE_EASE_SECS), 1.0);
     let mut s = scene(false);
     let text = "the older lines ride a slow wave while the newest line holds still for reading";
     s.apply(view(&words(text), WAVE), 0.0);
