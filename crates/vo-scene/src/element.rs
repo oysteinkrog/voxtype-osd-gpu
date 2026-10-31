@@ -1450,8 +1450,9 @@ impl<M> Element<M> {
         self
     }
 
-    /// Live text: a caret after the last word (TY14). It glides to the new end in about
-    /// 120 ms, stays solid while words arrive and for 400 ms after, then blinks at about
+    /// Live text: a caret after the last word (TY14). It jumps to a new end further on along
+    /// its line, so it never stands inside the text, and glides back or to another line in
+    /// about 120 ms. It stays solid while words arrive and for 400 ms after, then blinks at about
     /// 1 Hz.
     pub fn caret(mut self, c: Caret) -> Element<M> {
         match &mut self.kind {

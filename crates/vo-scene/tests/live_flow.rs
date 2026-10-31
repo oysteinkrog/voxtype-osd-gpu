@@ -132,7 +132,7 @@ fn reduced_motion_moves_words_at_once() {
 }
 
 #[test]
-fn the_caret_glides_to_the_end_and_blinks_when_idle() {
+fn the_caret_jumps_to_the_end_and_blinks_when_idle() {
     let mut s = scene();
     s.apply(view(&words(&[(1, "hello")]), None, true), 0.0);
     let id = s.find(&["root", "live"]).unwrap();
@@ -141,12 +141,11 @@ fn the_caret_glides_to_the_end_and_blinks_when_idle() {
     let end0 = s.word_bounds(id, 1, 0.0).unwrap().right();
     assert!(bar0.x > end0 && bar0.x < end0 + 4.0, "caret {bar0:?} after the word end {end0}");
 
-    // A new word: the caret glides, no jump.
+    // A new word on the line: the caret jumps to the new end, so it never stands inside
+    // the word.
     s.apply(view(&words(&[(1, "hello"), (2, "world")]), None, true), 1.0);
-    assert_eq!(s.caret(id, 1.0).unwrap().0.x, bar0.x);
     let end1 = s.word_bounds(id, 2, 5.0).unwrap().right();
-    let mid = s.caret(id, 1.05).unwrap().0.x;
-    assert!(mid > bar0.x && mid < end1, "caret mid glide at {mid}");
+    assert!((s.caret(id, 1.0).unwrap().0.x - end1 - 2.0).abs() < 1e-2);
     assert!((s.caret(id, 1.5).unwrap().0.x - end1 - 2.0).abs() < 1e-2);
 
     // Solid while words arrive and for the hold after, then it blinks.

@@ -101,7 +101,8 @@ pub const ROLL_EMS: f32 = 0.35;
 pub const RISE_EMS: f32 = 0.25;
 /// x-height over cap height, for `CaseChange::Grow`. Close to Noto Sans and most UI fonts.
 pub const X_TO_CAP: f32 = 0.75;
-/// The caret reaches the new end of the text in about 120 ms.
+/// The caret reaches a new end of the text back along its line, or on another line, in
+/// about 120 ms; an end further on along its line it takes at once.
 pub const CARET_GLIDE: Spring = Spring::SNAP;
 /// The caret stays solid this long after words last arrived.
 pub const CARET_HOLD: f64 = 0.4;
@@ -1912,7 +1913,11 @@ impl Flow {
         };
         match &mut self.caret {
             Some((cx, cy, s, b)) => {
-                move_to(cx, x, t, glide, reduced);
+                // The caret never trails inside the text: when the end moves on along its line
+                // (a word grew, a new word came), it jumps there at once, as the glyphs do. It
+                // glides only back along a line or to another line.
+                let on = (y as f64 - cy.target()).abs() < 0.5 && x as f64 > cx.value(t);
+                move_to(cx, x, t, glide, reduced || on);
                 move_to(cy, y, t, glide, reduced);
                 (*s, *b) = (style, bar);
             }
@@ -2609,6 +2614,40 @@ mod tests {
             assert_eq!(carets(EditDecor { end_caret: true, ..marks.clone() }), vec![3.0], "the end caret");
             let edit = EditDecor { caret: Some(2), end_caret: true, ..marks };
             assert_eq!(carets(edit), vec![2.0], "only the edit caret");
+        }
+
+        /// The end caret never stands inside the text: as a word grows or a new one comes on
+        /// its line it is after the last glyph from the first frame; back to a shorter end it
+        /// still glides.
+        #[test]
+        fn the_end_caret_jumps_on_and_glides_back() {
+            let end = Caret { width: 3.0, ..Caret::default() };
+            let words = |w: &[(WordId, &str)]| {
+                let w: Vec<Word> = w.iter().map(|&(id, t)| Word { id, text: t.into() }).collect();
+                Element::column("root").child(
+                    Element::live_text("live", &w).text_style(TextStyle::new(0, SIZE, 26.0)).width(300.0).caret(end),
+                )
+            };
+            // The caret's left edge and the right edge of the last glyph, at `t`.
+            let at = |s: &mut Scene<()>, t: f64| {
+                let dl = s.sample(t);
+                let caret = dl.shapes.iter().find(|s| s.geom[2] == 3.0).expect("the caret").geom[0];
+                let ink = dl.glyphs.iter().map(|g| g.pos.x).fold(f32::MIN, f32::max);
+                (caret, ink)
+            };
+            let mut s = scene();
+            s.apply(words(&[(1, "open")]), 0.0);
+            s.sample(0.5);
+            for (k, text) in [(1.0, "open"), (1.1, "open conf"), (1.2, "open configuration")] {
+                let w: Vec<(WordId, &str)> = text.split(' ').enumerate().map(|(i, t)| (i as WordId + 1, t)).collect();
+                s.apply(words(&w), k);
+                let (caret, ink) = at(&mut s, k + STEP);
+                assert!(caret > ink, "{text}: caret at {caret}, last glyph starts at {ink}");
+            }
+            let settled = at(&mut s, 2.0).0;
+            s.apply(words(&[(1, "open")]), 2.0);
+            let back = at(&mut s, 2.0 + STEP).0;
+            assert!(back > at(&mut s, 3.0).0 + 10.0 && back <= settled, "back along the line it glides: {back}");
         }
 
         /// The display list says where the caret meets its baseline, in surface space, for

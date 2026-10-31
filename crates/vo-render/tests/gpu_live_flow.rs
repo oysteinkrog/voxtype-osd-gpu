@@ -1,6 +1,6 @@
 //! Live text motion on the GPU (T02, T11, T17): film strips of a revision that crossfades
 //! while its neighbours slide, a rewrap that glides in reading order, and a caret that
-//! glides and blinks. Each golden stacks the frames of one scenario top to bottom.
+//! jumps to the new end and blinks. Each golden stacks the frames of one scenario top to bottom.
 //!
 //! GPU test: `just test-gpu` runs it.
 
@@ -97,7 +97,7 @@ fn live_flow_goldens() {
         ],
         &frames,
     );
-    // The caret: glides after "world", solid for the hold, then on and off.
+    // The caret: jumps after "world", solid for the hold, then on and off.
     let caret = strip(
         &mut off,
         &fonts,
