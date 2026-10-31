@@ -127,6 +127,8 @@ Swiss with its idle motion (v41: a soft highlight along the top hairline once ev
 
 Dotmatrix with its idle motion (feo: about 2 % of the unlit meter dots rise to 12 % ink for 0.4 s, and the quiet baseline steps one cell right every other 2 s and back), measure build, 2026-10-31: recording 5.40 % CPU, 52.8 frames/s, GPU 0.033 / 0.034 ms; idle-open 2.20 % CPU, GPU 0.026 ms p95. Idle-open was 1.46 % at 15.4 frames/s without it, so the motion costs about 0.7 % of one core. That is over the 2 % limit above and under the 3 % limit the idle beads use.
 
+Karaoke with its idle motion (6r7: the mic badge bobs 2 px on a 1.2 s cycle while no word comes, standing in for the bouncing ball; a soft stage light at most 8 % alpha sweeps under the newest line every 10 s), measure build, 2026-10-31: recording 7.40 % CPU, 48.4 frames/s, GPU 0.243 / 0.247 ms; idle-open 1.71 % CPU, 15.4 frames/s, GPU 0.153 / 0.166 ms. All within the budget.
+
 Jarvis with its idle motion (qwq: ring segments counter-turning at 4, -3 and 2 degrees a second, the outer ticks crawling 10 px a second, a 1 px scan line at 10 % down the text frame every 8 s that skips the newest line's band; the slow loops step 10 times a second), measure build, popup 24a4ab0, 2026-10-31: recording 8.98 % CPU, 54.0 frames/s, GPU median 0.343 ms; idle-open 1.96 % CPU, 11.5 frames/s, GPU median 0.180 ms. All within the budget.
 
 ### Over a limit today
