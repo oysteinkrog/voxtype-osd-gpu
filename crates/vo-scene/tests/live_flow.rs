@@ -338,6 +338,23 @@ fn a_new_word_moves_with_the_words_its_line_moved() {
     }
 }
 
+#[test]
+fn a_word_that_arrives_while_its_neighbour_slides_moves_with_it() {
+    let mut s = scene();
+    s.apply(view(&words(&[(1, "so"), (2, "the")]), None, false), 0.0);
+    // "so" grows and pushes "the" right; "fox" arrives in the next update, while "the" is
+    // still on its way.
+    s.apply(view(&words(&[(1, "sooooo"), (2, "the")]), None, false), 1.0);
+    s.apply(view(&words(&[(1, "sooooo"), (2, "the"), (3, "fox")]), None, false), 1.04);
+    let settled = s.sample(5.0);
+    let gap = first(&settled, 3).0 - first(&settled, 2).0;
+    for t in [1.04, 1.06, 1.1, 1.2] {
+        let f = s.sample(t);
+        let d = first(&f, 3).0 - first(&f, 2).0;
+        assert!((d - gap).abs() < 0.5, "at {t} the gap is {d}, settled {gap}");
+    }
+}
+
 /// Ten words over about three lines at 200 wide.
 const TEN: [(u32, &str); 10] = [
     (1, "every"),

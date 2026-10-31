@@ -1167,6 +1167,14 @@ impl Flow {
                     Some((line, dx)) if line == p.line && !reduced && !calm_drop => dx,
                     _ => 0.0,
                 };
+                // A word that arrives while the word before it on its line still slides
+                // (moved by an earlier update) starts as far off and as fast, so the two move
+                // as one piece instead of the new word landing on its neighbour.
+                let follow = next.last().filter(|n| back == 0.0 && !reduced && n.line == p.line).and_then(|n| {
+                    let (x, v) = n.x.sample(t);
+                    let off = x - n.x.target();
+                    (off.abs() >= 0.5).then_some((off, v, n.x.spring()))
+                });
                 let mut glyphs: Vec<FlowGlyph> =
                     p.glyphs.iter().zip(&graphemes).map(|(g, &gr)| make.rest(g, gr)).collect();
                 // A word inserted before kept words shows once they have moved out of its way.
@@ -1211,6 +1219,10 @@ impl Flow {
                     x: if hold > t {
                         let mut c = make.ch(p.x - back, FLIP, Rest::PIXELS);
                         c.retarget(hold, p.x as f64);
+                        c
+                    } else if let Some((off, v, spring)) = follow {
+                        let mut c = make.ch(p.x, spring, Rest::PIXELS);
+                        c.restart(t, p.x as f64 + off, v, p.x as f64);
                         c
                     } else {
                         make.to(p.x - back, p.x, FLIP, Rest::PIXELS)
