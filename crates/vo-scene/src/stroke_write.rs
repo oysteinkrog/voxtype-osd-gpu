@@ -46,7 +46,7 @@
 //!
 //! [`Pen`] (SW-08) names the pens a look picks from: `Ink` (the wet ink above), `Light` (a
 //! round line with a glow that settles and a 40 ms trail of nib light), `Phosphor` (a beam
-//! spot with a 0.6 s afterglow, leaving swept words to the look's own beam) and `Script`
+//! spot with a dim 0.3 s afterglow, leaving swept words to the look's own beam) and `Script`
 //! (the Hershey strokes in wet ink with ink bleeding into larger pools).
 
 use std::sync::{Arc, OnceLock};
@@ -539,8 +539,8 @@ pub enum Pen {
     /// A light pen: a round line in the text colour with a glow that settles, and a nib
     /// light in the accent trailing 40 ms behind it. No pools, no shine.
     Light,
-    /// A beam: the spot as the nib, a round line with an afterglow that fades over
-    /// 0.6 s, no shine or pools. A swept word shows no ink, so the look's own beam (or the
+    /// A beam: the spot as the nib, a dim round line with an afterglow that fades over
+    /// 0.3 s, so the word never reads bold, no shine or pools. A swept word shows no ink, so the look's own beam (or the
     /// type) brings it in.
     Phosphor,
     /// Script: the Hershey script strokes over the type in wet ink, with ink that bleeds
@@ -556,13 +556,13 @@ impl Pen {
             Pen::Ink => ink,
             Pen::Light => WetInk { nib: 7.0, sheen: 0.0, pen: None, pool: 0.0, glow: 4.0, trail_secs: 0.04, ..ink },
             Pen::Phosphor => WetInk {
-                ink: text,
+                ink: text.fade(0.45),
                 nib: 4.0,
-                dry_secs: 0.6,
+                dry_secs: 0.3,
                 sheen: 0.0,
                 pen: None,
                 pool: 0.0,
-                glow: 3.0,
+                glow: 1.5,
                 swept_ink: false,
                 ..ink
             },
@@ -1118,10 +1118,11 @@ mod tests {
         assert!(w.wetness(&swept, 1.08, &ink).iter().any(|&a| a > 0.0));
         let beam = Pen::Phosphor.wet(text, accent);
         assert!(w.wetness(&swept, 1.08, &beam).iter().all(|&a| a == 0.0));
-        // The beam's afterglow outlasts the ink's drying.
-        assert!(beam.until(&written) > ink.until(&written) + 0.3);
-        assert!(w.wetness(&written, 1.5, &beam).iter().any(|&a| a > 0.0));
-        assert!(w.wetness(&written, 1.5, &ink).iter().all(|&a| a == 0.0));
+        // The beam's afterglow outlasts the ink's drying, dimmer than the type.
+        assert!(beam.until(&written) > ink.until(&written) + 0.1);
+        assert!(w.wetness(&written, 1.42, &beam).iter().any(|&a| a > 0.0));
+        assert!(w.wetness(&written, 1.42, &ink).iter().all(|&a| a == 0.0));
+        assert!(beam.ink.a < 0.5);
         // The light pen trails 40 ms and glows; neither ink pen does.
         let light = Pen::Light.wet(text, accent);
         assert!((light.trail_secs - 0.04).abs() < 1e-9 && light.glow > 0.0 && light.pen.is_none());
