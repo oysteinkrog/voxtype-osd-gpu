@@ -62,11 +62,21 @@ pub fn digit_roll_with<M>(
                     // the ten lines into it. A carry changes the prefix, so a new column
                     // rolls in from below while the old one leaves upward.
                     let prefix: String = text.chars().take(i).collect();
-                    let digits = Element::column(format!("{key}-c{place}-{prefix}"))
+                    let column = format!("{key}-c{place}-{prefix}");
+                    // The ten labels' keys are the column's and a digit, built without a format
+                    // each: a clock in a view rebuilds these for every frame.
+                    let label_key = |v: u8| {
+                        let mut k = String::with_capacity(column.len() + 2);
+                        k.push_str(&column);
+                        k.push('-');
+                        k.push(char::from(b'0' + v));
+                        k
+                    };
+                    let digits = Element::column(column.clone())
                         .height(10.0 * lh)
                         .shrink(0.0)
-                        .children((0..10).map(|v| {
-                            Element::label(format!("{key}-c{place}-{prefix}-{v}"), v.to_string())
+                        .children((0..10u8).map(|v| {
+                            Element::label(label_key(v), char::from(b'0' + v).to_string())
                                 .text_style(style)
                                 .color(color)
                                 .height(lh)
