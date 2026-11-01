@@ -23,7 +23,7 @@ design choice, [G] a guess.
    by a crash in one week"). [I]
 5. **Tests never touch the user's session.** They run offscreen, on a nested
    `kwin_wayland --virtual` or a headless Sway, with a private `XDG_RUNTIME_DIR`, and
-   never against the real `voxtype.service`. [V, repo `CLAUDE.md`]
+   never against the real `voxtype.service`. [V, repo `AGENTS.md`]
 
 ## 2. Test tools this plan needs
 
