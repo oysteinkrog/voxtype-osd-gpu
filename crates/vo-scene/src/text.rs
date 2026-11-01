@@ -13,8 +13,9 @@
 //! - `EstimateText` uses a fixed advance per character, and its glyph ids are the
 //!   characters' code points. For tests that need no font.
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use harfrust::{Direction, Feature, ShaperFont};
 use skrifa::instance::Size as FontSize;
@@ -23,7 +24,7 @@ use unicode_linebreak::{linebreaks, BreakOpportunity};
 use vo_core::edit::{is_grapheme_boundary, next_grapheme, Affinity, Lines};
 
 use crate::element::TextStyle;
-use crate::font::{Face, FontId, FontRegistry};
+use crate::font::{Face, Fnv, FontId, FontRegistry};
 use crate::geom::{Point, Rect, Size};
 use crate::inline::{OBJECT_CHAR, OBJECT_GLYPH, OBJECT_TEXT};
 
@@ -565,14 +566,19 @@ impl EstimateText {
 /// so the glyphs sit centred in `line_height` the way CSS centres them. Whitespace advances
 /// the pen but places no glyph, and trailing whitespace does not count toward a line's
 /// width.
+///
+/// It keeps what it laid out lately: the same text with the same style, width and fonts gives
+/// the same glyphs, so a view that lays out its labels again for every frame shapes each one
+/// once. Clones share the store.
 #[derive(Clone, Debug)]
 pub struct ShapedLayout {
     fonts: FontRegistry,
+    kept: Arc<Mutex<Kept>>,
 }
 
 impl ShapedLayout {
     pub fn new(fonts: FontRegistry) -> ShapedLayout {
-        ShapedLayout { fonts }
+        ShapedLayout { fonts, kept: Arc::default() }
     }
 
     pub fn fonts(&self) -> &FontRegistry {
@@ -622,6 +628,129 @@ fn advances_toward(glyphs: &mut [Shaped], there: &[Shaped], toward: &[(Range<usi
                 g.dx *= k;
             }
         }
+    }
+}
+
+/// What `ShapedLayout` laid out lately, by text and by everything else it was given: two
+/// generations, so a layout asked for again within about `KEPT_GLYPHS` glyphs of other
+/// layouts stays, and the store never holds more than twice that.
+#[derive(Default)]
+struct Kept {
+    now: HashMap<u64, Vec<KeptLayout>, Fnv>,
+    before: HashMap<u64, Vec<KeptLayout>, Fnv>,
+    /// Glyphs and layouts in `now`.
+    glyphs: usize,
+    count: usize,
+    /// The arguments other than the text of the layout being looked up, as words.
+    args: Vec<u32>,
+}
+
+struct KeptLayout {
+    text: Box<str>,
+    args: Box<[u32]>,
+    out: ShapedText,
+}
+
+/// Glyphs, and layouts, the store's newer generation holds before it becomes the older one.
+const KEPT_GLYPHS: usize = 32_768;
+const KEPT_LAYOUTS: usize = 256;
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kept").field("count", &self.count).field("glyphs", &self.glyphs).finish()
+    }
+}
+
+impl Kept {
+    /// Fills `args` with everything but the text a layout depends on, and returns the hash
+    /// of it; `get` and `put` add the text's.
+    fn key(
+        &mut self,
+        generation: u64,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        (fonts, toward): (&[FontRange], &[TowardRange]),
+        in_place: bool,
+    ) -> u64 {
+        let a = &mut self.args;
+        a.clear();
+        a.extend([generation as u32, (generation >> 32) as u32]);
+        let flags = style.ellipsis as u32
+            | (style.balance as u32) << 1
+            | (style.vertical as u32) << 2
+            | (style.stops as u32) << 3
+            | (in_place as u32) << 4
+            | (style.align as u32) << 5
+            | (max_width.is_some() as u32) << 8
+            | (style.fit.is_some() as u32) << 9;
+        let (fit_min, fit_step) = style.fit.unwrap_or((0.0, 0.0));
+        a.extend([
+            style.font,
+            style.size.to_bits(),
+            style.line_height.to_bits(),
+            style.max_lines,
+            style.tracking.to_bits(),
+            fit_min.to_bits(),
+            fit_step.to_bits(),
+            flags,
+            max_width.unwrap_or(0.0).to_bits(),
+            objects.len() as u32,
+            fonts.len() as u32,
+            toward.len() as u32,
+        ]);
+        a.extend(objects.iter().map(|o| o.to_bits()));
+        for (r, f) in fonts {
+            a.extend([r.start as u32, r.end as u32, *f]);
+        }
+        for (r, f, share) in toward {
+            a.extend([r.start as u32, r.end as u32, *f, share.to_bits()]);
+        }
+        let mut h = std::hash::BuildHasher::build_hasher(&Fnv);
+        for w in a.iter() {
+            std::hash::Hasher::write_u32(&mut h, *w);
+        }
+        std::hash::Hasher::finish(&h)
+    }
+
+    fn hash(key: u64, text: &str) -> u64 {
+        let mut h = std::hash::BuildHasher::build_hasher(&Fnv);
+        std::hash::Hasher::write_u64(&mut h, key);
+        std::hash::Hasher::write(&mut h, text.as_bytes());
+        std::hash::Hasher::finish(&h)
+    }
+
+    /// The layout kept for `text` and the arguments `key` was made from, moved to the newer
+    /// generation when it was in the older.
+    fn get(&mut self, key: u64, text: &str) -> Option<ShapedText> {
+        let h = Kept::hash(key, text);
+        let same = |k: &KeptLayout| &*k.text == text && *k.args == *self.args;
+        if let Some(k) = self.now.get(&h).and_then(|v| v.iter().find(|k| same(k))) {
+            return Some(k.out.clone());
+        }
+        let list = self.before.get_mut(&h)?;
+        let i = list.iter().position(same)?;
+        let k = list.swap_remove(i);
+        let out = k.out.clone();
+        self.insert(h, k);
+        Some(out)
+    }
+
+    fn put(&mut self, key: u64, text: &str, out: &ShapedText) {
+        let h = Kept::hash(key, text);
+        let k = KeptLayout { text: text.into(), args: self.args.as_slice().into(), out: out.clone() };
+        self.insert(h, k);
+    }
+
+    fn insert(&mut self, h: u64, k: KeptLayout) {
+        if self.glyphs + k.out.glyphs.len() > KEPT_GLYPHS || self.count >= KEPT_LAYOUTS {
+            self.before = std::mem::take(&mut self.now);
+            self.glyphs = 0;
+            self.count = 0;
+        }
+        self.glyphs += k.out.glyphs.len();
+        self.count += 1;
+        self.now.entry(h).or_default().push(k);
     }
 }
 
@@ -684,6 +813,30 @@ impl TextLayout for ShapedLayout {
 impl ShapedLayout {
     /// `layout_fonts`, or with `in_place` `layout_fonts_in_place`.
     fn lay(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        objects: &[f32],
+        (fonts, toward): (&[FontRange], &[TowardRange]),
+        in_place: bool,
+    ) -> ShapedText {
+        if self.fonts.get(style.font).is_none() {
+            return EstimateText::default().layout_objects(text, style, max_width, objects);
+        }
+        let mut kept = self.kept.lock().expect("layout store lock");
+        let key = kept.key(self.fonts.generation(), style, max_width, objects, (fonts, toward), in_place);
+        if let Some(out) = kept.get(key, text) {
+            return out;
+        }
+        drop(kept);
+        let out = self.lay_new(text, style, max_width, objects, (fonts, toward), in_place);
+        self.kept.lock().expect("layout store lock").put(key, text, &out);
+        out
+    }
+
+    /// `lay` without the store.
+    fn lay_new(
         &self,
         text: &str,
         style: &TextStyle,
@@ -1376,6 +1529,39 @@ mod tests {
         // Other Latin text and another size share the plan too.
         t.layout("Other words", &TextStyle::new(0, 14.0, 18.0), None);
         assert_eq!(t.fonts().get(0).unwrap().plans_compiled(), 1);
+    }
+
+    #[test]
+    fn a_kept_layout_is_the_one_laid_out_anew() {
+        let t = shaped();
+        let fonts = [(0..5, 0)];
+        let toward = [(0..5, 0, 0.5)];
+        let cases: [(&str, TextStyle, Option<f32>, &[FontRange], &[TowardRange], bool); 6] = [
+            ("Hello there", STYLE, Some(60.0), &[], &[], false),
+            ("Hello there", STYLE, Some(61.0), &[], &[], false),
+            ("Hello there", STYLE.tracking(1.0), None, &[], &[], false),
+            ("Hello there", STYLE.with_stops(), Some(60.0), &fonts, &[], true),
+            ("Hello there", STYLE, None, &[], &toward, false),
+            ("Hello thera", STYLE, Some(60.0), &[], &[], false),
+        ];
+        for _ in 0..2 {
+            for (text, style, width, f, w, in_place) in cases {
+                let kept = t.lay(text, &style, width, &[], (f, w), in_place);
+                assert_eq!(kept, t.lay_new(text, &style, width, &[], (f, w), in_place), "{text} at {width:?}");
+            }
+        }
+        assert_eq!(t.kept.lock().unwrap().count, cases.len());
+    }
+
+    #[test]
+    fn a_new_fallback_chain_lays_kept_text_out_again() {
+        let (t, _, jp) = with_japanese();
+        let before = t.layout("a音", &STYLE, None);
+        assert_eq!(before.glyphs[1].font, jp);
+        t.fonts().set_fallbacks(0, &[]);
+        t.fonts().set_default_fallbacks(&[]);
+        let after = t.layout("a音", &STYLE, None);
+        assert_eq!(after.glyphs[1].font, 0, "set in the primary once it has no fallbacks");
     }
 
     #[test]

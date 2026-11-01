@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use skrifa::instance::{LocationRef, Size};
@@ -178,6 +178,11 @@ pub struct FontRegistry {
     system: Arc<RwLock<HashMap<String, Option<FontId>>>>,
     /// `glyph_ink` by font and glyph.
     ink: Arc<RwLock<InkTable>>,
+    /// Counts the changes that can set text in other faces than before: a new fallback chain,
+    /// or a new face from a file, which a chain may name. Text layout keeps what it laid out
+    /// under one count (`text::ShapedLayout`). A variable font instance does not count: no
+    /// chain can name it before it exists.
+    generation: Arc<AtomicU64>,
 }
 
 /// The area and outline length of `path` filled by the nonzero rule, as drawn: contours that
@@ -321,6 +326,7 @@ impl FontRegistry {
         let face = Arc::new(Face::new(data, index)?);
         let mut faces = self.faces.write().expect("font table lock");
         faces.push(face);
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(faces.len() as FontId - 1)
     }
 
@@ -429,11 +435,18 @@ impl FontRegistry {
     pub fn set_fallbacks(&self, primary: FontId, chain: &[FontId]) {
         let chain: Vec<FontId> = chain.iter().copied().filter(|&f| f != primary).collect();
         self.fallback.write().expect("fallback lock").chains.insert(primary, chain.into());
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Sets the faces tried for any font that has no chain of its own.
     pub fn set_default_fallbacks(&self, chain: &[FontId]) {
         self.fallback.write().expect("fallback lock").default = chain.into();
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The count of changes that can set text in other faces (`FontRegistry::generation`).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// The faces tried after `primary`, in order: its own chain or the default one.
