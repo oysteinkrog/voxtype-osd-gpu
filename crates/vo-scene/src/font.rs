@@ -42,6 +42,9 @@ pub struct Face {
     plans: Mutex<Vec<Arc<harfrust::ShapePlan>>>,
     /// How many plans `Face::plan` has compiled, for tests.
     plans_compiled: AtomicUsize,
+    /// `line_height` by size (its bits), for the last few sizes asked: a view asks for the
+    /// same few every frame, and each answer reads the font's metric tables.
+    line_heights: Mutex<Vec<(u32, f32)>>,
 }
 
 impl Face {
@@ -59,6 +62,7 @@ impl Face {
             coords: Vec::new(),
             plans: Mutex::default(),
             plans_compiled: AtomicUsize::new(0),
+            line_heights: Mutex::default(),
         })
     }
 
@@ -76,6 +80,7 @@ impl Face {
             coords,
             plans: Mutex::default(),
             plans_compiled: AtomicUsize::new(0),
+            line_heights: Mutex::default(),
         }
     }
 
@@ -153,11 +158,24 @@ impl Face {
     /// text set with it takes the room it takes in GTK. skrifa reads the ascent and descent
     /// from `hhea`, or from `OS/2` when the font asks for its typo metrics, as HarfBuzz does.
     pub fn line_height(&self, size: f32) -> f32 {
+        let key = size.to_bits();
+        if let Some(&(_, h)) = self.line_heights.lock().expect("line height lock").iter().find(|e| e.0 == key) {
+            return h;
+        }
         let m = self.skrifa().metrics(Size::new(size), self.location());
         // The tolerance keeps a height that is whole up to float error from rounding up.
-        (m.ascent - m.descent - 1e-3).ceil()
+        let h = (m.ascent - m.descent - 1e-3).ceil();
+        let mut kept = self.line_heights.lock().expect("line height lock");
+        if kept.len() >= LINE_HEIGHTS_KEPT {
+            kept.remove(0);
+        }
+        kept.push((key, h));
+        h
     }
 }
+
+/// Sizes whose line height a face keeps (`Face::line_height`).
+const LINE_HEIGHTS_KEPT: usize = 16;
 
 /// The shared font table. Cloning is cheap and gives a handle to the same table.
 ///
