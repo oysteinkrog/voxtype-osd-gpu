@@ -265,3 +265,24 @@ fn styles_step_at_their_rates_and_reduced_motion_stills_them() {
     assert!(s.scanlines > 0.39, "static looks stay");
     assert_eq!(still.next_wake(1.0), None);
 }
+
+/// A CRT layer with scanlines and no glitch draws the same list from one frame to the next
+/// (bqw3), so a paced frame on it can be kept on screen. The glitch's step changed 15 times
+/// a second before, even with no glitch to pick a pattern for.
+#[test]
+fn a_style_without_a_glitch_draws_the_same_each_frame() {
+    let view = || {
+        root(vec![Element::layer("crt")
+            .size(100.0, 50.0)
+            .scanlines(0.4, 3.0)
+            .vignette(0.3)
+            .child(Element::shape("dot", ShapeKind::Circle).size(10.0, 10.0).fill(Color::WHITE))])
+    };
+    let mut scene = Scene::new();
+    scene.apply(view(), 0.0);
+    let a = scene.sample(1.0);
+    let b = scene.sample(1.5);
+    assert_eq!(a.layers.iter().find_map(|l| l.style).expect("a style").glitch_step, 0);
+    assert!(b.draws_same_as(&a), "{:?}", b.first_change(&a));
+    assert_eq!(scene.next_wake(1.0), None);
+}

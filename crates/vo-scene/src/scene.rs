@@ -855,14 +855,17 @@ impl<M> Node<M> {
         let v = |s: Slot| self.value(s as u8, t) as f32;
         let age = (t - self.since).max(0.0);
         let moving = !self.reduced;
-        let glitch_step = (age * GLITCH_FPS).floor() as u32;
+        let glitch = if moving { v(Slot::StyleGlitch).clamp(0.0, 1.0) } else { 0.0 };
+        // The step only picks the glitch's pattern. Without a glitch it stays 0, so a still
+        // layer draws the same list from frame to frame and a paced frame can be skipped.
+        let glitch_step = if glitch > 0.0 { (age * GLITCH_FPS).floor() as u32 } else { 0 };
         let flicker_step = (age * FLICKER_FPS).floor() as u32;
         // A seeded level per step, so a seek or a replay flickers the same way.
         let level = vo_core::hash::rand_f32(0x5f1c_4e2b, flicker_step, 0, 0);
         Some(LayerStyle {
             rect,
             chroma: v(Slot::StyleChroma),
-            glitch: if moving { v(Slot::StyleGlitch).clamp(0.0, 1.0) } else { 0.0 },
+            glitch,
             glitch_step,
             scanlines: v(Slot::StyleScanlines).clamp(0.0, 1.0),
             scan_period: v(Slot::StyleScanPeriod).max(1.0),

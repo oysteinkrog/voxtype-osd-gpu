@@ -23,6 +23,13 @@ pub trait Diagnostics {
         let _ = t;
     }
 
+    /// A paced frame at `t` is drawn because its display list changed: `part` is the first part
+    /// that differs from the frame on screen and `index` its first differing entry
+    /// (`DisplayList::first_change`).
+    fn changed_frame(&mut self, t: f64, part: &str, index: usize) {
+        let _ = (t, part, index);
+    }
+
     /// Nothing moves any more at `t`, so no frames until the next event.
     fn settled(&mut self, t: f64, host: &HostDiag) {
         let _ = (t, host);
@@ -140,6 +147,12 @@ impl Diagnostics for LogDiagnostics {
         self.kept_frames += 1;
         if self.every_frame {
             eprintln!("vo: kept the frame on screen t={t:.4}");
+        }
+    }
+
+    fn changed_frame(&mut self, t: f64, part: &str, index: usize) {
+        if self.every_frame {
+            eprintln!("vo: frame t={t:.4} changed: {part}[{index}]");
         }
     }
 

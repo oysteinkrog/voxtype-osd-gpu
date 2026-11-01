@@ -1051,12 +1051,35 @@ impl DisplayList {
     /// pixels move on their own between frames: particles, feedback trails, app GPU code or
     /// app materials (those may read the signal block or keep state). False when unsure.
     pub fn draws_same_as(&self, other: &DisplayList) -> bool {
-        let still = |l: &DisplayList| {
-            l.emitters.is_empty()
-                && l.particle_words.is_none()
-                && l.gpu.is_empty()
-                && l.layers.iter().all(|x| x.trail.is_none())
-                && l.materials.iter().all(|m| m.func < crate::material::CUSTOM_FIRST)
+        self.first_change(other).is_none()
+    }
+
+    /// Why this list may not draw the same pixels as `other` (`draws_same_as`): the first part
+    /// that differs and the index of its first differing entry, or, when either list holds
+    /// something whose pixels move on their own, that part with a `moving ` prefix and index 0
+    /// (`moving emitters`, `moving particle_words`, `moving gpu`, `moving trail`, `moving
+    /// materials`). None when they draw the same.
+    pub fn first_change(&self, other: &DisplayList) -> Option<(&'static str, usize)> {
+        fn differ<T: PartialEq>(name: &'static str, a: &[T], b: &[T]) -> Option<(&'static str, usize)> {
+            if a == b {
+                return None;
+            }
+            Some((name, a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()))))
+        }
+        let moving = |l: &DisplayList| {
+            if !l.emitters.is_empty() {
+                Some("moving emitters")
+            } else if l.particle_words.is_some() {
+                Some("moving particle_words")
+            } else if !l.gpu.is_empty() {
+                Some("moving gpu")
+            } else if l.layers.iter().any(|x| x.trail.is_some()) {
+                Some("moving trail")
+            } else if l.materials.iter().any(|m| m.func >= crate::material::CUSTOM_FIRST) {
+                Some("moving materials")
+            } else {
+                None
+            }
         };
         // Destructured so a new field must be placed here: compared, or said to be skipped.
         let DisplayList {
@@ -1085,25 +1108,26 @@ impl DisplayList {
             hits,
             edit_caret: _,
         } = self;
-        still(self)
-            && still(other)
-            && *size == other.size
-            && *scale == other.scale
-            && *stage == other.stage
-            && *layers == other.layers
-            && *items == other.items
-            && *shapes == other.shapes
-            && *shape_prims == other.shape_prims
-            && *glyphs == other.glyphs
-            && *glyph_fx == other.glyph_fx
-            && *dots == other.dots
-            && *vectors == other.vectors
-            && *vector_segs == other.vector_segs
-            && *glass == other.glass
-            && *materials == other.materials
-            && *width_tables == other.width_tables
-            && *width_knots == other.width_knots
-            && *hits == other.hits
+        if let Some(part) = moving(self).or_else(|| moving(other)) {
+            return Some((part, 0));
+        }
+        if *size != other.size || *scale != other.scale || *stage != other.stage {
+            return Some(("surface", 0));
+        }
+        differ("layers", layers, &other.layers)
+            .or_else(|| differ("items", items, &other.items))
+            .or_else(|| differ("shapes", shapes, &other.shapes))
+            .or_else(|| differ("shape_prims", shape_prims, &other.shape_prims))
+            .or_else(|| differ("glyphs", glyphs, &other.glyphs))
+            .or_else(|| differ("glyph_fx", glyph_fx, &other.glyph_fx))
+            .or_else(|| differ("dots", dots, &other.dots))
+            .or_else(|| differ("vectors", vectors, &other.vectors))
+            .or_else(|| differ("vector_segs", vector_segs, &other.vector_segs))
+            .or_else(|| differ("glass", glass, &other.glass))
+            .or_else(|| differ("materials", materials, &other.materials))
+            .or_else(|| differ("width_tables", width_tables, &other.width_tables))
+            .or_else(|| differ("width_knots", width_knots, &other.width_knots))
+            .or_else(|| differ("hits", hits, &other.hits))
     }
 
     /// Adds `m` and returns its id for an instance's material. The same material as the last

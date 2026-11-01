@@ -851,9 +851,12 @@ impl<A: App> HostApp for Live<A> {
             std::mem::swap(&mut self.list, &mut self.shown);
         }
         self.sample(host, id, t);
-        if self.list.draws_same_as(&self.shown) {
+        let Some((part, index)) = self.list.first_change(&self.shown) else {
             self.after_frame(host, id, t, false);
             return false;
+        };
+        if let Some(d) = self.diag() {
+            d.changed_frame(t, part, index);
         }
         self.prepared = Some(t);
         true
