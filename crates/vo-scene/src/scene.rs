@@ -1535,16 +1535,17 @@ impl<M> Scene<M> {
             changed |= n.sync_mark(t, retention);
             changed |= n.sync_pass(t);
         }
-        // Visual slots the view no longer sets go back to their defaults.
-        let unset: Vec<u8> = n
-            .chans
-            .iter()
-            .map(|(s, _)| *s)
-            .filter(|s| *s >= Slot::Opacity as u8 && !targets.iter().any(|(k, _)| k == s))
-            .filter(|s| !crate::repeat::placed_slot(*s))
-            .collect();
-        for slot in unset {
-            changed |= n.set_target(slot, Slot::default_value(slot), t, retention);
+        // Visual slots the view no longer sets go back to their defaults. By index, without a
+        // list of them: this runs for every node of every view, and retargeting a slot the
+        // node has neither adds nor removes channels.
+        for i in 0..n.chans.len() {
+            let slot = n.chans[i].0;
+            if slot >= Slot::Opacity as u8
+                && !targets.iter().any(|(k, _)| *k == slot)
+                && !crate::repeat::placed_slot(slot)
+            {
+                changed |= n.set_target(slot, Slot::default_value(slot), t, retention);
+            }
         }
         self.changed |= changed;
         if relayout {
