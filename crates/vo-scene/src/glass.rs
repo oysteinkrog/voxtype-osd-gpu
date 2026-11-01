@@ -867,7 +867,8 @@ impl DisplayList {
                 blur_rects_in(r, g.radius * k, clip, &mut rects);
                 continue;
             }
-            let pts = g.outline_points(&self.vector_segs).or_else(|| shape_points(GlassShape::Rounded, g.rect, g.radius));
+            let pts =
+                g.outline_points(&self.vector_segs).or_else(|| shape_points(GlassShape::Rounded, g.rect, g.radius));
             if let Some(pts) = pts {
                 let pts: Vec<Point> = pts.into_iter().map(|p| seen(p, &m, warp)).collect();
                 outline_blur_rects_in(&pts, self.scale, clip, &mut rects);
@@ -927,7 +928,8 @@ impl DisplayList {
             if !g.glass.blur_behind || g.surface_alpha < BLUR_MIN_ALPHA {
                 continue;
             }
-            let segs = g.outline.and_then(|[first, count]| self.vector_segs.get(first as usize..(first + count) as usize));
+            let segs =
+                g.outline.and_then(|[first, count]| self.vector_segs.get(first as usize..(first + count) as usize));
             key.segs.extend_from_slice(segs.unwrap_or_default());
             key.glass.push(GlassKey {
                 rect: g.rect,
@@ -1305,8 +1307,9 @@ mod tests {
         let rect = [20.3, 14.6, 320.0, 120.0];
         let oct = GlassShape::chamfer(12.0).points(rect, 0.0).unwrap();
         for scale in [1.0, 1.25] {
-            let region = one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), Affine::IDENTITY, scale)
-                .blur_region();
+            let region =
+                one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), Affine::IDENTITY, scale)
+                    .blur_region();
             let cover = check_region(&oct, &region.rects, scale, &format!("octagon at {scale}x"));
             // Two rows per chamfer pixel row, top and bottom, plus the middle.
             assert!(region.rects.len() <= 2 * 14 + 1, "octagon at {scale}x: {} rects", region.rects.len());
@@ -1317,7 +1320,9 @@ mod tests {
     #[test]
     fn a_rotated_card_blur_region_follows_its_edges() {
         let (rect, radius) = ([0.0, 0.0, 300.0, 120.0], 16.0);
-        let turn = Affine::translate(-150.0, -60.0).then(&Affine::rotate(15f32.to_radians())).then(&Affine::translate(210.0, 130.0));
+        let turn = Affine::translate(-150.0, -60.0)
+            .then(&Affine::rotate(15f32.to_radians()))
+            .then(&Affine::translate(210.0, 130.0));
         let card = shape_points(GlassShape::Rounded, rect, radius).unwrap();
         let seen: Vec<Point> = card.iter().map(|p| turn.apply(*p)).collect();
         for scale in [1.0, 1.25] {
@@ -1326,8 +1331,10 @@ mod tests {
             eprintln!("15 degree card at {scale}x: {} rects, {:.2} % covered", region.rects.len(), 100.0 * cover);
         }
         // A chamfered card turned the same way.
-        let oct: Vec<Point> = GlassShape::chamfer(12.0).points(rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
-        let region = one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), turn, 1.25).blur_region();
+        let oct: Vec<Point> =
+            GlassShape::chamfer(12.0).points(rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
+        let region =
+            one_panel(rect, 0.0, Glass::dark().with_shape(GlassShape::chamfer(12.0)), turn, 1.25).blur_region();
         check_region(&oct, &region.rects, 1.25, "15 degree octagon at 1.25x");
     }
 
@@ -1346,7 +1353,8 @@ mod tests {
         // A 600-row turned card needs about 640 rows: the cap halves the bands until it fits.
         let rect = [0.0, 0.0, 200.0, 600.0];
         let turn = Affine::rotate(10f32.to_radians()).then(&Affine::translate(120.0, 10.0));
-        let seen: Vec<Point> = shape_points(GlassShape::Rounded, rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
+        let seen: Vec<Point> =
+            shape_points(GlassShape::Rounded, rect, 0.0).unwrap().iter().map(|p| turn.apply(*p)).collect();
         let mut rects = Vec::new();
         outline_blur_rects(&seen, 1.0, &mut rects);
         assert!(rects.len() <= MAX_BLUR_RECTS && rects.len() > MAX_BLUR_RECTS / 2, "{} rects", rects.len());
@@ -1364,7 +1372,8 @@ mod tests {
             .expect("the layer turns");
         let mut list = one_panel(rect, 12.0, Glass::dark(), Affine::IDENTITY, 1.0);
         list.layers[0].warp = Some(warp);
-        let seen: Vec<Point> = shape_points(GlassShape::Rounded, rect, 12.0).unwrap().iter().map(|p| warp.apply(*p)).collect();
+        let seen: Vec<Point> =
+            shape_points(GlassShape::Rounded, rect, 12.0).unwrap().iter().map(|p| warp.apply(*p)).collect();
         check_region(&seen, &list.blur_region().rects, 1.0, "tilted card");
     }
 
@@ -1452,7 +1461,9 @@ mod tests {
 
     #[test]
     fn the_edge_sweep_matches_the_full_scan() {
-        let turn = Affine::translate(-150.0, -60.0).then(&Affine::rotate(15f32.to_radians())).then(&Affine::translate(210.0, 130.0));
+        let turn = Affine::translate(-150.0, -60.0)
+            .then(&Affine::rotate(15f32.to_radians()))
+            .then(&Affine::translate(210.0, 130.0));
         let mut shapes: Vec<Vec<Point>> = vec![
             shape_points(GlassShape::Rounded, [0.0, 0.0, 300.0, 120.0], 16.0).unwrap(),
             GlassShape::chamfer(12.0).points([20.3, 14.6, 320.0, 120.0], 0.0).unwrap(),
@@ -1464,7 +1475,10 @@ mod tests {
         shapes.push(shapes[2].iter().map(|p| turn.apply(*p)).collect());
         let mut list = DisplayList::default();
         let (range, _) = push_outline(&mut list, &wavy_contour(1000, Point::new(400.0, 300.0), [300.0, 200.0]));
-        let g = GlassInstance { outline: Some(range), ..one_panel([0.0; 4], 0.0, Glass::dark(), Affine::IDENTITY, 1.0).glass[0] };
+        let g = GlassInstance {
+            outline: Some(range),
+            ..one_panel([0.0; 4], 0.0, Glass::dark(), Affine::IDENTITY, 1.0).glass[0]
+        };
         shapes.push(g.outline_points(&list.vector_segs).unwrap());
         for (i, pts) in shapes.iter().enumerate() {
             for scale in [1.0, 1.25, 2.0] {
@@ -1484,7 +1498,8 @@ mod tests {
         let mut list = one_panel(rect, 12.0, Glass::dark(), Affine::IDENTITY, 1.25);
         list.size = Size::new(320.0, 180.0);
         list.layers[0].warp = Some(warp);
-        let seen: Vec<Point> = shape_points(GlassShape::Rounded, rect, 12.0).unwrap().iter().map(|p| warp.apply(*p)).collect();
+        let seen: Vec<Point> =
+            shape_points(GlassShape::Rounded, rect, 12.0).unwrap().iter().map(|p| warp.apply(*p)).collect();
         let far = seen.iter().fold(0.0f32, |m, p| m.max(p.y));
         assert!(far > 1.0e6, "the outline reaches y = {far}");
         // The same outline handed in directly, with a point at y = 1e7.
@@ -1500,7 +1515,10 @@ mod tests {
         for (what, rects) in [("warped", &region.rects), ("direct", &direct)] {
             assert!(!rects.is_empty() && rects.len() <= MAX_BLUR_RECTS, "{what}: {} rects", rects.len());
             for r in rects.iter() {
-                assert!(r.w > 0 && r.h > 0 && r.x >= 0 && r.y >= 0 && r.x + r.w <= 320 && r.y + r.h <= 180, "{what}: {r:?}");
+                assert!(
+                    r.w > 0 && r.h > 0 && r.x >= 0 && r.y >= 0 && r.x + r.w <= 320 && r.y + r.h <= 180,
+                    "{what}: {r:?}"
+                );
             }
         }
         // An upright panel half off the surface is cut to it as well.
@@ -1513,8 +1531,12 @@ mod tests {
 
     #[test]
     fn a_panel_inside_the_surface_keeps_its_region_when_clipped() {
-        let turn = Affine::translate(-150.0, -60.0).then(&Affine::rotate(15f32.to_radians())).then(&Affine::translate(210.0, 130.0));
-        for (shape, m) in [(GlassShape::Rounded, Affine::IDENTITY), (GlassShape::chamfer(12.0), turn), (GlassShape::Rounded, turn)] {
+        let turn = Affine::translate(-150.0, -60.0)
+            .then(&Affine::rotate(15f32.to_radians()))
+            .then(&Affine::translate(210.0, 130.0));
+        for (shape, m) in
+            [(GlassShape::Rounded, Affine::IDENTITY), (GlassShape::chamfer(12.0), turn), (GlassShape::Rounded, turn)]
+        {
             let mut list = one_panel([0.0, 0.0, 300.0, 120.0], 16.0, Glass::dark().with_shape(shape), m, 1.25);
             let open = list.blur_region();
             list.size = Size::new(420.0, 260.0);

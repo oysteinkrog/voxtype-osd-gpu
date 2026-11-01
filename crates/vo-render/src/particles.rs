@@ -754,12 +754,8 @@ impl Particles {
         let paths = buffer(device, "vo-particles-paths", (MAX_EMITTERS * PATH_POINTS) as u64 * 16, U::STORAGE);
         let emit_draw =
             buffer(device, "vo-particles-emit-draw", MAX_EMITTERS as u64 * size_of::<GpuEmitDraw>() as u64, U::STORAGE);
-        let slot_draw = buffer(
-            device,
-            "vo-particles-slot-draw",
-            all_slots as u64 * size_of::<GpuSlotDraw>() as u64,
-            U::STORAGE,
-        );
+        let slot_draw =
+            buffer(device, "vo-particles-slot-draw", all_slots as u64 * size_of::<GpuSlotDraw>() as u64, U::STORAGE);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vo-particles-mask"),
             mag_filter: wgpu::FilterMode::Linear,

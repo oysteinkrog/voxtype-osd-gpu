@@ -242,7 +242,11 @@ impl Envelope {
             },
             baseline: v.baseline.clamp(-self.baseline, self.baseline),
             // A letter past the fill must still reach the ink floor.
-            fill: if self.ink > 0.0 && v.ink.clamp(least, 1.0) * floor.clamp(0.0, 1.0) < self.ink { 1.0 } else { v.fill },
+            fill: if self.ink > 0.0 && v.ink.clamp(least, 1.0) * floor.clamp(0.0, 1.0) < self.ink {
+                1.0
+            } else {
+                v.fill
+            },
         }
     }
 
@@ -474,7 +478,12 @@ impl TypoState {
 
     pub fn settled_at(&self) -> f64 {
         let tracks = self.words.iter().filter_map(|w| w.track.last().map(|k| k.0));
-        self.words.iter().flat_map(|w| w.ch.iter()).map(Channel::settled_at).chain(tracks).fold(f64::NEG_INFINITY, f64::max)
+        self.words
+            .iter()
+            .flat_map(|w| w.ch.iter())
+            .map(Channel::settled_at)
+            .chain(tracks)
+            .fold(f64::NEG_INFINITY, f64::max)
     }
 }
 

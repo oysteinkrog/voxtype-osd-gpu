@@ -98,10 +98,8 @@ fn main() {
         app_id: "vo-idle-loop".into(),
         ..OverlaySpec::default()
     };
-    let options = Options::<Exit> {
-        diagnostics: Some(Box::new(Count { secs, idle: 0, last: 0.0 })),
-        ..Options::default()
-    };
+    let options =
+        Options::<Exit> { diagnostics: Some(Box::new(Count { secs, idle: 0, last: 0.0 })), ..Options::default() };
     if let Err(e) = vo::run_overlay_with(Idle { secs, exiting: false }, spec, options) {
         eprintln!("idle_loop: {e}");
         std::process::exit(1);

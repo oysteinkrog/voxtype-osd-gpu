@@ -324,7 +324,19 @@ impl ItemPainter {
                     if let (Some(back), Some(front)) = (back, front) {
                         let px = |r: [f32; 4]| [r[2] as u32, r[3] as u32];
                         if let Some(layout) = halves_layout(px(back), px(front), self.limit) {
-                            self.paint_halves(enc, view, format, &frame, [back, front], layout, &camera, scale, at, key, t);
+                            self.paint_halves(
+                                enc,
+                                view,
+                                format,
+                                &frame,
+                                [back, front],
+                                layout,
+                                &camera,
+                                scale,
+                                at,
+                                key,
+                                t,
+                            );
                             return;
                         }
                     }

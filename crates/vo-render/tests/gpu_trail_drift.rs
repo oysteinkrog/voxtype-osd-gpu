@@ -20,7 +20,8 @@ struct Look {
 }
 
 const DARK: Look = Look { background: None, dot: Color::rgba(0.3, 0.8, 0.95, 1.0) };
-const LIGHT: Look = Look { background: Some(Color::rgba(0.96, 0.95, 0.92, 1.0)), dot: Color::rgba(0.1, 0.12, 0.2, 1.0) };
+const LIGHT: Look =
+    Look { background: Some(Color::rgba(0.96, 0.95, 0.92, 1.0)), dot: Color::rgba(0.1, 0.12, 0.2, 1.0) };
 
 /// A background on the root, then a trail layer with `dots` on it, at time `t`.
 fn frame(look: &Look, dots: &[Point], t: f64, drift: Option<TrailDrift>, half_life: f32) -> DisplayList {

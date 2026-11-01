@@ -366,8 +366,7 @@ mod tests {
                     r.vertices(&level, i as f64 * 0.25, &mut v);
                     for t in idx.as_chunks::<3>().0 {
                         let [a, b, c] = [t[0], t[1], t[2]].map(|i| v[i as usize]);
-                        let face =
-                            (Vec3::from(b.pos) - Vec3::from(a.pos)).cross(Vec3::from(c.pos) - Vec3::from(a.pos));
+                        let face = (Vec3::from(b.pos) - Vec3::from(a.pos)).cross(Vec3::from(c.pos) - Vec3::from(a.pos));
                         assert!(face.dot(Vec3::from(a.normal)) > 0.0, "{t:?} {a:?} {b:?} {c:?}");
                     }
                 }

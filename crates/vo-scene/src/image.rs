@@ -358,7 +358,9 @@ pub fn decode(data: &ImageData, px: [u32; 2]) -> Result<Raster, ImageError> {
 }
 
 fn is_svg_path(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
 }
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -390,7 +392,9 @@ fn png_rgba(b: &[u8]) -> Result<(u32, u32, Vec<u8>), ImageError> {
     let rgba = match info.color_type {
         png::ColorType::Rgba => src.to_vec(),
         png::ColorType::Rgb => src.as_chunks::<3>().0.iter().take(n).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => src.as_chunks::<2>().0.iter().take(n).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            src.as_chunks::<2>().0.iter().take(n).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+        }
         png::ColorType::Grayscale => src.iter().take(n).flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err(ImageError::Decode("palette not expanded".into())),
     };

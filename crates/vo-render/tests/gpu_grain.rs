@@ -31,11 +31,7 @@ fn panels(light: bool) -> El {
         .size(W, H)
         .fill(Color::hex(0x101014, 1.0))
         .child(row("top", panel("paper", Material::paper().into()), panel("fabric", Material::fabric().into())))
-        .child(row(
-            "bottom",
-            panel("rubber", Material::rubber().into()),
-            panel("grain", Material::film_grain().into()),
-        ))
+        .child(row("bottom", panel("rubber", Material::rubber().into()), panel("grain", Material::film_grain().into())))
 }
 
 fn list(scale: f32, light: bool, t: f64, reduced: bool) -> DisplayList {
@@ -138,9 +134,6 @@ fn the_cpu_first_frame_draws_the_plain_panels() {
     for (x, y) in [(100, 50), (300, 50), (100, 150), (300, 150), (20, 20), (380, 180)] {
         let i = ((y * w + x) * 4) as usize;
         let [b, g, r] = [got[i], got[i + 1], got[i + 2]];
-        assert!(
-            r.abs_diff(0x3a) <= 1 && g.abs_diff(0x3d) <= 1 && b.abs_diff(0x48) <= 1,
-            "{x},{y}: {r} {g} {b}"
-        );
+        assert!(r.abs_diff(0x3a) <= 1 && g.abs_diff(0x3d) <= 1 && b.abs_diff(0x48) <= 1, "{x},{y}: {r} {g} {b}");
     }
 }

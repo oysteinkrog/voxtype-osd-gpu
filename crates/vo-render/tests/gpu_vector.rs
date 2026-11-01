@@ -536,8 +536,11 @@ fn a_uniform_width_table_is_byte_identical() {
         for c in &contours {
             let mut style = StrokeStyle::solid(5.0, Color::hex(ACCENT, 0.8)).glow(3.0);
             if table {
-                let id =
-                    b.list.add_widths(&[WidthKnot::new(0.0, 1.0), WidthKnot::new(30.0, 1.0), WidthKnot::new(c.length(), 1.0)]);
+                let id = b.list.add_widths(&[
+                    WidthKnot::new(0.0, 1.0),
+                    WidthKnot::new(30.0, 1.0),
+                    WidthKnot::new(c.length(), 1.0),
+                ]);
                 style = style.widths(id);
             }
             b.stroke(c, &style);

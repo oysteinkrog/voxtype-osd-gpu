@@ -10,8 +10,8 @@ use std::time::Instant;
 use vo_render::particles::{
     EmitterLook, EmitterSim, FrameParams, Part, ParticleConfig, Particles, PointForm, SlotLook, SpriteStyle, WordGlyph,
 };
-use vo_scene::emitter::{ShapeTarget, Target};
 use vo_scene::element::TextStyle;
+use vo_scene::emitter::{ShapeTarget, Target};
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::{Affine, Color, Point};
 use vo_scene::text::{ShapedLayout, TextLayout};
@@ -374,7 +374,8 @@ fn main() {
     let form = PointForm { points: &points, starts: None, size: 200.0, persist: true, sweep: 0.0, scatter: false };
     p.set_points(0, 0.0, &form);
     let set_ms = c.elapsed().as_secs_f64() * 1e3;
-    let slot = [SlotLook { size: 1.2, style: SpriteStyle::SPARK, ..SlotLook::new(Point::new(300.0, 150.0), Color::WHITE) }];
+    let slot =
+        [SlotLook { size: 1.2, style: SpriteStyle::SPARK, ..SlotLook::new(Point::new(300.0, 150.0), Color::WHITE) }];
     let timer = Timer::new(&d, &q);
     let mut draw = Vec::new();
     for f in 0..90 {

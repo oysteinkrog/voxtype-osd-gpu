@@ -92,7 +92,14 @@ impl Default for ImagePainter {
 
 impl ImagePainter {
     pub fn new() -> ImagePainter {
-        ImagePainter { pipelines: Vec::new(), sampler: None, textures: Vec::new(), bytes: 0, frame: 0, logged: Vec::new() }
+        ImagePainter {
+            pipelines: Vec::new(),
+            sampler: None,
+            textures: Vec::new(),
+            bytes: 0,
+            frame: 0,
+            logged: Vec::new(),
+        }
     }
 
     /// Texture bytes held now.
@@ -163,7 +170,11 @@ impl ImagePainter {
         cx.queue.write_texture(
             tex.as_image_copy(),
             bytemuck::cast_slice(&texels),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(raster.w * 8), rows_per_image: Some(raster.h) },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raster.w * 8),
+                rows_per_image: Some(raster.h),
+            },
             size,
         );
         let view = tex.create_view(&Default::default());

@@ -12,5 +12,8 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 [profile.gpu]
 default-filter = "binary(/^gpu_/)"
 test-threads = 1
+# A GPU test takes seconds. Some spun for hours inside a full debug run (wyk3),
+# so stop one after 5 minutes and report it, instead of holding the queue.
+slow-timeout = { period = "60s", terminate-after = 5 }
 success-output = "immediate"
 failure-output = "immediate"

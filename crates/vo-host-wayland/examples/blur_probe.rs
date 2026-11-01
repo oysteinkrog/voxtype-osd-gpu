@@ -170,7 +170,9 @@ impl App {
         for (i, px) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = (i as u32 % w) as f32;
             let y = (i as u32 / w) as f32;
-            if let (Some(cx), Some(cy)) = ((i as u32 % w).checked_div(self.checker), (i as u32 / w).checked_div(self.checker)) {
+            if let (Some(cx), Some(cy)) =
+                ((i as u32 % w).checked_div(self.checker), (i as u32 / w).checked_div(self.checker))
+            {
                 let on = (cx + cy).is_multiple_of(2);
                 let v = if on { 255 } else { 0 };
                 px.copy_from_slice(&[v, v, v, 255]);

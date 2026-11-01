@@ -60,7 +60,9 @@ fn view(t: f64, reduced: bool, svg: &Arc<ImageSource>, png: &Arc<ImageSource>) -
     let rise = if reduced { 0.0 } else { 16.0 * (1.0 - ease) };
     let size = 16.0;
     let text = |key: &str, s: &str| {
-        Element::label(key.to_string(), s).text_style(TextStyle::new(0, size, size * 1.25)).color(Color::hex(0xe8ecf2, 1.0))
+        Element::label(key.to_string(), s)
+            .text_style(TextStyle::new(0, size, size * 1.25))
+            .color(Color::hex(0xe8ecf2, 1.0))
     };
     let chip = Element::panel("chip")
         .direction_row()

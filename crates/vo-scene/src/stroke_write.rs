@@ -203,7 +203,13 @@ impl Writing {
     }
 
     /// [`Writing::new`] with the strokes from `source`.
-    pub fn with_source(fonts: &FontRegistry, text: &str, word: WordOutline, lift: f32, source: StrokeSource) -> Writing {
+    pub fn with_source(
+        fonts: &FontRegistry,
+        text: &str,
+        word: WordOutline,
+        lift: f32,
+        source: StrokeSource,
+    ) -> Writing {
         let pen = PenFont::script();
         let mut placed_all: Vec<(usize, Contour, bool)> = Vec::new();
         let mut centres = Vec::with_capacity(word.glyphs.len());
@@ -231,7 +237,8 @@ impl Writing {
             };
             let cap = cap_height(fonts, g.font, g.size);
             let k = cap / HERSHEY_CAP;
-            let hershey = if source == StrokeSource::Hershey { pen.glyph(c).filter(|p| !p.strokes.is_empty()) } else { None };
+            let hershey =
+                if source == StrokeSource::Hershey { pen.glyph(c).filter(|p| !p.strokes.is_empty()) } else { None };
             // Centre lines that miss the glyph's ink do not stand for it either.
             let centre = centre.filter(|cl| cl.coverage.writes() && !cl.strokes.is_empty());
             let hershey = hershey.filter(|_| !unwritable);
@@ -240,8 +247,11 @@ impl Writing {
                     .strokes
                     .iter()
                     .map(|st| {
-                        let mut pts: Vec<Point> =
-                            st.points.iter().map(|q| Point::new(g.pos.x + q.x * g.size, g.pos.y + q.y * g.size)).collect();
+                        let mut pts: Vec<Point> = st
+                            .points
+                            .iter()
+                            .map(|q| Point::new(g.pos.x + q.x * g.size, g.pos.y + q.y * g.size))
+                            .collect();
                         let mut widths = st.widths.clone();
                         if st.closed && pts.len() > 1 {
                             // Round the loop back to its start.
@@ -437,7 +447,12 @@ impl Writing {
 
     /// Every stroke in pen order.
     pub fn strokes(&self) -> impl Iterator<Item = WrittenStroke<'_>> {
-        self.strokes.iter().map(|t| WrittenStroke { glyph: t.glyph, contour: &t.contour, start: t.start, delayed: t.delayed })
+        self.strokes.iter().map(|t| WrittenStroke {
+            glyph: t.glyph,
+            contour: &t.contour,
+            start: t.start,
+            delayed: t.delayed,
+        })
     }
 
     /// The pen distance of the whole word.
@@ -719,7 +734,13 @@ impl Writing {
             return self
                 .strokes
                 .iter()
-                .map(|s| if t < slot.start { 0.0 } else { ((k * (n + 2.0) - s.glyph as f32) / 3.0).clamp(0.0, 1.0) * dry(slot.end) })
+                .map(|s| {
+                    if t < slot.start {
+                        0.0
+                    } else {
+                        ((k * (n + 2.0) - s.glyph as f32) / 3.0).clamp(0.0, 1.0) * dry(slot.end)
+                    }
+                })
                 .collect();
         }
         let dur = slot.end - slot.start;
@@ -1505,7 +1526,12 @@ mod tests {
         assert_eq!(last.strokes().count(), whole.strokes().filter(|s| s.glyph == 4).count());
         assert_eq!(last.strokes().next().map(|s| s.start), Some(0.0));
         let own: f32 = whole.strokes().filter(|s| s.glyph == 4).map(|s| s.contour.length()).sum();
-        assert!(last.length() >= own && last.length() < 0.5 * whole.length(), "{} of {}", last.length(), whole.length());
+        assert!(
+            last.length() >= own && last.length() < 0.5 * whole.length(),
+            "{} of {}",
+            last.length(),
+            whole.length()
+        );
         // The other glyphs count as written from the start; the last is not.
         assert!(last.glyph_end[..4].iter().all(|e| *e < 0.0));
         assert!(last.glyph_end[4] > 0.0);

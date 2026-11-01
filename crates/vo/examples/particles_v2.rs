@@ -399,15 +399,27 @@ impl App for Popup {
             card.child(river).child(self.text(22.0))
         } else if self.concept == 26 {
             // "river" is the key that takes no margin: the only emitter here.
-            let swarm =
-                Element::layer("glow").bloom(0.8, 6.0).child(emitter("river", self.swarm.clone(), 2000, 8, false, 150.0));
+            let swarm = Element::layer("glow").bloom(0.8, 6.0).child(emitter(
+                "river",
+                self.swarm.clone(),
+                2000,
+                8,
+                false,
+                150.0,
+            ));
             card.child(swarm).child(self.text(24.0))
         } else if self.concept == 27 {
-            let orb = Element::layer("glow")
-                .bloom(0.8, 6.0)
-                .child(emitter("river", Arc::new(Orb { level: self.level.clone() }), 1024, 9, false, 150.0));
+            let orb = Element::layer("glow").bloom(0.8, 6.0).child(emitter(
+                "river",
+                Arc::new(Orb { level: self.level.clone() }),
+                1024,
+                9,
+                false,
+                150.0,
+            ));
             // The letters carry coverage, not light: they sit outside the bloom.
-            let letters = emitter("letters", Arc::new(LetterStream { level: self.level.clone() }), 512, 10, false, 150.0);
+            let letters =
+                emitter("letters", Arc::new(LetterStream { level: self.level.clone() }), 512, 10, false, 150.0);
             card.child(orb).child(letters).child(self.text(24.0))
         } else {
             let pink = [Color::hex(VIOLET, 1.0), Color::hex(0x6a5cff, 1.0), Color::hex(CYAN, 1.0)];

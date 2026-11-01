@@ -217,7 +217,11 @@ fn into_vertices(edges: &[(Point, Point)], s: &mut Raw, r: f32, cap_out: f32) {
     let unit = |a: Point, b: Point| {
         let d = Point::new(b.x - a.x, b.y - a.y);
         let l = (d.x * d.x + d.y * d.y).sqrt();
-        if l < 1e-6 { Point::ZERO } else { Point::new(d.x / l, d.y / l) }
+        if l < 1e-6 {
+            Point::ZERO
+        } else {
+            Point::new(d.x / l, d.y / l)
+        }
     };
     // The point an arc length `r` away from `i`, backwards or forwards; None past an open end.
     let arm = |i: usize, fwd: bool| -> Option<Point> {
@@ -864,7 +868,8 @@ fn edt_1d(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
     if n == 0 {
         return;
     }
-    let cross = |q: usize, p: usize| ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
+    let cross =
+        |q: usize, p: usize| ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
     let mut k = 0usize;
     v[0] = 0;
     z[0] = f64::NEG_INFINITY;
@@ -901,7 +906,9 @@ fn neighbours(sk: &[bool], w: usize, i: usize) -> ([usize; 8], usize) {
             n += 1;
         }
     }
-    for (d, a, b) in [(i - w + 1, i - w, i + 1), (i + w + 1, i + w, i + 1), (i + w - 1, i + w, i - 1), (i - w - 1, i - w, i - 1)] {
+    for (d, a, b) in
+        [(i - w + 1, i - w, i + 1), (i + w + 1, i + w, i + 1), (i + w - 1, i + w, i - 1), (i - w - 1, i - w, i - 1)]
+    {
         if sk[d] && !sk[a] && !sk[b] {
             out[n] = d;
             n += 1;
@@ -913,10 +920,8 @@ fn neighbours(sk: &[bool], w: usize, i: usize) -> ([usize; 8], usize) {
 /// Stem width in pixels: twice the median distance to the edge along the skeleton, less
 /// the half pixel the pixel centres add.
 fn stem_width(skel: &[bool], dist: &[f32], w: usize) -> f32 {
-    let mut ds: Vec<f32> = (0..skel.len())
-        .filter(|&i| skel[i] && neighbours(skel, w, i).1 <= 2)
-        .map(|i| dist[i])
-        .collect();
+    let mut ds: Vec<f32> =
+        (0..skel.len()).filter(|&i| skel[i] && neighbours(skel, w, i).1 <= 2).map(|i| dist[i]).collect();
     if ds.is_empty() {
         ds = (0..skel.len()).filter(|&i| skel[i]).map(|i| dist[i]).collect();
     }
@@ -1199,13 +1204,12 @@ impl Graph {
             // Nodes with two edges: join them.
             let deg = self.degrees();
             let two = (0..self.nodes.len()).find(|&n| {
-                deg[n] == 2
-                    && self.nodes[n].alive
-                    && !self.edges.iter().any(|e| e.alive && e.a == n && e.b == n)
+                deg[n] == 2 && self.nodes[n].alive && !self.edges.iter().any(|e| e.alive && e.a == n && e.b == n)
             });
             if let Some(n) = two {
-                let ks: Vec<usize> =
-                    (0..self.edges.len()).filter(|&k| self.edges[k].alive && (self.edges[k].a == n || self.edges[k].b == n)).collect();
+                let ks: Vec<usize> = (0..self.edges.len())
+                    .filter(|&k| self.edges[k].alive && (self.edges[k].a == n || self.edges[k].b == n))
+                    .collect();
                 let (e1, e2) = (self.edges[ks[0]].clone(), self.edges[ks[1]].clone());
                 // e1 oriented to end at n, e2 to start at n.
                 let e1 = if e1.b == n { e1 } else { reversed(e1) };
@@ -1476,7 +1480,18 @@ struct Raw {
 
 impl Raw {
     fn new(pts: Vec<Point>, closed: bool, through: Vec<usize>) -> Raw {
-        Raw { pts, w: Vec::new(), ends: [None, None], closed, through, delayed: false, len: 0.0, top: 0.0, left: 0.0, horizontal: false }
+        Raw {
+            pts,
+            w: Vec::new(),
+            ends: [None, None],
+            closed,
+            through,
+            delayed: false,
+            len: 0.0,
+            top: 0.0,
+            left: 0.0,
+            horizontal: false,
+        }
     }
 
     /// Open: left to right when wider than tall, else top to bottom. Closed: anticlockwise
@@ -1489,17 +1504,18 @@ impl Raw {
         if self.closed {
             // Shoelace in y-down space: positive is clockwise on screen.
             let n = pts.len();
-            let area: f32 = (0..n).map(|i| {
-                let (a, b) = (pts[i], pts[(i + 1) % n]);
-                a.x * b.y - b.x * a.y
-            }).sum();
+            let area: f32 = (0..n)
+                .map(|i| {
+                    let (a, b) = (pts[i], pts[(i + 1) % n]);
+                    a.x * b.y - b.x * a.y
+                })
+                .sum();
             if area > 0.0 {
                 pts.reverse();
                 self.w.reverse();
             }
-            let top = (0..n)
-                .min_by(|&i, &j| pts[i].y.total_cmp(&pts[j].y).then(pts[i].x.total_cmp(&pts[j].x)))
-                .unwrap_or(0);
+            let top =
+                (0..n).min_by(|&i, &j| pts[i].y.total_cmp(&pts[j].y).then(pts[i].x.total_cmp(&pts[j].x))).unwrap_or(0);
             pts.rotate_left(top);
             self.w.rotate_left(top);
         } else {
@@ -1561,7 +1577,9 @@ fn rdp(pts: &[Point], wid: &[f32], idx: &[usize]) -> Vec<usize> {
     let mut keep = vec![false; m];
     keep[0] = true;
     keep[m - 1] = true;
-    let far = (1..m).max_by(|&i, &j| dist2(pts[idx[0]], pts[idx[i]]).total_cmp(&dist2(pts[idx[0]], pts[idx[j]]))).unwrap_or(0);
+    let far = (1..m)
+        .max_by(|&i, &j| dist2(pts[idx[0]], pts[idx[i]]).total_cmp(&dist2(pts[idx[0]], pts[idx[j]])))
+        .unwrap_or(0);
     keep[far] = true;
     let mut stack = vec![(0usize, far), (far, m - 1)];
     while let Some((i, j)) = stack.pop() {
@@ -1763,7 +1781,8 @@ pub fn measure_coverage(path: &BezPath, g: &GlyphCentre, width: Option<f32>) -> 
         .strokes
         .iter()
         .map(|c| {
-            let mut r = Raw::new(c.points.iter().map(|p| Point::new(p.x * GRID, p.y * GRID)).collect(), c.closed, Vec::new());
+            let mut r =
+                Raw::new(c.points.iter().map(|p| Point::new(p.x * GRID, p.y * GRID)).collect(), c.closed, Vec::new());
             r.w = c.widths.iter().map(|w| w * GRID).collect();
             r
         })

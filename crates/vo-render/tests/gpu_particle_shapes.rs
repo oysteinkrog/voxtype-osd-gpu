@@ -11,8 +11,8 @@ use support::{Image, Tolerance};
 use vo_render::{Renderer, Target as RenderTarget};
 use vo_scene::element::{Element, TextStyle};
 use vo_scene::emitter::{
-    text_mask, text_path, Emitter, EmitterLook, EmitterSim, EmitterSource, MaskField, Shape, ShapeTarget, SpriteStyle, Target,
-    TimedMask,
+    text_mask, text_path, Emitter, EmitterLook, EmitterSim, EmitterSource, MaskField, Shape, ShapeTarget, SpriteStyle,
+    Target, TimedMask,
 };
 use vo_scene::font::{test_font_path, FontRegistry};
 use vo_scene::geom::{Color, Point, Size};
@@ -97,7 +97,8 @@ fn render(
     let mut scene: Scene<()> =
         Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone()))).with_reduced_motion(reduced);
     scene.set_viewport(0.0, Size::new(W as f32, H as f32), scale);
-    let view = Element::column("root").child(Element::emitter("e", Emitter::new(source, capacity, 5)).size(W as f32, H as f32));
+    let view = Element::column("root")
+        .child(Element::emitter("e", Emitter::new(source, capacity, 5)).size(W as f32, H as f32));
     scene.apply(view, 0.0);
     let last = keep.iter().copied().fold(0.0, f64::max);
     let mut kept = Vec::new();
@@ -184,7 +185,11 @@ fn particles_form_a_check_mark() {
     let frames = render(&gpu, &fonts, src, 600, 1.0, false, 60.0, &[0.25, 1.7]);
     let (early, _) = light_share(&frames[0], in_check);
     let (share, light) = light_share(&frames[1], in_check);
-    println!("check mark: {:.1} % of the light inside a 4 px stroke at 1.5 s, {:.1} % just after it applies", share * 100.0, early * 100.0);
+    println!(
+        "check mark: {:.1} % of the light inside a 4 px stroke at 1.5 s, {:.1} % just after it applies",
+        share * 100.0,
+        early * 100.0
+    );
     assert!(light > 0.0, "the shape draws");
     assert!(share >= 0.85, "{:.1} % inside", share * 100.0);
     assert!(early < 0.6, "the particles fly in rather than appear: {:.1} %", early * 100.0);
@@ -236,7 +241,11 @@ fn reduced_motion_shows_the_shape_already_formed() {
     let frames = render(&gpu, &fonts, src, 600, 1.0, true, 60.0, &[0.25, 1.7]);
     let (early, l0) = light_share(&frames[0], in_check);
     let (late, l1) = light_share(&frames[1], in_check);
-    println!("reduced motion: {:.1} % inside at once, {:.1} % later; light {l0} then {l1}", early * 100.0, late * 100.0);
+    println!(
+        "reduced motion: {:.1} % inside at once, {:.1} % later; light {l0} then {l1}",
+        early * 100.0,
+        late * 100.0
+    );
     assert!(early >= 0.85 && late >= 0.85);
     assert!(frames[0] == frames[1], "the shape does not move after it appears");
 }

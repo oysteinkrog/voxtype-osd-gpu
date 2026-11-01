@@ -254,9 +254,7 @@ fn outline_header(pts: &[Point], rect: [f32; 4], base: Option<[f32; 3]>) -> [[f3
             continue;
         }
         let r = r.clamp(0.0, h[0].min(h[1]));
-        let g = (0..n)
-            .map(|i| edge_min_sd(local(pts[i]), local(pts[(i + 1) % n]), h, r))
-            .fold(f32::INFINITY, f32::min);
+        let g = (0..n).map(|i| edge_min_sd(local(pts[i]), local(pts[(i + 1) % n]), h, r)).fold(f32::INFINITY, f32::min);
         let (dx, dy, dr) = (h[0] + g, h[1] + g, (r + g).max(0.0));
         if dx <= 0.0 || dy <= 0.0 {
             continue;

@@ -267,7 +267,10 @@ impl SurfaceText {
                     label: Some("vo3d-surface-mip"),
                     layout: &layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&level(i - 1)) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&level(i - 1)),
+                        },
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     ],
                 });
@@ -429,15 +432,7 @@ pub struct PageTurn {
 
 impl Default for PageTurn {
     fn default() -> PageTurn {
-        PageTurn {
-            length: 3.0,
-            width: 0.6,
-            segments: 96,
-            across: 24,
-            radius: 0.18,
-            slant: 0.25,
-            reduced_motion: false,
-        }
+        PageTurn { length: 3.0, width: 0.6, segments: 96, across: 24, radius: 0.18, slant: 0.25, reduced_motion: false }
     }
 }
 

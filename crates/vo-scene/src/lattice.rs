@@ -46,10 +46,10 @@
 
 use std::sync::Arc;
 
+use crate::ambient::{Loop, LoopProp};
 use crate::canvas::Painter;
 use crate::display::{Paint, ShapeInstance};
 use crate::element::{Element, Key, TextStyle};
-use crate::ambient::{Loop, LoopProp};
 use crate::emitter::LevelTrack;
 use crate::geom::{Color, Point, Rect, Size};
 use crate::path::{Contour, StrokeStyle};
@@ -156,10 +156,7 @@ impl LatticeDrift {
         let amp = self.amp.max(0.0) as f64;
         [
             (LoopProp::OffsetX, Loop::drift(amp, self.period, self.seed).fps(DRIFT_FPS)),
-            (
-                LoopProp::OffsetY,
-                Loop::drift(0.6 * amp, 1.3 * self.period, self.seed.wrapping_add(7919)).fps(DRIFT_FPS),
-            ),
+            (LoopProp::OffsetY, Loop::drift(0.6 * amp, 1.3 * self.period, self.seed.wrapping_add(7919)).fps(DRIFT_FPS)),
         ]
     }
 }

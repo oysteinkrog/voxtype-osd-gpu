@@ -741,7 +741,10 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         if *name == "panes-20" {
             let report = r.frame_report();
             let offscreen = report.surfaces.iter().filter(|s| s.kind == vo_render::profile::SurfaceKind::Layer).count();
-            println!("effect_cost: panes-20 at {w}x{h}: {offscreen} offscreen layers, {} draws", report.surfaces[0].draws);
+            println!(
+                "effect_cost: panes-20 at {w}x{h}: {offscreen} offscreen layers, {} draws",
+                report.surfaces[0].draws
+            );
         }
         sections.sort_by(|a, b| b.1.total_cmp(&a.1));
         let slowest =

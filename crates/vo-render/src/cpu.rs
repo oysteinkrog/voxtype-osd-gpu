@@ -587,7 +587,12 @@ impl CpuRenderer {
             let i = 4 * (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize;
             let p = &raster.px[i..i + 4];
             let a = p[3] as f32 / 255.0;
-            [srgb_decode(p[0] as f32 / 255.0) * a, srgb_decode(p[1] as f32 / 255.0) * a, srgb_decode(p[2] as f32 / 255.0) * a, a]
+            [
+                srgb_decode(p[0] as f32 / 255.0) * a,
+                srgb_decode(p[1] as f32 / 255.0) * a,
+                srgb_decode(p[2] as f32 / 255.0) * a,
+                a,
+            ]
         };
         for y in y0..y1 {
             for x in x0..x1 {
@@ -1253,7 +1258,10 @@ mod tests {
             let mut cpu = CpuRenderer::new(fonts.clone());
             let mut out = vec![0u8; 200 * 160 * 4];
             cpu.draw_bgra(list, 1.0, 200, 160, 200 * 4, &mut out);
-            (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y, x))).filter(|&(y, x)| out[(y * 200 + x) * 4 + 3] > 128).count()
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (y, x)))
+                .filter(|&(y, x)| out[(y * 200 + x) * 4 + 3] > 128)
+                .count()
         };
         let mut without = list.clone();
         without.items.iter_mut().filter(|it| it.kind == ItemKind::Gpu).for_each(|it| it.len = 0);

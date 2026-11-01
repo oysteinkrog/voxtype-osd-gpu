@@ -84,14 +84,22 @@ pub static ASSETS: &[Asset] = &[
     // EG-28: five more faces, about 225 KB in all, downloaded from the projects' official
     // sources and subset by assets/fonts/subset.sh (sources and licences in the README).
     font!("typewriter", "CourierPrime-Regular-Latin.ttf", "Courier Prime Regular, Latin: a typewriter face"),
-    font!("display-wide-italic", "Kanit-BoldItalic-Latin.ttf", "Kanit Bold Italic, Latin: a wide, slanted display face"),
+    font!(
+        "display-wide-italic",
+        "Kanit-BoldItalic-Latin.ttf",
+        "Kanit Bold Italic, Latin: a wide, slanted display face"
+    ),
     font!(
         "ultra-condensed-heavy",
         "LeagueGothic-Condensed-Latin.ttf",
         "League Gothic at width 75, Latin: an ultra condensed heavy face"
     ),
     font!("script", "GreatVibes-Regular-Latin.ttf", "Great Vibes Regular, Latin: a formal connected script"),
-    font!("music", "Bravura-Music.otf", "Bravura (SMuFL): staff lines, clefs, note heads, flags, accidentals and rests"),
+    font!(
+        "music",
+        "Bravura-Music.otf",
+        "Bravura (SMuFL): staff lines, clefs, note heads, flags, accidentals and rests"
+    ),
     font!("jp-labels", "NotoSansJP-Regular-Labels.otf", "Noto Sans CJK JP Regular: kana and label kanji"),
     font!("jp-labels-bold", "NotoSansJP-Bold-Labels.otf", "Noto Sans CJK JP Bold: kana and label kanji"),
     tile!("paper", "Paper fibre: soft mottling with short light and dark fibres"),

@@ -177,8 +177,10 @@ fn gradient_png(w: u32, h: u32, salt: u8) -> Vec<u8> {
 
 /// One frame: `src` in a `box_size` box inside a layer scaled by `scale`, on a fresh scene.
 fn scaled_frame(off: &mut Offscreen, src: &Arc<ImageSource>, box_size: f32, scale: f32) -> Image {
-    let layer =
-        Element::layer("l").size(box_size, box_size).scale(scale).child(Element::image("img", src.clone()).size(box_size, box_size));
+    let layer = Element::layer("l")
+        .size(box_size, box_size)
+        .scale(scale)
+        .child(Element::image("img", src.clone()).size(box_size, box_size));
     let root = Element::panel("root").size(box_size, box_size).child(layer);
     let mut scene: Scene<()> = Scene::new();
     scene.set_viewport(0.0, Size::new(box_size, box_size), 1.0);

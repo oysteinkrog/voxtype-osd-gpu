@@ -382,10 +382,28 @@ impl ParticleLayer {
         let reach = reach.max((pool.shape_reach + 4.0 * look.size) * s);
         let origin = Point::new(centre.x / s, centre.y / s);
         let start = self.placements.len() as u32;
-        self.placements.push(Placement { part: Part::Emitter(pool.id), surface, origin, look: Some(look), word: None, shape: None });
+        self.placements.push(Placement {
+            part: Part::Emitter(pool.id),
+            surface,
+            origin,
+            look: Some(look),
+            word: None,
+            shape: None,
+        });
         if let Some(slot) = pool.slot {
-            let shape = SlotLook { size: look.size, style: look.style, ..SlotLook::new(origin, look.ramp[0].fade(look.brightness)) };
-            self.placements.push(Placement { part: Part::Slot(slot), surface, origin, look: None, word: None, shape: Some(shape) });
+            let shape = SlotLook {
+                size: look.size,
+                style: look.style,
+                ..SlotLook::new(origin, look.ramp[0].fade(look.brightness))
+            };
+            self.placements.push(Placement {
+                part: Part::Slot(slot),
+                surface,
+                origin,
+                look: None,
+                word: None,
+                shape: Some(shape),
+            });
         }
         let end = self.placements.len() as u32;
         Some((start..end, [centre.x - reach, centre.y - reach, centre.x + reach, centre.y + reach]))

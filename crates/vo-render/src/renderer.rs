@@ -1576,7 +1576,9 @@ impl Renderer {
                         // No painter for a liquid revision: draw its plain glyphs, so the word
                         // does not vanish while the scene hides it from the text (RV-06).
                         if !liquid_painter {
-                            if let Some(rev) = g.source.0.as_any().downcast_ref::<vo_scene::flow::liquid::LiquidRevision>() {
+                            if let Some(rev) =
+                                g.source.0.as_any().downcast_ref::<vo_scene::flow::liquid::LiquidRevision>()
+                            {
                                 let gs = self.glyphs.len() as u32;
                                 for gi in rev.plain_glyphs(g.rect, g.t, g.opacity) {
                                     if let Some(inst) = self.glyph(&gi, &state) {

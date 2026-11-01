@@ -30,9 +30,8 @@ const PAGE: [f32; 2] = [600.0, 120.0];
 fn page_text(fonts: &FontRegistry, ink: Color) -> DisplayList {
     let mut scene: Scene<()> = Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
     scene.set_viewport(0.0, Size::new(PAGE[0], PAGE[1]), 1.0);
-    let line = |key: &'static str, text: &str| {
-        Element::label(key, text).text_style(TextStyle::new(0, 24.0, 31.0)).color(ink)
-    };
+    let line =
+        |key: &'static str, text: &str| Element::label(key, text).text_style(TextStyle::new(0, 24.0, 31.0)).color(ink);
     let view = Element::column("root")
         .size(PAGE[0], PAGE[1])
         .pad(16.0)

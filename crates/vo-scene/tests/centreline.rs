@@ -32,7 +32,8 @@ fn letters_and_digits() -> impl Iterator<Item = char> {
 /// Saira ExtraCondensed ExtraBold glyphs whose strokes do not reach the 95 % / 5 % bar yet:
 /// the wide flat-cut peaks of `w` and `W` and the merged flag and stem at the top of `1` are
 /// blobs no single centre line fills. Their pen strokes still cover 93 % or more.
-const KNOWN_SHORT: [(&str, char); 3] = [("extra-condensed-bold", 'w'), ("extra-condensed-bold", 'W'), ("extra-condensed-bold", '1')];
+const KNOWN_SHORT: [(&str, char); 3] =
+    [("extra-condensed-bold", 'w'), ("extra-condensed-bold", 'W'), ("extra-condensed-bold", '1')];
 
 /// The strokes, each drawn round-capped with its own width table (the ink's width along it,
 /// [`CentreStroke::widths`]), cover at least 95 % of the glyph's ink with at most 5 % of the
@@ -87,7 +88,12 @@ fn stroke_counts_and_order() {
         let f = face(name);
         for (c, n) in [('o', 1), ('l', 1), ('T', 2), ('H', 3)] {
             let g = centre(&f, c);
-            assert_eq!(g.strokes.len(), n, "{name} {c:?}: {:#?}", g.strokes.iter().map(|s| s.points.len()).collect::<Vec<_>>());
+            assert_eq!(
+                g.strokes.len(),
+                n,
+                "{name} {c:?}: {:#?}",
+                g.strokes.iter().map(|s| s.points.len()).collect::<Vec<_>>()
+            );
         }
         // T: the bar first, drawn left to right, then the stem top to bottom.
         let t = centre(&f, 'T');
