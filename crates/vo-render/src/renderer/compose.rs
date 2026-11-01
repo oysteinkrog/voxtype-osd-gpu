@@ -251,7 +251,7 @@ impl Renderer {
                 mapped_at_creation: false,
             }));
         }
-        self.queue.write_buffer(c.buf.as_ref().unwrap(), 0, &c.uniforms);
+        self.staged.write(c.buf.as_ref().unwrap(), 0, &c.uniforms);
     }
 
     /// The bind group of a `CompositeFx` draw of surface `si`.

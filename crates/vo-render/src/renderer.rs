@@ -780,6 +780,55 @@ pub struct Renderer {
     /// Each glyph's word id and box in target pixels, gathered while `collect_words` (EG-31).
     collect_words: bool,
     word_boxes: Vec<(u32, [f32; 4])>,
+    /// This encode's buffer writes, sent to the GPU as one (`Staged`).
+    staged: Staged,
+}
+
+/// One encode's buffer writes, sent as one: the bytes go up in one queue write to a buffer
+/// kept from frame to frame, and the encoder copies each part to its buffer before the
+/// passes. Each `Queue::write_buffer` makes, and after the frame frees, a staging buffer of
+/// its own, which cost more CPU than the copies (bqw3).
+#[derive(Default)]
+struct Staged {
+    bytes: Vec<u8>,
+    /// Destination, its offset, and the offset and length in `bytes`.
+    copies: Vec<(wgpu::Buffer, u64, u64, u64)>,
+    buf: Option<wgpu::Buffer>,
+}
+
+impl Staged {
+    /// Writes `data` at `offset` in `dst` when `send` runs. Lengths and offsets are multiples
+    /// of 4, as for `Queue::write_buffer`.
+    fn write(&mut self, dst: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let at = self.bytes.len() as u64;
+        self.bytes.extend_from_slice(data);
+        self.copies.push((dst.clone(), offset, at, data.len() as u64));
+    }
+
+    /// Sends the writes made since the last call, as copies at this point in `enc`.
+    fn send(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder) {
+        if self.copies.is_empty() {
+            return;
+        }
+        let size = (self.bytes.len() as u64).next_power_of_two().max(4096);
+        if self.buf.as_ref().is_none_or(|b| b.size() < size) {
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vo-staged"),
+                size,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buf = self.buf.as_ref().unwrap();
+        queue.write_buffer(buf, 0, &self.bytes);
+        for (dst, offset, at, len) in self.copies.drain(..) {
+            enc.copy_buffer_to_buffer(buf, at, &dst, offset, len);
+        }
+        self.bytes.clear();
+    }
 }
 
 // `vo::Resident` builds a renderer on a warm-up thread and hands it to the host's thread.
@@ -869,6 +918,7 @@ impl Renderer {
             text_words: crate::text_field::WordTable::default().gpu_bytes(None),
             collect_words: false,
             word_boxes: Vec::new(),
+            staged: Staged::default(),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -1170,7 +1220,7 @@ impl Renderer {
     ) {
         self.load = load;
         // One block per encode: a second encode before the submit overwrites it.
-        self.queue.write_buffer(&self.signals_buf, 0, bytemuck::cast_slice(&list.signals.as_floats()));
+        self.staged.write(&self.signals_buf, 0, bytemuck::cast_slice(&list.signals.as_floats()));
         let (w, h) = (target.width(), target.height());
         let effects = self.quality == Quality::Full
             && list.layers.iter().any(|l| {
@@ -1251,6 +1301,7 @@ impl Renderer {
             }
         }
         self.upload(format, target.format(), w, h);
+        self.staged.send(&self.device, &self.queue, enc);
         let surfaces = &self.surfaces;
         self.particles.prepare(w, h, format, &|i| (surfaces[i].origin, surfaces[i].size));
         let mut painters = std::mem::take(&mut self.painters);
@@ -2236,7 +2287,7 @@ impl Renderer {
         self.atlas_gpu.set_uniforms(queue, &Uniforms::pixels(w as f32, h as f32));
         write_grow(
             device,
-            queue,
+            &mut self.staged,
             &mut self.shape_buf,
             "vo-shapes",
             wgpu::BufferUsages::VERTEX,
@@ -2244,7 +2295,7 @@ impl Renderer {
         );
         write_grow(
             device,
-            queue,
+            &mut self.staged,
             &mut self.glyph_buf,
             "vo-glyphs",
             wgpu::BufferUsages::VERTEX,
@@ -2252,7 +2303,7 @@ impl Renderer {
         );
         write_grow(
             device,
-            queue,
+            &mut self.staged,
             &mut self.dot_buf,
             "vo-dots",
             wgpu::BufferUsages::VERTEX,
@@ -2260,7 +2311,7 @@ impl Renderer {
         );
         write_grow(
             device,
-            queue,
+            &mut self.staged,
             &mut self.glass_buf,
             "vo-glass",
             wgpu::BufferUsages::VERTEX,
@@ -2268,7 +2319,7 @@ impl Renderer {
         );
         write_grow(
             device,
-            queue,
+            &mut self.staged,
             &mut self.vector_buf,
             "vo-vectors",
             wgpu::BufferUsages::VERTEX,
@@ -2290,7 +2341,7 @@ impl Renderer {
             self.vector_segs_buf = Some((buf, bind));
         }
         if !self.vector_segs.is_empty() {
-            queue.write_buffer(&self.vector_segs_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.vector_segs));
+            self.staged.write(&self.vector_segs_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.vector_segs));
         }
         let need = (self.shape_prims.len() * 16).max(256) as u64;
         if self.shape_prims_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
@@ -2308,7 +2359,7 @@ impl Renderer {
             self.shape_prims_buf = Some((buf, bind));
         }
         if !self.shape_prims.is_empty() {
-            queue.write_buffer(&self.shape_prims_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.shape_prims));
+            self.staged.write(&self.shape_prims_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.shape_prims));
         }
         let need = (self.materials.len() * std::mem::size_of::<GpuMaterial>()).max(256) as u64;
         if self.material_buf.as_ref().is_none_or(|(b, _)| b.size() < need) {
@@ -2326,11 +2377,11 @@ impl Renderer {
             self.material_buf = Some((buf, bind));
         }
         if !self.materials.is_empty() {
-            queue.write_buffer(&self.material_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.materials));
+            self.staged.write(&self.material_buf.as_ref().unwrap().0, 0, bytemuck::cast_slice(&self.materials));
         }
         write_uniforms(
             device,
-            queue,
+            &mut self.staged,
             &mut self.uniform_buf,
             "vo-layers",
             &self.layer_layout,
@@ -2357,7 +2408,7 @@ impl Renderer {
                 self.fx_uniforms.resize(offset + self.uniform_stride as usize, 0);
                 write_uniforms(
                     device,
-                    queue,
+                    &mut self.staged,
                     &mut self.fx_buf,
                     "vo-fx",
                     &fx.fx_layout,
@@ -2677,7 +2728,7 @@ impl Renderer {
         }
         self.fill_tile_slots();
         let t = self.mat_tex.get_or_insert_with(|| MatTextures::new(&self.device));
-        self.queue.write_buffer(&t.words, 0, &self.text_words);
+        self.staged.write(&t.words, 0, &self.text_words);
         let materials = &self.material_buf.as_ref().expect("uploaded").0;
         for k in keys {
             let backdrop = self.backdrops.get(k as usize).and_then(|b| b.tex).map(|i| &self.pool[i].view);
@@ -3213,7 +3264,7 @@ fn grow(into: &mut [f32; 4], b: [f32; 4]) {
 /// Writes `data` into `buf`, replacing the buffer with a larger one when it does not fit.
 fn write_grow(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    staged: &mut Staged,
     buf: &mut Option<wgpu::Buffer>,
     label: &str,
     usage: wgpu::BufferUsages,
@@ -3228,9 +3279,7 @@ fn write_grow(
             mapped_at_creation: false,
         }));
     }
-    if !data.is_empty() {
-        queue.write_buffer(buf.as_ref().unwrap(), 0, data);
-    }
+    staged.write(buf.as_ref().unwrap(), 0, data);
 }
 
 /// Writes uniform blocks bound at dynamic offsets, growing the buffer and its bind group when
@@ -3238,7 +3287,7 @@ fn write_grow(
 #[allow(clippy::too_many_arguments)]
 fn write_uniforms(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    staged: &mut Staged,
     slot: &mut Option<(wgpu::Buffer, wgpu::BindGroup)>,
     label: &str,
     layout: &wgpu::BindGroupLayout,
@@ -3268,9 +3317,7 @@ fn write_uniforms(
         });
         *slot = Some((buf, bind));
     }
-    if !data.is_empty() {
-        queue.write_buffer(&slot.as_ref().unwrap().0, 0, data);
-    }
+    staged.write(&slot.as_ref().unwrap().0, 0, data);
 }
 
 #[cfg(test)]
