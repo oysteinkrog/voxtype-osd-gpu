@@ -285,29 +285,31 @@ impl Renderer {
                 size: wgpu::BufferSize::new(std::mem::size_of::<ComposeUniform>() as u64),
             }),
         });
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-compose"),
-            layout: &c.layout,
-            entries: &entries,
-        })
+        self.binds.get(
+            &self.device,
+            &wgpu::BindGroupDescriptor { label: Some("vo-compose"), layout: &c.layout, entries: &entries },
+        )
     }
 
     /// The final pass's bind group: the scene and the blue-noise tile.
     pub(super) fn final_bind(&self, scene: usize) -> wgpu::BindGroup {
         let fx = self.fx.as_ref().expect("effect frame");
         let c = self.compose.as_ref().expect("ensure_compose ran");
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-final"),
-            layout: &fx.sampled_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.pool[scene].view),
-                },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&c.noise) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&fx.sampler) },
-            ],
-        })
+        self.binds.get(
+            &self.device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("vo-final"),
+                layout: &fx.sampled_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.pool[scene].view),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&c.noise) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&fx.sampler) },
+                ],
+            },
+        )
     }
 
     /// After a composite: the second draw of an exact multiply. Bind groups stay as they are.

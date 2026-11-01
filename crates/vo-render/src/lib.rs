@@ -17,6 +17,7 @@
 //! - `color`: sRGB, linear and OKLab conversions.
 //! - `cpu` (feature `cpu`): the same display list drawn on the CPU, for the first frame.
 
+mod bind_cache;
 pub mod blur;
 pub mod color;
 #[cfg(feature = "cpu")]

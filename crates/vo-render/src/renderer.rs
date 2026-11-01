@@ -782,6 +782,8 @@ pub struct Renderer {
     word_boxes: Vec<(u32, [f32; 4])>,
     /// This encode's buffer writes, sent to the GPU as one (`Staged`).
     staged: Staged,
+    /// Bind groups of pooled textures, kept from frame to frame.
+    binds: crate::bind_cache::BindCache,
 }
 
 /// One encode's buffer writes, sent as one: the bytes go up in one queue write to a buffer
@@ -919,6 +921,7 @@ impl Renderer {
             collect_words: false,
             word_boxes: Vec::new(),
             staged: Staged::default(),
+            binds: Default::default(),
             fonts,
             faces: Vec::new(),
             atlas: Atlas::default(),
@@ -1252,6 +1255,7 @@ impl Renderer {
             b.clear();
         }
         self.frame += 1;
+        self.binds.next_frame();
         for p in &mut self.pool {
             p.used = false;
         }
@@ -1297,6 +1301,7 @@ impl Renderer {
                 eprintln!("vo-render: effect textures failed ({e}); dropping to quality {:?}", self.quality.lower());
                 self.quality = self.quality.lower();
                 self.pool.clear();
+                self.binds.clear();
                 return self.encode_with(list, scale, target, load, enc);
             }
         }
@@ -2593,15 +2598,24 @@ impl Renderer {
     }
 
     fn sampled_bind(&self, fx: &FxShared, src: usize, low: usize) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-fx"),
-            layout: &fx.sampled_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.pool[src].view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.pool[low].view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&fx.sampler) },
-            ],
-        })
+        self.binds.get(
+            &self.device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("vo-fx"),
+                layout: &fx.sampled_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.pool[src].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.pool[low].view),
+                    },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&fx.sampler) },
+                ],
+            },
+        )
     }
 
     /// A pass break command: the encoder is free and the surface's pass has ended.
@@ -2670,11 +2684,17 @@ impl Renderer {
             }
             Pipe::Capture => {
                 let Some(tex) = self.backdrops[c.range.start as usize].tex else { return };
-                let source = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("vo-backdrop-source"),
-                    layout: &self.composite_layout,
-                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
-                });
+                let source = self.binds.get(
+                    &self.device,
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("vo-backdrop-source"),
+                        layout: &self.composite_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        }],
+                    },
+                );
                 let mut pass = begin(enc, &self.pool[tex].view, "vo-backdrop");
                 pass.set_pipeline(self.cached_pipeline(EFFECT_FORMAT, Pipe::Capture, BlendMode::Normal));
                 pass.set_bind_group(0, &source, &[]);
@@ -2751,11 +2771,14 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(self.text_view.as_ref().unwrap_or(&t.empty)),
             });
             entries.push(wgpu::BindGroupEntry { binding: 8, resource: t.words.as_entire_binding() });
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("vo-material-textures"),
-                layout: &t.layout,
-                entries: &entries,
-            });
+            let bind = self.binds.get(
+                &self.device,
+                &wgpu::BindGroupDescriptor {
+                    label: Some("vo-material-textures"),
+                    layout: &t.layout,
+                    entries: &entries,
+                },
+            );
             t.binds.push((k, bind));
         }
     }

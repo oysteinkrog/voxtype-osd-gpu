@@ -88,6 +88,8 @@ pub(crate) struct BlurGpu {
     data: Vec<u8>,
     buf: Option<wgpu::Buffer>,
     bind: Option<wgpu::BindGroup>,
+    /// Texture and block bind groups, kept from frame to frame.
+    binds: crate::bind_cache::BindCache,
 }
 
 impl BlurGpu {
@@ -181,11 +183,22 @@ impl BlurGpu {
         };
         let plain = pipeline("fs_blur", &[Some(&tex_layout), None, Some(&block_layout)]);
         let frost = layer_layout.map(|l| pipeline("fs_frost", &[Some(&tex_layout), Some(l), Some(&block_layout)]));
-        BlurGpu { tex_layout, block_layout, sampler, plain, frost, data: Vec::new(), buf: None, bind: None }
+        BlurGpu {
+            tex_layout,
+            block_layout,
+            sampler,
+            plain,
+            frost,
+            data: Vec::new(),
+            buf: None,
+            bind: None,
+            binds: Default::default(),
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         self.data.clear();
+        self.binds.next_frame();
     }
 
     /// Adds a block and returns its dynamic offset.
@@ -213,30 +226,36 @@ impl BlurGpu {
         }
         let buf = self.buf.as_ref().unwrap();
         queue.write_buffer(buf, 0, &self.data);
-        self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-blur"),
-            layout: &self.block_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<BlurBlock>() as u64),
-                }),
-            }],
-        }));
+        self.bind = Some(self.binds.get(
+            device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("vo-blur"),
+                layout: &self.block_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: buf,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<BlurBlock>() as u64),
+                    }),
+                }],
+            },
+        ));
     }
 
     fn textures(&self, device: &wgpu::Device, src: &wgpu::TextureView, sharp: &wgpu::TextureView) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vo-blur-textures"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(sharp) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        })
+        self.binds.get(
+            device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("vo-blur-textures"),
+                layout: &self.tex_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(sharp) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            },
+        )
     }
 
     /// One `fs_blur` pass of block `offset` from `src` into `dst`. `load` keeps what `dst`
