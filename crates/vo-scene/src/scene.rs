@@ -26,7 +26,9 @@ use crate::display::{
 use crate::display::{BloomBand, BloomShape};
 use crate::dots::Dots;
 use crate::element::BAND_SLOTS;
-use crate::element::{Element, Handlers, Key, Kind, MarkShape, Motion, Prop, Slot, Transition, DEFAULT_MOTION};
+use crate::element::{
+    Element, ElementData, Handlers, Key, Kind, MarkShape, Motion, Prop, Slot, Transition, DEFAULT_MOTION,
+};
 use crate::emitter::{ParticleWord, ParticleWords, WORD_PARTICLES_BUSY};
 use crate::final_pass::{self, FinalPass};
 use crate::flow::{Flow, FlowInput};
@@ -1369,7 +1371,7 @@ impl<M> Scene<M> {
     }
 
     fn create(&mut self, parent: Option<NodeId>, el: Element<M>, t: f64) -> NodeId {
-        let Element {
+        let ElementData {
             key,
             kind,
             style,
@@ -1390,7 +1392,7 @@ impl<M> Scene<M> {
             handlers,
             children,
             loops,
-        } = el;
+        } = el.into_data();
         self.changed = true;
         let mut node = Node {
             key,
@@ -1460,7 +1462,7 @@ impl<M> Scene<M> {
     }
 
     fn update(&mut self, id: NodeId, el: Element<M>, t: f64) {
-        let Element {
+        let ElementData {
             key: _,
             kind,
             style,
@@ -1481,7 +1483,7 @@ impl<M> Scene<M> {
             handlers,
             children,
             loops,
-        } = el;
+        } = el.into_data();
         let retention = self.retention;
         // Before the targets below, so they retarget with this subtree's default.
         let effective = self.inherited_motion(default_motion, self.nodes[id].parent);

@@ -798,8 +798,37 @@ impl<M> Default for Handlers<M> {
 }
 
 /// One element of a view. `M` is the app's message type for pointer handlers.
+///
+/// The fields sit behind one pointer: a view is built by value, each builder call and each
+/// push into a parent's children moves the element, and the fields are over a kilobyte
+/// (bqw3: on room tone a third of the popup's view time was spent copying them).
 #[derive(Clone, Debug)]
-pub struct Element<M = ()> {
+pub struct Element<M = ()>(Box<ElementData<M>>);
+
+impl<M> std::ops::Deref for Element<M> {
+    type Target = ElementData<M>;
+
+    fn deref(&self) -> &ElementData<M> {
+        &self.0
+    }
+}
+
+impl<M> std::ops::DerefMut for Element<M> {
+    fn deref_mut(&mut self) -> &mut ElementData<M> {
+        &mut self.0
+    }
+}
+
+impl<M> Element<M> {
+    /// The fields, by value.
+    pub(crate) fn into_data(self) -> ElementData<M> {
+        *self.0
+    }
+}
+
+/// What an [`Element`] holds.
+#[derive(Clone, Debug)]
+pub struct ElementData<M = ()> {
     pub(crate) key: Key,
     pub(crate) kind: Kind,
     pub(crate) style: taffy::Style,
@@ -838,7 +867,7 @@ pub struct Element<M = ()> {
 
 impl<M> Element<M> {
     pub(crate) fn new(key: impl Into<Key>, kind: Kind, style: taffy::Style) -> Element<M> {
-        Element {
+        Element(Box::new(ElementData {
             key: key.into(),
             kind,
             style,
@@ -859,7 +888,7 @@ impl<M> Element<M> {
             handlers: Handlers::default(),
             children: Vec::new(),
             loops: Vec::new(),
-        }
+        }))
     }
 
     fn flex(direction: FlexDirection) -> taffy::Style {
