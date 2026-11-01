@@ -123,7 +123,9 @@ pub struct TimerId(u64);
 
 pub(crate) struct Timers<M> {
     next: u64,
-    /// `(at, id, msg)`, unsorted; there are only ever a few.
+    /// `(at, id, msg)`, latest first, so the next timer is the last: a scripted run sets a
+    /// timer for every message it plays, hundreds at once, and each one that fires would
+    /// otherwise scan and shift them all.
     pending: Vec<(f64, TimerId, M)>,
 }
 
@@ -135,20 +137,23 @@ impl<M> Default for Timers<M> {
 
 impl<M> Timers<M> {
     pub(crate) fn next_at(&self) -> Option<f64> {
-        self.pending.iter().map(|p| p.0).min_by(f64::total_cmp)
+        self.pending.last().map(|p| p.0)
     }
 
-    /// Removes and returns the earliest timer due at or before `t`.
+    /// Removes and returns the earliest timer due at or before `t`; of two due at the same
+    /// time, the one set first.
     fn pop_due(&mut self, t: f64) -> Option<(f64, M)> {
-        let i = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.0 <= t)
-            .min_by(|a, b| a.1 .0.total_cmp(&b.1 .0).then(a.1 .1 .0.cmp(&b.1 .1 .0)))?
-            .0;
-        let (at, _, msg) = self.pending.remove(i);
+        self.pending.last().filter(|p| p.0 <= t)?;
+        let (at, _, msg) = self.pending.pop()?;
         Some((at, msg))
+    }
+
+    /// Adds a timer in its place: after every timer due later, or at the same time and set
+    /// later.
+    fn insert(&mut self, at: f64, id: TimerId, msg: M) {
+        let later = |p: &(f64, TimerId, M)| p.0.total_cmp(&at).then(p.1 .0.cmp(&id.0)).is_gt();
+        let i = self.pending.partition_point(later);
+        self.pending.insert(i, (at, id, msg));
     }
 }
 
@@ -170,7 +175,7 @@ impl<M> Cx<'_, M> {
     pub fn after(&mut self, secs: f64, msg: M) -> TimerId {
         let id = TimerId(self.timers.next);
         self.timers.next += 1;
-        self.timers.pending.push((self.t + secs, id, msg));
+        self.timers.insert(self.t + secs, id, msg);
         id
     }
 
@@ -574,6 +579,24 @@ mod tests {
         d.fire_timers(3.0);
         assert_eq!(d.app.0, vec![(1, 1.5), (2, 2.5)]);
         assert!(d.done(3.0));
+    }
+
+    #[test]
+    fn timers_set_out_of_order_fire_by_time_then_by_the_order_they_were_set() {
+        let mut timers: Timers<u32> = Timers::default();
+        for (n, at) in [(1, 3.0), (2, 1.0), (3, 3.0), (4, 2.0), (5, 1.0), (6, f64::NAN)] {
+            let id = TimerId(timers.next);
+            timers.next += 1;
+            timers.insert(at, id, n);
+        }
+        assert_eq!(timers.next_at(), Some(1.0));
+        assert_eq!(timers.pop_due(0.5), None);
+        let mut fired = Vec::new();
+        while let Some((at, n)) = timers.pop_due(10.0) {
+            fired.push((n, at));
+        }
+        assert_eq!(fired, vec![(2, 1.0), (5, 1.0), (4, 2.0), (1, 3.0), (3, 3.0)]);
+        assert!(timers.next_at().is_some_and(f64::is_nan), "a timer at no time never fires");
     }
 
     /// A toast body that holds its dismiss timer while hovered and draws nothing different.
