@@ -277,9 +277,11 @@ impl<A: App> Live<A> {
         let slot = pace_slot(self.last_frame, self.driver().app.frame_pace()).filter(|&s| s > now && !self.host_asked);
         let d = self.driver();
         // A capped-rate animation is not due at every event (each present is one), only at
-        // its own wake time.
-        let due = d.scene.next_wake(now).is_some_and(|w| w <= now) || paced.is_some_and(|w| w <= now);
-        if d.dirty || d.stale() || due {
+        // its own wake time. The scene's wake time is asked last: it visits every node, and a
+        // message under a frame pace leaves the view stale anyway.
+        let due =
+            d.dirty || d.stale() || paced.is_some_and(|w| w <= now) || d.scene.next_wake(now).is_some_and(|w| w <= now);
+        if due {
             match slot {
                 Some(s) => paced = Some(s),
                 None => host.request_frame(id),
