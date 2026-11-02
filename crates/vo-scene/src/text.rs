@@ -1536,7 +1536,8 @@ mod tests {
         let t = shaped();
         let fonts = [(0..5, 0)];
         let toward = [(0..5, 0, 0.5)];
-        let cases: [(&str, TextStyle, Option<f32>, &[FontRange], &[TowardRange], bool); 6] = [
+        type Case<'a> = (&'a str, TextStyle, Option<f32>, &'a [FontRange], &'a [TowardRange], bool);
+        let cases: [Case; 6] = [
             ("Hello there", STYLE, Some(60.0), &[], &[], false),
             ("Hello there", STYLE, Some(61.0), &[], &[], false),
             ("Hello there", STYLE.tracking(1.0), None, &[], &[], false),
