@@ -9,5 +9,5 @@ description = "Overlay core: time model (springs, tracks, seeded hash, event log
 [dependencies]
 similar = "3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 unicode-segmentation = "1"

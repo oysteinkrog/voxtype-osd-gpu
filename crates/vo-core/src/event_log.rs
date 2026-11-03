@@ -297,6 +297,21 @@ mod tests {
     }
 
     #[test]
+    fn times_read_back_bit_for_bit() {
+        // Sums of key steps, as scripted typing makes them. Plain serde_json parsing can be off
+        // in the last bit; a replay needs the exact time.
+        let mut log = EventLog::new(0);
+        let mut t = 0.0;
+        for _ in 0..40 {
+            t += 0.03;
+            log.push(t, Ev::Stop).unwrap();
+        }
+        let back: EventLog<Ev> = EventLog::from_json(&log.to_json()).unwrap();
+        let bits = |l: &EventLog<Ev>| l.events().iter().map(|e| e.t.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&back), bits(&log));
+    }
+
+    #[test]
     fn rejects_bad_order_and_newer_versions() {
         let mut log = sample();
         assert!(matches!(log.push(1.0, Ev::Stop), Err(EventLogError::BadTime { .. })));
