@@ -54,6 +54,8 @@ mod imp {
         active: Arc<AtomicBool>,
         /// Whether the tree went out since the last activation.
         sent: bool,
+        /// What the adapter was last told about keyboard focus.
+        focused: bool,
         announcer: Announcer,
         last: Option<Accessible>,
     }
@@ -63,7 +65,16 @@ mod imp {
             let active = Arc::new(AtomicBool::new(false));
             let adapter =
                 accesskit_unix::Adapter::new(Activate(active.clone(), waker), NoActions, Deactivate(active.clone()));
-            Live { adapter, active, sent: false, announcer: Announcer::default(), last: None }
+            Live { adapter, active, sent: false, focused: false, announcer: Announcer::default(), last: None }
+        }
+
+        /// The focused node is focused for a screen reader only while the overlay has
+        /// keyboard focus.
+        pub(super) fn focus(&mut self, focused: bool) {
+            if focused != self.focused {
+                self.focused = focused;
+                self.adapter.update_window_focus_state(focused);
+            }
         }
 
         pub(super) fn active(&self) -> bool {
@@ -99,26 +110,27 @@ pub(crate) struct A11y {
 }
 
 impl A11y {
-    /// After a change on the overlay at `t`: `describe` asks the app (`App::accessible`).
+    /// After a change on the overlay at `t`, with keyboard focus (`focused`, its focus proxy)
+    /// or not: `describe` asks the app (`App::accessible`).
     pub(crate) fn follow(
         &mut self,
         t: f64,
+        focused: bool,
         waker: impl FnOnce() -> Waker,
         describe: impl FnOnce() -> Option<Accessible>,
     ) {
-        if !cfg!(feature = "a11y") || std::env::var("VO_A11Y").is_ok_and(|v| v.trim() == "0") {
-            return;
-        }
         #[cfg(feature = "a11y")]
         {
             if !self.probed {
                 self.probed = true;
-                if describe().is_some() {
+                let off = std::env::var("VO_A11Y").is_ok_and(|v| v.trim() == "0");
+                if !off && describe().is_some() {
                     self.live = Some(imp::Live::start(waker()));
                 }
                 return;
             }
             if let Some(live) = self.live.as_mut() {
+                live.focus(focused);
                 if !live.active() {
                     live.idle();
                 } else if let Some(a) = describe() {
@@ -127,6 +139,6 @@ impl A11y {
             }
         }
         #[cfg(not(feature = "a11y"))]
-        let _ = (t, waker, describe, self.probed);
+        let _ = (t, focused, waker, describe, self.probed);
     }
 }

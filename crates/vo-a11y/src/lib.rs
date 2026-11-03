@@ -55,7 +55,8 @@ pub fn tree(a: &Accessible, text: &str) -> TreeUpdate {
     let mut window = Node::new(Role::Window);
     window.set_label(a.name.clone());
     let mut label = Node::new(Role::Label);
-    label.set_label(text.to_string());
+    // A label's name is its value (AccessKit reads static text from it).
+    label.set_value(text.to_string());
     label.set_live(Live::Polite);
     let mut children = vec![TEXT];
     let mut nodes = Vec::new();
@@ -191,7 +192,7 @@ mod tests {
         assert_eq!((w.role(), w.label()), (Role::Window, Some("Dictation")));
         assert_eq!(w.children(), &[TEXT]);
         let l = node(&u, TEXT);
-        assert_eq!((l.role(), l.label(), l.live()), (Role::Label, Some("plum pear"), Some(Live::Polite)));
+        assert_eq!((l.role(), l.value(), l.live()), (Role::Label, Some("plum pear"), Some(Live::Polite)));
         assert_eq!(u.nodes.len(), 2);
     }
 

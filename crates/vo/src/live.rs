@@ -278,7 +278,7 @@ impl<A: App> Live<A> {
         self.follow_focus(host);
         let t = host.now();
         let app = &self.driver.as_ref().expect("started").app;
-        self.a11y.follow(t, || host.waker(), || app.accessible());
+        self.a11y.follow(t, self.proxy.is_some(), || host.waker(), || app.accessible());
         self.follow_main_surface(host);
         let now = host.now();
         let id = self.surface;
