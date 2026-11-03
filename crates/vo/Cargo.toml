@@ -16,6 +16,9 @@ export = []
 preview = ["record", "dep:toml", "dep:png", "dep:bytemuck"]
 # Record an app's messages to a file and replay them as a scenario (`vo::record`).
 record = ["dep:serde", "dep:serde_json"]
+# Screen readers through AT-SPI (plan F8): `App::accessible` goes to an AccessKit adapter that
+# stays inactive, at no cost, while no assistive technology runs.
+a11y = ["wayland", "dep:accesskit_unix"]
 
 [dependencies]
 vo-core = { path = "../vo-core" }
@@ -23,6 +26,8 @@ vo-scene = { path = "../vo-scene" }
 vo-render = { path = "../vo-render", features = ["png", "cpu"] }
 vo-host = { path = "../vo-host" }
 vo-host-wayland = { path = "../vo-host-wayland", optional = true }
+vo-a11y = { path = "../vo-a11y" }
+accesskit_unix = { version = "0.22.1", optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 pollster = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }

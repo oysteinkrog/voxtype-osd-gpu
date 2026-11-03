@@ -262,6 +262,8 @@ struct Live<A: App> {
     /// host was last told with the caret box: re-sent when either changes.
     ime: Option<TextInputState>,
     ime_sent: Option<(SurfaceId, Option<TextInputState>, Option<vo_scene::geom::Rect>)>,
+    /// Screen reader access (`App::accessible`, plan F8).
+    a11y: crate::a11y::A11y,
     /// The cursor last asked of the host for the main surface (`Element::cursor`).
     cursor: CursorShape,
 }
@@ -274,6 +276,9 @@ impl<A: App> Live<A> {
     /// After any change: ask for a frame if needed, arm the next timer, exit when done.
     fn after_change(&mut self, host: &mut dyn HostCtl) {
         self.follow_focus(host);
+        let t = host.now();
+        let app = &self.driver.as_ref().expect("started").app;
+        self.a11y.follow(t, || host.waker(), || app.accessible());
         self.follow_main_surface(host);
         let now = host.now();
         let id = self.surface;
@@ -1039,6 +1044,7 @@ impl<A: App> Live<A> {
             proxy: None,
             ime: None,
             ime_sent: None,
+            a11y: Default::default(),
             cursor: CursorShape::Default,
         }
     }

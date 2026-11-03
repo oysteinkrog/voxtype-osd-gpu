@@ -269,6 +269,24 @@ sends back text in batches.
 - `examples/fake_ime.rs` is a test input method that KWin starts itself
   (`kwin_wayland --inputmethod`), for nested tests.
 
+## Screen readers
+
+Screen readers (plan stage F8) see an app through AccessKit on AT-SPI, with `vo`'s `a11y`
+feature.
+
+- The app describes itself with `App::accessible`: a name, the text it shows, whether that
+  text is final, and the field being edited with its selection (`vo_a11y::Accessible`).
+- `vo_a11y::tree` makes the full tree: a `Window` named after the app, a `Label` with the
+  shown text as a polite live region, and while editing a focused `MultilineTextInput` with one
+  `TextRun` per hard line, character lengths by grapheme cluster, and the caret and selection.
+- `vo_a11y::Announcer` keeps a screen reader from hearing every revision: live text at most
+  every 2 s, a final text at once and once.
+- The live overlay asks the app once at the start. When it describes itself, an
+  accesskit_unix adapter starts and watches the session bus. While no assistive technology runs
+  the adapter stays inactive and the app is not asked again, so it costs nothing. An activation
+  wakes the loop and the next change sends the tree. `VO_A11Y=0` turns it off.
+- Actions from the screen reader (focus, set selection) are not handled yet.
+
 ## The three cases the plan needs
 
 - **Dictation popup:** `InputMode::None`, `Keyboard::None`, no interactive nodes. The region is empty
@@ -284,9 +302,7 @@ sends back text in batches.
 
 ## Out of scope
 
-Screen readers,
-touch and gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
-path, so accesskit can be added later as the plan says.
+Touch and gestures, scroll, and drag and drop between apps.
 
 ## Exact additions
 

@@ -15,6 +15,8 @@
 //! Every message is applied at its own timestamp from the host clock, and the scene samples
 //! each frame at the time it will reach the screen.
 
+#[cfg(feature = "wayland")]
+mod a11y;
 mod app;
 mod diag;
 pub mod envelope;
@@ -44,6 +46,7 @@ pub use surfaces::SurfaceView;
 pub use vo_host::{
     Edges, FocusProxySpec, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind,
 };
+pub use vo_a11y as a11y_tree;
 pub use vo_scene as scene;
 pub use vo_scene::font::FontRegistry;
 pub use vo_scene::text::{ShapedLayout, TextLayout};

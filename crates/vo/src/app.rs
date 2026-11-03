@@ -98,6 +98,13 @@ pub trait App {
         let _ = (text, cx);
     }
 
+    /// What a screen reader sees of the app: its name, the text it shows and the field being
+    /// edited (plan F8, `vo_a11y`). `None` (the default) exposes nothing. Live, with the `a11y`
+    /// feature, it is asked once at the start and then only while a screen reader runs.
+    fn accessible(&self) -> Option<vo_a11y::Accessible> {
+        None
+    }
+
     /// A batch from the input method, while it is on ([`Cx::text_input`]). Apply its deletes
     /// and commit to the text (`TextInputEvent::actions`) and show its preedit at the caret
     /// without putting it in the text (`vo_core::text_input::Composing`).
