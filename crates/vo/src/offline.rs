@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use vo_core::event_log::{EventLog, EventLogError, InputRecord};
 use vo_core::time::FrameTime;
 use vo_host::{
     KeyEvent, KeyState, LogicalKey, Mods, NamedKey, Placement, Point, PointerEvent, PointerKind, RepeatInfo, Size,
@@ -104,6 +105,69 @@ impl<M> Scenario<M> {
         let up = self.key(t + KEY_STEP, key, None, mods);
         self.push(up + KEY_STEP, Input::Modifiers(Mods::NONE));
         up + KEY_STEP
+    }
+}
+
+impl<M: Clone> Scenario<M> {
+    /// The scenario as an event log: messages go in `events` and keyboard input in `input`
+    /// records, each at its time. Pointer inputs are left out: the log has no pointer kind
+    /// yet.
+    pub fn to_log(&self, seed: u32) -> Result<EventLog<M>, EventLogError> {
+        let mut log = EventLog::new(seed);
+        for (t, input) in &self.inputs {
+            let t = *t;
+            match input {
+                Input::Msg(m) => log.push(t, m.clone())?,
+                Input::Pointer { .. } => {}
+                Input::Key(ev) => log.push_input(
+                    t,
+                    InputRecord::Key {
+                        state: ev.state,
+                        key: ev.key,
+                        code: ev.code,
+                        text: ev.text.clone(),
+                        mods: ev.mods,
+                    },
+                )?,
+                Input::KeyboardFocus { gained, requested } => {
+                    log.push_input(t, InputRecord::KeyboardFocus { gained: *gained, requested: *requested })?
+                }
+                Input::Modifiers(mods) => log.push_input(t, InputRecord::Modifiers { mods: *mods })?,
+                Input::RepeatInfo(info) => log.push_input(t, InputRecord::RepeatInfo { info: *info })?,
+            }
+        }
+        Ok(log)
+    }
+
+    /// A scenario that replays `log`: its events as messages and its input records as keys,
+    /// focus, modifiers and repeat info, on surface 1. A keymap record changes nothing
+    /// offline, because each key already carries the text the keymap gave it.
+    pub fn from_log(size: Size, scale: f32, duration: f64, log: &EventLog<M>) -> Scenario<M> {
+        let mut s = Scenario { size, scale, duration, inputs: Vec::new() };
+        for e in log.events() {
+            s.push(e.t, Input::Msg(e.event.clone()));
+        }
+        for e in log.input() {
+            let input = match &e.event {
+                InputRecord::Key { state, key, code, text, mods } => Input::Key(KeyEvent {
+                    surface: 1,
+                    t: e.t,
+                    state: *state,
+                    key: *key,
+                    code: *code,
+                    text: text.clone(),
+                    mods: *mods,
+                }),
+                InputRecord::KeyboardFocus { gained, requested } => {
+                    Input::KeyboardFocus { gained: *gained, requested: *requested }
+                }
+                InputRecord::Modifiers { mods } => Input::Modifiers(*mods),
+                InputRecord::RepeatInfo { info } => Input::RepeatInfo(*info),
+                InputRecord::Keymap { .. } => continue,
+            };
+            s.push(e.t, input);
+        }
+        s
     }
 }
 
@@ -610,6 +674,74 @@ mod tests {
         let d = run_keys(&s);
         assert_eq!(d.app.repeats, 3);
         assert_eq!(d.app.buf.text(), "");
+    }
+
+    /// Records every key, repeat and focus change it gets, with its time.
+    struct Recorder {
+        seen: Vec<String>,
+    }
+
+    impl App for Recorder {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> Element<()> {
+            Element::panel("root").size(10.0, 10.0)
+        }
+        fn key(&mut self, ev: &KeyEvent, _: &mut Cx<()>) -> bool {
+            self.seen.push(format!("{:.6} {:?} {:?} {} {:?} {:?}", ev.t, ev.state, ev.key, ev.code, ev.text, ev.mods));
+            true
+        }
+        fn keyboard_focus(&mut self, gained: bool, requested: bool, _: &mut Cx<()>) {
+            self.seen.push(format!("focus {gained} {requested}"));
+        }
+    }
+
+    /// Steps a scenario frame by frame at `hz`, as a live run would, and returns what the app saw.
+    fn replay_at(scenario: &Scenario<()>, hz: f64) -> Vec<String> {
+        let mut driver = start(Recorder { seen: Vec::new() }, scenario, &mut Options::default());
+        let mut next = 0;
+        for n in 0.. {
+            let ft = FrameTime::at_rate(n, hz);
+            if ft.t > scenario.duration {
+                break;
+            }
+            advance(&mut driver, &scenario.inputs, &mut next, ft.t);
+        }
+        driver.app.seen
+    }
+
+    #[test]
+    fn a_logged_edit_session_replays_the_same_at_60_and_144_hz() {
+        let mut s = Scenario { size: Size::new(300.0, 80.0), scale: 1.0, duration: 6.0, inputs: Vec::new() };
+        s.push(0.0, Input::RepeatInfo(RepeatInfo { rate_hz: 30.0, delay_s: 0.4 }));
+        s.push(0.1, Input::KeyboardFocus { gained: true, requested: true });
+        let t = s.type_text(0.2, "Kort tekst\nmed æøå");
+        let t = s.chord(t + 0.3, Mods::CTRL, LogicalKey::Named(NamedKey::Left));
+        let t = s.chord(t + 0.3, Mods::CTRL, LogicalKey::Char('z'));
+        // A held Backspace, so the replay has to make repeats on the host clock.
+        let bs = KeyEvent {
+            surface: 1,
+            t: 0.0,
+            state: KeyState::Down,
+            key: LogicalKey::Named(NamedKey::Backspace),
+            code: 14,
+            text: None,
+            mods: Mods::NONE,
+        };
+        s.push(t + 0.2, Input::Key(bs.clone()));
+        s.push(t + 1.013, Input::Key(KeyEvent { state: KeyState::Up, ..bs }));
+        s.push(t + 1.5, Input::KeyboardFocus { gained: false, requested: false });
+
+        let log = s.to_log(7).unwrap();
+        assert_eq!(log.version(), 2);
+        let back = EventLog::<()>::from_json(&log.to_json()).unwrap();
+        assert_eq!(back, log);
+        let replay = Scenario::from_log(s.size, s.scale, s.duration, &back);
+
+        let live = replay_at(&s, 60.0);
+        assert!(live.iter().any(|l| l.contains("Repeat")), "the held key repeats: {live:?}");
+        assert_eq!(replay_at(&replay, 60.0), live);
+        assert_eq!(replay_at(&replay, 144.0), live);
     }
 
     /// An app that fades out when told to exit: its fade settles.

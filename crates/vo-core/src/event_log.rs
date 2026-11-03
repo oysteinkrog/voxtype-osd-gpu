@@ -5,20 +5,35 @@
 //! this module only adds the envelope. Stored as JSON with a `version` field, so later
 //! versions can read old logs and refuse ones they do not understand.
 //!
-//! Keyboard input (keys, focus, modifiers, keymap and repeat info) goes in its own `input`
-//! list of [`InputRecord`]s beside `events`, still version 1: a version 1 reader ignores
-//! fields it does not know, so it skips them, and a log with no input writes exactly as
-//! before. Repeat info always comes before the first key, so a replay repeats keys as the
-//! live run did.
+//! Version 2 adds keyboard input (keys, focus, modifiers, keymap and repeat info) as
+//! first-class [`InputRecord`]s in an `input` list beside `events`. The rules:
+//!
+//! - A log with no input writes version 1, byte for byte as before, so builds that read only
+//!   version 1 still open it. A log with input writes version 2.
+//! - The `input` list is additive: a reader that knows only `version`, `seed` and `events`
+//!   ignores it. A build with the version 1 gate refuses a version 2 file and says to update,
+//!   which is right, because it could not replay the keys.
+//! - This reader reads every version 1 file, including version 1 files that already carry an
+//!   `input` list, and skips input records whose `kind` it does not know, so a later kind
+//!   does not break it.
+//! - Times are seconds on the host clock from the log's start, the clock that stamps keys
+//!   and drives key repeat. Repeats are not logged: the replay makes them again from the
+//!   repeat info, which always comes before the first key.
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeOwned, Error as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::key::{KeyState, LogicalKey, Mods, RepeatInfo};
 
-/// The format version this build writes. Raise it on any change that an older reader would
-/// misread, and keep reading the old versions.
-pub const EVENT_LOG_VERSION: u32 = 1;
+/// The newest format version this build reads and writes. Raise it on any change that an
+/// older reader would misread, and keep reading the old versions.
+pub const EVENT_LOG_VERSION: u32 = 2;
+
+/// The version a log with no input records writes: the version 1 layout, unchanged.
+const PLAIN_VERSION: u32 = 1;
+
+/// The `kind` names of [`InputRecord`]. An input record of any other kind is skipped on read.
+const INPUT_KINDS: [&str; 5] = ["key", "keyboard_focus", "modifiers", "keymap", "repeat_info"];
 
 /// One event at time `t` (seconds from the log's start).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -27,14 +42,12 @@ pub struct Event<E> {
     pub event: E,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EventLog<E> {
-    pub version: u32,
     /// Seed for every `hash::rand` call the replay makes.
     pub seed: u32,
     events: Vec<Event<E>>,
     /// Keyboard input, in time order (`push_input`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     input: Vec<Event<InputRecord>>,
 }
 
@@ -42,8 +55,9 @@ pub struct EventLog<E> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputRecord {
-    /// A key as the host sent it. Repeats are not logged: the replay makes them again from
-    /// the repeat info.
+    /// A key as the host sent it: `Down` or `Up`, its keysym as the layout reads it, the raw
+    /// key code, the text it types and the modifiers in effect. Repeats are not logged: the
+    /// replay makes them again from the repeat info.
     Key {
         state: KeyState,
         key: LogicalKey,
@@ -52,6 +66,7 @@ pub enum InputRecord {
         text: Option<String>,
         mods: Mods,
     },
+    /// Keyboard focus came (`gained`) or went; `requested` when the app asked for it.
     KeyboardFocus {
         gained: bool,
         requested: bool,
@@ -105,7 +120,16 @@ impl std::error::Error for EventLogError {}
 
 impl<E> EventLog<E> {
     pub fn new(seed: u32) -> EventLog<E> {
-        EventLog { version: EVENT_LOG_VERSION, seed, events: Vec::new(), input: Vec::new() }
+        EventLog { seed, events: Vec::new(), input: Vec::new() }
+    }
+
+    /// The version this log writes: 2 when it has input records, else 1.
+    pub fn version(&self) -> u32 {
+        if self.input.is_empty() {
+            PLAIN_VERSION
+        } else {
+            EVENT_LOG_VERSION
+        }
     }
 
     /// Appends a keyboard input record. Times must be finite and never go backwards, and a
@@ -149,6 +173,51 @@ impl<E> EventLog<E> {
     }
 }
 
+impl<E: Serialize> Serialize for EventLog<E> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        /// The layout on disk. Field order is the version 1 order, so a log with no input
+        /// writes exactly as version 1 did.
+        #[derive(Serialize)]
+        struct Wire<'a, E> {
+            version: u32,
+            seed: u32,
+            events: &'a [Event<E>],
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            input: &'a [Event<InputRecord>],
+        }
+        Wire { version: self.version(), seed: self.seed, events: &self.events, input: &self.input }.serialize(s)
+    }
+}
+
+impl<'de, E: Deserialize<'de>> Deserialize<'de> for EventLog<E> {
+    /// Reads the layout only: [`EventLog::from_json`] also checks the times and the
+    /// repeat-info rule.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<EventLog<E>, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire<E> {
+            version: u32,
+            seed: u32,
+            events: Vec<Event<E>>,
+            #[serde(default)]
+            input: Vec<Event<serde_json::Value>>,
+        }
+        let wire = Wire::<E>::deserialize(d)?;
+        if wire.version > EVENT_LOG_VERSION {
+            return Err(D::Error::custom(EventLogError::UnsupportedVersion(wire.version)));
+        }
+        let mut input = Vec::with_capacity(wire.input.len());
+        for e in wire.input {
+            let known = e.event.get("kind").and_then(|k| k.as_str()).is_some_and(|k| INPUT_KINDS.contains(&k));
+            if !known {
+                continue;
+            }
+            let record = serde_json::from_value(e.event).map_err(D::Error::custom)?;
+            input.push(Event { t: e.t, event: record });
+        }
+        Ok(EventLog { seed: wire.seed, events: wire.events, input })
+    }
+}
+
 impl<E: Serialize> EventLog<E> {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("an event log always serializes")
@@ -156,7 +225,7 @@ impl<E: Serialize> EventLog<E> {
 }
 
 impl<E: DeserializeOwned> EventLog<E> {
-    /// Reads a log, checking the version and the time order.
+    /// Reads a log of version 1 or 2, checking the version and the time order.
     pub fn from_json(text: &str) -> Result<EventLog<E>, EventLogError> {
         #[derive(Deserialize)]
         struct Header {
@@ -232,9 +301,11 @@ mod tests {
         let mut log = sample();
         assert!(matches!(log.push(1.0, Ev::Stop), Err(EventLogError::BadTime { .. })));
         assert!(matches!(log.push(f64::NAN, Ev::Stop), Err(EventLogError::BadTime { .. })));
-        let newer = log.to_json().replace("\"version\": 1", "\"version\": 2");
+        let newer = log.to_json().replace("\"version\": 1", "\"version\": 3");
         let err = EventLog::<Ev>::from_json(&newer).unwrap_err();
-        assert!(matches!(err, EventLogError::UnsupportedVersion(2)), "{err}");
+        assert!(matches!(err, EventLogError::UnsupportedVersion(3)), "{err}");
+        // Through plain serde too, so an embedded log cannot slip past the version check.
+        assert!(serde_json::from_str::<EventLog<Ev>>(&newer).is_err());
         let shuffled = r#"{"version":1,"seed":0,"events":[{"t":1.0,"event":"Start"},{"t":0.5,"event":"Stop"}]}"#;
         assert!(matches!(EventLog::<Ev>::from_json(shuffled), Err(EventLogError::BadTime { .. })));
     }
@@ -287,12 +358,18 @@ mod tests {
         let back: EventLog<Ev> = EventLog::from_json(&log.to_json()).unwrap();
         assert_eq!(back, log);
         assert_eq!(back.input().len(), 7);
+        assert_eq!(back.version(), 2);
+        assert!(log.to_json().contains("\"version\": 2"));
+        // Every record kind is in the log, and every kind's name is one the reader keeps.
+        for kind in INPUT_KINDS {
+            assert!(log.to_json().contains(&format!("\"kind\": \"{kind}\"")), "{kind}");
+        }
         // A log without input writes exactly as before: no `input` field.
         assert!(!sample().to_json().contains("input"));
     }
 
     #[test]
-    fn version_1_readers_skip_key_records() {
+    fn readers_that_know_only_version_1_fields_skip_key_records() {
         /// The reader as it was before key records.
         #[derive(Deserialize)]
         struct V1<E> {
@@ -302,7 +379,7 @@ mod tests {
         }
         let log = with_keys();
         let old: V1<Ev> = serde_json::from_str(&log.to_json()).unwrap();
-        assert_eq!((old.version, old.seed), (1, 42));
+        assert_eq!((old.version, old.seed), (2, 42));
         assert_eq!(old.events, log.events());
     }
 
@@ -317,5 +394,60 @@ mod tests {
         bad.input.push(Event { t: 0.2, event: key(KeyState::Down, 'a') });
         let err = EventLog::<Ev>::from_json(&bad.to_json()).unwrap_err();
         assert!(matches!(err, EventLogError::KeyBeforeRepeatInfo { .. }), "{err}");
+    }
+
+    /// A version 1 log as the version 1 writer wrote it, byte for byte.
+    const V1_FIXTURE: &str = r#"{
+  "version": 1,
+  "seed": 42,
+  "events": [
+    {
+      "t": 0.0,
+      "event": "Start"
+    },
+    {
+      "t": 0.52,
+      "event": {
+        "Preview": {
+          "text": "hello there"
+        }
+      }
+    },
+    {
+      "t": 1.75,
+      "event": "Stop"
+    }
+  ]
+}"#;
+
+    #[test]
+    fn version_1_files_read_unchanged() {
+        let log = EventLog::<Ev>::from_json(V1_FIXTURE).unwrap();
+        assert_eq!(log.seed, 42);
+        assert_eq!(log.events().len(), 3);
+        assert!(log.input().is_empty());
+        assert_eq!(log.version(), 1);
+        // With no input it writes back exactly as version 1 did.
+        assert_eq!(log.to_json(), V1_FIXTURE);
+
+        // A version 1 file from the build that already logged input reads with its input.
+        let v1_input = with_keys().to_json().replace("\"version\": 2", "\"version\": 1");
+        let back = EventLog::<Ev>::from_json(&v1_input).unwrap();
+        assert_eq!(back, with_keys());
+    }
+
+    #[test]
+    fn unknown_input_kinds_are_skipped() {
+        let text = r#"{"version":2,"seed":0,"events":[],"input":[
+            {"t":0.0,"event":{"kind":"repeat_info","info":{"rate_hz":25.0,"delay_s":0.6}}},
+            {"t":0.1,"event":{"kind":"touch_strip","value":3}},
+            {"t":0.2,"event":{"kind":"modifiers","mods":{"shift":true,"ctrl":false,"alt":false,"logo":false,"caps_lock":false,"num_lock":false}}}
+        ]}"#;
+        let log = EventLog::<Ev>::from_json(text).unwrap();
+        assert_eq!(log.input().len(), 2);
+        assert!(matches!(log.input()[1].event, InputRecord::Modifiers { mods } if mods.shift));
+        // A known kind with bad fields is still an error.
+        let bad = text.replace("\"mods\":{", "\"mods_x\":{");
+        assert!(matches!(EventLog::<Ev>::from_json(&bad), Err(EventLogError::Json(_))));
     }
 }

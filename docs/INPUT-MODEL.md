@@ -147,8 +147,29 @@ taskbar, so the proxy is never seen.
 at version 9 or lower for the keyboard: with `wl_keyboard` version 10 KWin repeats keys itself and
 reports a repeat rate of 0. Key repeat runs in the `Driver`, on the host clock, so offline runs and
 replays repeat the same way. Keys held when focus arrives are not replayed, and focus loss, a key up
-or a modifier change stops the repeat. Key events go into the event log's `input` records, which
-version 1 readers skip.
+or a modifier change stops the repeat. Key events go into the event log's `input` records (format
+below).
+
+### Event log format, version 2
+
+`vo_core::event_log` writes JSON. Version 2 adds keyboard input as first-class records:
+
+- The file has `version`, `seed`, `events` (the app's messages with their `t`) and, in version 2, an
+  `input` list. Each input entry is `{ "t": ..., "event": { "kind": ..., ... } }`.
+- Input kinds: `key` (state `Down` or `Up`, the logical key or keysym, the raw code, the text it
+  types and the modifiers), `keyboard_focus` (gained, requested), `modifiers`, `keymap` (the layout
+  name) and `repeat_info` (rate and delay). Repeats are not logged: the `Driver` makes them again on
+  the host clock, so a replay at 60 Hz and at 144 Hz gives the same keys. Repeat info must come
+  before the first key; the writer and the reader both refuse a key without it.
+- `t` is seconds from the log's start on the host clock, the clock that stamps keys.
+- A log with no input writes version 1, byte for byte as before. A log with input writes version 2.
+- The reader reads version 1 and 2. It skips input records of a kind it does not know, so a later
+  kind does not break it, and refuses versions above 2 with "update the tool".
+- The `input` list is additive. A reader that knows only `version`, `seed` and `events` reads a
+  version 2 file and ignores the keys. A build with the version 1 check refuses a version 2 file,
+  which is right: it could not replay the keys.
+- `vo::offline::Scenario::to_log` and `Scenario::from_log` turn a scripted scenario (for example
+  `type_text` and `chord`) into a log and back. Pointer inputs are not logged yet.
 
 **Routing.** A key goes to the focused node first (`Element::on_key`; the scene focuses the first
 such node, one per scene for now) and reaches `App::key` only when no node has focus.
