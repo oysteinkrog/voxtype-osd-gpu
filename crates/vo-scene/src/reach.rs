@@ -165,8 +165,9 @@ pub fn particle_reach(sim: &crate::emitter::EmitterSim, look: &crate::emitter::E
 
 /// What the reach of one element or node is computed from.
 pub(crate) struct ReachIn<'a> {
-    /// A slot's values: the element's target, or a node's value and target. Empty when unset.
-    pub get: &'a dyn Fn(Slot) -> Vec<f64>,
+    /// Calls the given function with each of a slot's values: the element's target, or a
+    /// node's value and target. Not at all when unset.
+    pub get: &'a dyn Fn(Slot, &mut dyn FnMut(f64)),
     pub kind: &'a Kind,
     pub inside: bool,
     pub hairline: bool,
@@ -178,8 +179,18 @@ pub(crate) struct ReachIn<'a> {
 
 /// How far one element draws outside its own box (children not included).
 pub(crate) fn own_reach(r: &ReachIn) -> Insets {
-    let one = |s: Slot| (r.get)(s).into_iter().map(f64::abs).fold(0.0f64, f64::max) as f32;
-    let set = |s: Slot| !(r.get)(s).is_empty();
+    // `get` calls back with each value instead of returning a list: the margin check walks
+    // every node on each new view, and a list per slot was an allocation per query.
+    let one = |s: Slot| {
+        let mut m = 0.0f64;
+        (r.get)(s, &mut |v| m = m.max(v.abs()));
+        m as f32
+    };
+    let set = |s: Slot| {
+        let mut any = false;
+        (r.get)(s, &mut |_| any = true);
+        any
+    };
     // Effects around the box, and how far motion moves the box.
     let mut effects = Insets::ZERO;
     let mut motion = Insets::ZERO;
@@ -194,14 +205,14 @@ pub(crate) fn own_reach(r: &ReachIn) -> Insets {
     }
     if set(Slot::ShadowColor) {
         let blur = 3.0 * one(Slot::ShadowBlur);
-        for dx in (r.get)(Slot::ShadowX) {
+        (r.get)(Slot::ShadowX, &mut |dx| {
             effects.left = effects.left.max(blur + (-dx as f32).max(0.0));
             effects.right = effects.right.max(blur + (dx as f32).max(0.0));
-        }
-        for dy in (r.get)(Slot::ShadowY) {
+        });
+        (r.get)(Slot::ShadowY, &mut |dy| {
             effects.top = effects.top.max(blur + (-dy as f32).max(0.0));
             effects.bottom = effects.bottom.max(blur + (dy as f32).max(0.0));
-        }
+        });
         uniform = uniform.max(blur);
     }
     if set(Slot::BloomRadius) {
@@ -215,31 +226,23 @@ pub(crate) fn own_reach(r: &ReachIn) -> Insets {
     uniform = uniform.max(one(Slot::StyleChroma)).max(0.5 * one(Slot::RimWidth));
     uniform = uniform.max(kind_reach(r.kind, r.size, r.t));
     // Motion: an offset moves the ink with it; spring overshoot adds about 5% of the move.
-    let offset = |s: Slot| (r.get)(s).into_iter().map(|v| v as f32).collect::<Vec<_>>();
-    let mut moves: Vec<(f32, f32, f32)> = Vec::new();
-    for x in offset(Slot::OffsetX) {
-        moves.push((x, 0.0, 1.0));
-    }
-    for y in offset(Slot::OffsetY) {
-        moves.push((0.0, y, 1.0));
-    }
-    if let Some((enter, exit)) = r.presence {
-        for tr in [enter, exit] {
-            let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
-            moves.push((x, y, tr.scale.unwrap_or(1.0)));
-        }
-    }
-    for s in (r.get)(Slot::Scale) {
-        moves.push((0.0, 0.0, s as f32));
-    }
-    for (x, y, s) in moves {
+    let mut add_move = |x: f32, y: f32, s: f32| {
         let k = 1.05;
         let grow = r.size.map_or(0.0, |z| 0.5 * (s - 1.0).max(0.0) * z.w.max(z.h)) * k;
         motion.left = motion.left.max(grow + (-x * k).max(0.0));
         motion.right = motion.right.max(grow + (x * k).max(0.0));
         motion.top = motion.top.max(grow + (-y * k).max(0.0));
         motion.bottom = motion.bottom.max(grow + (y * k).max(0.0));
+    };
+    (r.get)(Slot::OffsetX, &mut |x| add_move(x as f32, 0.0, 1.0));
+    (r.get)(Slot::OffsetY, &mut |y| add_move(0.0, y as f32, 1.0));
+    if let Some((enter, exit)) = r.presence {
+        for tr in [enter, exit] {
+            let (x, y) = tr.offset.unwrap_or((0.0, 0.0));
+            add_move(x, y, tr.scale.unwrap_or(1.0));
+        }
     }
+    (r.get)(Slot::Scale, &mut |s| add_move(0.0, 0.0, s as f32));
     // What the app declared for drawing the framework cannot see (canvas, GPU elements).
     let declared =
         Insets::new(one(Slot::ReachLeft), one(Slot::ReachTop), one(Slot::ReachRight), one(Slot::ReachBottom));
@@ -271,9 +274,9 @@ impl<M> Element<M> {
     /// motion. Children count as if they sat inside their parent's box. Use it to size a
     /// surface's transparent margin ([`surface_for`]).
     pub fn effect_reach(&self, t: f64) -> Insets {
-        let get = |s: Slot| -> Vec<f64> {
+        let get = |s: Slot, f: &mut dyn FnMut(f64)| {
             let first = s as u8;
-            self.targets.iter().filter(|(k, _)| *k == first).map(|(_, v)| *v).collect()
+            self.targets.iter().filter(|(k, _)| *k == first).for_each(|(_, v)| f(*v));
         };
         let size = fixed_size(&self.style);
         let own = own_reach(&ReachIn {
@@ -413,15 +416,11 @@ impl<M> Scene<M> {
             return;
         }
         let b = self.node_box(id, origin, t);
-        let get = |s: Slot| -> Vec<f64> {
+        let get = |s: Slot, f: &mut dyn FnMut(f64)| {
             let slot = s as u8;
-            if !n.has(slot) {
-                return Vec::new();
-            }
-            let ch = n.chans.iter().find(|(k, _)| *k == slot).map(|(_, c)| c.target());
-            let mut v = vec![n.value(slot, t)];
-            v.extend(ch);
-            v
+            let Ok(i) = n.chans.binary_search_by_key(&slot, |(k, _)| *k) else { return };
+            f(n.value(slot, t));
+            f(n.chans[i].1.target());
         };
         let reach = own_reach(&ReachIn {
             get: &get,
