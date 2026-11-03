@@ -250,6 +250,47 @@ pub(crate) fn own_reach(r: &ReachIn) -> Insets {
     motion.plus(effects.max(Insets::uniform(uniform))).max(declared).non_negative()
 }
 
+/// Every slot [`own_reach`] reads. A node with none of them, no presence and a kind that
+/// draws inside its box reaches nowhere, and the margin check skips its queries.
+const REACH_SLOTS: [Slot; 22] = [
+    Slot::Stroke,
+    Slot::StrokeWidth,
+    Slot::GlowColor,
+    Slot::GlowRadius,
+    Slot::GlowStrength,
+    Slot::ShadowColor,
+    Slot::ShadowX,
+    Slot::ShadowY,
+    Slot::ShadowBlur,
+    Slot::BloomRadius,
+    Slot::TextBlur,
+    Slot::TextChroma,
+    Slot::TextHaloRadius,
+    Slot::StyleChroma,
+    Slot::RimWidth,
+    Slot::OffsetX,
+    Slot::OffsetY,
+    Slot::Scale,
+    Slot::ReachLeft,
+    Slot::ReachTop,
+    Slot::ReachRight,
+    Slot::ReachBottom,
+];
+
+/// Whether `kind` may draw outside its box: the kinds [`kind_reach`] measures.
+fn kind_may_reach(kind: &Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Emitter(_)
+            | Kind::StrokePath(_)
+            | Kind::Morph(_)
+            | Kind::WavyLine(_)
+            | Kind::Repeat(_)
+            | Kind::Frame(_)
+            | Kind::Spectrum(_)
+    )
+}
+
 /// Reach that comes from what the element draws, around its box.
 fn kind_reach(kind: &Kind, size: Option<Size>, t: f64) -> f32 {
     let half = size.map_or(0.0, |s| 0.5 * s.w.min(s.h));
@@ -422,7 +463,7 @@ impl<M> Scene<M> {
             f(n.value(slot, t));
             f(n.chans[i].1.target());
         };
-        let reach = own_reach(&ReachIn {
+        let input = ReachIn {
             get: &get,
             kind: &n.kind,
             inside: n.inside,
@@ -430,7 +471,17 @@ impl<M> Scene<M> {
             presence: n.presence,
             size: Some(Size::new(b.w, b.h)),
             t,
-        });
+        };
+        // Most nodes (labels, panels, rows) have nothing that reaches out: one pass over
+        // their few channels instead of a search per slot own_reach asks about.
+        let plain = n.presence.is_none()
+            && !kind_may_reach(&n.kind)
+            && !n.chans.iter().any(|(k, _)| REACH_SLOTS.iter().any(|s| *s as u8 == *k));
+        let reach = if plain { Insets::ZERO } else { own_reach(&input) };
+        debug_assert!(
+            !plain || own_reach(&input) == Insets::ZERO,
+            "a slot own_reach reads is missing from REACH_SLOTS"
+        );
         let ink = reach.expand(b);
         *acc = Some(match *acc {
             None => ink,
