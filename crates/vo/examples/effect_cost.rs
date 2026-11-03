@@ -80,7 +80,19 @@ const CASES: &[&str] = &[
     "panes-20",
     "image-icon",
     "paper-panel",
+    "liquid-revise",
+    "particle-shapes",
+    "ribbon-3d",
+    "shadows-3d",
+    "hero-scene",
+    "hero-env",
+    "hero-desktop",
+    "orbit-split",
 ];
+
+/// The cases whose effect is a 3D item or a particle swarm drawn with the card (`eg_view`).
+const EG_ITEMS: &[&str] =
+    &["particle-shapes", "ribbon-3d", "shadows-3d", "hero-scene", "hero-env", "hero-desktop", "orbit-split"];
 
 /// The app material of the "material backdrop" case (EG-02): the card's panel reads its
 /// layer's backdrop through four taps 3 px apart, a light frost, under its own fill.
@@ -156,6 +168,8 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
                 .color(Color::hex(0xc8d3e0, 1.0))
         } else if case == "flex-breathing" {
             flex_breathing(t, k)
+        } else if case == "liquid-revise" {
+            liquid_words(t, k)
         } else {
             text("l2", "so the window shows the live words", 17.0, 0xc8d3e0)
         })
@@ -233,6 +247,9 @@ fn view(size: Size, i: usize, t: f64) -> Element<Msg> {
             .layout(|s| s.position = vo::scene::taffy::style::Position::Absolute);
         let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
         return root.child(Element::layer("fx").child(card)).child(strokes);
+    }
+    if EG_ITEMS.contains(&case) {
+        return eg_view(case, size, k, card);
     }
     let layer = Element::layer("fx").child(card);
     let layer = match case {
@@ -603,6 +620,243 @@ fn flex_breathing(t: f64, k: f32) -> Element<Msg> {
         .word_breath(breaths)
 }
 
+/// The "liquid-revise" case's line (EG-32): the last two words are revised back and forth
+/// every 0.6 s, each change flowing as liquid from the old letters to the new.
+fn liquid_words(t: f64, k: f32) -> Element<Msg> {
+    use vo_core::words::Word;
+    let text = if ((t / 0.6) as u64).is_multiple_of(2) {
+        ["so", "the", "scream", "teem"]
+    } else {
+        ["so", "the", "cream", "team"]
+    };
+    let words: Vec<Word> = text.iter().enumerate().map(|(i, s)| Word { id: i as u32 + 1, text: (*s).into() }).collect();
+    Element::live_text("l2", &words)
+        .text_style(TextStyle::new(0, 17.0 * k, 17.0 * 1.25 * k))
+        .color(Color::hex(0xc8d3e0, 1.0))
+        .word_revise(vo::scene::flow::Revise::Liquid)
+}
+
+/// A case of `EG_ITEMS`: the card with a 3D item behind it (ribbon, shadows), in front of it
+/// (the heroes in a layer of their own, the swarm) or split around its text (orbit).
+fn eg_view(case: &str, size: Size, k: f32, card: Element<Msg>) -> Element<Msg> {
+    use vo::scene::taffy::style::{LengthPercentageAuto, Position};
+    let full = |e: Element<Msg>| e.size(size.w, size.h).layout(|s| s.position = Position::Absolute);
+    let root = Element::column("root").size(size.w, size.h).pad_xy(60.0 * k, 40.0 * k);
+    let card = Element::layer("fx").child(card);
+    match case {
+        "ribbon-3d" | "shadows-3d" => root.child(full(Element::gpu("item", eg_source(case)))).child(card),
+        "orbit-split" => root.child(card).child(full(Element::gpu_split("item", eg_source(case)))),
+        "particle-shapes" => root.child(card).child(full(Element::emitter("swarm", swarm()))),
+        _ => {
+            // A hero 0.55 of the height across, over the card's right half; the chrome with
+            // its environment reads the card through its layer's backdrop (EG-17).
+            let d = 0.55 * size.h;
+            let hero = Element::gpu("item", eg_source(case)).size(d, d).layout(move |s| {
+                s.position = Position::Absolute;
+                s.inset.left = LengthPercentageAuto::length(0.62 * size.w - 60.0 * k);
+                s.inset.top = LengthPercentageAuto::length(0.1 * size.h - 40.0 * k);
+            });
+            let mut layer = full(Element::layer("hero"));
+            if case == "hero-env" {
+                layer = layer.backdrop(BackdropRes::Half, Color::TRANSPARENT);
+            }
+            root.child(card).child(layer.child(hero))
+        }
+    }
+}
+
+/// The GPU source of a 3D case: one for the whole run, since the painters know a source by
+/// its address.
+fn eg_source(case: &str) -> std::sync::Arc<dyn vo::scene::gpu::GpuSource> {
+    use std::sync::{Arc, OnceLock};
+    type Sources = Vec<(&'static str, Arc<dyn vo::scene::gpu::GpuSource>)>;
+    static SOURCES: OnceLock<Sources> = OnceLock::new();
+    let all = SOURCES.get_or_init(|| {
+        let mut level = vo::scene::emitter::LevelTrack::default();
+        for i in 0..600 {
+            let t = i as f64 / 30.0;
+            level.push(t, (t as f32 * 9.0).sin().abs() * (0.5 + 0.5 * (t as f32 * 1.7).sin()));
+        }
+        let ribbon =
+            vo_3d::RibbonItem { ribbon: vo_3d::Ribbon3d::default(), level, look: vo_3d::RibbonLook::default() };
+        vec![
+            ("ribbon-3d", vo_3d::item(ribbon)),
+            ("shadows-3d", vo_3d::item(Shadowed)),
+            ("orbit-split", vo_3d::item(Orbit)),
+            ("hero-scene", vo_3d::hero(Hero::Scene)),
+            ("hero-env", vo_3d::hero(Hero::Env)),
+            ("hero-desktop", vo_3d::hero(Hero::Desktop)),
+        ]
+    });
+    all.iter().find(|(n, _)| *n == case).map(|(_, s)| s.clone()).expect("a 3D case")
+}
+
+/// The "shadows-3d" case (EG-18): a cube and a torus over a floor, casting soft shadows.
+#[derive(Debug)]
+struct Shadowed;
+
+impl vo_3d::Source3d for Shadowed {
+    fn meshes(&self) -> Vec<vo_3d::Mesh> {
+        use vo_3d::{Mesh, Vec3};
+        vec![Mesh::cuboid(Vec3::new(0.6, 0.6, 0.6)), Mesh::torus(0.45, 0.14, 64, 20)]
+    }
+
+    fn frame(&self, t: f64, _: Size) -> vo_3d::Frame3d {
+        use vo_3d::{Camera, Floor, Frame3d, Light, Mat4, Material, MeshDraw, MeshId, Shadows, Vec3};
+        let t = t as f32;
+        let lift = 0.3 + 0.3 * (t * 1.4).sin();
+        Frame3d {
+            camera: Camera::orbit(Vec3::new(0.0, -0.2, 0.0), 0.25, 0.45, 4.2),
+            light: Light { dir: Vec3::new(0.55, -1.0, 0.35), ..Default::default() },
+            meshes: vec![
+                MeshDraw {
+                    mesh: MeshId(0),
+                    model: Mat4::rotate_y(0.5 + 0.4 * t).then(&Mat4::translation(Vec3::new(-0.3, lift, -0.2))),
+                    material: Material { color: Color::hex(0xff7a45, 1.0), ..Default::default() },
+                },
+                MeshDraw {
+                    mesh: MeshId(1),
+                    model: Mat4::rotate_x(0.35 + 0.5 * (t * 0.8).sin())
+                        .then(&Mat4::translation(Vec3::new(0.6, -0.25, 0.1))),
+                    material: Material { color: Color::hex(0x4f8cff, 1.0), ..Default::default() },
+                },
+            ],
+            floor: Some(Floor { y: -0.6, reflect: 0.25, fade: 0.6, ..Default::default() }),
+            shadows: Some(Shadows::default()),
+            ..Default::default()
+        }
+    }
+}
+
+/// The "orbit-split" case (EG-20): a ring with five beads on the stage camera, its far side
+/// behind the card's text and its near side in front.
+#[derive(Debug)]
+struct Orbit;
+
+impl vo_3d::Source3d for Orbit {
+    fn meshes(&self) -> Vec<vo_3d::Mesh> {
+        use vo_3d::{Mesh, Vec3};
+        vec![Mesh::torus(1.0, 0.03, 192, 12), Mesh::cuboid(Vec3::new(1.0, 1.0, 1.0))]
+    }
+
+    fn frame(&self, t: f64, size: Size) -> vo_3d::Frame3d {
+        use std::f32::consts::{FRAC_PI_2, TAU};
+        use vo_3d::{Frame3d, Light, Mat4, Material, MeshDraw, MeshId, OnStage, Vec3};
+        let t = t as f32;
+        let r = size.h / 3.0;
+        let pose = Mat4::rotate_z(0.22).then(&Mat4::rotate_y(0.75 + 0.12 * (0.5 * t).sin()));
+        let mut meshes = vec![MeshDraw {
+            mesh: MeshId(0),
+            model: Mat4::uniform_scale(r).then(&Mat4::rotate_x(FRAC_PI_2)).then(&pose),
+            material: Material { color: Color::hex(0x6fe8ff, 1.0), emissive: 0.6, ..Default::default() },
+        }];
+        for i in 0..5 {
+            let a = 0.8 * t + i as f32 * TAU / 5.0;
+            meshes.push(MeshDraw {
+                mesh: MeshId(1),
+                model: Mat4::uniform_scale(size.h * 0.03)
+                    .then(&Mat4::rotate_x(1.3 * t + i as f32))
+                    .then(&Mat4::translation(Vec3::new(r * a.cos(), r * a.sin(), 0.0)))
+                    .then(&pose),
+                material: Material { color: Color::hex(0xffb35c, 1.0), emissive: 0.5, ..Default::default() },
+            });
+        }
+        Frame3d {
+            meshes,
+            light: Light { dir: Vec3::new(0.3, -0.6, -1.0), ..Default::default() },
+            on_stage: Some(OnStage { overscan: 0.0 }),
+            ..Default::default()
+        }
+    }
+}
+
+/// The hero cases: a jellyfish of several parts with a see-through skin (EG-19), and the
+/// chrome blob reflecting its layer's backdrop (EG-17) or a made-up desktop (EG-21).
+#[derive(Debug)]
+enum Hero {
+    Scene,
+    Env,
+    Desktop,
+}
+
+impl vo_3d::HeroSource for Hero {
+    fn frame(&self, t: f64, _: Size) -> vo_3d::HeroFrame {
+        use vo_3d::{env, Desktop, Env, HeroFrame, HeroLook, HeroShape};
+        let (phase, v) = (t as f32, 0.5 + 0.5 * (t * 2.0).sin() as f32);
+        let env = match self {
+            Hero::Scene => return HeroFrame::jellyfish(phase, v, false),
+            Hero::Env => Env::default(),
+            Hero::Desktop => {
+                let desktop = Desktop { drift: env::DRIFT_MAX, ..Desktop::new(Color::hex(0x3d7ae0, 1.0), 4) };
+                Env { desktop: Some(desktop), ..Env::default() }
+            }
+        };
+        HeroFrame {
+            shape: HeroShape::Blob { lobes: 5 },
+            look: HeroLook::Chrome {
+                tint: Color::hex(0xdfe8ff, 1.0),
+                top: Color::hex(0x8ea4d8, 1.0),
+                bottom: Color::hex(0x06070c, 1.0),
+                light: Color::hex(0xffffff, 1.0),
+                env: Some(env),
+            },
+            stretch: [1.0, 0.5 + 0.12 * v, 0.8],
+            wobble: 0.25 + 0.75 * v,
+            phase,
+            spin: 0.2 * phase,
+            ..Default::default()
+        }
+    }
+}
+
+/// The "particle-shapes" case (EG-26): a swarm that forms a check mark, scatters, and forms
+/// it again, 1200 sparks. One emitter for the whole run, so its pool carries over frames.
+fn swarm() -> vo::scene::emitter::Emitter {
+    use std::sync::{Arc, OnceLock};
+    use vo::scene::emitter::{Emitter, EmitterSource};
+    static SWARM: OnceLock<Arc<dyn EmitterSource>> = OnceLock::new();
+    Emitter::new(SWARM.get_or_init(|| Arc::new(Swarm)).clone(), 1200, 5)
+}
+
+#[derive(Debug)]
+struct Swarm;
+
+impl vo::scene::emitter::EmitterSource for Swarm {
+    fn sim(&self, _: f64) -> vo::scene::emitter::EmitterSim {
+        use vo::scene::emitter::{EmitterSim, Shape};
+        EmitterSim {
+            shape: Shape::Disc { radius: 46.0 },
+            emit: 1.0,
+            life: 0.9,
+            spawn_speed: 20.0,
+            swirl: 1.2,
+            noise: 140.0,
+            noise_scale: 0.03,
+            drag: 2.0,
+            ..Default::default()
+        }
+    }
+
+    fn look(&self, _: f64) -> vo::scene::emitter::EmitterLook {
+        use vo::scene::emitter::{EmitterLook, SpriteStyle};
+        let ramp = [Color::hex(0x9be7ff, 1.0), Color::hex(0x4cc9f0, 0.8), Color::hex(0x3a6bff, 0.0)];
+        EmitterLook { size: 1.1, brightness: 0.9, ramp, style: SpriteStyle::SPARK, ..Default::default() }
+    }
+
+    fn targets(&self) -> Option<std::sync::Arc<[vo::scene::emitter::ShapeTarget]>> {
+        use vo::scene::emitter::{ShapeTarget, Target as Form};
+        static TARGETS: std::sync::OnceLock<std::sync::Arc<[ShapeTarget]>> = std::sync::OnceLock::new();
+        let t = TARGETS.get_or_init(|| {
+            std::sync::Arc::from([
+                ShapeTarget { sweep: 0.25, ..ShapeTarget::new(0.3, Form::CheckMark, 96.0) },
+                ShapeTarget { scatter: true, ..ShapeTarget::new(1.1, Form::None, 96.0) },
+                ShapeTarget { sweep: 0.25, ..ShapeTarget::new(1.5, Form::CheckMark, 96.0) },
+            ])
+        });
+        Some(t.clone())
+    }
+}
+
 /// Cycles through the cases, for the preview and contact sheets.
 struct Tour {
     size: Size,
@@ -683,6 +937,7 @@ fn measure(g: &Gpu, fonts: &FontRegistry, size: Size, frames: usize, only: &[Str
         let mut r = Renderer::with_fonts(&g.device, &g.queue, fonts.clone());
         assert!(r.set_profiling(true), "this device has no timestamp queries");
         add_materials(&mut r);
+        vo_3d::install(&mut r);
         // The water's ticks run in their own submits, outside the frame's timestamps.
         let water_ms = if *name == "water pool" {
             vo_sim::water_render::install_pool(&mut r, &water_pool(size, 0.0), 1.0);
@@ -812,6 +1067,7 @@ fn main() {
             fonts: fonts.clone(),
             renderer_setup: Some(std::sync::Arc::new(move |r: &mut Renderer| {
                 add_materials(r);
+                vo_3d::install(r);
                 vo_sim::water_render::install_pool(r, &water_pool(size, 0.0), 1.0);
                 vo_sim::fluid_render::install_layer(r, &ink_layer(size, 0.0, InkStyle::Ink), 1.0);
             })),

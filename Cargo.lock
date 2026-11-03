@@ -1334,6 +1334,7 @@ dependencies = [
  "serde_json",
  "toml",
  "vo",
+ "vo-3d",
  "vo-core",
  "vo-dots",
  "vo-host",

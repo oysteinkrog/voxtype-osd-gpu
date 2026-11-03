@@ -41,5 +41,7 @@ required-features = ["preview"]
 [dev-dependencies]
 vo-dots = { path = "../vo-dots" }
 vo-sim = { path = "../vo-sim" }
+# effect_cost times the 3D abilities (EG-13, 17 to 21) next to the 2D ones.
+vo-3d = { path = "../vo-3d" }
 # Tests and examples always see the export and preview code; the library only with the features.
 vo = { path = ".", default-features = false, features = ["export", "preview"] }
