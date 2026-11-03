@@ -916,10 +916,14 @@ fn from_to(t: f64, from: f32, to: f32, spring: Spring, rest: Rest, retention: f6
 /// Moves `ch` toward `target` from `at` with `spring`, or jumps there under reduced motion.
 fn move_to(ch: &mut Channel, target: f32, at: f64, spring: Spring, reduced: bool) {
     let target = target as f64;
+    // Already headed there, maybe later: a kept letter of a revised word waits where it is
+    // drawn and jumps when the new letters show (`Channel::postpone`). Moving it again from
+    // where it waits would turn that jump into a glide when the flow runs again before then.
+    if ch.target() == target {
+        return;
+    }
     if reduced {
-        if ch.target() != target {
-            ch.snap(at, target);
-        }
+        ch.snap(at, target);
     } else {
         ch.set_spring(spring);
         ch.retarget(at, target);

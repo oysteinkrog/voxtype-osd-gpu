@@ -187,3 +187,30 @@ fn letters_of_a_revised_word_never_overlap() {
         }
     }
 }
+
+/// A look that lays its view out again every frame (a status line that changes under the
+/// text) runs the flow again with the same words. The letters a revision keeps still move
+/// to their new places in the frame the new letters show, as with one layout, and do not
+/// glide there from where they waited: "ask" to "Ask" would squeeze the word while they
+/// slide, against the reading-line envelope's tracking limit.
+#[test]
+fn laying_out_the_same_words_again_keeps_the_revision() {
+    // The live text, and a bar below it whose height changes every frame.
+    let view = |w: &[Word], bar: f32| view(w).child(Element::column("bar").width(10.0).height(bar));
+    for (old, new) in [("ask", "Ask"), ("ill", "Will"), ("ink", "Mink"), ("lit", "WWlit")] {
+        let before = words(&[(1, "and"), (2, old), (3, "then")]);
+        let after = words(&[(1, "and"), (2, new), (3, "then")]);
+        let mut once = scene();
+        let mut every = scene();
+        for s in [&mut once, &mut every] {
+            s.apply(view(&before, 1.0), 0.0);
+            s.sample(1.0);
+            s.apply(view(&after, 1.0), 1.0);
+        }
+        for f in 0..60 {
+            let t = 1.0 + f as f64 / 120.0;
+            every.apply(view(&after, 2.0 + f as f32), t);
+            assert_eq!(of(&every.sample(t), 2), of(&once.sample(t), 2), "\"{old}\" to \"{new}\" frame {f}");
+        }
+    }
+}
