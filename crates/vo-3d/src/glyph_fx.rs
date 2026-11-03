@@ -496,6 +496,62 @@ pub struct GlyphFxPainter {
     blank: Option<wgpu::TextureView>,
     /// The renderer's fonts, for liquid revisions, which carry glyph ids only.
     fonts: Option<FontRegistry>,
+    /// The buffers of each paint call in a frame, kept and rewritten from frame to frame:
+    /// making six buffers a call each frame cost the Glass look about 0.9 % of a core at
+    /// idle (bqw3). `next` is the slot of the next call; `begin_frame` resets it.
+    slots: Vec<CallBufs>,
+    next: usize,
+}
+
+/// One paint call's buffers (see `GlyphFxPainter::slots`).
+#[derive(Default)]
+struct CallBufs {
+    mask_uniform: Option<wgpu::Buffer>,
+    uniform: Option<wgpu::Buffer>,
+    glyphs: Option<wgpu::Buffer>,
+    material: Option<wgpu::Buffer>,
+    quads: Option<wgpu::Buffer>,
+    light_quad: Option<wgpu::Buffer>,
+}
+
+/// `bytes` written into `kept`, which is made or grown first when it is missing or too
+/// small, and the length to bind. An empty `bytes` writes 80 zero bytes, since a storage
+/// binding must not be empty.
+fn reuse(
+    kept: &mut Option<wgpu::Buffer>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    usage: wgpu::BufferUsages,
+    bytes: &[u8],
+) -> Kept {
+    let pad = [0u8; 80];
+    let bytes = if bytes.is_empty() { &pad[..] } else { bytes };
+    let len = bytes.len() as u64;
+    if kept.as_ref().is_none_or(|b| b.size() < len) {
+        *kept = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: len.next_power_of_two().max(256),
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let buffer = kept.clone().unwrap();
+    queue.write_buffer(&buffer, 0, bytes);
+    Kept(buffer, len)
+}
+
+/// A kept buffer and the length of this frame's contents.
+struct Kept(wgpu::Buffer, u64);
+
+impl Kept {
+    fn binding(&self) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.0,
+            offset: 0,
+            size: wgpu::BufferSize::new(self.1),
+        })
+    }
 }
 
 impl GlyphFxPainter {
@@ -632,17 +688,6 @@ struct Batch {
     quads: Vec<GpuQuad>,
 }
 
-fn storage(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-    use wgpu::util::DeviceExt;
-    // A storage binding must not be empty.
-    let pad = [0u8; 80];
-    let contents = if bytes.is_empty() { &pad[..] } else { bytes };
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents,
-        usage: wgpu::BufferUsages::STORAGE,
-    })
-}
 
 impl GlyphFxPainter {
     /// The glyphs, quads and uniform of a [`GlyphFx`] element, and whether it is the light
@@ -842,6 +887,10 @@ impl GpuPainter for GlyphFxPainter {
         true
     }
 
+    fn begin_frame(&mut self) {
+        self.next = 0;
+    }
+
     fn paint(&mut self, cx: &mut PaintCx<'_>) -> bool {
         let source = cx.source.as_any();
         let prepared = if let Some(src) = source.downcast_ref::<GlyphFx>() {
@@ -851,7 +900,7 @@ impl GpuPainter for GlyphFxPainter {
         } else {
             return false;
         };
-        let Some((mut batch, u, under, material)) = prepared else { return true };
+        let Some((batch, u, under, material)) = prepared else { return true };
         let [x0, y0, x1, y1] = cx.rect_px();
         let (rect_w, rect_h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
         if batch.quads.is_empty() && !under {
@@ -870,41 +919,55 @@ impl GpuPainter for GlyphFxPainter {
                 })
             })
             .clone();
-        let glyph_buf = storage(cx.device, "vo3d-glyph-fx-glyphs", bytemuck::cast_slice(&batch.glyphs));
-        let material_buf = storage(cx.device, "vo3d-glyph-fx-material", bytemuck::bytes_of(&material));
-        let quad_buf = storage(cx.device, "vo3d-glyph-fx-quads", bytemuck::cast_slice(&batch.quads));
+        // This call's buffers: each call in a frame has its own, since a queue write lands
+        // before the whole submit and a shared buffer would hold only the last call's data.
+        let (device, queue) = (cx.device, cx.queue);
+        if self.slots.len() <= self.next {
+            self.slots.resize_with(self.next + 1, CallBufs::default);
+        }
+        let slot = &mut self.slots[self.next];
+        self.next += 1;
+        let (storage, uniform) = (wgpu::BufferUsages::STORAGE, wgpu::BufferUsages::UNIFORM);
+        let glyph_buf =
+            reuse(&mut slot.glyphs, device, queue, "vo3d-glyph-fx-glyphs", storage, bytemuck::cast_slice(&batch.glyphs));
+        let material_buf =
+            reuse(&mut slot.material, device, queue, "vo3d-glyph-fx-material", storage, bytemuck::bytes_of(&material));
+        let quad_buf =
+            reuse(&mut slot.quads, device, queue, "vo3d-glyph-fx-quads", storage, bytemuck::cast_slice(&batch.quads));
+        let main_uniform = reuse(&mut slot.uniform, device, queue, "vo3d-glyph-fx", uniform, bytemuck::bytes_of(&u));
+        // The light under the text is one quad over the whole box, after the mask pass.
+        let under_bufs = under.then(|| {
+            let mu = FxUniform { dst: [x0, y0, rect_w, rect_h], ..u };
+            let q = [GpuQuad { rect: [x0, y0, x1, y1], range: [0, 0, 0, 0] }];
+            (
+                reuse(&mut slot.mask_uniform, device, queue, "vo3d-glyph-fx-mask", uniform, bytemuck::bytes_of(&mu)),
+                reuse(&mut slot.light_quad, device, queue, "vo3d-glyph-fx-quads", storage, bytemuck::cast_slice(&q)),
+            )
+        });
         let atlas_view = self.atlas.as_ref().unwrap().view.clone();
-        let device = cx.device;
-        let bind = |pipes: &Pipes, u: &FxUniform, mask: &wgpu::TextureView| {
-            use wgpu::util::DeviceExt;
-            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vo3d-glyph-fx"),
-                contents: bytemuck::bytes_of(u),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        let bind = |pipes: &Pipes, ub: &Kept, quads: &Kept, mask: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vo3d-glyph-fx"),
                 layout: &pipes.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: glyph_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: quad_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: ub.binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: glyph_buf.binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: quads.binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(mask) },
-                    wgpu::BindGroupEntry { binding: 6, resource: material_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: material_buf.binding() },
                 ],
             })
         };
 
-        let mask_view = if under {
+        let mask_view = if let Some((mask_uniform, _)) = &under_bufs {
             // The stencil mask at half the box's resolution.
             let size = [((rect_w / 2.0).ceil() as u32).max(1), ((rect_h / 2.0).ceil() as u32).max(1)];
             let view = self.mask_view(device, size);
             let pipes = self.pipes.as_ref().unwrap();
-            let mu = FxUniform { dst: [x0, y0, rect_w, rect_h], ..u };
             let blank = self.blank.clone();
-            let bg = bind(pipes, &mu, blank.as_ref().unwrap_or(&atlas_view));
+            let bg = bind(pipes, mask_uniform, &quad_buf, blank.as_ref().unwrap_or(&atlas_view));
             let mut pass = cx.enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vo3d-glyph-fx-mask"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -932,41 +995,10 @@ impl GpuPainter for GlyphFxPainter {
         };
 
         // The light under the text is one quad over the whole box, after the glyph quads.
-        let count = if under {
-            batch.quads.clear();
-            0
-        } else {
-            batch.quads.len() as u32
-        };
-        let quad_buf2;
+        let count = if under { 0 } else { batch.quads.len() as u32 };
         let pipes = self.pipes.as_ref().unwrap();
-        let bg = if under {
-            let q = [GpuQuad { rect: [x0, y0, x1, y1], range: [0, 0, 0, 0] }];
-            quad_buf2 = storage(device, "vo3d-glyph-fx-quads", bytemuck::cast_slice(&q));
-            let ub = {
-                use wgpu::util::DeviceExt;
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("vo3d-glyph-fx"),
-                    contents: bytemuck::bytes_of(&u),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                })
-            };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("vo3d-glyph-fx"),
-                layout: &pipes.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: glyph_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: quad_buf2.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&mask_view) },
-                    wgpu::BindGroupEntry { binding: 6, resource: material_buf.as_entire_binding() },
-                ],
-            })
-        } else {
-            bind(pipes, &u, &mask_view)
-        };
+        let quads = under_bufs.as_ref().map_or(&quad_buf, |(_, light_quad)| light_quad);
+        let bg = bind(pipes, &main_uniform, quads, &mask_view);
         let mut pass = cx.enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vo3d-glyph-fx"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
