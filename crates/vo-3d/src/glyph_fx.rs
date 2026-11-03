@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use vo_core::signals::{Sig, SignalsCell};
+use vo_core::signals::{Sig, Signals, SignalsCell};
 use vo_render::color::srgb_to_linear;
 use vo_render::material::{materials_source, GpuMaterial};
 use vo_render::text::slug_gpu::PREMULTIPLIED_OVER;
@@ -273,10 +273,7 @@ impl GlyphFx {
 
     fn level(&self, t: f64) -> (f32, f32) {
         match &self.signals {
-            Some(s) => {
-                let s = s.get();
-                (s.envelope(Sig::Level, 0.03, 0.4, t), s.onset_age(t))
-            }
+            Some(s) => level_of(&s.get(), t),
             None => (0.0, 1000.0),
         }
     }
@@ -285,15 +282,24 @@ impl GlyphFx {
     /// how bright (0..1). With no voice it drifts slowly across and back; the voice pushes it
     /// on and brightens it.
     pub fn light_at(&self, light: &Light, t: f64, w: f32, h: f32) -> (Point, f32) {
+        self.light_at_level(light, t, w, h, self.level(t).0)
+    }
+
+    /// [`GlyphFx::light_at`] for a voice `level` already read at `t`.
+    fn light_at_level(&self, light: &Light, t: f64, w: f32, h: f32, level: f32) -> (Point, f32) {
         if self.reduced {
             return (Point::new(0.12 * w, 0.15 * h), 0.6);
         }
-        let (level, _) = self.level(t);
         let phase = (t / light.sweep_secs.max(0.1) as f64 * std::f64::consts::TAU) as f32;
         let x = 0.5 - 0.42 * phase.cos() + 0.12 * level;
         let y = 0.12 + 0.1 * (0.6 * phase).sin();
         (Point::new(x * w, y * h), (0.45 + 0.55 * level).min(1.0))
     }
+}
+
+/// The smoothed voice level and the onset age in `signals` at `t`.
+fn level_of(signals: &Signals, t: f64) -> (f32, f32) {
+    (signals.envelope(Sig::Level, 0.03, 0.4, t), signals.onset_age(t))
 }
 
 /// Following the live text (`Element::glyph_follow`): each word's glyphs move by how far that
@@ -501,6 +507,10 @@ pub struct GlyphFxPainter {
     /// idle (bqw3). `next` is the slot of the next call; `begin_frame` resets it.
     slots: Vec<CallBufs>,
     next: usize,
+    /// The last level read (`level_of`): its time, the signal snapshot and the value. The
+    /// light under the text and the light over it read the same level each frame, and each
+    /// read filters 2.4 s of history (bqw3).
+    level: Option<(f64, Arc<Signals>, (f32, f32))>,
 }
 
 /// One paint call's buffers (see `GlyphFxPainter::slots`).
@@ -555,6 +565,20 @@ impl Kept {
 }
 
 impl GlyphFxPainter {
+    /// `src`'s level at `t`, read once for every paint at that time from one snapshot.
+    fn level_of(&mut self, src: &GlyphFx, t: f64) -> (f32, f32) {
+        let Some(cell) = &src.signals else { return (0.0, 1000.0) };
+        let now = cell.get();
+        if let Some((at, kept, v)) = &self.level {
+            if *at == t && Arc::ptr_eq(kept, &now) {
+                return *v;
+            }
+        }
+        let v = level_of(&now, t);
+        self.level = Some((t, now, v));
+        v
+    }
+
     fn pipes(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if self.pipes.as_ref().is_some_and(|p| p.format == format) {
             return;
@@ -765,7 +789,7 @@ impl GlyphFxPainter {
             batch.glyphs.extend(gs);
         }
 
-        let (level, onset) = src.level(t);
+        let (level, onset) = self.level_of(src, t);
         let rect_w = (x1 - x0).max(1.0);
         let rect_h = (y1 - y0).max(1.0);
         let mut u = FxUniform {
@@ -797,7 +821,7 @@ impl GlyphFxPainter {
                 u.c0 = lin(m.tint);
             }
             Effect::Light(light, side) => {
-                let (at, inten) = src.light_at(&light, t, cx.rect.w, cx.rect.h);
+                let (at, inten) = src.light_at_level(&light, t, cx.rect.w, cx.rect.h, level);
                 let lp = cx.to_px.apply(Point::new(cx.rect.x + at.x, cx.rect.y + at.y));
                 u.light = [lp.x, lp.y, inten, reduced as u32 as f32];
                 u.p0 = [light.shadow_len * scale, light.shadow, light.caustics, light.cell * scale];
