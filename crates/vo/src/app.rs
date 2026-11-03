@@ -105,6 +105,13 @@ pub trait App {
         None
     }
 
+    /// A screen reader's request on the edit field of [`App::accessible`]: focus it, or put
+    /// its caret and selection (bytes of the field's value, as the app described it). Live
+    /// only with the `a11y` feature and a screen reader running. Default: ignored.
+    fn accessibility(&mut self, request: vo_a11y::Request, cx: &mut Cx<Self::Msg>) {
+        let _ = (request, cx);
+    }
+
     /// A batch from the input method, while it is on ([`Cx::text_input`]). Apply its deletes
     /// and commit to the text (`TextInputEvent::actions`) and show its preedit at the caret
     /// without putting it in the text (`vo_core::text_input::Composing`).
@@ -500,6 +507,13 @@ impl<A: App> Driver<A> {
         self.fire_timers(t);
         self.flush();
         self.run(t, |app, cx| app.text_input(ev, cx));
+    }
+
+    /// A screen reader's request arrived (`App::accessibility`).
+    pub(crate) fn accessibility(&mut self, t: f64, request: vo_a11y::Request) {
+        self.fire_timers(t);
+        self.flush();
+        self.run(t, |app, cx| app.accessibility(request, cx));
     }
 
     /// Builds the view and applies it to the scenes at `t`.

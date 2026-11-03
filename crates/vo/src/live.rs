@@ -837,6 +837,9 @@ impl<A: App> HostApp for Live<A> {
             HostEvent::External { t } => {
                 self.driver().fire_timers(t);
                 self.drain_inbox(t);
+                for request in self.a11y.requests() {
+                    self.driver().accessibility(t, request);
+                }
             }
             HostEvent::GpuReady { .. } => match host.gpu() {
                 Ok(gpu) => {

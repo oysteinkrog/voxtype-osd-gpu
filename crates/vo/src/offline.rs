@@ -40,6 +40,8 @@ pub enum Input<M> {
     /// A batch from the input method (`App::text_input`). Its `t` is replaced by the input's
     /// time.
     TextInput(TextInputEvent),
+    /// A screen reader's request (`App::accessibility`).
+    Accessibility(vo_a11y::Request),
 }
 
 /// Seconds between the press and the release of a scripted key, and between scripted keys.
@@ -122,7 +124,7 @@ impl<M: Clone> Scenario<M> {
             let t = *t;
             match input {
                 Input::Msg(m) => log.push(t, m.clone())?,
-                Input::Pointer { .. } => {}
+                Input::Pointer { .. } | Input::Accessibility(_) => {}
                 Input::Key(ev) => log.push_input(
                     t,
                     InputRecord::Key {
@@ -456,6 +458,7 @@ pub(crate) fn advance<A: App>(
                     Input::Modifiers(mods) => driver.modifiers(*at, *mods),
                     Input::RepeatInfo(info) => driver.repeat_info(*info),
                     Input::TextInput(ev) => driver.text_input(*at, &TextInputEvent { t: *at, ..ev.clone() }),
+                    Input::Accessibility(r) => driver.accessibility(*at, *r),
                 }
                 // Offline, focus comes from the inputs; a request opens nothing.
                 driver.focus = None;

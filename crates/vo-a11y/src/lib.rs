@@ -9,7 +9,8 @@
 //!   it out when it changes without cutting into what it is saying,
 //! - while editing, a `MultilineTextInput` with the text as its value and focus, holding one
 //!   `TextRun` per hard line, with character lengths by grapheme cluster and the caret and
-//!   selection as a `TextSelection`.
+//!   selection as a `TextSelection`. It takes the focus and set-selection actions:
+//!   [`request`] turns one into a [`Request`] in the field's bytes.
 //!
 //! Live text changes many times a second while someone speaks. [`Announcer`] picks what the
 //! label shows: a final text at once and only once, and live text at most every
@@ -17,7 +18,9 @@
 //!
 //! No platform code: `vo` connects this to AT-SPI (accesskit_unix) behind its `a11y` feature.
 
-use accesskit::{Live, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate};
+use accesskit::{
+    Action, ActionData, ActionRequest, Live, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use accesskit;
@@ -128,6 +131,8 @@ fn edit_nodes(e: &EditField) -> (Node, Vec<(NodeId, Node)>) {
     field.set_value(e.value.clone());
     field.set_children((0..runs.len()).map(|i| NodeId(RUNS + i as u64)).collect::<Vec<_>>());
     field.set_text_selection(TextSelection { anchor: position(&runs, e.anchor), focus: position(&runs, e.focus) });
+    field.add_action(Action::Focus);
+    field.add_action(Action::SetTextSelection);
     let nodes = runs
         .iter()
         .enumerate()
@@ -139,6 +144,41 @@ fn edit_nodes(e: &EditField) -> (Node, Vec<(NodeId, Node)>) {
         })
         .collect();
     (field, nodes)
+}
+
+/// What a screen reader asked of the edit field, in the terms of the app's [`Accessible`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// Focus the field.
+    Focus,
+    /// Put the selection from `anchor` to `focus` (the caret when they are equal), in bytes of
+    /// the field's value, on grapheme cluster boundaries.
+    Select { anchor: usize, focus: usize },
+}
+
+/// The request `req` makes of the tree [`tree`] built from `a`. `None` for an action the tree
+/// does not offer, one on another node, or a position outside the field's runs.
+pub fn request(a: &Accessible, req: &ActionRequest) -> Option<Request> {
+    let e = a.edit.as_ref()?;
+    if req.target_node != EDIT {
+        return None;
+    }
+    match (req.action, &req.data) {
+        (Action::Focus, _) => Some(Request::Focus),
+        (Action::SetTextSelection, Some(ActionData::SetTextSelection(s))) => {
+            let runs = runs(&e.value);
+            Some(Request::Select { anchor: byte_at(&runs, s.anchor)?, focus: byte_at(&runs, s.focus)? })
+        }
+        _ => None,
+    }
+}
+
+/// The byte at text position `p`: the inverse of [`position`].
+fn byte_at(runs: &[Run<'_>], p: TextPosition) -> Option<usize> {
+    let i = usize::try_from(p.node.0.checked_sub(RUNS)?).ok()?;
+    let r = runs.get(i)?;
+    let before = r.lengths.get(..p.character_index)?;
+    Some(r.start + before.iter().map(|&l| l as usize).sum::<usize>())
 }
 
 /// Seconds between two announcements of live text.
@@ -233,6 +273,53 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(position(&rs, 3), TextPosition { node: NodeId(RUNS + 1), character_index: 0 });
         assert_eq!(runs("").len(), 1);
+    }
+
+    #[test]
+    fn a_selection_request_comes_back_in_the_fields_bytes() {
+        // "e" and a combining accent is one character of 3 bytes; two hard lines.
+        let value = "plum ce\u{301}\nkiwi".to_string();
+        let a = Accessible {
+            name: "Dictation".into(),
+            edit: Some(EditField { value: value.clone(), anchor: 0, focus: 0 }),
+            ..Accessible::default()
+        };
+        let u = tree(&a, "");
+        let f = node(&u, EDIT);
+        assert!(f.supports_action(Action::Focus) && f.supports_action(Action::SetTextSelection));
+        let rs = runs(&value);
+        let ask = |anchor: usize, focus: usize| ActionRequest {
+            action: Action::SetTextSelection,
+            target_tree: TreeId::ROOT,
+            target_node: EDIT,
+            data: Some(ActionData::SetTextSelection(TextSelection {
+                anchor: position(&rs, anchor),
+                focus: position(&rs, focus),
+            })),
+        };
+        // Every character boundary goes there and back, the break and the end included.
+        let bounds = [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14];
+        for &b in &bounds {
+            assert_eq!(request(&a, &ask(b, b)), Some(Request::Select { anchor: b, focus: b }), "{b}");
+        }
+        assert_eq!(request(&a, &ask(10, 2)), Some(Request::Select { anchor: 10, focus: 2 }));
+        // Focus on the field; nothing on another node, past a run, or with no field.
+        let focus = ActionRequest { action: Action::Focus, target_tree: TreeId::ROOT, target_node: EDIT, data: None };
+        assert_eq!(request(&a, &focus), Some(Request::Focus));
+        assert_eq!(request(&a, &ActionRequest { target_node: TEXT, ..focus.clone() }), None);
+        let past = TextPosition { node: NodeId(RUNS + 1), character_index: 5 };
+        let far = ActionRequest {
+            data: Some(ActionData::SetTextSelection(TextSelection { anchor: past, focus: past })),
+            ..ask(0, 0)
+        };
+        assert_eq!(request(&a, &far), None);
+        let gone = TextPosition { node: NodeId(RUNS + 2), character_index: 0 };
+        let none = ActionRequest {
+            data: Some(ActionData::SetTextSelection(TextSelection { anchor: gone, focus: gone })),
+            ..ask(0, 0)
+        };
+        assert_eq!(request(&a, &none), None);
+        assert_eq!(request(&Accessible { edit: None, ..a.clone() }, &focus), None);
     }
 
     #[test]
