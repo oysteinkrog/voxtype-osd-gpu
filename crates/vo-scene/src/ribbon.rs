@@ -94,7 +94,8 @@ impl Ribbon {
     /// Strand `i`'s points and width factors in `rect` at `t`.
     pub fn strand(&self, rect: Rect, t: f64, i: u32) -> (Vec<Point>, Vec<f32>) {
         let (tp, level) = self.pose(t);
-        self.strand_at(rect, tp, level, i)
+        let grid = self.grid(rect);
+        (self.strand_at(rect, tp, level, i, &grid), grid.iter().map(|g| g.width).collect())
     }
 
     /// The time the strands stand at for `t`, and the level there. The level follows the
@@ -104,7 +105,25 @@ impl Ribbon {
         (tp, self.levels.at(tp.min(self.levels.newest_at)))
     }
 
-    fn strand_at(&self, rect: Rect, tp: f64, level: f32, i: u32) -> (Vec<Point>, Vec<f32>) {
+    /// The points across `rect` with what every strand at every time shares: where each is
+    /// across, its swing envelope and width, and the sine and cosine of both waves' angles
+    /// there. A strand adds its own phase to those angles, so a frame takes two sines per
+    /// point for all its strands instead of two per point per strand (bqw3).
+    fn grid(&self, rect: Rect) -> Vec<GridPoint> {
+        let tau = std::f64::consts::TAU;
+        let steps = (rect.w / self.step.max(0.5)).ceil().max(2.0) as usize;
+        (0..=steps)
+            .map(|k| {
+                let u = k as f32 / steps as f32;
+                let env = self.shape(u);
+                let x = u as f64 * self.cycles as f64;
+                GridPoint { u, env, width: env.max(0.02), a: (tau * x).sin_cos(), b: (tau * 0.53 * x).sin_cos() }
+            })
+            .collect()
+    }
+
+    /// Strand `i`'s points on `grid` at time `tp` and `level`.
+    fn strand_at(&self, rect: Rect, tp: f64, level: f32, i: u32, grid: &[GridPoint]) -> Vec<Point> {
         let settle = self
             .settle
             .map_or(1.0, |s| 1.0 - smoothstep(0.0, 1.0, ((tp - s) / self.settle_secs.max(1e-3) as f64) as f32));
@@ -115,20 +134,18 @@ impl Ribbon {
         let swing = (self.floor + (self.gain - self.floor) * level) * settle * half * (1.0 - 0.3 * f);
         let phase = self.spread as f64 * f as f64;
         let tau = std::f64::consts::TAU;
-        let steps = (rect.w / self.step.max(0.5)).ceil().max(2.0) as usize;
-        let mut pts = Vec::with_capacity(steps + 1);
-        let mut widths = Vec::with_capacity(steps + 1);
-        for k in 0..=steps {
-            let u = k as f32 / steps as f32;
-            let env = self.shape(u);
-            let x = u as f64 * self.cycles as f64;
-            let a = (tau * (x - self.speed as f64 * tp + phase)).sin();
-            let b = (tau * (0.53 * x + 0.71 * self.speed as f64 * tp - 1.7 * phase)).sin();
-            let y = (0.7 * a + 0.3 * b) as f32;
-            pts.push(Point::new(rect.x + u * rect.w, mid - swing * env * y));
-            widths.push(env.max(0.02));
-        }
-        (pts, widths)
+        // sin(p + q) = sin p cos q + cos p sin q, with p the grid's angle and q this
+        // strand's shift at this time.
+        let (sa, ca) = (tau * (phase - self.speed as f64 * tp)).sin_cos();
+        let (sb, cb) = (tau * (0.71 * self.speed as f64 * tp - 1.7 * phase)).sin_cos();
+        grid.iter()
+            .map(|g| {
+                let a = g.a.0 * ca + g.a.1 * sa;
+                let b = g.b.0 * cb + g.b.1 * sb;
+                let y = (0.7 * a + 0.3 * b) as f32;
+                Point::new(rect.x + g.u * rect.w, mid - swing * g.env * y)
+            })
+            .collect()
     }
 
     pub fn draw(&self, t: f64, rect: Rect, p: &mut Painter) {
@@ -138,9 +155,11 @@ impl Ribbon {
         let n = self.strands.max(1);
         let (x0, x1) = (Point::new(rect.x, 0.0), Point::new(rect.right(), 0.0));
         let (tp, level) = self.pose(t);
+        let grid = self.grid(rect);
+        let widths: Vec<f32> = grid.iter().map(|g| g.width).collect();
         for i in (0..n).rev() {
             let f = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
-            let (pts, widths) = self.strand_at(rect, tp, level, i);
+            let pts = self.strand_at(rect, tp, level, i, &grid);
             let c = make::ribbon(&pts, &widths);
             let (a, b) = (self.left.at(f).fade(self.alpha), self.right.at(f).fade(self.alpha));
             let style = StrokeStyle::solid(self.width, a).linear(x0, a, x1, b).glow(self.glow);
@@ -158,6 +177,16 @@ impl Ribbon {
             p.stroke(&Contour { segs: run.to_vec(), closed: false }, style);
         }
     }
+}
+
+/// One point of [`Ribbon::grid`].
+struct GridPoint {
+    u: f32,
+    env: f32,
+    width: f32,
+    /// Sine and cosine of the two waves' angles here.
+    a: (f64, f64),
+    b: (f64, f64),
 }
 
 impl<M> Element<M> {
@@ -193,6 +222,31 @@ mod tests {
         let ys: Vec<f32> = all.iter().map(|(p, _)| p[mid].y).collect();
         let spread = ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min);
         assert!(spread > 5.0, "{ys:?}");
+    }
+
+    /// The grid's sums of angles give the points the sines of the whole angles give.
+    #[test]
+    fn the_grid_matches_the_direct_sines() {
+        let r = ribbon(0.6);
+        let tau = std::f64::consts::TAU;
+        for t in [0.5, 1.3, 2.9] {
+            let (tp, level) = r.pose(t);
+            for i in 0..r.strands {
+                let (pts, _) = r.strand(R, t, i);
+                let f = i as f32 / (r.strands - 1) as f32;
+                let swing = (r.floor + (r.gain - r.floor) * level) * 0.5 * R.h * (1.0 - 0.3 * f);
+                let phase = r.spread as f64 * f as f64;
+                let steps = pts.len() - 1;
+                for (k, q) in pts.iter().enumerate() {
+                    let u = k as f32 / steps as f32;
+                    let x = u as f64 * r.cycles as f64;
+                    let a = (tau * (x - r.speed as f64 * tp + phase)).sin();
+                    let b = (tau * (0.53 * x + 0.71 * r.speed as f64 * tp - 1.7 * phase)).sin();
+                    let y = 30.0 - swing * r.shape(u) * (0.7 * a + 0.3 * b) as f32;
+                    assert!((q.y - y).abs() < 1e-4, "t {t} strand {i} point {k}: {} vs {y}", q.y);
+                }
+            }
+        }
     }
 
     #[test]
