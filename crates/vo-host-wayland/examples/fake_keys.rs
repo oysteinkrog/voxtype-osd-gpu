@@ -83,6 +83,7 @@ fn code(name: &str) -> Option<u32> {
         "rightctrl" => 97,
         "rightalt" => 100,
         "home" => 102,
+        "insert" => 110,
         "up" => 103,
         "left" => 105,
         "right" => 106,

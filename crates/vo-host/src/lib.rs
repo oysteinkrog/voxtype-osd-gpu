@@ -266,6 +266,12 @@ pub enum HostEvent {
         t: f64,
         info: RepeatInfo,
     },
+    /// The answer to [`HostCtl::request_clipboard`]: the clipboard's text, or `None` when it
+    /// is empty or holds no UTF-8 text.
+    Clipboard {
+        t: f64,
+        text: Option<String>,
+    },
 }
 
 /// A frame to draw. The app encodes and submits its work into `texture` before returning; the
@@ -421,6 +427,20 @@ pub trait HostCtl {
     /// compositor picks next. Unknown ids are ignored.
     fn close_focus_proxy(&mut self, id: SurfaceId) {
         let _ = id;
+    }
+
+    /// Puts `text` on the clipboard, as an explicit copy. Needs keyboard focus and a key
+    /// press since it came (the compositor checks the input serial). Hosts never set the
+    /// primary selection.
+    fn set_clipboard(&mut self, text: String) -> Result<(), HostError> {
+        let _ = text;
+        Err(HostError::Unsupported("clipboard".into()))
+    }
+
+    /// Asks for the clipboard's text. `HostEvent::Clipboard` answers, later on the event
+    /// loop. Needs keyboard focus.
+    fn request_clipboard(&mut self) -> Result<(), HostError> {
+        Err(HostError::Unsupported("clipboard".into()))
     }
 
     /// Asks for one frame on `id`. The host calls `HostApp::frame` when the compositor is ready

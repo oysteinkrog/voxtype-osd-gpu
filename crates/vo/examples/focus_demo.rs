@@ -9,8 +9,9 @@
 //! focus proxy:
 //!   cargo run -p vo --example focus_demo
 //!
-//! Script: type "kiwi", Tab, "lime", Tab, "fig", Shift+Tab, "s", Escape. The fields end as
-//! "kiwi", "limes" and "fig".
+//! Script: type "kiwi", Tab, "lime", Tab, "fig", Shift+Tab, "s", Ctrl+A, Ctrl+C, Tab, Ctrl+V,
+//! Escape. The fields end as "kiwi", "limes" and "figlimes". Ctrl+C, Ctrl+X and Ctrl+V use
+//! the clipboard (offline, the driver's own).
 
 use std::path::PathBuf;
 
@@ -18,7 +19,7 @@ use vo::scene::element::{Element, TextStyle};
 use vo::scene::focus::FocusRing;
 use vo::scene::geom::{Color, Size};
 use vo::{App, Cx, FocusProxySpec, FontRegistry, Input, Options, OverlaySpec, Scenario};
-use vo_core::edit::EditBuffer;
+use vo_core::edit::{Dir, EditAction, EditBuffer, Unit};
 use vo_core::edit_keymap::{EditCmd, TextBoxKeys};
 use vo_core::key::{KeyEvent, LogicalKey, Mods, NamedKey};
 
@@ -64,11 +65,30 @@ impl App for Fields {
                     self.bufs[i].apply_plain(action, ev.t);
                 }
                 Some(EditCmd::Resume | EditCmd::Finish) => {
+                    let texts: Vec<&str> = self.bufs.iter().map(EditBuffer::text).collect();
+                    eprintln!("focus_demo: fields {texts:?}");
                     cx.release_keyboard_focus();
                     cx.exit();
                 }
+                Some(EditCmd::Copy) => cx.copy(selected(&self.bufs[i])),
+                Some(EditCmd::Cut) => {
+                    cx.copy(selected(&self.bufs[i]));
+                    self.bufs[i].apply_plain(EditAction::Delete(Dir::Back, Unit::Grapheme), ev.t);
+                }
+                Some(EditCmd::Paste) => cx.paste(),
                 Some(EditCmd::Collapse) | None => {}
             },
+        }
+    }
+
+    fn keyboard_focus(&mut self, gained: bool, _: bool, _: &mut Cx<Msg>) {
+        eprintln!("focus_demo: keyboard focus {gained}");
+    }
+
+    /// Pasted text goes into the focused field.
+    fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Msg>) {
+        if let (Some(i), Some(text)) = (self.focused, text) {
+            self.bufs[i].apply_plain(EditAction::Insert(text), cx.t());
         }
     }
 
@@ -107,9 +127,15 @@ impl App for Fields {
     }
 }
 
-/// Type into the first field, Tab, Tab, Shift+Tab, then Escape.
+/// The selected text of `buf`; empty with a caret.
+fn selected(buf: &EditBuffer) -> String {
+    let sel = buf.selection();
+    buf.text()[sel.anchor.min(sel.focus)..sel.anchor.max(sel.focus)].to_string()
+}
+
+/// Type into the first field, Tab, Tab, Shift+Tab, copy, Tab, paste, then Escape.
 fn scripted() -> Scenario<Msg> {
-    let mut s = Scenario { size: SURFACE, scale: 1.0, duration: 6.0, inputs: Vec::new() };
+    let mut s = Scenario { size: SURFACE, scale: 1.0, duration: 8.0, inputs: Vec::new() };
     s.push(0.3, Input::KeyboardFocus { gained: true, requested: false });
     let tab = LogicalKey::Named(NamedKey::Tab);
     let t = s.type_text(0.6, "kiwi");
@@ -119,6 +145,10 @@ fn scripted() -> Scenario<Msg> {
     let t = s.type_text(t + 0.3, "fig");
     let t = s.chord(t + 0.4, Mods::SHIFT, tab);
     let t = s.type_text(t + 0.3, "s");
+    let t = s.chord(t + 0.4, Mods::CTRL, LogicalKey::Char('a'));
+    let t = s.chord(t + 0.2, Mods::CTRL, LogicalKey::Char('c'));
+    let t = s.key(t + 0.3, tab, None, Mods::NONE);
+    let t = s.chord(t + 0.3, Mods::CTRL, LogicalKey::Char('v'));
     s.key(t + 0.8, LogicalKey::Named(NamedKey::Escape), None, Mods::NONE);
     s
 }

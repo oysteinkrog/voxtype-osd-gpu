@@ -88,6 +88,19 @@ pub trait App {
     fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Self::Msg>) {
         let _ = (gained, requested, cx);
     }
+
+    /// The answer to [`Cx::paste`]: the clipboard's text, or `None` when it is empty, holds
+    /// no text, or the host has no clipboard.
+    fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Self::Msg>) {
+        let _ = (text, cx);
+    }
+}
+
+/// A clipboard request the app made during a callback (`Cx::copy`, `Cx::paste`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ClipRequest {
+    Copy(String),
+    Paste,
 }
 
 /// What the app asked for about keyboard focus during a callback.
@@ -164,6 +177,7 @@ pub struct Cx<'a, M> {
     timers: &'a mut Timers<M>,
     exit: &'a mut bool,
     focus: &'a mut Option<FocusRequest>,
+    clip: &'a mut Vec<ClipRequest>,
 }
 
 impl<M> Cx<'_, M> {
@@ -200,6 +214,19 @@ impl<M> Cx<'_, M> {
     /// follows at once.
     pub fn release_keyboard_focus(&mut self) {
         *self.focus = Some(FocusRequest::Release);
+    }
+
+    /// Puts `text` on the clipboard. Only an explicit copy should: selecting text must not
+    /// (plan R18). Live this needs keyboard focus and a key press since it came, which a
+    /// copy key gives. Offline the driver keeps the text for the next `paste`.
+    pub fn copy(&mut self, text: impl Into<String>) {
+        self.clip.push(ClipRequest::Copy(text.into()));
+    }
+
+    /// Asks for the clipboard's text; [`App::clipboard`] answers. Live it comes on a later
+    /// event; offline at once, with the last `copy`.
+    pub fn paste(&mut self) {
+        self.clip.push(ClipRequest::Paste);
     }
 }
 
@@ -282,6 +309,11 @@ pub(crate) struct Driver<A: App> {
     pub(crate) keys: Keys,
     /// A focus change the app asked for, for the live overlay to carry out.
     pub(crate) focus: Option<FocusRequest>,
+    /// Clipboard requests, in order. Live takes them to the host (`host_clipboard`);
+    /// otherwise the driver answers them from `clip_text`.
+    pub(crate) clip: Vec<ClipRequest>,
+    pub(crate) host_clipboard: bool,
+    clip_text: Option<String>,
 }
 
 impl<A: App> Driver<A> {
@@ -302,7 +334,8 @@ impl<A: App> Driver<A> {
         let mut timers = Timers::default();
         let mut exit = false;
         let mut focus = None;
-        app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit, focus: &mut focus });
+        let mut clip = Vec::new();
+        app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit, focus: &mut focus, clip: &mut clip });
         let extras = Extras::new(make);
         let exit_at = exit.then_some(t);
         let mut d = Driver {
@@ -321,6 +354,9 @@ impl<A: App> Driver<A> {
             views: 1,
             keys: Keys::default(),
             focus,
+            clip,
+            host_clipboard: false,
+            clip_text: None,
         };
         let view = d.view();
         d.scene.apply(view, t);
@@ -366,10 +402,14 @@ impl<A: App> Driver<A> {
     fn run(&mut self, t: f64, f: impl FnOnce(&mut A, &mut Cx<A::Msg>)) {
         let t = t.max(self.last_t);
         self.last_t = t;
-        f(&mut self.app, &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit, focus: &mut self.focus });
+        f(
+            &mut self.app,
+            &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit, focus: &mut self.focus, clip: &mut self.clip },
+        );
         if self.exit && self.exit_at.is_none() {
             self.exit_at = Some(t);
         }
+        self.local_clipboard(t);
         // Under a frame pace the frame waits for its slot anyway, so the view waits with it.
         // Extra surfaces and the exit build at once: their frames are not paced.
         if self.lazy && !self.exit && self.extras.list.is_empty() && self.app.frame_pace().is_some() {
@@ -378,6 +418,31 @@ impl<A: App> Driver<A> {
         }
         self.stale = None;
         self.rebuild(t);
+    }
+
+    /// Without a host clipboard (offline, tests) a copy is kept here and a paste answered
+    /// from it at once, right after the callback that asked.
+    fn local_clipboard(&mut self, t: f64) {
+        if self.host_clipboard || self.clip.is_empty() {
+            return;
+        }
+        let mut pastes = Vec::new();
+        for request in std::mem::take(&mut self.clip) {
+            match request {
+                ClipRequest::Copy(text) => self.clip_text = Some(text),
+                ClipRequest::Paste => pastes.push(self.clip_text.clone()),
+            }
+        }
+        for text in pastes {
+            self.clipboard(t, text);
+        }
+    }
+
+    /// The clipboard's text arrived (`App::clipboard`).
+    pub(crate) fn clipboard(&mut self, t: f64, text: Option<String>) {
+        self.fire_timers(t);
+        self.flush();
+        self.run(t, |app, cx| app.clipboard(text, cx));
     }
 
     /// Builds the view and applies it to the scenes at `t`.

@@ -10,7 +10,7 @@ use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
 use vo_scene::display::{DisplayList, InputRegion};
 
-use crate::app::{App, Driver, FocusRequest, EXIT_MOTION_MAX};
+use crate::app::{App, ClipRequest, Driver, FocusRequest, EXIT_MOTION_MAX};
 use crate::surfaces::PanelAnchor;
 use crate::{Options, SurfaceMargin, Tokens};
 
@@ -308,9 +308,31 @@ impl<A: App> Live<A> {
         }
     }
 
+    /// Takes the app's copies and pastes to the host. A host without a clipboard answers a
+    /// paste with no text at once.
+    fn follow_clipboard(&mut self, host: &mut dyn HostCtl) {
+        for request in std::mem::take(&mut self.driver().clip) {
+            match request {
+                ClipRequest::Copy(text) => {
+                    if let Err(e) = host.set_clipboard(text) {
+                        eprintln!("vo: copy failed: {e}");
+                    }
+                }
+                ClipRequest::Paste => {
+                    if let Err(e) = host.request_clipboard() {
+                        eprintln!("vo: paste failed: {e}");
+                        let t = host.now();
+                        self.driver().clipboard(t, None);
+                    }
+                }
+            }
+        }
+    }
+
     /// Opens or closes the focus proxy when the app asked to take or give back keyboard
     /// focus. A host that cannot take focus tells the app at once that it has none.
     fn follow_focus(&mut self, host: &mut dyn HostCtl) {
+        self.follow_clipboard(host);
         let Some(request) = self.driver().focus.take() else { return };
         match request {
             FocusRequest::Take(spec) if self.proxy.is_none() => match host.open_focus_proxy(&spec) {
@@ -549,6 +571,7 @@ impl<A: App> Live<A> {
         scene.set_viewport(t, self.spec.size, 1.0);
         let mut driver = Driver::with_surfaces(app, scene, self.tokens.clone(), t, options.scene_maker());
         driver.lazy = true;
+        driver.host_clipboard = true;
         driver.extras.reduced = options.reduced_motion;
         let follows = matches!(options.margin, SurfaceMargin::Auto | SurfaceMargin::AtLeast(_))
             && self.spec.placement != Placement::Fullscreen;
@@ -803,6 +826,7 @@ impl<A: App> HostApp for Live<A> {
             }
             HostEvent::Modifiers { t, mods, .. } => self.driver().modifiers(t, mods),
             HostEvent::KeyRepeatInfo { info, .. } => self.driver().repeat_info(info),
+            HostEvent::Clipboard { t, text } => self.driver().clipboard(t, text),
             _ => {}
         }
         self.after_change(host);

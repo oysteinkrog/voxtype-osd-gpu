@@ -28,6 +28,7 @@
 //!   surface, so the overlay is click-through until the first GPU frame.
 
 mod blur;
+mod clipboard;
 pub mod guard;
 mod handlers;
 mod keyboard;
@@ -447,6 +448,7 @@ pub struct State {
     pub(crate) pointers: Vec<WlPointer>,
     pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
     pub(crate) keyboard: keyboard::Keyboard,
+    pub(crate) clipboard: clipboard::Clipboard,
     pub(crate) events: Vec<HostEvent>,
     timer: Option<f64>,
     exit: bool,
@@ -540,6 +542,7 @@ impl WaylandHost {
             })
             .map_err(|e| HostError::Connect(format!("ping source: {e}")))?;
 
+        let clipboard = clipboard::Clipboard::bind(&globals, &qh, &event_loop.handle());
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
@@ -573,6 +576,7 @@ impl WaylandHost {
             keyboards: Vec::new(),
             proxies: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
+            clipboard,
             events: Vec::new(),
             timer: None,
             exit: false,
@@ -1416,6 +1420,18 @@ impl HostCtl for State {
         let _ = self.conn.flush();
     }
 
+    fn set_clipboard(&mut self, text: String) -> Result<(), HostError> {
+        let done = self.clipboard.copy(&self.qh, text);
+        let _ = self.conn.flush();
+        done
+    }
+
+    fn request_clipboard(&mut self) -> Result<(), HostError> {
+        let done = self.clipboard.paste();
+        let _ = self.conn.flush();
+        done
+    }
+
     fn close(&mut self, id: SurfaceId) {
         if self.in_frame == Some(id) {
             // Closed from inside its own frame: the host still holds the frame's texture.
@@ -1482,6 +1498,12 @@ impl HostCtl for WaylandHost {
     }
     fn close_focus_proxy(&mut self, id: SurfaceId) {
         self.state.close_focus_proxy(id)
+    }
+    fn set_clipboard(&mut self, text: String) -> Result<(), HostError> {
+        self.state.set_clipboard(text)
+    }
+    fn request_clipboard(&mut self) -> Result<(), HostError> {
+        self.state.request_clipboard()
     }
     fn request_frame(&mut self, id: SurfaceId) {
         self.state.request_frame(id)

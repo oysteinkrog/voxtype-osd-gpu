@@ -14,8 +14,11 @@
 //! | Ctrl+A | select all |
 //! | Backspace, Delete (Ctrl: by word) | delete the selection, or a grapheme or word |
 //! | Ctrl+Z; Ctrl+Shift+Z, Ctrl+Y | undo; redo |
+//! | Ctrl+C, Ctrl+Insert | copy the selection (plan F5) |
+//! | Ctrl+X, Shift+Delete | cut the selection |
+//! | Ctrl+V, Shift+Insert | paste |
 //! | a key that types text (AltGr and dead keys included) | insert it |
-//! | Tab, Ctrl+C, Ctrl+X, Ctrl+V, a bare modifier, Alt+anything | nothing |
+//! | Tab, a bare modifier, Alt+anything | nothing |
 //!
 //! Up and Down do nothing while both Ctrl keys are held: Left Ctrl + Right Ctrl + Up/Down
 //! steps the look, and the daemon owns that chord.
@@ -34,6 +37,12 @@ pub enum EditCmd {
     Resume,
     /// Finish and send (Enter, on release).
     Finish,
+    /// Copy the selection to the clipboard (Ctrl+C, Ctrl+Insert).
+    Copy,
+    /// Copy the selection, then delete it (Ctrl+X, Shift+Delete).
+    Cut,
+    /// Insert the clipboard's text (Ctrl+V, Shift+Insert).
+    Paste,
 }
 
 /// Turns key events into text box commands. Keeps the little state it needs: which Ctrl keys
@@ -83,7 +92,10 @@ impl TextBoxKeys {
                 NamedKey::Home => mv(Dir::Back, if ctrl { Unit::Text } else { Unit::Line }),
                 NamedKey::End => mv(Dir::Forward, if ctrl { Unit::Text } else { Unit::Line }),
                 NamedKey::Backspace => Some(EditCmd::Edit(EditAction::Delete(Dir::Back, by_word(ctrl)))),
+                NamedKey::Delete if shift && !ctrl => Some(EditCmd::Cut),
                 NamedKey::Delete => Some(EditCmd::Edit(EditAction::Delete(Dir::Forward, by_word(ctrl)))),
+                NamedKey::Insert if ctrl && !shift => Some(EditCmd::Copy),
+                NamedKey::Insert if shift && !ctrl => Some(EditCmd::Paste),
                 _ => None,
             },
             LogicalKey::Char(c) if ctrl && !m.alt => match c.to_ascii_lowercase() {
@@ -91,6 +103,9 @@ impl TextBoxKeys {
                 'z' if shift => Some(EditCmd::Edit(EditAction::Redo)),
                 'z' => Some(EditCmd::Edit(EditAction::Undo)),
                 'y' => Some(EditCmd::Edit(EditAction::Redo)),
+                'c' => Some(EditCmd::Copy),
+                'x' => Some(EditCmd::Cut),
+                'v' => Some(EditCmd::Paste),
                 _ => None,
             },
             _ if ctrl || m.alt || m.logo => None,
@@ -193,9 +208,14 @@ mod tests {
                 edit(EditAction::Insert("é".into())),
             ),
             ("Tab: ignored", press(named(Tab), None, NONE), false, None),
-            ("Ctrl+C: ignored", press(LogicalKey::Char('c'), None, CTRL), true, None),
-            ("Ctrl+X: ignored", press(LogicalKey::Char('x'), None, CTRL), true, None),
-            ("Ctrl+V: ignored", press(LogicalKey::Char('v'), None, CTRL), false, None),
+            ("Ctrl+C: copy", press(LogicalKey::Char('c'), None, CTRL), true, Some(EditCmd::Copy)),
+            ("Ctrl+X: cut", press(LogicalKey::Char('x'), None, CTRL), true, Some(EditCmd::Cut)),
+            ("Ctrl+V: paste", press(LogicalKey::Char('v'), None, CTRL), false, Some(EditCmd::Paste)),
+            ("Ctrl+Insert: copy", press(named(Insert), None, CTRL), true, Some(EditCmd::Copy)),
+            ("Shift+Delete: cut", press(named(Delete), None, SHIFT), true, Some(EditCmd::Cut)),
+            ("Shift+Insert: paste", press(named(Insert), None, SHIFT), false, Some(EditCmd::Paste)),
+            ("Insert: ignored", press(named(Insert), None, NONE), false, None),
+            ("Ctrl+V release: nothing", ev(KeyState::Up, LogicalKey::Char('v'), None, CTRL), false, None),
             ("Alt+a: not text", press(LogicalKey::Char('a'), Some("a"), ALT), false, None),
             ("bare Right Shift", press(named(ShiftRight), None, NONE), false, None),
             ("bare Right Shift release", ev(KeyState::Up, named(ShiftRight), None, SHIFT), false, None),

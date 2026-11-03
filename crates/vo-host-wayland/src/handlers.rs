@@ -360,10 +360,12 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         let has = caps.contains(wl_seat::Capability::Keyboard);
         if has && state.keyboards.is_empty() {
             state.keyboards.push(seat.get_keyboard(qh, ()));
+            state.clipboard.seat(qh, seat);
         } else if !has && !state.keyboards.is_empty() {
             for k in state.keyboards.drain(..) {
                 k.release();
             }
+            state.clipboard.seat_gone();
             if let Some(id) = state.keyboard.leave() {
                 let t = state.now();
                 state.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
@@ -386,19 +388,25 @@ impl Dispatch<WlKeyboard, ()> for State {
             wl_keyboard::Event::Keymap { format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
                 state.keyboard.keymap(fd, size);
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter { surface, serial, .. } => {
                 // Keys held at enter are ignored, so the key list is not read.
                 if let Some(id) = state.focus_target(&surface) {
+                    state.clipboard.serial = Some(serial);
                     state.keyboard.enter(id, t, &mut state.events);
                 }
             }
             wl_keyboard::Event::Leave { .. } => {
+                state.clipboard.serial = None;
                 if let Some(id) = state.keyboard.leave() {
                     state.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });
                 }
             }
-            wl_keyboard::Event::Key { key, state: WEnum::Value(s), .. } => {
+            wl_keyboard::Event::Key { key, state: WEnum::Value(s), serial, .. } => {
                 let pressed = s == wl_keyboard::KeyState::Pressed;
+                if pressed {
+                    // A copy needs the serial of an input event (`clipboard.rs`).
+                    state.clipboard.serial = Some(serial);
+                }
                 // Compositor repeats (wl_keyboard 10) are dropped: the driver repeats.
                 if pressed || s == wl_keyboard::KeyState::Released {
                     state.keyboard.key(t, key, pressed, &mut state.events);

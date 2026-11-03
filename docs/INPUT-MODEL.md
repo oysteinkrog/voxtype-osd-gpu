@@ -202,6 +202,27 @@ working while the popup has focus, as they do in any text box. The edit keys the
 Home, End, Backspace, Delete, Ctrl+Z and the like) are not global shortcuts, so nothing needs to be
 inhibited.
 
+## Clipboard
+
+Added 2026-11-03 (F5). Copy and paste of plain text through `wl_data_device`, on the seat the
+keyboard comes from.
+
+- `Cx::copy(text)` puts text on the clipboard; `Cx::paste()` asks for it and `App::clipboard`
+  answers with `Some(text)`, or `None` when the clipboard is empty or holds no
+  `text/plain;charset=utf-8`. Live the answer comes on a later event; offline the driver keeps the
+  last copy and answers at once.
+- Only an explicit copy sets the clipboard. The host never sets the primary selection, so
+  selecting text leaves what a middle click or Shift+Insert in another app pastes alone (plan
+  R18).
+- The compositor checks the serial of a copy against the client's input, and sends the clipboard
+  only to the client with keyboard focus. So copy needs a key press since focus came (a copy key
+  is one), and both work only while the focus proxy has focus.
+- Pipes are read and written on short-lived threads, so a slow peer never blocks the event loop.
+  A paste is cut at 4 MiB.
+- The text box keymap maps Ctrl+C and Ctrl+Insert to copy, Ctrl+X and Shift+Delete to cut, and
+  Ctrl+V and Shift+Insert to paste (`vo_core::edit_keymap`).
+- `scripts/clipboard-check.sh` checks it in a nested KWin with `wl-copy` and `wl-paste`.
+
 ## The three cases the plan needs
 
 - **Dictation popup:** `InputMode::None`, `Keyboard::None`, no interactive nodes. The region is empty
@@ -217,7 +238,7 @@ inhibited.
 
 ## Out of scope
 
-Text input and IME, clipboard, screen readers,
+Text input and IME, screen readers,
 touch and gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
 path, so accesskit can be added later as the plan says.
 
