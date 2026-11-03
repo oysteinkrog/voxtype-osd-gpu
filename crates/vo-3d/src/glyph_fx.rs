@@ -688,7 +688,6 @@ struct Batch {
     quads: Vec<GpuQuad>,
 }
 
-
 impl GlyphFxPainter {
     /// The glyphs, quads and uniform of a [`GlyphFx`] element, and whether it is the light
     /// under the text. `None` when it draws nothing.
@@ -928,8 +927,14 @@ impl GpuPainter for GlyphFxPainter {
         let slot = &mut self.slots[self.next];
         self.next += 1;
         let (storage, uniform) = (wgpu::BufferUsages::STORAGE, wgpu::BufferUsages::UNIFORM);
-        let glyph_buf =
-            reuse(&mut slot.glyphs, device, queue, "vo3d-glyph-fx-glyphs", storage, bytemuck::cast_slice(&batch.glyphs));
+        let glyph_buf = reuse(
+            &mut slot.glyphs,
+            device,
+            queue,
+            "vo3d-glyph-fx-glyphs",
+            storage,
+            bytemuck::cast_slice(&batch.glyphs),
+        );
         let material_buf =
             reuse(&mut slot.material, device, queue, "vo3d-glyph-fx-material", storage, bytemuck::bytes_of(&material));
         let quad_buf =
