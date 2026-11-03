@@ -172,3 +172,69 @@ Lattice gate (LT-11, popup d418f14): `scripts/osd-vo-looks.sh --motion kinetic-l
 Synthwave with its effects and idle motion (1kj: onset-grid, light-line, pitch-baseline and particle-source on by default; z4a: once the onset road has been empty for 2.4 s, faint rows drift toward the viewer at 8 px/s with their gaps breathing 1 px every 3 s, standing in for a sun's stripes; the tube dips to 70 % for 0.1 s every 8 s), room tone paced at 10 frames a second for this look, measure build, popup d42e943, 2026-10-31, three runs under load 10 to 28: recording 8.0 to 13.0 % CPU, 50 to 52 frames/s, GPU median 0.51 ms; idle-open 1.50, 1.75 and 1.75 % CPU, 10.2 frames/s, GPU median 0.34 ms. Idle within the budget; recording over 10 % in one run of three, at load 17.
 
 Mecha with its effects and idle motion (3or: hydraulic-chain, onset-joint, look-choice and broken-frame on by default; vfl: the level meter's cell just above the reading flickers between 18 % and 30 % ink 6 times a second, standing in for gauge needles; the two side bars left of the text panel reach 2 px toward each other and back every 3 s, standing in for pistons; the hazard stripes keep their crawl of 8.6 px/s at 600 px and stand still under reduced motion), measure build, popup 5b42aec, 2026-10-31, three runs at load 4 to 5: recording 4.0 to 4.8 % CPU, 50 to 53 frames/s, GPU median 0.20 ms; idle-open 2.00, 1.50 and 1.75 % CPU, 15.4 frames/s, GPU median 0.15 ms. All within the budget. Under reduced motion the clock and the live waveform still change between idle frames: they are readings, not idle motion.
+
+## 6. Gate: all 27 looks with their defaults (RD-06, EG-GATE)
+
+Run 2026-11-03 on clean worktrees of two commits: framework c7520dc and popup 0275331 (its vo pin 527844f). Both shared checkouts had other lanes' edits in flight, so the gate ran on what was committed.
+
+- Framework, `just all` at c7520dc: exit 0. CPU tests 1057 passed, GPU tests 278 passed, budget ok (cold first frame median 260.8 ms, idle loop 28 frames a second, slowest effect at 600x300 smoke 0.521 ms).
+- Popup, `cargo test --lib osd::`: 198 passed. `cargo test --features osd-vo --bin voxtype-osd-vo`: 357 passed, 2 ignored. `cargo clippy --features osd-vo --bin voxtype-osd-vo -- -D warnings`: clean.
+- `scripts/osd-vo-looks.sh` (debug build): 27 looks, 189 runs, 0 failed. Again with `VO_LIGHT=1`: 189 runs, 0 failed. Swiss with a light kdeglobals (`XDG_CONFIG_HOME` at a temp dir): `--envelope` plain, with `--cancel` and with `VO_REDUCED_MOTION=1` all print `envelope: ok`.
+- `scripts/osd-vo-budget.sh` (measure build), 54 rows. The first run had six rows over by a small margin at load 5 to 14 (showcase recording 13.14 % against 12 %, scope recording 11.03 % against 10 %, type, tron, particles and synthwave idle-open 2.01 to 2.14 % against 2 %). A second run of those six looks passed every row (exit 0). The table keeps run 1 and takes run 2 for those six rows.
+
+| look | state | CPU % | frames/s | GPU median ms | p95 | run |
+|---|---|---:|---:|---:|---:|---|
+| swiss | recording | 5.19 | 50.6 | 0.060 | 0.065 | 1 |
+| swiss | idle-open | 1.99 | 15.1 | 0.048 | 0.063 | 1 |
+| showcase | recording | 10.41 | 48.2 | 0.643 | 2.591 | 2 (run 1: 13.14 %) |
+| showcase | idle-open | 2.69 | 10.2 | 0.292 | 0.380 | 1 |
+| type | recording | 8.92 | 50.0 | 0.073 | 0.159 | 1 |
+| type | idle-open | 1.39 | 12.2 | 0.052 | 0.101 | 2 (run 1: 2.13 %) |
+| amber | recording | 6.92 | 50.2 | 0.194 | 0.240 | 1 |
+| amber | idle-open | 1.61 | 15.4 | 0.123 | 0.139 | 1 |
+| radial | recording | 4.62 | 51.2 | 0.042 | 0.055 | 1 |
+| radial | idle-open | 1.75 | 12.4 | 0.038 | 0.052 | 1 |
+| tron | recording | 6.78 | 41.0 | 0.275 | 0.344 | 1 |
+| tron | idle-open | 1.52 | 15.4 | 0.171 | 0.220 | 2 (run 1: 2.13 %) |
+| phosphor | recording | 6.06 | 50.4 | 0.165 | 0.191 | 1 |
+| phosphor | idle-open | 1.77 | 12.2 | 0.103 | 0.115 | 1 |
+| mission | recording | 5.26 | 52.2 | 0.122 | 0.130 | 1 |
+| mission | idle-open | 1.90 | 15.4 | 0.102 | 0.111 | 1 |
+| palette | recording | 4.88 | 52.2 | 0.076 | 0.195 | 1 |
+| palette | idle-open | 1.54 | 15.1 | 0.049 | 0.153 | 1 |
+| dotmatrix | recording | 5.37 | 51.0 | 0.026 | 0.031 | 1 |
+| dotmatrix | idle-open | 1.34 | 15.4 | 0.019 | 0.023 | 1 |
+| swissfi | recording | 5.36 | 51.8 | 0.054 | 0.063 | 1 |
+| swissfi | idle-open | 1.64 | 15.4 | 0.036 | 0.057 | 1 |
+| scope | recording | 7.34 | 51.4 | 0.147 | 0.265 | 2 (run 1: 11.03 %) |
+| scope | idle-open | 1.33 | 10.0 | 0.123 | 0.269 | 1 |
+| captions | recording | 5.73 | 52.0 | 0.146 | 0.973 | 1 |
+| captions | idle-open | 1.92 | 14.9 | 0.147 | 0.526 | 1 |
+| karaoke | recording | 5.54 | 51.8 | 0.151 | 0.222 | 1 |
+| karaoke | idle-open | 1.30 | 15.4 | 0.104 | 0.152 | 1 |
+| island | recording | 5.87 | 52.6 | 0.070 | 0.085 | 1 |
+| island | idle-open | 1.60 | 15.1 | 0.043 | 0.048 | 1 |
+| jarvis | recording | 5.63 | 52.0 | 0.332 | 1.667 | 1 |
+| jarvis | idle-open | 1.60 | 11.5 | 0.182 | 1.047 | 1 |
+| particles | recording | 7.68 | 51.0 | 0.049 | 0.076 | 1 |
+| particles | idle-open | 1.44 | 15.4 | 0.043 | 0.055 | 2 (run 1: 2.01 %) |
+| synthwave | recording | 8.22 | 50.6 | 0.511 | 2.439 | 1 |
+| synthwave | idle-open | 1.70 | 10.0 | 0.348 | 0.377 | 2 (run 1: 2.14 %) |
+| mecha | recording | 4.44 | 52.0 | 0.201 | 0.227 | 1 |
+| mecha | idle-open | 1.95 | 14.1 | 0.155 | 0.170 | 1 |
+| cyberpunk | recording | 6.22 | 47.6 | 0.269 | 0.436 | 1 |
+| cyberpunk | idle-open | 1.90 | 14.6 | 0.161 | 0.195 | 1 |
+| orb | recording | 4.27 | 46.2 | 0.114 | 0.131 | 1 |
+| orb | idle-open | 1.00 | 7.6 | 0.114 | 0.132 | 1 |
+| chrome | recording | 5.53 | 49.0 | 0.321 | 0.357 | 1 |
+| chrome | idle-open | 1.13 | 7.8 | 0.296 | 1.304 | 1 |
+| glass | recording | 4.45 | 42.4 | 0.327 | 0.371 | 1 |
+| glass | idle-open | 1.62 | 15.1 | 0.178 | 0.261 | 1 |
+| biolume | recording | 7.69 | 46.2 | 0.452 | 0.495 | 1 |
+| biolume | idle-open | 1.29 | 7.6 | 0.351 | 0.418 | 1 |
+| aurora | recording | 8.44 | 51.4 | 0.294 | 0.362 | 1 |
+| aurora | idle-open | 2.00 | 15.1 | 0.224 | 0.248 | 1 |
+| hologram | recording | 3.75 | 32.4 | 0.321 | 0.365 | 1 |
+| hologram | idle-open | 1.44 | 14.4 | 0.211 | 0.288 | 1 |
+| river | recording | 7.67 | 50.2 | 0.211 | 0.259 | 1 |
+| river | idle-open | 1.60 | 14.4 | 0.234 | 0.267 | 1 |
