@@ -277,7 +277,8 @@ impl PointerHandler for State {
             let kind = match e.kind {
                 PointerEventKind::Enter { serial } => {
                     let s = &self.surfaces[i];
-                    self.cursors.enter(s.id, serial, s.cursor);
+                    let scale = s.px_scale().ceil() as u32;
+                    self.cursors.enter(s.id, serial, scale, s.cursor, &mut self.diag.notes);
                     PointerKind::Enter
                 }
                 PointerEventKind::Leave { .. } => {

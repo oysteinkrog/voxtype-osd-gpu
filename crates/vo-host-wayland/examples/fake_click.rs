@@ -7,6 +7,10 @@
 //!   fake_click click X Y [N]   move there, then press and release the left button (N times,
 //!                              60 ms apart, for a double or triple click)
 //!   fake_click drag X Y X2 Y2  press at (X, Y), move to (X2, Y2) in steps, release there
+//!
+//! KWin removes the fake pointer when this exits, and clients see the pointer capability go.
+//! Set `FAKE_CLICK_HOLD_MS=N` to keep it N ms longer, for a check that needs the pointer to
+//! stay (a cursor image set on it, for example).
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -91,4 +95,7 @@ fn main() {
     }
     queue.roundtrip(&mut State).expect("roundtrip");
     eprintln!("fake_click: {verb} at ({x}, {y})");
+    if let Some(ms) = std::env::var("FAKE_CLICK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
 }

@@ -2019,6 +2019,7 @@ dependencies = [
  "vo-host",
  "vo-scene",
  "wayland-client",
+ "wayland-cursor",
  "wayland-protocols-plasma",
  "wgpu",
  "xkbcommon",

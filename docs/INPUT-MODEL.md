@@ -218,7 +218,9 @@ transform), so a text box can place the caret and select.
 - `Element::cursor(Cursor::Text)` sets the cursor over a node, or over the pressed node while
   the button is held. The live driver sends `SurfaceChange::Cursor` when it changes. The
   Wayland host shows it through `wp_cursor_shape_v1`, so the compositor draws its own theme's
-  I-beam; a compositor without the protocol keeps its cursor.
+  I-beam. Without the protocol, the host draws the shape from the XCursor theme
+  (`XCURSOR_THEME`, `XCURSOR_SIZE`) on a cursor surface of its own. `scripts/cursor-fallback.sh`
+  checks both in a nested KWin, hiding the global with `VO_NO_CURSOR_SHAPE=1` for the fallback.
 - `vo_core::edit::word_at` and `line_at` give what a double and a triple click select: the
   run of word characters, separators or spaces under the click (Qt's rule), and the line
   between hard line breaks. `EditAction::Select` selects a range.

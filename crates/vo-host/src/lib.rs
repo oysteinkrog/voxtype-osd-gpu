@@ -204,7 +204,8 @@ pub enum SurfaceChange {
     Cursor(CursorShape),
 }
 
-/// A cursor the compositor draws from its own theme (`SurfaceChange::Cursor`).
+/// A cursor shape (`SurfaceChange::Cursor`). The compositor draws it from its own theme, or
+/// the host draws it from the XCursor theme when the compositor cannot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CursorShape {
     #[default]

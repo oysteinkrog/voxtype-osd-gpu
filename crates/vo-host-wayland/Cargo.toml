@@ -12,6 +12,8 @@ vo-scene = { path = "../vo-scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
 smithay-client-toolkit = { version = "0.20.0", default-features = false, features = ["calloop"] }
 wayland-client = { version = "0.31", features = ["system"] }
+# XCursor themes for the cursor fallback without wp_cursor_shape_v1. sctk already depends on it.
+wayland-cursor = "0.31"
 raw-window-handle = "0.6"
 pollster = "0.4"
 libc = "0.2"

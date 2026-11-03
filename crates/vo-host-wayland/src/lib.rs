@@ -549,7 +549,7 @@ impl WaylandHost {
             .map_err(|e| HostError::Connect(format!("ping source: {e}")))?;
 
         let clipboard = clipboard::Clipboard::bind(&globals, &qh, &event_loop.handle());
-        let cursors = cursor::Cursors::bind(&globals, &qh);
+        let cursors = cursor::Cursors::bind(&globals, &qh, &conn, &compositor, shm.as_ref().map(|s| s.wl_shm()));
         let text_input = text_input::TextInput::bind(&globals, &qh);
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
@@ -1315,7 +1315,7 @@ impl HostCtl for State {
         match change {
             SurfaceChange::Cursor(shape) => {
                 self.surfaces[i].cursor = shape;
-                self.cursors.set(id, shape);
+                self.cursors.set(id, shape, &mut self.diag.notes);
                 let _ = self.conn.flush();
             }
             SurfaceChange::Input(mode) => {
