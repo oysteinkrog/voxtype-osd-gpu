@@ -789,11 +789,17 @@ pub(crate) struct Handlers<M> {
     pub hover: Option<(M, M)>,
     /// Makes the message for a key while this node has keyboard focus.
     pub key: Option<fn(crate::input::KeyEvent) -> M>,
+    /// Messages when keyboard focus comes to this node and when it leaves.
+    pub focus: Option<(M, M)>,
+    /// Place in the tab order (`crate::focus`); `None` is 0.
+    pub tab_index: Option<i32>,
+    /// Drawn around the node while it has focus.
+    pub ring: Option<crate::focus::FocusRing>,
 }
 
 impl<M> Default for Handlers<M> {
     fn default() -> Self {
-        Handlers { hit: false, click: None, hover: None, key: None }
+        Handlers { hit: false, click: None, hover: None, key: None, focus: None, tab_index: None, ring: None }
     }
 }
 
@@ -2324,11 +2330,31 @@ impl<M> Element<M> {
 
     /// Makes the node focusable: while the app has keyboard focus, keys go to the focused
     /// node first, as `msg(key)`, and reach `App::key` only when no node is focused. The
-    /// scene focuses the first focusable node in tree order (one per scene for now), and a
-    /// node that is removed or leaves loses focus. `msg` is usually a message constructor,
-    /// such as `Msg::Key`.
+    /// scene focuses the first node in the tab order, Tab and Shift+Tab move focus when
+    /// there is more than one (`crate::focus`), and a node that is removed or leaves loses
+    /// focus. `msg` is usually a message constructor, such as `Msg::Key`.
     pub fn on_key(mut self, msg: fn(crate::input::KeyEvent) -> M) -> Element<M> {
         self.handlers.key = Some(msg);
+        self
+    }
+
+    /// Messages for when keyboard focus comes to this node and when it leaves it.
+    pub fn on_focus(mut self, enter: M, leave: M) -> Element<M> {
+        self.handlers.focus = Some((enter, leave));
+        self
+    }
+
+    /// The node's place in the tab order, as in HTML: positive indexes come first, lowest
+    /// first, then 0 (the default) in document order. A negative index leaves the node out
+    /// of the tab order.
+    pub fn tab_index(mut self, index: i32) -> Element<M> {
+        self.handlers.tab_index = Some(index);
+        self
+    }
+
+    /// Draws `ring` around the node while it has keyboard focus. No node has one by default.
+    pub fn focus_ring(mut self, ring: crate::focus::FocusRing) -> Element<M> {
+        self.handlers.ring = Some(ring);
         self
     }
 }

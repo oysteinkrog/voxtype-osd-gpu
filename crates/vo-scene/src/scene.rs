@@ -35,7 +35,7 @@ use crate::flow::{Flow, FlowInput};
 use crate::geom::{Affine, Color, Point, RRect, Rect, Size};
 use crate::glass::{BlurBehind, Glass, GlassInstance, GlassShape};
 use crate::inline::OBJECT_GLYPH;
-use crate::input::{KeyEvent, PointerState};
+use crate::input::PointerState;
 use crate::layout::LayoutView;
 use crate::material::Material;
 use crate::text::{EstimateText, ShapedText, TextLayout, ELLIPSIS_CLUSTER};
@@ -947,8 +947,8 @@ pub struct Scene<M = ()> {
     /// Something drawn or hit-tested changed during the current `apply`.
     changed: bool,
     pub(crate) pointer: PointerState,
-    /// The node keys go to (`Element::on_key`).
-    focused: Option<NodeId>,
+    /// The node keys go to (`Element::on_key`), and focus changes not yet sent.
+    pub(crate) focus: crate::focus::Focus,
     /// The signal bus store bound props read (`crate::bind`).
     signals: Option<SignalsCell>,
 }
@@ -977,7 +977,7 @@ impl<M> Scene<M> {
             layout_dirty: false,
             changed: false,
             pointer: PointerState::default(),
-            focused: None,
+            focus: Default::default(),
             signals: None,
         }
     }
@@ -1138,38 +1138,8 @@ impl<M> Scene<M> {
         }
         self.changed |= crate::repeat::place_children(&mut self.nodes, t, self.retention);
         self.pointer.forget_missing(|id| self.nodes.get(id).is_some_and(|n| n.leaving.is_none()));
-        self.focused = self.focused.filter(|&id| self.focusable(id)).or_else(|| self.first_focusable());
+        self.changed |= self.refocus();
         self.changed
-    }
-
-    fn focusable(&self, id: NodeId) -> bool {
-        self.nodes.get(id).is_some_and(|n| n.leaving.is_none() && n.handlers.key.is_some())
-    }
-
-    /// The first focusable node in tree order, depth first.
-    fn first_focusable(&self) -> Option<NodeId> {
-        let mut stack: Vec<NodeId> = self.root.into_iter().collect();
-        while let Some(id) = stack.pop() {
-            if self.focusable(id) {
-                return Some(id);
-            }
-            if let Some(n) = self.nodes.get(id) {
-                stack.extend(n.flow.iter().rev());
-            }
-        }
-        None
-    }
-
-    /// The node that has keyboard focus, if any node is focusable.
-    pub fn focused(&self) -> Option<NodeId> {
-        self.focused
-    }
-
-    /// The message for a key, from the focused node's `Element::on_key`, or `None` when no
-    /// node has focus.
-    pub fn key(&self, ev: &KeyEvent) -> Option<M> {
-        let make = self.nodes.get(self.focused?)?.handlers.key?;
-        Some(make(ev.clone()))
     }
 
     /// The time at or after `t` from which the display list may differ from `sample(t)`:
@@ -1497,7 +1467,7 @@ impl<M> Scene<M> {
         changed |= n.glass != glass || n.blur_behind != blur_behind;
         changed |= n.binds != binds;
         changed |= n.material != material || n.afterglow != afterglow || n.trail_drift != trail_drift;
-        changed |= n.handlers.hit != handlers.hit;
+        changed |= n.handlers.hit != handlers.hit || n.handlers.ring != handlers.ring;
         n.style = style;
         n.kind = kind;
         n.motion = motion;
@@ -2049,6 +2019,14 @@ impl<M> Scene<M> {
         }
         for &c in &n.children {
             self.emit(c, t, m, alpha, layer, leaving, items, out);
+        }
+        if let Some(ring) = n.handlers.ring.filter(|_| !leaving && self.focus.focused == Some(id)) {
+            let g = ring.gap;
+            let rect = Rect::new(m.e - g, m.f - g, size.w + 2.0 * g, size.h + 2.0 * g);
+            let shape = ShapeInstance::rrect(RRect::new(rect, radius(n, t) + g), Paint::NONE)
+                .with_stroke(Paint::solid(ring.color).fade(alpha), ring.width);
+            push_item(items, ItemKind::Shapes, out.shapes.len() as u32);
+            out.shapes.push(shape);
         }
         if let Some(mat) = &n.material {
             // Reduced motion (MO09): long after any flicker-on, and still.
@@ -3136,49 +3114,5 @@ impl From<NodeId> for taffy::NodeId {
 impl From<taffy::NodeId> for NodeId {
     fn from(id: taffy::NodeId) -> NodeId {
         NodeId::from_bits(u64::from(id))
-    }
-}
-
-#[cfg(test)]
-mod focus_tests {
-    use super::*;
-    use crate::input::{KeyState, LogicalKey, Mods};
-
-    #[derive(Clone, Debug, PartialEq)]
-    enum Msg {
-        Key(KeyEvent),
-    }
-
-    fn ev(t: f64) -> KeyEvent {
-        KeyEvent {
-            surface: 1,
-            t,
-            state: KeyState::Down,
-            key: LogicalKey::Char('a'),
-            code: 30,
-            text: Some("a".into()),
-            mods: Mods::NONE,
-        }
-    }
-
-    #[test]
-    fn keys_reach_the_focused_node_and_a_removed_node_loses_focus() {
-        let mut scene: Scene<Msg> = Scene::new();
-        scene.apply(Element::column("root").child(Element::label("hint", "x")), 0.0);
-        assert_eq!(scene.focused(), None);
-        assert_eq!(scene.key(&ev(0.0)), None, "no focusable node: the key goes to the app");
-
-        let editable =
-            Element::column("root").child(Element::label("hint", "x")).child(Element::panel("box").on_key(Msg::Key));
-        scene.apply(editable.clone(), 1.0);
-        let focused = scene.focused().expect("the focusable node gets focus");
-        assert_eq!(scene.key(&ev(1.0)), Some(Msg::Key(ev(1.0))));
-        // A new view with the same node keeps focus on it.
-        scene.apply(editable, 2.0);
-        assert_eq!(scene.focused(), Some(focused));
-
-        scene.apply(Element::column("root").child(Element::label("hint", "x")), 3.0);
-        assert_eq!(scene.focused(), None);
-        assert_eq!(scene.key(&ev(3.0)), None);
     }
 }

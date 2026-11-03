@@ -171,8 +171,31 @@ below).
 - `vo::offline::Scenario::to_log` and `Scenario::from_log` turn a scripted scenario (for example
   `type_text` and `chord`) into a log and back. Pointer inputs are not logged yet.
 
-**Routing.** A key goes to the focused node first (`Element::on_key`; the scene focuses the first
-such node, one per scene for now) and reaches `App::key` only when no node has focus.
+**Routing.** A key goes to the focused node first (`Element::on_key`) and reaches `App::key` only
+when no node has focus.
+
+## Focus order
+
+Added 2026-11-03 (F4c). A scene can hold several focusable nodes (`Element::on_key`).
+
+- **Tab order.** Nodes with a positive `Element::tab_index` come first, lowest first, then nodes
+  with index 0 (the default) in document order: depth first, in layout order. A negative index
+  leaves the node out of the tab order. It can still hold focus.
+- **Tab and Shift+Tab** (without Ctrl, Alt or Super) move focus one step forward or back and
+  wrap around. They do this only when there is another node in the tab order to move to, so with
+  one focusable node Tab reaches that node like any other key. The release of a Tab that moved
+  focus goes nowhere, so the new node never sees a stray key up. A held Tab repeats like any key.
+- **First focus.** On each view the scene keeps focus on its node while that node is still
+  focusable, which holds for as long as the view keeps the node's key path. Otherwise focus goes
+  to the first node in the tab order, or to the first focusable node when all opted out.
+- **Messages.** `Element::on_focus(enter, leave)` gives the app a message when focus comes to the
+  node and when it goes: the old node's leave first, then the new node's enter. A removed node
+  gets no leave. The driver sends them after the view that caused them, or after the Tab.
+- **Focus ring.** `Element::focus_ring(FocusRing { color, width, gap })` draws a stroke `gap`
+  outside the node's box while it has focus. The look picks colour and width. No node has a ring
+  by default, so existing looks draw nothing new.
+- `Keyboard::None` stays the default for every surface. Scene focus says which node gets keys;
+  the surface still needs keyboard focus (the focus proxy) for keys to arrive.
 
 **Shortcuts.** v1 does not use `zwp_keyboard_shortcuts_inhibit_manager_v1`. KWin global shortcuts keep
 working while the popup has focus, as they do in any text box. The edit keys the popup uses (arrows,
@@ -194,7 +217,7 @@ inhibited.
 
 ## Out of scope
 
-Text input and IME, focus traversal and more than one focusable node, clipboard, screen readers,
+Text input and IME, clipboard, screen readers,
 touch and gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
 path, so accesskit can be added later as the plan says.
 

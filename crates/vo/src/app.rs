@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use vo_host::{FocusProxySpec, KeyEvent, KeyState, LogicalKey, Mods, Placement, PointerEvent, RepeatInfo, Waker};
 use vo_scene::element::Element;
+use vo_scene::focus::KeyRoute;
 use vo_scene::geom::{Color, Size};
 use vo_scene::Scene;
 
@@ -385,6 +386,14 @@ impl<A: App> Driver<A> {
         // costs no frame.
         self.dirty |= self.scene.apply(view, t);
         self.extras.apply(self.app.surfaces(&self.tokens), t);
+        self.focus_msgs(t);
+    }
+
+    /// Sends the focus leave and enter messages (`Element::on_focus`) the scene queued.
+    fn focus_msgs(&mut self, t: f64) {
+        for msg in self.scene.take_focus_msgs() {
+            self.dispatch(msg, t);
+        }
     }
 
     /// Whether a message's view waits for the next frame (`lazy`).
@@ -457,11 +466,15 @@ impl<A: App> Driver<A> {
     }
 
     /// Gives a key to the focused node (`Element::on_key`), or to `App::key` when no node
-    /// is focusable.
+    /// is focusable. Tab and Shift+Tab move focus when more than one node can take it.
     fn deliver_key(&mut self, ev: &KeyEvent) {
         match self.scene.key(ev) {
-            Some(msg) => self.dispatch(msg, ev.t),
-            None => self.run(ev.t, |app, cx| {
+            KeyRoute::Node(msg) => self.dispatch(msg, ev.t),
+            KeyRoute::Focus { redraw } => {
+                self.dirty |= redraw;
+                self.focus_msgs(ev.t);
+            }
+            KeyRoute::App => self.run(ev.t, |app, cx| {
                 app.key(ev, cx);
             }),
         }
