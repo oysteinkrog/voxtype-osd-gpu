@@ -177,7 +177,7 @@ mod tests {
         let mut buf = EditBuffer::new("plum ");
         buf.apply_plain(EditAction::MoveTo { to: 5, affinity: crate::edit::Affinity::Downstream, extend: false }, 0.0);
         let mut c = Composing::default();
-        let mut feed = |buf: &mut EditBuffer, c: &mut Composing, ev: TextInputEvent| {
+        let feed = |buf: &mut EditBuffer, c: &mut Composing, ev: TextInputEvent| {
             for a in ev.actions(buf.text(), buf.selection().range()) {
                 buf.apply_plain(a, 0.0);
             }
