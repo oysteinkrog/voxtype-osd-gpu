@@ -32,6 +32,12 @@ pub trait GpuSource: Debug + Send + Sync {
     /// Scene time after which the drawing no longer changes. `f64::INFINITY` keeps the scene
     /// awake for as long as the element is shown.
     fn until(&self) -> f64;
+    /// Whether its painter reads the frame's signal block (`DisplayList::signals`, bound
+    /// as group 3). The scene builds the block only when something reads it, so a source
+    /// whose painter never binds it says no (bqw3).
+    fn reads_signals(&self) -> bool {
+        true
+    }
 }
 
 /// A source handle: compared by identity, so a view that keeps the same `Arc` leaves the node
@@ -299,6 +305,37 @@ mod tests {
         fn until(&self) -> f64 {
             0.0
         }
+    }
+
+    /// Says it never reads the signal block.
+    #[derive(Debug)]
+    struct Deaf;
+
+    impl GpuSource for Deaf {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn until(&self) -> f64 {
+            0.0
+        }
+        fn reads_signals(&self) -> bool {
+            false
+        }
+    }
+
+    /// The scene builds the signal block for a GPU source that reads it, and skips it when
+    /// every GPU source says it does not (bqw3). The block's first value is the time.
+    #[test]
+    fn the_signal_block_is_built_only_for_a_reader() {
+        let block_t = |src: Arc<dyn GpuSource>| {
+            let mut scene: Scene<()> = Scene::new();
+            scene.set_viewport(0.0, Size::new(100.0, 100.0), 1.0);
+            scene.set_signals(vo_core::signals::SignalsCell::new(vo_core::signals::Signals::new()));
+            scene.apply(Element::column("root").child(Element::gpu("g", src).size(50.0, 50.0)), 0.0);
+            scene.sample(5.0).signals.head[0]
+        };
+        assert_eq!(block_t(Arc::new(Dummy)), 5.0);
+        assert_eq!(block_t(Arc::new(Deaf)), 0.0);
     }
 
     fn words(n: usize) -> Vec<Word> {

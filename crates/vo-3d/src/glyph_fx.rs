@@ -343,6 +343,11 @@ impl GpuSource for GlyphFx {
     fn until(&self) -> f64 {
         self.settled_at()
     }
+
+    /// The glyph-effect shader binds no signal block: the painter reads the level itself.
+    fn reads_signals(&self) -> bool {
+        false
+    }
 }
 
 #[repr(C)]

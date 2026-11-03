@@ -30,6 +30,11 @@ impl GpuSource for Item3d {
     fn until(&self) -> f64 {
         self.0.until()
     }
+
+    /// The 3D renderer binds no signal block.
+    fn reads_signals(&self) -> bool {
+        false
+    }
 }
 
 /// `source` as the source of `Element::gpu`.

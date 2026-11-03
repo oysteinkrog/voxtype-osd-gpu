@@ -1267,8 +1267,11 @@ impl<M> Scene<M> {
         crate::gpu::place_front_halves(out);
         // Only app GPU code and app materials read the signal block; built-in shaders do not.
         // A list without them skips it: room tone would rebuild every band and the whole
-        // level history once a frame for nothing (RD-14).
-        if out.gpu.is_empty() && out.materials.iter().all(|m| m.func < crate::material::CUSTOM_FIRST) {
+        // level history once a frame for nothing (RD-14). GPU sources that say they never
+        // read it, such as 3D items and glyph effects, do not count (bqw3).
+        if out.gpu.iter().all(|g| !g.source.0.reads_signals())
+            && out.materials.iter().all(|m| m.func < crate::material::CUSTOM_FIRST)
+        {
             return;
         }
         out.signals = self.signals.as_ref().map_or_else(SignalBlock::default, |c| c.get().block(t));
