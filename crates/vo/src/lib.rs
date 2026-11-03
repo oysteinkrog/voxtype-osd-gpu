@@ -43,10 +43,10 @@ pub use offline::{
 };
 pub use surfaces::SurfaceView;
 
+pub use vo_a11y as a11y_tree;
 pub use vo_host::{
     Edges, FocusProxySpec, HostError, InputMode, Keyboard, OverlaySpec, Placement, PointerKind, Stack, SurfaceKind,
 };
-pub use vo_a11y as a11y_tree;
 pub use vo_scene as scene;
 pub use vo_scene::font::FontRegistry;
 pub use vo_scene::text::{ShapedLayout, TextLayout};
