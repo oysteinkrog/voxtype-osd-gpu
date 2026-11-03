@@ -164,10 +164,13 @@ pub fn particle_reach(sim: &crate::emitter::EmitterSim, look: &crate::emitter::E
 }
 
 /// What the reach of one element or node is computed from.
+/// Calls the given function with each value of a slot (see [`ReachIn::get`]).
+pub(crate) type SlotValues<'a> = dyn Fn(Slot, &mut dyn FnMut(f64)) + 'a;
+
 pub(crate) struct ReachIn<'a> {
     /// Calls the given function with each of a slot's values: the element's target, or a
     /// node's value and target. Not at all when unset.
-    pub get: &'a dyn Fn(Slot, &mut dyn FnMut(f64)),
+    pub get: &'a SlotValues<'a>,
     pub kind: &'a Kind,
     pub inside: bool,
     pub hairline: bool,
