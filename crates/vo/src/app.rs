@@ -213,7 +213,11 @@ impl<M> Cx<'_, M> {
     }
 
     pub fn cancel(&mut self, id: TimerId) {
-        self.timers.pending.retain(|p| p.1 != id);
+        // Ids are unique, and the timer an app cancels is most often one due soon, which
+        // sits at the end: search from there and stop at the first match.
+        if let Some(i) = self.timers.pending.iter().rposition(|p| p.1 == id) {
+            self.timers.pending.remove(i);
+        }
     }
 
     /// Ends the run once everything has settled, so exit motion plays out first.
