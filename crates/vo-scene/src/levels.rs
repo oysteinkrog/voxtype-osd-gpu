@@ -4,10 +4,13 @@
 //! [`Levels`] is a run of levels from 0 to 1, oldest first, evenly spaced in time, with an
 //! attack and release follower so a picture rises fast and falls slowly. Every read is a pure
 //! function of `t` and the fields: the follower runs over the whole history from the oldest
-//! level, so keep about a second of history beyond what the element shows.
+//! level, so keep about a second of history beyond what the element shows. The followed
+//! history is kept per history and follower (a few at a time, per thread), so the many reads
+//! of one frame run the follower once.
 //!
 //! [`Stops`] is a colour ramp: colours at positions from 0 to 1, mixed between in sRGB.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::geom::Color;
@@ -63,9 +66,31 @@ impl Levels {
     }
 
     /// A reader of the followed level at any scene time: 0 before the oldest level, the
-    /// newest level after the newest, linear between. Runs the follower once.
+    /// newest level after the newest, linear between. Runs the follower at most once for a
+    /// history and follower.
     pub fn reader(&self) -> Reader {
-        Reader { followed: self.followed(), first_at: self.first_at(), rate: self.rate.max(1e-3) as f64 }
+        Reader { followed: self.followed_shared(), first_at: self.first_at(), rate: self.rate.max(1e-3) as f64 }
+    }
+
+    /// [`Levels::followed`], from the cache when this history was followed with the same rate
+    /// and time constants. The cache holds the history itself, so its address cannot be
+    /// reused by another history while the entry lives.
+    fn followed_shared(&self) -> Arc<[f32]> {
+        const KEEP: usize = 8;
+        let key = [self.rate.to_bits(), self.attack.to_bits(), self.release.to_bits()];
+        FOLLOWED.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(i) = cache.iter().position(|(l, k, _)| *k == key && Arc::ptr_eq(l, &self.levels)) {
+                let hit = cache.remove(i);
+                let followed = hit.2.clone();
+                cache.insert(0, hit);
+                return followed;
+            }
+            let followed: Arc<[f32]> = self.followed().into();
+            cache.insert(0, (self.levels.clone(), key, followed.clone()));
+            cache.truncate(KEEP);
+            followed
+        })
     }
 
     /// The followed level at `t`, clamped to the newest level.
@@ -74,10 +99,17 @@ impl Levels {
     }
 }
 
+type FollowedCache = Vec<(Arc<[f32]>, [u32; 3], Arc<[f32]>)>;
+
+thread_local! {
+    /// Followed histories, the last used first: `(history, follower key, followed)`.
+    static FOLLOWED: RefCell<FollowedCache> = const { RefCell::new(Vec::new()) };
+}
+
 /// The followed levels of a [`Levels`], read at any time.
 #[derive(Clone, Debug)]
 pub struct Reader {
-    followed: Vec<f32>,
+    followed: Arc<[f32]>,
     first_at: f64,
     rate: f64,
 }
@@ -180,6 +212,22 @@ mod tests {
         assert!(near(s.at(0.4), Color::rgba(0.5, 0.5, 0.5, 1.0)));
         assert!(near(s.at(0.8), Color::rgba(1.0, 0.5, 0.5, 1.0)));
         assert_eq!(s.at(2.0), Color::hex(0xff0000, 1.0));
+    }
+
+    #[test]
+    fn a_read_from_the_cache_equals_a_fresh_follow() {
+        let l = Levels::new((0..300).map(|i| ((i as f32) * 0.37).sin().abs()).collect::<Vec<f32>>(), 3.0);
+        let fresh = |l: &Levels, t: f64| {
+            Reader { followed: l.followed().into(), first_at: l.first_at(), rate: l.rate as f64 }.at(t)
+        };
+        for k in 0..50 {
+            let t = k as f64 * 0.07;
+            assert_eq!(l.at(t).to_bits(), fresh(&l, t).to_bits(), "{t}");
+        }
+        // Another follower on the same history is followed again, not read from the cache.
+        let slow = Levels { release: 0.9, ..l.clone() };
+        assert_eq!(slow.at(2.5).to_bits(), fresh(&slow, 2.5).to_bits());
+        assert_ne!(slow.at(2.5), l.at(2.5));
     }
 
     #[test]
