@@ -784,12 +784,20 @@ impl Tracker {
                 // glyphs comes to rest. Letters that show first can rest on a hold a few
                 // frames before the rest of the word does while the whole word glides along
                 // its row (a centred line re-centring), and their rests and those of the
-                // later letters are then from different moments.
+                // later letters are then from different moments. A glyph already leaving at
+                // that moment keeps its own rest: when a look lays the final text out again
+                // ("ask" recased to "Ask"), the old copy's letters set off for the new layout
+                // while the old first letter still holds, and it rests last.
                 let at = gs.iter().map(|g| g.2.t).fold(f64::NEG_INFINITY, f64::max);
                 let rest_x = |&(ti, _, r): &(usize, &Sample, Sample)| {
                     let tr = &self.tracks[ti];
                     match tr.samples.binary_search_by(|q| q.t.total_cmp(&at)) {
-                        Ok(j) if (tr.samples[j].pos.y - r.pos.y).abs() < 0.5 * r.em => tr.samples[j].pos.x,
+                        Ok(j)
+                            if (tr.samples[j].pos.y - r.pos.y).abs() < 0.5 * r.em
+                                && (rests[ti][j].is_some() || level_rests[ti][j].is_some()) =>
+                        {
+                            tr.samples[j].pos.x
+                        }
                         _ => r.pos.x,
                     }
                 };
@@ -2255,6 +2263,35 @@ mod tests {
     fn a_word_that_glides_whole_keeps_its_width_at_any_rate() {
         for fps in [30.0, 60.0] {
             let r = sampled(fps, 1.0, gliding);
+            assert!(!kinds(&r).contains(&"tracking"), "{fps} fps: {r}");
+        }
+    }
+
+    /// A word recased when the final text comes ("ask" to "Ask"), as a look lays the final
+    /// text out again: from 0.4 s the old copy's letters after the first lift and slide 3 px
+    /// right over 0.2 s while its first letter holds still, and at 0.6 s the old copy goes and
+    /// the new one, with another first glyph, settles where the old letters were heading.
+    /// Word 2 on the same row stays put.
+    fn recased(t: f64) -> Vec<GlyphInstance> {
+        let u = ((t as f32 - 0.4) / 0.2).clamp(0.0, 1.0);
+        let d = 3.0 * u * u * (3.0 - 2.0 * u);
+        let mut g = if t < 0.6 {
+            let mut g = letters(1, 30, &[10.0], 40.0, 1.0);
+            g.extend(letters(1, 31, &[20.0 + d, 30.0 + d], 40.0 + d, 1.0));
+            g
+        } else {
+            let mut g = letters(1, 40, &[10.0], 40.0, 1.0);
+            g.extend(letters(1, 31, &[23.0, 33.0], 40.0, 1.0));
+            g
+        };
+        g.extend(letters(2, 50, &[50.0, 60.0], 40.0, 1.0));
+        g
+    }
+
+    #[test]
+    fn a_recased_word_is_measured_against_its_rest_before_the_change() {
+        for fps in [30.0, 60.0] {
+            let r = sampled(fps, 1.2, recased);
             assert!(!kinds(&r).contains(&"tracking"), "{fps} fps: {r}");
         }
     }
