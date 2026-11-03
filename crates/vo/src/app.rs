@@ -325,6 +325,8 @@ impl<A: App> Driver<A> {
         let view = d.view();
         d.scene.apply(view, t);
         d.extras.apply(d.app.surfaces(&d.tokens), t);
+        // The first view focuses its first focusable node: tell the app now.
+        d.focus_msgs(t);
         d
     }
 
