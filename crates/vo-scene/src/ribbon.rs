@@ -93,8 +93,18 @@ impl Ribbon {
 
     /// Strand `i`'s points and width factors in `rect` at `t`.
     pub fn strand(&self, rect: Rect, t: f64, i: u32) -> (Vec<Point>, Vec<f32>) {
+        let (tp, level) = self.pose(t);
+        self.strand_at(rect, tp, level, i)
+    }
+
+    /// The time the strands stand at for `t`, and the level there. The level follows the
+    /// whole history, so a frame reads it once for all its strands (bqw3).
+    fn pose(&self, t: f64) -> (f64, f32) {
         let tp = t.min(self.until());
-        let level = self.levels.at(tp.min(self.levels.newest_at));
+        (tp, self.levels.at(tp.min(self.levels.newest_at)))
+    }
+
+    fn strand_at(&self, rect: Rect, tp: f64, level: f32, i: u32) -> (Vec<Point>, Vec<f32>) {
         let settle = self
             .settle
             .map_or(1.0, |s| 1.0 - smoothstep(0.0, 1.0, ((tp - s) / self.settle_secs.max(1e-3) as f64) as f32));
@@ -127,9 +137,10 @@ impl Ribbon {
         }
         let n = self.strands.max(1);
         let (x0, x1) = (Point::new(rect.x, 0.0), Point::new(rect.right(), 0.0));
+        let (tp, level) = self.pose(t);
         for i in (0..n).rev() {
             let f = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
-            let (pts, widths) = self.strand(rect, t, i);
+            let (pts, widths) = self.strand_at(rect, tp, level, i);
             let c = make::ribbon(&pts, &widths);
             let (a, b) = (self.left.at(f).fade(self.alpha), self.right.at(f).fade(self.alpha));
             let style = StrokeStyle::solid(self.width, a).linear(x0, a, x1, b).glow(self.glow);
