@@ -660,6 +660,10 @@ impl<A: App> Live<A> {
         if matches!(self.spec.input, InputMode::Regions(_)) {
             let region = list.input_region();
             if self.region.as_ref() != Some(&region) {
+                // For nested tests that click a node: where it takes input, surface-local.
+                if std::env::var_os("VO_DIAG_INPUT").is_some() {
+                    eprintln!("vo: input region {:?}", region.rects);
+                }
                 let _ = host.update(id, SurfaceChange::Input(InputMode::Regions(region.clone())));
                 self.region = Some(region);
             }
