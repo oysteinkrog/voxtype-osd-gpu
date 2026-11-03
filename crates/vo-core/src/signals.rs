@@ -462,6 +462,51 @@ impl Signals {
         y
     }
 
+    /// [`Signals::envelope`] for two release times at once, in one walk of the grid: each
+    /// value equals its own `envelope` call bit for bit. For an element that reads a level
+    /// both quickly and slowly every frame (the magnetic caret).
+    pub fn envelope2(&self, sig: Sig, attack: f32, release: [f32; 2], t: f64) -> [f32; 2] {
+        let walks = attack > 0.0 && release.iter().all(|&r| r > 0.0) && !self.frames.is_empty();
+        if !walks || matches!(sig, Sig::Pitch | Sig::OnsetPulse { .. }) {
+            return release.map(|r| self.envelope(sig, attack, r, t));
+        }
+        let s = self.read_at(t);
+        let first = release.map(|r| ((s - 6.0 * attack.max(r) as f64) / FRAME_SECS).floor() as i64);
+        let last = (s / FRAME_SECS).floor() as i64;
+        let mut y = first.map(|f| self.sample_read(sig, f as f64 * FRAME_SECS));
+        let up = 1.0 - (-FRAME_SECS as f32 / attack).exp();
+        let down = release.map(|r| 1.0 - (-FRAME_SECS as f32 / r).exp());
+        let from = first[0].min(first[1]);
+        let mut i = self.index((from + 1) as f64 * FRAME_SECS);
+        for k in from + 1..=last {
+            let at = k as f64 * FRAME_SECS;
+            while let Some(next) = self.frames.get(i.map_or(0, |i| i + 1)) {
+                if next.at > at {
+                    break;
+                }
+                i = Some(i.map_or(0, |i| i + 1));
+            }
+            let x = match i {
+                Some(i) => self.read_from(sig, i, at),
+                None => sig.rest(),
+            };
+            for j in 0..2 {
+                if k > first[j] {
+                    y[j] += (x - y[j]) * if x > y[j] { up } else { down[j] };
+                }
+            }
+        }
+        let rest = s - last as f64 * FRAME_SECS;
+        if rest > 0.0 {
+            let x = self.sample_read(sig, s);
+            for j in 0..2 {
+                let tc = if x > y[j] { attack } else { release[j] };
+                y[j] += (x - y[j]) * (1.0 - (-rest as f32 / tc).exp());
+            }
+        }
+        y
+    }
+
     /// 1 while frames are arriving, fading to 0 between 300 and 600 ms after the newest one.
     pub fn presence(&self, t: f64) -> f32 {
         let Some(newest) = self.newest_at() else { return 0.0 };
@@ -837,6 +882,26 @@ mod tests {
             s.envelope(Sig::Level, 0.02, 0.3, k as f64 * 0.016);
         }
         assert_eq!(a, s.envelope(Sig::Level, 0.02, 0.3, 1.2345));
+    }
+
+    #[test]
+    fn envelope2_equals_two_envelopes() {
+        // With a gap in the frames, so the walk meets missing frames too.
+        let s = recorded(700, |i| -60.0 + 60.0 * ((i as f32 * 0.23).sin() * 0.5 + 0.5));
+        let gap = Signals::recorded(
+            (0..300).filter(|i| !(120..180).contains(i)).map(|i| frame(i as f64 * FRAME_SECS, -20.0 - i as f32 * 0.1)),
+            0.0,
+        );
+        for s in [&s, &gap] {
+            for k in 0..140 {
+                let t = k as f64 * 0.0517;
+                let [fast, slow] = s.envelope2(Sig::Level, 0.02, [0.25, 0.9], t);
+                assert_eq!(fast.to_bits(), s.envelope(Sig::Level, 0.02, 0.25, t).to_bits(), "{t}");
+                assert_eq!(slow.to_bits(), s.envelope(Sig::Level, 0.02, 0.9, t).to_bits(), "{t}");
+                let [a, b] = s.envelope2(Sig::Level, 0.02, [0.9, 0.25], t);
+                assert_eq!((a.to_bits(), b.to_bits()), (slow.to_bits(), fast.to_bits()));
+            }
+        }
     }
 
     /// `Signals::envelope` as it was written first: a search and an `exp` per step.

@@ -119,7 +119,10 @@ impl Magnet {
     /// arrived.
     pub fn state(&self, signals: Option<&Signals>, arrived: f64, t: f64) -> FieldState {
         let (level, lasting) = match signals {
-            Some(s) if !s.is_empty() => (s.envelope(Sig::Level, 0.02, 0.25, t), s.envelope(Sig::Level, 0.02, 0.9, t)),
+            Some(s) if !s.is_empty() => {
+                let [level, lasting] = s.envelope2(Sig::Level, 0.02, [0.25, 0.9], t);
+                (level, lasting)
+            }
             _ => (0.0, 0.0),
         };
         let since = (t - arrived).max(0.0);
