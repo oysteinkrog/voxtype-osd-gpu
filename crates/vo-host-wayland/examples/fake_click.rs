@@ -4,7 +4,9 @@
 //! real session.
 //!
 //!   fake_click move X Y        move the pointer to global logical (X, Y)
-//!   fake_click click X Y       move there, then press and release the left button
+//!   fake_click click X Y [N]   move there, then press and release the left button (N times,
+//!                              60 ms apart, for a double or triple click)
+//!   fake_click drag X Y X2 Y2  press at (X, Y), move to (X2, Y2) in steps, release there
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -41,10 +43,13 @@ impl Dispatch<OrgKdeKwinFakeInput, ()> for State {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (verb, x, y) = match args.as_slice() {
-        [v, x, y] => (v.as_str(), x.parse::<f64>().expect("X"), y.parse::<f64>().expect("Y")),
+    let num = |s: &String| s.parse::<f64>().expect("a number");
+    let (verb, x, y, to) = match args.as_slice() {
+        [v, x, y] => (v.as_str(), num(x), num(y), None),
+        [v, x, y, n] if v == "click" => (v.as_str(), num(x), num(y), Some((num(n), 0.0))),
+        [v, x, y, x2, y2] if v == "drag" => (v.as_str(), num(x), num(y), Some((num(x2), num(y2)))),
         _ => {
-            eprintln!("usage: fake_click move|click X Y");
+            eprintln!("usage: fake_click move|click X Y, click X Y N, or drag X Y X2 Y2");
             std::process::exit(2);
         }
     };
@@ -54,16 +59,35 @@ fn main() {
     let fake: OrgKdeKwinFakeInput = globals.bind(&qh, 3..=5, ()).expect("org_kde_kwin_fake_input (version 3 to 5)");
     fake.authenticate("vo fake_click".into(), "overlay input test".into());
     fake.pointer_motion_absolute(x, y);
-    if verb == "click" {
+    let pause = |queue: &mut wayland_client::EventQueue<State>| {
         queue.roundtrip(&mut State).expect("roundtrip");
         std::thread::sleep(std::time::Duration::from_millis(30));
-        fake.button(BTN_LEFT, 1);
-        queue.roundtrip(&mut State).expect("roundtrip");
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        fake.button(BTN_LEFT, 0);
-    } else if verb != "move" {
-        eprintln!("unknown verb {verb}");
-        std::process::exit(2);
+    };
+    match (verb, to) {
+        ("move", _) => {}
+        ("click", n) => {
+            for _ in 0..n.map_or(1, |(n, _)| n as u32) {
+                pause(&mut queue);
+                fake.button(BTN_LEFT, 1);
+                pause(&mut queue);
+                fake.button(BTN_LEFT, 0);
+            }
+        }
+        ("drag", Some((x2, y2))) => {
+            pause(&mut queue);
+            fake.button(BTN_LEFT, 1);
+            for i in 1..=8 {
+                pause(&mut queue);
+                let f = f64::from(i) / 8.0;
+                fake.pointer_motion_absolute(x + (x2 - x) * f, y + (y2 - y) * f);
+            }
+            pause(&mut queue);
+            fake.button(BTN_LEFT, 0);
+        }
+        _ => {
+            eprintln!("unknown verb {verb}");
+            std::process::exit(2);
+        }
     }
     queue.roundtrip(&mut State).expect("roundtrip");
     eprintln!("fake_click: {verb} at ({x}, {y})");
