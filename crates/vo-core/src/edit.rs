@@ -108,6 +108,12 @@ pub enum EditAction {
         extend: bool,
     },
     SelectAll,
+    /// Selects from `anchor` to `focus`, both snapped outward to grapheme boundaries: a
+    /// double click's word ([`word_at`]) or a triple click's line ([`line_at`]).
+    Select {
+        anchor: usize,
+        focus: usize,
+    },
     /// Takes back the last step, back to the floor at most.
     Undo,
     /// Does again the last step undone, until a new edit.
@@ -380,6 +386,13 @@ impl EditBuffer {
                 self.sel = Selection { anchor: 0, focus: self.text.len(), affinity: Affinity::Downstream };
                 None
             }
+            EditAction::Select { anchor, focus } => {
+                let (lo, hi) = (anchor.min(focus), anchor.max(focus));
+                let (lo, hi) = (self.snap(lo, Dir::Back), self.snap(hi, Dir::Forward));
+                let (anchor, focus) = if anchor <= focus { (lo, hi) } else { (hi, lo) };
+                self.sel = Selection { anchor, focus, affinity: Affinity::Downstream };
+                None
+            }
         }
     }
 
@@ -577,6 +590,58 @@ pub fn prev_word(text: &str, at: usize) -> usize {
         _ => skip(&mut chars, &is_word_char),
     }
     pos
+}
+
+/// What a double click at byte `at` selects, by the Qt rule: the run of word characters, of
+/// separators or of spaces that holds the character at `at`. At the end of a run (or of the
+/// text) the character before counts, so a click just past a word selects that word. A line
+/// break is never part of the run.
+pub fn word_at(text: &str, at: usize) -> Range<usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Class {
+        Word,
+        Separator,
+        Space,
+        Break,
+    }
+    let class = |c: char| match c {
+        '\n' => Class::Break,
+        c if c.is_whitespace() => Class::Space,
+        c if is_word_separator(c) => Class::Separator,
+        _ => Class::Word,
+    };
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let ink = |c: Option<Class>| matches!(c, Some(Class::Word | Class::Separator));
+    let after = text[at..].chars().next().map(class);
+    let before = text[..at].chars().next_back().map(class);
+    // Past a word or separator run, that run wins over spaces, a break or the end.
+    let pick = match (before, after) {
+        (Some(b), a) if ink(Some(b)) && !ink(a) => b,
+        (_, Some(a)) => a,
+        (Some(b), None) => b,
+        (None, None) => return 0..0,
+    };
+    if pick == Class::Break {
+        return at..at;
+    }
+    let start = text[..at].char_indices().rev().take_while(|&(_, c)| class(c) == pick).last().map_or(at, |(i, _)| i);
+    let end = text[at..].char_indices().find(|&(_, c)| class(c) != pick).map_or(text.len(), |(i, _)| at + i);
+    start..end
+}
+
+/// What a triple click at byte `at` selects: the line between hard line breaks that holds
+/// it, without the break, as a text box selects its paragraph.
+pub fn line_at(text: &str, at: usize) -> Range<usize> {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    start..end
 }
 
 /// The grapheme boundary after `at`, or the text length.
@@ -1184,5 +1249,45 @@ mod tests {
             while b.apply_plain(EditAction::Undo, t).is_some() {}
             assert_eq!(b.text(), floor_text);
         }
+    }
+
+    /// Double and triple click reference table: (text, click byte, word, line).
+    #[test]
+    fn word_and_line_under_a_click() {
+        let rows: &[(&str, usize, &str, &str)] = &[
+            ("plum pear", 2, "plum", "plum pear"),
+            ("plum pear", 0, "plum", "plum pear"),
+            // Just past a word: that word.
+            ("plum pear", 4, "plum", "plum pear"),
+            ("plum pear", 9, "pear", "plum pear"),
+            // On the space between two spaces' worth: the spaces.
+            ("plum  pear", 5, "  ", "plum  pear"),
+            // Separators are their own run.
+            ("fig, kiwi", 3, ",", "fig, kiwi"),
+            ("fig,, kiwi", 4, ",,", "fig,, kiwi"),
+            ("re-do it", 2, "-", "re-do it"),
+            ("re-do it", 1, "re", "re-do it"),
+            // Letters with marks and other scripts are word characters.
+            ("blåbær ost", 3, "blåbær", "blåbær ost"),
+            // Lines are split at hard breaks only.
+            ("one two\nthree four", 10, "three", "three four"),
+            ("one two\nthree four", 7, "two", "one two"),
+            ("one two\nthree four", 8, "three", "three four"),
+            ("", 0, "", ""),
+        ];
+        for &(text, at, word, line) in rows {
+            assert_eq!(&text[word_at(text, at)], word, "word at {at} in {text:?}");
+            assert_eq!(&text[line_at(text, at)], line, "line at {at} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn select_snaps_outward_to_graphemes() {
+        // "e" plus a combining acute: one grapheme of three bytes.
+        let mut b = EditBuffer::new("ae\u{301}b");
+        b.apply_plain(EditAction::Select { anchor: 1, focus: 2 }, 0.0);
+        assert_eq!(b.selection().range(), 1..4);
+        b.apply_plain(EditAction::Select { anchor: 4, focus: 0 }, 0.0);
+        assert_eq!((b.selection().anchor, b.selection().focus), (4, 0));
     }
 }

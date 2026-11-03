@@ -795,11 +795,28 @@ pub(crate) struct Handlers<M> {
     pub tab_index: Option<i32>,
     /// Drawn around the node while it has focus.
     pub ring: Option<crate::focus::FocusRing>,
+    /// Makes the message for a press, drag or release of the primary button on this node.
+    pub pointer: Option<fn(crate::input::PointerInput) -> M>,
+    /// Passed back in `PointerInput::tag`.
+    pub tag: u32,
+    /// The cursor over this node.
+    pub cursor: Option<crate::input::Cursor>,
 }
 
 impl<M> Default for Handlers<M> {
     fn default() -> Self {
-        Handlers { hit: false, click: None, hover: None, key: None, focus: None, tab_index: None, ring: None }
+        Handlers {
+            hit: false,
+            click: None,
+            hover: None,
+            key: None,
+            focus: None,
+            tab_index: None,
+            ring: None,
+            pointer: None,
+            tag: 0,
+            cursor: None,
+        }
     }
 }
 
@@ -2325,6 +2342,30 @@ impl<M> Element<M> {
     pub fn on_hover(mut self, enter: M, leave: M) -> Element<M> {
         self.handlers.hit = true;
         self.handlers.hover = Some((enter, leave));
+        self
+    }
+
+    /// The primary button's press (with its click count), drag and release on this node, as
+    /// `msg(input)` at node-local positions. Implies `interactive`. While the button is held
+    /// the node keeps the pointer, so a drag that leaves the box still reaches it. For text
+    /// boxes: place the caret, select by drag, select a word on a double click.
+    pub fn on_pointer(mut self, msg: fn(crate::input::PointerInput) -> M) -> Element<M> {
+        self.handlers.hit = true;
+        self.handlers.pointer = Some(msg);
+        self
+    }
+
+    /// A number `on_pointer` passes back in `PointerInput::tag`, such as a line index, so
+    /// one handler serves several nodes.
+    pub fn pointer_tag(mut self, tag: u32) -> Element<M> {
+        self.handlers.tag = tag;
+        self
+    }
+
+    /// The cursor while the pointer is over this node (or pressed on it). Does not make the
+    /// node a hit target by itself.
+    pub fn cursor(mut self, cursor: crate::input::Cursor) -> Element<M> {
+        self.handlers.cursor = Some(cursor);
         self
     }
 

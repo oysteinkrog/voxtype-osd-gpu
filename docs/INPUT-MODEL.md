@@ -202,6 +202,30 @@ working while the popup has focus, as they do in any text box. The edit keys the
 Home, End, Backspace, Delete, Ctrl+Z and the like) are not global shortcuts, so nothing needs to be
 inhibited.
 
+## Pointer in text boxes
+
+Added 2026-11-03 (F6). `Element::on_pointer(fn(PointerInput) -> M)` gives a node the primary
+button's press, drag and release at node-local positions (its box from the top left, after its
+transform), so a text box can place the caret and select.
+
+- **Press** carries a click count: 2 and 3 for a press on the same node within
+  `MULTI_CLICK_SECS` (0.4 s) and `MULTI_CLICK_PX` (4 px) of the press before. A fourth press
+  starts at 1 again. The count comes from event times, so a replay counts the same.
+- **Drag** comes for every motion while the button is held, also outside the box: the pressed
+  node keeps the pointer, as Wayland's implicit grab does. **Release** ends it.
+- `Element::pointer_tag(u32)` is passed back in `PointerInput::tag`, so one handler serves
+  several nodes, such as the line nodes of a look that draws one live text per line.
+- `Element::cursor(Cursor::Text)` sets the cursor over a node, or over the pressed node while
+  the button is held. The live driver sends `SurfaceChange::Cursor` when it changes. The
+  Wayland host shows it through `wp_cursor_shape_v1`, so the compositor draws its own theme's
+  I-beam; a compositor without the protocol keeps its cursor.
+- `vo_core::edit::word_at` and `line_at` give what a double and a triple click select: the
+  run of word characters, separators or spaces under the click (Qt's rule), and the line
+  between hard line breaks. `EditAction::Select` selects a range.
+- A surface gets pointer events only where its input region says. A popup that should stay
+  click-through outside editing opens with `InputMode::Regions` and an empty region: only
+  nodes with handlers make the region, so it is empty until a text box takes the pointer.
+
 ## Clipboard
 
 Added 2026-11-03 (F5). Copy and paste of plain text through `wl_data_device`, on the seat the

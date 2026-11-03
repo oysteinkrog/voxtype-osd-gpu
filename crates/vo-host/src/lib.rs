@@ -198,6 +198,20 @@ pub enum SurfaceChange {
     /// blur off. Asked for while drawing a frame, it rides on that frame's commit. Ignored
     /// unless [`HostCaps::backdrop_blur`].
     Blur(Option<InputRegion>),
+    /// The cursor while the pointer is over the surface. Shown at once if it is there now.
+    /// A host that cannot change the cursor ignores it.
+    Cursor(CursorShape),
+}
+
+/// A cursor the compositor draws from its own theme (`SurfaceChange::Cursor`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CursorShape {
+    #[default]
+    Default,
+    /// The I-beam, over editable text.
+    Text,
+    /// The hand, over something to click.
+    Pointer,
 }
 
 /// Something the host tells the app. Every variant that happened at a time carries it on the

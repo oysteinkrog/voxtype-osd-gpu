@@ -241,6 +241,7 @@ impl SeatHandler for State {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
             if let Ok(p) = self.seats.get_pointer(qh, &seat) {
+                self.cursors.pointer(qh, &p);
                 self.pointers.push(p);
             }
         }
@@ -248,6 +249,7 @@ impl SeatHandler for State {
 
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
+            self.cursors.pointers_gone();
             for p in self.pointers.drain(..) {
                 p.release();
             }
@@ -273,8 +275,15 @@ impl PointerHandler for State {
         for e in events {
             let Some(i) = self.surface_index(&e.surface) else { continue };
             let kind = match e.kind {
-                PointerEventKind::Enter { .. } => PointerKind::Enter,
-                PointerEventKind::Leave { .. } => PointerKind::Leave,
+                PointerEventKind::Enter { serial } => {
+                    let s = &self.surfaces[i];
+                    self.cursors.enter(s.id, serial, s.cursor);
+                    PointerKind::Enter
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.cursors.leave();
+                    PointerKind::Leave
+                }
                 PointerEventKind::Motion { .. } => PointerKind::Motion,
                 PointerEventKind::Press { button: b, .. } => match button(b) {
                     Some(b) => PointerKind::Down(b),

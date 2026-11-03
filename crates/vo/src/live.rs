@@ -3,8 +3,8 @@
 //! only while something changed or moves.
 
 use vo_host::{
-    CpuFrame, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, Placement, SurfaceChange,
-    SurfaceId,
+    CpuFrame, CursorShape, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, Placement,
+    SurfaceChange, SurfaceId,
 };
 use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
@@ -258,6 +258,8 @@ struct Live<A: App> {
     error: Option<HostError>,
     /// The focus proxy open for the app (`Cx::take_keyboard_focus`).
     proxy: Option<SurfaceId>,
+    /// The cursor last asked of the host for the main surface (`Element::cursor`).
+    cursor: CursorShape,
 }
 
 impl<A: App> Live<A> {
@@ -305,6 +307,19 @@ impl<A: App> Live<A> {
         let drawn = !d.dirty && !d.stale() && !d.extras.list.iter().any(|e| e.dirty);
         if d.done(now) && (drawn || d.overdue(now)) {
             self.finish(host);
+        }
+    }
+
+    /// Asks the host for the cursor of the node under the pointer, when it changed.
+    fn follow_cursor(&mut self, host: &mut dyn HostCtl) {
+        let shape = match self.driver().scene.cursor() {
+            vo_scene::input::Cursor::Default => CursorShape::Default,
+            vo_scene::input::Cursor::Text => CursorShape::Text,
+            vo_scene::input::Cursor::Pointer => CursorShape::Pointer,
+        };
+        if shape != self.cursor {
+            self.cursor = shape;
+            let _ = host.update(self.surface, SurfaceChange::Cursor(shape));
         }
     }
 
@@ -762,7 +777,10 @@ impl<A: App> HostApp for Live<A> {
                 self.driver().dirty = true;
                 self.host_asked = true;
             }
-            HostEvent::Pointer(ev) if ev.surface == self.surface => self.driver().pointer(&ev),
+            HostEvent::Pointer(ev) if ev.surface == self.surface => {
+                self.driver().pointer(&ev);
+                self.follow_cursor(host);
+            }
             HostEvent::Configured { id, t, size, scale } => {
                 if let Some(di) = self.extra_index(id) {
                     let e = &mut self.driver().extras.list[di];
@@ -987,6 +1005,7 @@ impl<A: App> Live<A> {
             finished: false,
             error: None,
             proxy: None,
+            cursor: CursorShape::Default,
         }
     }
 }

@@ -29,6 +29,7 @@
 
 mod blur;
 mod clipboard;
+mod cursor;
 pub mod guard;
 mod handlers;
 mod keyboard;
@@ -57,9 +58,9 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
-    ClickThrough, CpuFrame, FocusProxySpec, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag, HostError,
-    HostEvent, InputMode, InputRegion, Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange, SurfaceId,
-    SurfaceKind, Waker,
+    ClickThrough, CpuFrame, CursorShape, FocusProxySpec, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag,
+    HostError, HostEvent, InputMode, InputRegion, Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange,
+    SurfaceId, SurfaceKind, Waker,
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_shm::Format;
@@ -218,6 +219,8 @@ pub(crate) struct Surf {
     /// the frame's commit (`Some(None)` turns the blur off).
     blur: Option<ExtBackgroundEffectSurfaceV1>,
     pending_blur: Option<Option<InputRegion>>,
+    /// The cursor over this surface (`SurfaceChange::Cursor`).
+    pub(crate) cursor: CursorShape,
 }
 
 impl Surf {
@@ -449,6 +452,7 @@ pub struct State {
     pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
     pub(crate) keyboard: keyboard::Keyboard,
     pub(crate) clipboard: clipboard::Clipboard,
+    pub(crate) cursors: cursor::Cursors,
     pub(crate) events: Vec<HostEvent>,
     timer: Option<f64>,
     exit: bool,
@@ -543,6 +547,7 @@ impl WaylandHost {
             .map_err(|e| HostError::Connect(format!("ping source: {e}")))?;
 
         let clipboard = clipboard::Clipboard::bind(&globals, &qh, &event_loop.handle());
+        let cursors = cursor::Cursors::bind(&globals, &qh);
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
@@ -577,6 +582,7 @@ impl WaylandHost {
             proxies: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
             clipboard,
+            cursors,
             events: Vec::new(),
             timer: None,
             exit: false,
@@ -1295,6 +1301,7 @@ impl HostCtl for State {
             pending_input: None,
             blur: None,
             pending_blur: None,
+            cursor: CursorShape::Default,
         });
         Ok(id)
     }
@@ -1302,6 +1309,11 @@ impl HostCtl for State {
     fn update(&mut self, id: SurfaceId, change: SurfaceChange) -> Result<(), HostError> {
         let i = self.index(id)?;
         match change {
+            SurfaceChange::Cursor(shape) => {
+                self.surfaces[i].cursor = shape;
+                self.cursors.set(id, shape);
+                let _ = self.conn.flush();
+            }
             SurfaceChange::Input(mode) => {
                 if self.in_frame == Some(id) {
                     self.surfaces[i].pending_input = Some(mode);
