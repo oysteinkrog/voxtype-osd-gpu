@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use vo_host::{FocusProxySpec, KeyEvent, KeyState, LogicalKey, Mods, Placement, PointerEvent, RepeatInfo, Waker};
+use vo_host::{
+    FocusProxySpec, KeyEvent, KeyState, LogicalKey, Mods, Placement, PointerEvent, RepeatInfo, TextInputEvent,
+    TextInputState, Waker,
+};
 use vo_scene::element::Element;
 use vo_scene::focus::KeyRoute;
 use vo_scene::geom::{Color, Size};
@@ -94,6 +97,13 @@ pub trait App {
     fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Self::Msg>) {
         let _ = (text, cx);
     }
+
+    /// A batch from the input method, while it is on ([`Cx::text_input`]). Apply its deletes
+    /// and commit to the text (`TextInputEvent::actions`) and show its preedit at the caret
+    /// without putting it in the text (`vo_core::text_input::Composing`).
+    fn text_input(&mut self, ev: &TextInputEvent, cx: &mut Cx<Self::Msg>) {
+        let _ = (ev, cx);
+    }
 }
 
 /// A clipboard request the app made during a callback (`Cx::copy`, `Cx::paste`).
@@ -178,6 +188,7 @@ pub struct Cx<'a, M> {
     exit: &'a mut bool,
     focus: &'a mut Option<FocusRequest>,
     clip: &'a mut Vec<ClipRequest>,
+    ime: &'a mut Option<Option<TextInputState>>,
 }
 
 impl<M> Cx<'_, M> {
@@ -227,6 +238,15 @@ impl<M> Cx<'_, M> {
     /// event; offline at once, with the last `copy`.
     pub fn paste(&mut self) {
         self.clip.push(ClipRequest::Paste);
+    }
+
+    /// Turns the input method on with the text around the caret (`Some`), updates it, or
+    /// turns it off (`None`). Call with the new state after every change to the text or the
+    /// selection while it is on. Live, it goes to the focus proxy, with the caret's box from
+    /// the drawn frame (`DisplayList::edit_caret_box`) for the candidate list; batches come
+    /// to [`App::text_input`]. Offline they come from the scenario's inputs.
+    pub fn text_input(&mut self, state: Option<TextInputState>) {
+        *self.ime = Some(state);
     }
 }
 
@@ -314,6 +334,9 @@ pub(crate) struct Driver<A: App> {
     pub(crate) clip: Vec<ClipRequest>,
     pub(crate) host_clipboard: bool,
     clip_text: Option<String>,
+    /// The input method state the app asked for since the live overlay last looked (`Some`),
+    /// `Some(None)` to turn it off.
+    pub(crate) ime: Option<Option<TextInputState>>,
 }
 
 impl<A: App> Driver<A> {
@@ -335,7 +358,15 @@ impl<A: App> Driver<A> {
         let mut exit = false;
         let mut focus = None;
         let mut clip = Vec::new();
-        app.init(&mut Cx { t, timers: &mut timers, exit: &mut exit, focus: &mut focus, clip: &mut clip });
+        let mut ime = None;
+        app.init(&mut Cx {
+            t,
+            timers: &mut timers,
+            exit: &mut exit,
+            focus: &mut focus,
+            clip: &mut clip,
+            ime: &mut ime,
+        });
         let extras = Extras::new(make);
         let exit_at = exit.then_some(t);
         let mut d = Driver {
@@ -357,6 +388,7 @@ impl<A: App> Driver<A> {
             clip,
             host_clipboard: false,
             clip_text: None,
+            ime,
         };
         let view = d.view();
         d.scene.apply(view, t);
@@ -404,7 +436,14 @@ impl<A: App> Driver<A> {
         self.last_t = t;
         f(
             &mut self.app,
-            &mut Cx { t, timers: &mut self.timers, exit: &mut self.exit, focus: &mut self.focus, clip: &mut self.clip },
+            &mut Cx {
+                t,
+                timers: &mut self.timers,
+                exit: &mut self.exit,
+                focus: &mut self.focus,
+                clip: &mut self.clip,
+                ime: &mut self.ime,
+            },
         );
         if self.exit && self.exit_at.is_none() {
             self.exit_at = Some(t);
@@ -443,6 +482,13 @@ impl<A: App> Driver<A> {
         self.fire_timers(t);
         self.flush();
         self.run(t, |app, cx| app.clipboard(text, cx));
+    }
+
+    /// A batch from the input method arrived (`App::text_input`).
+    pub(crate) fn text_input(&mut self, t: f64, ev: &TextInputEvent) {
+        self.fire_timers(t);
+        self.flush();
+        self.run(t, |app, cx| app.text_input(ev, cx));
     }
 
     /// Builds the view and applies it to the scenes at `t`.

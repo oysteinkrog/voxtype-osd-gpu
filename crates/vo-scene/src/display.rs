@@ -85,6 +85,10 @@ pub struct DisplayList {
     /// from it. Not serialized.
     #[serde(skip)]
     pub edit_caret: Option<Point>,
+    /// The bounding box of that caret's bar in surface space, also while it blinks off: an
+    /// input method shows its candidates next to it (plan F7). Not drawn, not serialized.
+    #[serde(skip)]
+    pub edit_caret_box: Option<crate::geom::Rect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1043,6 +1047,7 @@ impl DisplayList {
         self.width_knots.clear();
         self.hits.clear();
         self.edit_caret = None;
+        self.edit_caret_box = None;
     }
 
     /// True when drawing this list would give the same pixels as drawing `other`, so a host
@@ -1107,6 +1112,7 @@ impl DisplayList {
             width_knots,
             hits,
             edit_caret: _,
+            edit_caret_box: _,
         } = self;
         if let Some(part) = moving(self).or_else(|| moving(other)) {
             return Some((part, 0));

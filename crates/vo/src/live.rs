@@ -4,7 +4,7 @@
 
 use vo_host::{
     CpuFrame, CursorShape, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, Placement,
-    SurfaceChange, SurfaceId,
+    SurfaceChange, SurfaceId, TextInputState,
 };
 use vo_render::cpu::CpuRenderer;
 use vo_render::{Renderer, Target};
@@ -258,6 +258,10 @@ struct Live<A: App> {
     error: Option<HostError>,
     /// The focus proxy open for the app (`Cx::take_keyboard_focus`).
     proxy: Option<SurfaceId>,
+    /// The input method state the app wants on the proxy (`Cx::text_input`), and what the
+    /// host was last told with the caret box: re-sent when either changes.
+    ime: Option<TextInputState>,
+    ime_sent: Option<(SurfaceId, Option<TextInputState>, Option<vo_scene::geom::Rect>)>,
     /// The cursor last asked of the host for the main surface (`Element::cursor`).
     cursor: CursorShape,
 }
@@ -348,6 +352,10 @@ impl<A: App> Live<A> {
     /// focus. A host that cannot take focus tells the app at once that it has none.
     fn follow_focus(&mut self, host: &mut dyn HostCtl) {
         self.follow_clipboard(host);
+        if let Some(state) = self.driver().ime.take() {
+            self.ime = state;
+            self.follow_text_input(host, None);
+        }
         let Some(request) = self.driver().focus.take() else { return };
         match request {
             FocusRequest::Take(spec) if self.proxy.is_none() => match host.open_focus_proxy(&spec) {
@@ -365,6 +373,22 @@ impl<A: App> Live<A> {
                 }
             }
         }
+    }
+
+    /// Tells the host the input method state and the caret box (`caret`, or the last one
+    /// sent when `None`) when either changed since it was last told, for the open proxy.
+    fn follow_text_input(&mut self, host: &mut dyn HostCtl, caret: Option<vo_scene::geom::Rect>) {
+        let Some(proxy) = self.proxy else {
+            self.ime_sent = None;
+            return;
+        };
+        let last = self.ime_sent.as_ref().filter(|s| s.0 == proxy);
+        let caret = caret.or_else(|| last.and_then(|s| s.2)).filter(|_| self.ime.is_some());
+        if last.is_some_and(|s| s.1 == self.ime && s.2 == caret) || (last.is_none() && self.ime.is_none()) {
+            return;
+        }
+        host.set_text_input(proxy, self.ime.clone(), caret.map(|r| (self.surface, r)));
+        self.ime_sent = Some((proxy, self.ime.clone(), caret));
     }
 
     /// Resizes and moves the main surface when the app asks for another size or place. The
@@ -657,6 +681,9 @@ impl<A: App> Live<A> {
         }
         let mut list = std::mem::take(&mut self.list);
         self.driver().scene.sample_into(t, &mut list);
+        if self.ime.is_some() && id == self.surface {
+            self.follow_text_input(host, list.edit_caret_box);
+        }
         if matches!(self.spec.input, InputMode::Regions(_)) {
             let region = list.input_region();
             if self.region.as_ref() != Some(&region) {
@@ -849,6 +876,7 @@ impl<A: App> HostApp for Live<A> {
             HostEvent::Modifiers { t, mods, .. } => self.driver().modifiers(t, mods),
             HostEvent::KeyRepeatInfo { info, .. } => self.driver().repeat_info(info),
             HostEvent::Clipboard { t, text } => self.driver().clipboard(t, text),
+            HostEvent::TextInput(ev) => self.driver().text_input(ev.t, &ev),
             _ => {}
         }
         self.after_change(host);
@@ -1009,6 +1037,8 @@ impl<A: App> Live<A> {
             finished: false,
             error: None,
             proxy: None,
+            ime: None,
+            ime_sent: None,
             cursor: CursorShape::Default,
         }
     }

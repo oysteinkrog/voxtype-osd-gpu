@@ -13,9 +13,10 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use vo_scene::display::{IRect, InputRegion};
-pub use vo_scene::geom::{Point, Size};
+pub use vo_scene::geom::{Point, Rect, Size};
 pub use vo_scene::input::{
-    Button, KeyEvent, KeyState, LogicalKey, Mods, NamedKey, PointerEvent, PointerKind, RepeatInfo, SurfaceId,
+    Button, KeyEvent, KeyState, LogicalKey, Mods, NamedKey, PointerEvent, PointerKind, Preedit, RepeatInfo, SurfaceId,
+    TextInputEvent, TextInputState,
 };
 
 /// What this host can do on this system. Probed once, when the host connects.
@@ -286,6 +287,9 @@ pub enum HostEvent {
         t: f64,
         text: Option<String>,
     },
+    /// A batch from the input method for the focus proxy that has it on
+    /// ([`HostCtl::set_text_input`]).
+    TextInput(TextInputEvent),
 }
 
 /// A frame to draw. The app encodes and submits its work into `texture` before returning; the
@@ -455,6 +459,16 @@ pub trait HostCtl {
     /// loop. Needs keyboard focus.
     fn request_clipboard(&mut self) -> Result<(), HostError> {
         Err(HostError::Unsupported("clipboard".into()))
+    }
+
+    /// Turns the input method on for focus proxy `proxy`, telling it the text around the
+    /// caret (`state`), or off with `None`. Call again whenever the text, the selection or the
+    /// caret moves. `caret` is the caret's box on surface `on`, in that surface's logical
+    /// pixels: the input method shows its candidate list next to it. `HostEvent::TextInput`
+    /// brings what the input method sends. The input method follows keyboard focus, so it
+    /// is only on while the proxy has focus. Hosts without input methods ignore it.
+    fn set_text_input(&mut self, proxy: SurfaceId, state: Option<TextInputState>, caret: Option<(SurfaceId, Rect)>) {
+        let _ = (proxy, state, caret);
     }
 
     /// Asks for one frame on `id`. The host calls `HostApp::frame` when the compositor is ready

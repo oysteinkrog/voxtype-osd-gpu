@@ -247,6 +247,28 @@ keyboard comes from.
   Ctrl+V and Shift+Insert to paste (`vo_core::edit_keymap`).
 - `scripts/clipboard-check.sh` checks it in a nested KWin with `wl-copy` and `wl-paste`.
 
+## Input methods
+
+Input methods (IME, plan stage F7) go through `zwp_text_input_v3` on the seat the keyboard
+comes from. The compositor routes keys to the input method while it is on, and the input method
+sends back text in batches.
+
+- The app turns it on with `Cx::text_input(Some(state))`, where `state` is the text around the
+  caret and the selection in it (`TextInputState::around` keeps it under the protocol's 4000
+  bytes). The app calls it again after every change, and with `None` when editing ends. The
+  live driver sends it to the focus proxy, so it is only on while the proxy has keyboard focus.
+- The caret box for the candidate list comes from the drawn frame
+  (`DisplayList::edit_caret_box`, the caret bar of an `Element::edit` live text in surface
+  space). The proxy sits at the output's top left, so the host adds the surface's place on the
+  output.
+- Each `done` arrives as one `App::text_input(TextInputEvent)`: bytes to delete before and
+  after the selection, text to commit, and a preedit. `TextInputEvent::actions` turns the
+  deletes and the commit into edits; `Composing` keeps the preedit. The preedit is drawn at the
+  caret but never enters the text (R55). A focus loss or the end of editing drops it.
+- The event log records batches as `text_input` input records; readers from before skip them.
+- `examples/fake_ime.rs` is a test input method that KWin starts itself
+  (`kwin_wayland --inputmethod`), for nested tests.
+
 ## The three cases the plan needs
 
 - **Dictation popup:** `InputMode::None`, `Keyboard::None`, no interactive nodes. The region is empty
@@ -262,7 +284,7 @@ keyboard comes from.
 
 ## Out of scope
 
-Text input and IME, screen readers,
+Screen readers,
 touch and gestures, scroll, cursor shape changes, and drag and drop between apps. Node ids stay stable by key
 path, so accesskit can be added later as the plan says.
 

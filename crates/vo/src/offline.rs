@@ -8,6 +8,7 @@ use vo_core::event_log::{EventLog, EventLogError, InputRecord};
 use vo_core::time::FrameTime;
 use vo_host::{
     KeyEvent, KeyState, LogicalKey, Mods, NamedKey, Placement, Point, PointerEvent, PointerKind, RepeatInfo, Size,
+    TextInputEvent,
 };
 use vo_render::offscreen::{write_png, Frame};
 use vo_render::Offscreen;
@@ -36,6 +37,9 @@ pub enum Input<M> {
     Modifiers(Mods),
     /// The compositor's key repeat rate and delay. Without it nothing repeats.
     RepeatInfo(RepeatInfo),
+    /// A batch from the input method (`App::text_input`). Its `t` is replaced by the input's
+    /// time.
+    TextInput(TextInputEvent),
 }
 
 /// Seconds between the press and the release of a scripted key, and between scripted keys.
@@ -134,6 +138,15 @@ impl<M: Clone> Scenario<M> {
                 }
                 Input::Modifiers(mods) => log.push_input(t, InputRecord::Modifiers { mods: *mods })?,
                 Input::RepeatInfo(info) => log.push_input(t, InputRecord::RepeatInfo { info: *info })?,
+                Input::TextInput(ev) => log.push_input(
+                    t,
+                    InputRecord::TextInput {
+                        delete_before: ev.delete_before,
+                        delete_after: ev.delete_after,
+                        commit: ev.commit.clone(),
+                        preedit: ev.preedit.clone(),
+                    },
+                )?,
             }
         }
         Ok(log)
@@ -163,6 +176,15 @@ impl<M: Clone> Scenario<M> {
                 }
                 InputRecord::Modifiers { mods } => Input::Modifiers(*mods),
                 InputRecord::RepeatInfo { info } => Input::RepeatInfo(*info),
+                InputRecord::TextInput { delete_before, delete_after, commit, preedit } => {
+                    Input::TextInput(TextInputEvent {
+                        t: e.t,
+                        delete_before: *delete_before,
+                        delete_after: *delete_after,
+                        commit: commit.clone(),
+                        preedit: preedit.clone(),
+                    })
+                }
                 InputRecord::Keymap { .. } => continue,
             };
             s.push(e.t, input);
@@ -433,6 +455,7 @@ pub(crate) fn advance<A: App>(
                     Input::KeyboardFocus { gained, requested } => driver.keyboard_focus(*at, *gained, *requested),
                     Input::Modifiers(mods) => driver.modifiers(*at, *mods),
                     Input::RepeatInfo(info) => driver.repeat_info(*info),
+                    Input::TextInput(ev) => driver.text_input(*at, &TextInputEvent { t: *at, ..ev.clone() }),
                 }
                 // Offline, focus comes from the inputs; a request opens nothing.
                 driver.focus = None;

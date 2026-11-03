@@ -24,6 +24,7 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::key::{KeyState, LogicalKey, Mods, RepeatInfo};
+use crate::text_input::Preedit;
 
 /// The newest format version this build reads and writes. Raise it on any change that an
 /// older reader would misread, and keep reading the old versions.
@@ -33,7 +34,7 @@ pub const EVENT_LOG_VERSION: u32 = 2;
 const PLAIN_VERSION: u32 = 1;
 
 /// The `kind` names of [`InputRecord`]. An input record of any other kind is skipped on read.
-const INPUT_KINDS: [&str; 5] = ["key", "keyboard_focus", "modifiers", "keymap", "repeat_info"];
+const INPUT_KINDS: [&str; 6] = ["key", "keyboard_focus", "modifiers", "keymap", "repeat_info", "text_input"];
 
 /// One event at time `t` (seconds from the log's start).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,6 +82,22 @@ pub enum InputRecord {
     RepeatInfo {
         info: RepeatInfo,
     },
+    /// A batch from the input method (`TextInputEvent`, plan F7). Readers older than this
+    /// kind skip it.
+    TextInput {
+        #[serde(default, skip_serializing_if = "is_zero")]
+        delete_before: u32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        delete_after: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preedit: Option<Preedit>,
+    },
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug)]
@@ -363,6 +380,14 @@ mod tests {
         log.push_input(0.7, key(KeyState::Down, 'é')).unwrap();
         log.push_input(0.75, InputRecord::Modifiers { mods: Mods::SHIFT }).unwrap();
         log.push_input(0.8, key(KeyState::Up, 'é')).unwrap();
+        let preedit = Some(crate::text_input::Preedit { text: "ni".into(), cursor: Some((2, 2)) });
+        log.push_input(0.9, InputRecord::TextInput { delete_before: 0, delete_after: 0, commit: None, preedit })
+            .unwrap();
+        log.push_input(
+            1.0,
+            InputRecord::TextInput { delete_before: 1, delete_after: 0, commit: Some("x".into()), preedit: None },
+        )
+        .unwrap();
         log.push_input(1.2, InputRecord::KeyboardFocus { gained: false, requested: true }).unwrap();
         log
     }
@@ -372,7 +397,7 @@ mod tests {
         let log = with_keys();
         let back: EventLog<Ev> = EventLog::from_json(&log.to_json()).unwrap();
         assert_eq!(back, log);
-        assert_eq!(back.input().len(), 7);
+        assert_eq!(back.input().len(), 9);
         assert_eq!(back.version(), 2);
         assert!(log.to_json().contains("\"version\": 2"));
         // Every record kind is in the log, and every kind's name is one the reader keeps.

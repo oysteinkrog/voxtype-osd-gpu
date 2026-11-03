@@ -370,11 +370,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         if has && state.keyboards.is_empty() {
             state.keyboards.push(seat.get_keyboard(qh, ()));
             state.clipboard.seat(qh, seat);
+            state.text_input.seat(qh, seat);
         } else if !has && !state.keyboards.is_empty() {
             for k in state.keyboards.drain(..) {
                 k.release();
             }
             state.clipboard.seat_gone();
+            state.text_input.seat_gone();
             if let Some(id) = state.keyboard.leave() {
                 let t = state.now();
                 state.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: false });

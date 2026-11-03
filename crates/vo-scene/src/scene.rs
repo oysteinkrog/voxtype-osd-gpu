@@ -2560,6 +2560,18 @@ impl<M> Scene<M> {
                         let p = l.transform.apply(Point::new(origin.x + foot.x * z, origin.y + foot.y * z));
                         out.edit_caret = Some(l.warp.as_ref().map_or(p, |w| w.apply(p)));
                     }
+                    if let Some((bar, _)) = f.caret {
+                        let l = &out.layers[layer as usize];
+                        let r = zoomed(bar);
+                        let corners =
+                            [(r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h)].map(|(x, y)| {
+                                let p = l.transform.apply(Point::new(x, y));
+                                l.warp.as_ref().map_or(p, |w| w.apply(p))
+                            });
+                        let (x0, y0) = corners.iter().fold((f32::MAX, f32::MAX), |a, p| (a.0.min(p.x), a.1.min(p.y)));
+                        let (x1, y1) = corners.iter().fold((f32::MIN, f32::MIN), |a, p| (a.0.max(p.x), a.1.max(p.y)));
+                        out.edit_caret_box = Some(Rect::new(x0, y0, x1 - x0, y1 - y0));
+                    }
                     let ink = d.mark_color.map_or(color, |c| c.fade(alpha));
                     for &r in &f.marks {
                         push_item(items, ItemKind::Shapes, out.shapes.len() as u32);

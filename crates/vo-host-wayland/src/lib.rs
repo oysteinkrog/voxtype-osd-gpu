@@ -33,6 +33,7 @@ mod cursor;
 pub mod guard;
 mod handlers;
 mod keyboard;
+mod text_input;
 
 use std::ptr::NonNull;
 use std::sync::mpsc;
@@ -59,8 +60,8 @@ use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use vo_host::{
     ClickThrough, CpuFrame, CursorShape, FocusProxySpec, Frame, Gpu, Host, HostApp, HostCaps, HostCtl, HostDiag,
-    HostError, HostEvent, InputMode, InputRegion, Keyboard, OverlaySpec, Placement, Size, Stack, SurfaceChange,
-    SurfaceId, SurfaceKind, Waker,
+    HostError, HostEvent, InputMode, InputRegion, Keyboard, OverlaySpec, Placement, Rect, Size, Stack, SurfaceChange,
+    SurfaceId, SurfaceKind, TextInputState, Waker,
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_shm::Format;
@@ -453,6 +454,7 @@ pub struct State {
     pub(crate) keyboard: keyboard::Keyboard,
     pub(crate) clipboard: clipboard::Clipboard,
     pub(crate) cursors: cursor::Cursors,
+    pub(crate) text_input: text_input::TextInput,
     pub(crate) events: Vec<HostEvent>,
     timer: Option<f64>,
     exit: bool,
@@ -548,6 +550,7 @@ impl WaylandHost {
 
         let clipboard = clipboard::Clipboard::bind(&globals, &qh, &event_loop.handle());
         let cursors = cursor::Cursors::bind(&globals, &qh);
+        let text_input = text_input::TextInput::bind(&globals, &qh);
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
@@ -583,6 +586,7 @@ impl WaylandHost {
             keyboard: keyboard::Keyboard::default(),
             clipboard,
             cursors,
+            text_input,
             events: Vec::new(),
             timer: None,
             exit: false,
@@ -1427,6 +1431,7 @@ impl HostCtl for State {
             let t = self.now();
             self.events.push(HostEvent::KeyboardFocus { id, t, gained: false, requested: true });
         }
+        self.text_input.proxy_closed(id);
         // Dropping the layer surface destroys it; the compositor then picks the next window.
         self.proxies.remove(i);
         let _ = self.conn.flush();
@@ -1442,6 +1447,29 @@ impl HostCtl for State {
         let done = self.clipboard.paste();
         let _ = self.conn.flush();
         done
+    }
+
+    fn set_text_input(&mut self, proxy: SurfaceId, state: Option<TextInputState>, caret: Option<(SurfaceId, Rect)>) {
+        let want = state.and_then(|state| {
+            let p = self.proxies.iter().find(|p| p.id == proxy)?;
+            // The proxy sits at the output's top left, so the caret's box in its coordinates
+            // is its place on the output: the surface's top left plus its place on it.
+            let caret = caret.and_then(|(on, r)| {
+                let s = self.surfaces.iter().find(|s| s.id == on)?;
+                let out = self.output_dims().unwrap_or((1920, self.output_height()));
+                let size = (s.spec.size.w.round().max(1.0) as u32, s.spec.size.h.round().max(1.0) as u32);
+                let (x, y) = layer_top_left(s.spec.placement, out, size)?;
+                Some([
+                    x + r.x.round() as i32,
+                    y + r.y.round() as i32,
+                    r.w.round().max(1.0) as i32,
+                    r.h.round().max(1.0) as i32,
+                ])
+            });
+            Some(text_input::Want { proxy, surface: p.layer.wl_surface().clone(), state, caret })
+        });
+        self.text_input.set(want);
+        let _ = self.conn.flush();
     }
 
     fn close(&mut self, id: SurfaceId) {
@@ -1516,6 +1544,9 @@ impl HostCtl for WaylandHost {
     }
     fn request_clipboard(&mut self) -> Result<(), HostError> {
         self.state.request_clipboard()
+    }
+    fn set_text_input(&mut self, proxy: SurfaceId, state: Option<TextInputState>, caret: Option<(SurfaceId, Rect)>) {
+        HostCtl::set_text_input(&mut self.state, proxy, state, caret)
     }
     fn request_frame(&mut self, id: SurfaceId) {
         self.state.request_frame(id)

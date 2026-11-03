@@ -19,6 +19,7 @@ pub mod key;
 pub mod noise;
 pub mod signals;
 pub mod spring;
+pub mod text_input;
 pub mod throttle;
 pub mod time;
 pub mod timeline;

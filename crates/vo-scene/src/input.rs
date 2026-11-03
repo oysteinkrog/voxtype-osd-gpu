@@ -8,6 +8,7 @@ use crate::geom::{Point, Size};
 
 use crate::scene::{NodeId, Scene};
 pub use vo_core::key::{KeyEvent, KeyState, LogicalKey, Mods, NamedKey, RepeatInfo};
+pub use vo_core::text_input::{Preedit, TextInputEvent, TextInputState};
 
 pub type SurfaceId = u32;
 
