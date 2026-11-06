@@ -190,6 +190,28 @@ pub(crate) struct SeatPointer {
     pub(crate) at: Option<(SurfaceId, vo_host::Point)>,
 }
 
+/// A `wl_surface` with no role yet and a swapchain set up on it, made while the overlay is
+/// hidden, so the next session's surface does not wait for `vkCreateSwapchainKHR` and its
+/// image allocation: about 10 ms on every warm show, and more on a GPU other apps use
+/// (ytr-l4vy). Making a swapchain commits nothing, so the surface can still take a role.
+struct Spare {
+    /// Before the Wayland surface, as in `Surf`.
+    wgpu: Option<wgpu::Surface<'static>>,
+    wl: Option<WlSurface>,
+    config: wgpu::SurfaceConfiguration,
+    offered: Vec<wgpu::CompositeAlphaMode>,
+}
+
+impl Drop for Spare {
+    /// An unused spare destroys its surface: a bare `WlSurface` proxy does not on drop.
+    fn drop(&mut self) {
+        self.wgpu = None;
+        if let Some(wl) = self.wl.take() {
+            wl.destroy();
+        }
+    }
+}
+
 pub(crate) struct Surf {
     pub(crate) id: SurfaceId,
     spec: OverlaySpec,
@@ -454,6 +476,8 @@ fn make_gpu(
 pub struct State {
     /// First, so it is dropped (its thread joined) before the connection.
     early: EarlyInstance,
+    /// The next session's surface (`Spare`); dropped before the device and the connection.
+    spare: Option<Spare>,
     pub(crate) conn: Connection,
     pub(crate) qh: QueueHandle<State>,
     pub(crate) registry: RegistryState,
@@ -595,6 +619,7 @@ impl WaylandHost {
         diag.stages.push(("connected", t));
         let mut state = State {
             early,
+            spare: None,
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &qh),
             seats: SeatState::new(&globals, &qh),
@@ -890,6 +915,23 @@ impl State {
         let wl = s.gpu_wl().clone();
         let effect = s.blur.get_or_insert_with(|| manager.get_background_effect(&wl, &self.qh, ()));
         blur::set_region(&self.compositor, effect, region);
+    }
+
+    /// Makes the next session's surface and its swapchain (`Spare`) at `w` x `h` pixels, the
+    /// last GPU surface's size: once per hidden spell, while nothing waits on it.
+    fn make_spare(&mut self, w: u32, h: u32) {
+        if self.spare.is_some() || self.gpu.is_none() {
+            return;
+        }
+        let wl = self.compositor.create_surface(&self.qh);
+        let Ok(surface) = self.wgpu_surface(&wl) else {
+            wl.destroy();
+            return;
+        };
+        let gpu = self.gpu.as_ref().unwrap();
+        let (config, offered) = swapchain_config(&surface, &gpu.adapter, w, h);
+        surface.configure(&gpu.gpu.device, &config);
+        self.spare = Some(Spare { wgpu: Some(surface), wl: Some(wl), config, offered });
     }
 
     pub(crate) fn remove(&mut self, i: usize) {
@@ -1266,7 +1308,12 @@ impl HostCtl for State {
         self.spawn_gpu(None)
     }
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
-        let wl = self.compositor.create_surface(&self.qh);
+        // While the device thread runs the GPU draws on a sub-surface, so a spare is no use.
+        let mut spare = if self.bg.is_none() { self.spare.take() } else { None };
+        let wl = match spare.as_mut().and_then(|s| s.wl.take()) {
+            Some(wl) => wl,
+            None => self.compositor.create_surface(&self.qh),
+        };
         let (w, h) = (spec.size.w.round().max(1.0) as u32, spec.size.h.round().max(1.0) as u32);
         let role = match (&self.layer_shell, &self.xdg, spec.kind) {
             (Some(shell), _, SurfaceKind::Overlay) => {
@@ -1347,10 +1394,23 @@ impl HostCtl for State {
                 }
                 None
             }
-            None => Some(self.wgpu_surface(&role.wl().clone())?),
+            None => match spare.as_mut().and_then(|s| s.wgpu.take()) {
+                Some(surface) => Some(surface),
+                None => Some(self.wgpu_surface(&role.wl().clone())?),
+            },
         };
         let id = self.next_id;
         self.next_id += 1;
+        // The spare's swapchain, when its surface was taken; `configure_swapchain` keeps it
+        // when the size matches.
+        let config = match spare.take() {
+            Some(sp) if wgpu_surface.is_some() => {
+                let note = swapchain_note(id, &sp.config, &sp.offered);
+                self.diag.notes.push(format!("{note}, made while hidden"));
+                Some(sp.config.clone())
+            }
+            _ => None,
+        };
         let input_on_role = child.is_some();
         self.surfaces.push(Surf {
             id,
@@ -1360,7 +1420,7 @@ impl HostCtl for State {
             child,
             shm,
             role,
-            config: None,
+            config,
             size: spec.size,
             scale: 1,
             frac: None,
@@ -1696,8 +1756,13 @@ impl WaylandHost {
         // and keep the device it made.
         state.bg_target = None;
         state.poll_gpu(true);
+        // The next show's surface, at this show's size, made now while it is hidden.
+        let next = state.surfaces.iter().find_map(|s| s.config.as_ref().map(|c| (c.width, c.height)));
         state.surfaces.clear();
         state.events.clear();
+        if let Some((w, h)) = next {
+            state.make_spare(w, h);
+        }
         let _ = state.conn.flush();
         result
     }
@@ -1754,6 +1819,7 @@ impl Host for WaylandHost {
     fn run(mut self, app: &mut dyn HostApp) -> Result<(), HostError> {
         let result = self.run_session(app);
         // The device and the instance before the connection.
+        self.state.spare = None;
         self.state.gpu = None;
         self.state.instance = None;
         let _ = self.state.conn.flush();
