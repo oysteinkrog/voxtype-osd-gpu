@@ -133,9 +133,8 @@ impl CompositorHandler for State {
     ) {
         // The role surface only: its GPU sub-surface enters the same output.
         let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
-        let outputs = &mut self.surfaces[i].outputs;
-        outputs.retain(|o| o != output);
-        outputs.push(output.clone());
+        let s = &mut self.surfaces[i];
+        crate::enter_output(&mut s.outputs, &mut s.output_kept, output.clone());
         self.report_output(i);
     }
 
@@ -147,7 +146,8 @@ impl CompositorHandler for State {
         output: &wl_output::WlOutput,
     ) {
         let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
-        if crate::leave_output(&mut self.surfaces[i].outputs, output) {
+        let s = &mut self.surfaces[i];
+        if crate::leave_output(&mut s.outputs, &mut s.output_kept, output) {
             self.report_output(i);
         }
     }
@@ -306,21 +306,24 @@ impl State {
 impl PointerHandler for State {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, pointer: &WlPointer, events: &[SctkPointer]) {
         let k = self.pointers.iter().position(|p| &p.pointer == pointer);
-        // One time per pointer frame: the events in it happened together. It is the
-        // compositor's time for them on the host clock, so events read late keep the time
-        // they happened; a frame of only enter or leave has none and takes now.
+        // Each event's time is the compositor's time for it on the host clock, so events read
+        // late keep the time they happened. Enter and leave carry none and take the frame's
+        // first time, or now when the frame has none.
         let now = self.now();
-        let stamped = events.iter().find_map(|e| match e.kind {
+        let mono_ms = (crate::monotonic() * 1000.0) as u64;
+        let stamp = |kind: &PointerEventKind| match *kind {
             PointerEventKind::Motion { time }
             | PointerEventKind::Press { time, .. }
             | PointerEventKind::Release { time, .. }
             | PointerEventKind::Axis { time, .. } => Some(time),
             _ => None,
-        });
-        let mono_ms = (crate::monotonic() * 1000.0) as u64;
-        let age = stamped.and_then(|ms| crate::event_age(mono_ms, ms as u64, Some(1 << 32), 1e-3));
-        let t = now - age.unwrap_or(0.0);
+        };
+        let at = |ms: Option<u32>| {
+            now - ms.and_then(|ms| crate::event_age(mono_ms, ms as u64, Some(1 << 32), 1e-3)).unwrap_or(0.0)
+        };
+        let frame_t = at(events.iter().find_map(|e| stamp(&e.kind)));
         for e in events {
+            let t = stamp(&e.kind).map_or(frame_t, |ms| at(Some(ms)));
             let Some(i) = self.surface_index(&e.surface) else { continue };
             let kind = match e.kind {
                 PointerEventKind::Enter { serial } => {
@@ -394,6 +397,9 @@ impl OutputHandler for State {
         for i in 0..self.surfaces.len() {
             let was_current = self.surfaces[i].outputs.last() == Some(&output);
             self.surfaces[i].outputs.retain(|o| o != &output);
+            if self.surfaces[i].outputs.is_empty() {
+                self.surfaces[i].output_kept = false;
+            }
             if was_current {
                 self.report_output(i);
             }

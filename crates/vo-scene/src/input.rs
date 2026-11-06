@@ -202,7 +202,7 @@ impl<M: Clone> Scene<M> {
                     let clicks = match self.pointer.last_press {
                         Some((last, at, p, n))
                             if last == id
-                                && stamp - at <= MULTI_CLICK_SECS
+                                && (0.0..=MULTI_CLICK_SECS).contains(&(stamp - at))
                                 && (ev.pos.x - p.x).hypot(ev.pos.y - p.y) <= MULTI_CLICK_PX =>
                         {
                             n % 3 + 1

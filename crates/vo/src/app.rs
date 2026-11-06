@@ -844,6 +844,11 @@ mod tests {
         d.pointer(&at(1.6, PointerKind::Up(Button::Primary)));
         d.pointer(&at(1.7, PointerKind::Down(Button::Primary)));
         assert_eq!(d.app.0, [1, 1, 2]);
+        // A press stamped before the last one (its stamp fell back to the read time, or came
+        // from another clock) starts a new count instead of counting as a fast click.
+        d.pointer(&at(1.8, PointerKind::Up(Button::Primary)));
+        d.pointer(&at(1.2, PointerKind::Down(Button::Primary)));
+        assert_eq!(d.app.0, [1, 1, 2, 1]);
     }
 
     /// An app with a dial that spins for ever.

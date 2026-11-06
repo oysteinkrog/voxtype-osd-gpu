@@ -243,6 +243,9 @@ pub(crate) struct Surf {
     /// The outputs the surface is on, in the order it entered them. The last one is the one
     /// reported in `HostEvent::Output`.
     pub(crate) outputs: Vec<wl_output::WlOutput>,
+    /// `outputs` holds only an output the surface left, kept for its size updates
+    /// (`leave_output`); the next output it enters replaces it.
+    pub(crate) output_kept: bool,
 }
 
 impl Surf {
@@ -1380,6 +1383,7 @@ impl HostCtl for State {
             pending_blur: None,
             cursor: CursorShape::Default,
             outputs: Vec::new(),
+            output_kept: false,
         });
         Ok(id)
     }
@@ -1834,13 +1838,25 @@ fn from_top_margin(fraction: f32, output_h: i32, surface_h: i32) -> i32 {
 /// its only output: KWin sends a leave for it when the output shrinks so the surface no
 /// longer fits on it, and dropping it would lose the output's later size updates. Only
 /// `output_destroyed` drops an output for good.
-pub(crate) fn leave_output<T: PartialEq>(outputs: &mut Vec<T>, output: &T) -> bool {
+/// `kept` marks that kept output, so `enter_output` replaces it rather than falling back to it.
+pub(crate) fn leave_output<T: PartialEq>(outputs: &mut Vec<T>, kept: &mut bool, output: &T) -> bool {
     if outputs.len() == 1 && outputs[0] == *output {
+        *kept = true;
         return false;
     }
     let was_current = outputs.last() == Some(output);
     outputs.retain(|o| o != output);
     was_current && !outputs.is_empty()
+}
+
+/// The surface entered `output`, which becomes its current output. An output it left and
+/// only kept (`leave_output`) goes: the surface is no longer on it.
+pub(crate) fn enter_output<T: PartialEq>(outputs: &mut Vec<T>, kept: &mut bool, output: T) {
+    if std::mem::take(kept) {
+        outputs.clear();
+    }
+    outputs.retain(|o| *o != output);
+    outputs.push(output);
 }
 
 /// How long ago an event happened, from the compositor's time for it: `now` and `event` on
@@ -1868,8 +1884,6 @@ fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
 mod tests {
     use super::{from_top_margin, line_at_margin, next_present, resize_expired, to_px, RESIZE_WAIT};
 
-    /// A surface keeps its only output on a leave, so later size updates of that output still
-    /// reach it; with two outputs it drops the one it left, and reports when that was current.
     /// An event's age comes from the compositor's time for it, across the 32-bit ms wrap.
     #[test]
     fn an_event_read_late_keeps_its_age() {
@@ -1886,24 +1900,35 @@ mod tests {
         assert_eq!(event_age(1_000_000, 1_500_000, None, 1e-6), None);
     }
 
+    /// A surface keeps its only output on a leave, so later size updates of that output still
+    /// reach it; with two outputs it drops the one it left, and reports when that was current.
     #[test]
     fn a_surface_keeps_its_only_output_when_it_leaves_it() {
-        use super::leave_output;
+        use super::{enter_output, leave_output};
+        let mut kept = false;
         let mut on = vec!["DP-1"];
-        assert!(!leave_output(&mut on, &"DP-1"));
+        assert!(!leave_output(&mut on, &mut kept, &"DP-1"));
         assert_eq!(on, ["DP-1"]);
+        // The next output it enters replaces the kept one, so leaving that later does not
+        // fall back to an output the surface already left.
+        enter_output(&mut on, &mut kept, "HDMI-A-1");
+        assert_eq!(on, ["HDMI-A-1"]);
+        assert!(!leave_output(&mut on, &mut kept, &"HDMI-A-1"));
+        assert_eq!(on, ["HDMI-A-1"]);
         // On two outputs: leaving the current one makes the other current.
+        let mut kept = false;
         let mut on = vec!["DP-1", "HDMI-A-1"];
-        assert!(leave_output(&mut on, &"HDMI-A-1"));
+        assert!(leave_output(&mut on, &mut kept, &"HDMI-A-1"));
         assert_eq!(on, ["DP-1"]);
         // Leaving one that is not current changes nothing to report.
         let mut on = vec!["DP-1", "HDMI-A-1"];
-        assert!(!leave_output(&mut on, &"DP-1"));
+        assert!(!leave_output(&mut on, &mut kept, &"DP-1"));
         assert_eq!(on, ["HDMI-A-1"]);
         // An output the surface is not on.
         let mut on = vec!["DP-1"];
-        assert!(!leave_output(&mut on, &"DP-2"));
+        assert!(!leave_output(&mut on, &mut kept, &"DP-2"));
         assert_eq!(on, ["DP-1"]);
+        assert!(!kept);
     }
 
     #[test]
