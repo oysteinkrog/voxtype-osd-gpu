@@ -76,8 +76,9 @@ pub enum PointerPhase {
     /// surface it sits on, such as a drag area: the travel stays right while the surface
     /// moves, which positions relative to the surface do not. Not every host sends it.
     Travel { dx: f32, dy: f32 },
-    /// The press ended without a release: the pointer went away (its seat lost it) or the
-    /// compositor took the grab. Drop whatever the press started.
+    /// The press ended without a release: the pointer left the surface mid-press (the
+    /// compositor took the grab) or went away (its seat lost it). Sent once per press. Drop
+    /// whatever the press started.
     Cancel,
 }
 
@@ -136,11 +137,17 @@ impl<M: Clone> Scene<M> {
         Some((Point::new(p.x - r.x, p.y - r.y), Size::new(r.w, r.h)))
     }
 
-    /// The `on_pointer` message for node `id`, if it has a handler and is drawn.
+    /// The `on_pointer` message for node `id`, if it still exists, has a handler and is
+    /// drawn. A `Cancel` also reaches a node that is no longer drawn, at no local position,
+    /// so a press never stays open in the app; a deleted node hears nothing.
     fn pointer_msg(&self, id: NodeId, ev: &PointerEvent, phase: PointerPhase) -> Option<M> {
         let n = self.nodes.get(id)?;
         let make = n.handlers.pointer?;
-        let (local, size) = self.local_in(id, ev.pos, ev.t)?;
+        let (local, size) = match self.local_in(id, ev.pos, ev.t) {
+            Some(at) => at,
+            None if phase == PointerPhase::Cancel => (Point::ZERO, Size::ZERO),
+            None => return None,
+        };
         Some(make(PointerInput { t: ev.t, local, size, phase, tag: n.handlers.tag }))
     }
 
@@ -214,12 +221,15 @@ impl<M: Clone> Scene<M> {
                     }
                 }
             }
-            PointerKind::Cancel => {
+            // A leave mid-press (the compositor may take the pointer for a grab of its own)
+            // ends the press as a cancel does: the node hears it once, as a Cancel, and a
+            // cancel that follows finds nothing pressed. A node deleted since the press hears
+            // nothing (`pointer_msg`).
+            PointerKind::Leave | PointerKind::Cancel => {
                 if let Some(id) = self.pointer.pressed.take() {
                     msgs.extend(self.pointer_msg(id, ev, PointerPhase::Cancel));
                 }
             }
-            PointerKind::Leave => self.pointer.pressed = None,
             _ => {}
         }
         msgs
@@ -293,6 +303,28 @@ mod tests {
         assert!(s.pointer(&ev(1.3, 30.0, 40.0, PointerKind::Relative { dx: 1.0, dy: 0.0 })).is_empty());
         // A cancel with nothing pressed says nothing.
         assert!(s.pointer(&ev(1.4, 25.0, 40.0, PointerKind::Cancel)).is_empty());
+    }
+
+    /// A leave mid-press (a compositor grab), then the pointer removed: the node hears one
+    /// Cancel, from the leave.
+    #[test]
+    fn a_leave_mid_press_cancels_once() {
+        let mut s = scene();
+        s.pointer(&ev(1.0, 25.0, 40.0, PointerKind::Down(Button::Primary)));
+        let leave = s.pointer(&ev(1.1, 25.0, 40.0, PointerKind::Leave));
+        assert_eq!(inputs(leave), [(PointerPhase::Cancel, Point::new(15.0, 10.0))]);
+        assert!(inputs(s.pointer(&ev(1.2, 25.0, 40.0, PointerKind::Cancel))).is_empty());
+        assert!(s.pointer(&ev(1.3, 25.0, 40.0, PointerKind::Relative { dx: 1.0, dy: 0.0 })).is_empty());
+    }
+
+    /// A node deleted mid-press hears no Cancel.
+    #[test]
+    fn a_cancel_skips_a_deleted_node() {
+        let mut s = scene();
+        s.pointer(&ev(1.0, 25.0, 40.0, PointerKind::Down(Button::Primary)));
+        s.apply(Element::column("root").pad_xy(10.0, 30.0), 1.05);
+        s.sample(5.0);
+        assert!(inputs(s.pointer(&ev(5.0, 25.0, 40.0, PointerKind::Cancel))).is_empty());
     }
 
     #[test]

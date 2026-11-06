@@ -292,7 +292,10 @@ pub enum HostEvent {
     /// ([`HostCtl::set_text_input`]).
     TextInput(TextInputEvent),
     /// Surface `id` is now shown on `output`. Sent when the compositor first puts it on an
-    /// output and when it moves to another one. A host that does not know sends nothing.
+    /// output, when it moves to another one, and when that output's size or scale changes.
+    /// When the surface leaves every output (its last one unplugged, say) nothing is sent:
+    /// the last `Output` still holds until the compositor puts it on one again. A host that
+    /// does not know sends nothing.
     Output {
         id: SurfaceId,
         t: f64,
