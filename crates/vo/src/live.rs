@@ -2,6 +2,8 @@
 //! timestamp, every frame is sampled at its predicted present time, and a frame is asked for
 //! only while something changed or moves.
 
+use std::sync::mpsc;
+
 use vo_host::{
     CpuFrame, CursorShape, Frame, HostApp, HostCtl, HostError, HostEvent, InputMode, OverlaySpec, Placement,
     SurfaceChange, SurfaceId, TextInputState,
@@ -201,10 +203,14 @@ struct Live<A: App> {
     /// A renderer kept from an earlier session on the same device (`Resident`), taken by the
     /// first GPU frame.
     warm: Option<Renderer>,
-    /// Where a warm-up still running puts its renderer (`Resident::warm_up`).
+    /// Where a warm-up still running puts its renderer (`Resident::warm_up`, or the session's
+    /// own, `first_frame_warm_up`).
     warming: Option<WarmSlot>,
     /// Draws the first frames while the GPU device is made; dropped once the GPU draws.
     cpu: Option<CpuRenderer>,
+    /// Takes the first CPU frame to the device thread, which draws it once to make the
+    /// pipelines (`first_frame_warm_up`).
+    first_list: Option<mpsc::Sender<FirstList>>,
     /// The host's number of the first GPU frame, for the startup report.
     first_gpu_frame: Option<u64>,
     /// With diagnostics: the display list of the last frame before a settle, to tell a frame
@@ -642,7 +648,20 @@ impl<A: App> Live<A> {
             let (s, m) = (self.spec.size, self.insets);
             eprintln!("vo: surface {}x{} at t {t:.3}, margin {} {} {} {}", s.w, s.h, m.left, m.top, m.right, m.bottom);
         }
-        if options.cpu_first_frame && host.gpu_in_background() {
+        let in_background = if !options.cpu_first_frame {
+            false
+        } else if self.warm.is_none() && self.warming.is_none() {
+            let (then, list, slot) = first_frame_warm_up(&options);
+            let started = host.gpu_in_background_then(then);
+            if started {
+                self.warming = Some(slot);
+                self.first_list = Some(list);
+            }
+            started
+        } else {
+            host.gpu_in_background()
+        };
+        if in_background {
             self.cpu = Some(CpuRenderer::new(options.fonts.clone()));
             self.surface = host.open(&self.spec)?;
         } else {
@@ -955,6 +974,9 @@ impl<A: App> HostApp for Live<A> {
         self.sample(host, frame.id, t);
         let [w, h] = frame.size;
         self.cpu.as_mut().unwrap().draw_bgra(&self.list, frame.scale, w, h, frame.stride, frame.pixels);
+        if let Some(tx) = self.first_list.take() {
+            let _ = tx.send(FirstList { list: self.list.clone(), scale: frame.scale, size: frame.size });
+        }
         self.after_frame(host, frame.id, t, true);
         true
     }
@@ -1019,6 +1041,7 @@ impl<A: App> Live<A> {
             renderer: None,
             warm,
             warming: None,
+            first_list: None,
             cpu: None,
             first_gpu_frame: None,
             settled_list: None,
@@ -1094,8 +1117,53 @@ pub struct WarmFrames {
 
 /// The swapchain format the Wayland host picks when the compositor offers it, as KWin does.
 /// Pipelines are made per format, so warming another format would not help the first show.
-#[cfg(feature = "wayland")]
 const WARM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+/// The first CPU frame's display list, its scale and its size in pixels.
+struct FirstList {
+    list: DisplayList,
+    scale: f32,
+    size: [u32; 2],
+}
+
+/// How long the device thread waits for the first CPU frame once the device is made. The
+/// frame comes a few ms after the surface is configured and the device takes far longer, so
+/// this only bounds a session that ends before its first frame.
+const FIRST_LIST_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The renderer for a session that starts on the CPU, built on the host's device thread:
+/// it draws the first CPU frame (sent on the returned channel) once into an offscreen target
+/// in the swapchain's format (`WARM_FORMAT` when the host names none), so the pipelines, glyphs and buffers that frame needs are made
+/// there. Left to the first GPU frame on the host's loop, that took 1.8 s on lavapipe with a
+/// cold shader cache, and input, configures and frame callbacks waited (ytr-shfk). The
+/// renderer goes in the returned slot; without a frame in `FIRST_LIST_WAIT` it goes in
+/// unwarmed.
+fn first_frame_warm_up<M>(options: &Options<M>) -> (vo_host::WarmUp, mpsc::Sender<FirstList>, WarmSlot) {
+    let (tx, rx) = mpsc::channel::<FirstList>();
+    let slot = WarmSlot::default();
+    let filled = slot.clone();
+    let (fonts, quality, light, setup) =
+        (options.fonts.clone(), options.quality, options.light, options.renderer_setup.clone());
+    let then: vo_host::WarmUp = Box::new(move |gpu, format| {
+        let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
+        r.set_quality(quality);
+        r.set_light(light);
+        if let Some(setup) = &setup {
+            setup(&mut r);
+        }
+        if let Ok(first) = rx.recv_timeout(FIRST_LIST_WAIT) {
+            let [w, h] = first.size;
+            let mut target = Target::new(&gpu.device, w.max(1), h.max(1), format.unwrap_or(WARM_FORMAT));
+            r.render_at(&first.list, first.scale, &mut target);
+            let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            r.forget_frames();
+        }
+        if let Ok(mut s) = filled.lock() {
+            *s = Some(r);
+        }
+    });
+    (then, tx, slot)
+}
 
 #[cfg(feature = "wayland")]
 impl Default for Resident {
@@ -1134,7 +1202,8 @@ impl Resident {
         let (fonts, quality, light, setup) =
             (options.fonts.clone(), options.quality, options.light, options.renderer_setup.clone());
         let filled = slot.clone();
-        let then: vo_host_wayland::WarmUp = Box::new(move |gpu| {
+        // A warm-up has no surface, so no format: it draws in the one KWin offers.
+        let then: vo_host_wayland::WarmUp = Box::new(move |gpu, _| {
             let mut r = Renderer::with_fonts(&gpu.device, &gpu.queue, fonts);
             r.set_quality(quality);
             r.set_light(light);

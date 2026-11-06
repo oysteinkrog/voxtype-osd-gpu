@@ -60,10 +60,12 @@ impl Clipboard {
         let Ok(manager) = DataDeviceManagerState::bind(globals, qh) else { return Clipboard::default() };
         let (tx, rx) = calloop::channel::channel::<Option<String>>();
         let inserted = handle.insert_source(rx, |ev, _, state: &mut State| {
+            let start = std::time::Instant::now();
             if let calloop::channel::Event::Msg(text) = ev {
                 let t = state.now();
                 state.events.push(HostEvent::Clipboard { t, text });
             }
+            state.timed(start);
         });
         Clipboard { manager: Some(manager), pasted: inserted.is_ok().then_some(tx), ..Clipboard::default() }
     }

@@ -352,6 +352,11 @@ pub struct Gpu {
     pub adapter: String,
 }
 
+/// Runs on a host's device thread with the new device, before the host takes it
+/// (`HostCtl::gpu_in_background_then`). The format is the first swapchain's, when the thread
+/// set one up: pipelines are made per format, so a warm-up draws in that one.
+pub type WarmUp = Box<dyn FnOnce(&Gpu, Option<wgpu::TextureFormat>) + Send>;
+
 /// Wakes the host's loop from another thread, for example after sending a message on a
 /// channel. The app gets `HostEvent::External`.
 #[derive(Clone)]
@@ -385,6 +390,10 @@ pub struct HostDiag {
     pub notes: Vec<String>,
     /// Times the host's loop woke up. While the app is settled this should stay still.
     pub loop_wakeups: u64,
+    /// The longest turn of the host's loop outside its wait, in seconds: the event callbacks,
+    /// handling events and drawing. While a turn runs, input, configures and frame callbacks
+    /// wait.
+    pub longest_turn: f64,
 }
 
 #[derive(Debug)]
@@ -445,6 +454,15 @@ pub trait HostCtl {
     /// host cannot do this (`HostCaps::cpu_first_frame`); then use `gpu` as usual.
     fn gpu_in_background(&mut self) -> bool {
         false
+    }
+
+    /// As `gpu_in_background`, and runs `then` with the new device on the device thread
+    /// before `HostEvent::GpuReady`: for example to build the pipelines the first GPU frame
+    /// needs there, so that frame does not hold the host's loop. A host without a device
+    /// thread, or whose thread is already running, drops `then`.
+    fn gpu_in_background_then(&mut self, then: WarmUp) -> bool {
+        drop(then);
+        self.gpu_in_background()
     }
 
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError>;

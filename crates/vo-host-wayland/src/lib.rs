@@ -27,7 +27,9 @@
 //!   sub-surface goes desynchronized and runs on its own. Until the hand-over the input
 //!   region sits on the role surface, which shows the CPU frames; the GPU sub-surface has no
 //!   buffer yet, so a region there would take nothing. The hand-over commit moves the region
-//!   to the sub-surface (voxtype-osd-gpu-6jmj).
+//!   to the sub-surface (voxtype-osd-gpu-6jmj). `HostCtl::gpu_in_background_then` runs app
+//!   code on the device thread before `GpuReady`; vo builds the first GPU frame's pipelines
+//!   there, which on the loop held input for up to 1.4 s (ytr-shfk).
 
 mod blur;
 mod clipboard;
@@ -39,7 +41,7 @@ mod text_input;
 
 use std::ptr::NonNull;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use smithay_client_toolkit::compositor::{CompositorState, Region};
@@ -397,8 +399,9 @@ fn new_instance(display: DisplayHandle) -> wgpu::Instance {
 /// surface (about 70 ms of a cold start). Whoever needs the instance first joins the thread.
 /// Dropping it joins too: the thread holds the display pointer, so it must end before the
 /// connection does.
-/// Runs on the device thread with the new device, before the host takes it (`warm_up`).
-pub type WarmUp = Box<dyn FnOnce(&Gpu) + Send>;
+/// Runs on the device thread with the new device, before the host takes it (`warm_up`,
+/// `HostCtl::gpu_in_background_then`).
+pub use vo_host::WarmUp;
 
 struct EarlyInstance(Option<std::thread::JoinHandle<(wgpu::Instance, f64)>>);
 
@@ -495,6 +498,8 @@ pub struct State {
     pub(crate) presentation: PresentationTimeState,
     caps: HostCaps,
     pub(crate) diag: HostDiag,
+    /// Seconds spent in event callbacks during this turn of the loop (`timed`).
+    callbacks: f64,
     origin: f64,
     instance: Option<wgpu::Instance>,
     gpu: Option<GpuState>,
@@ -605,8 +610,10 @@ impl WaylandHost {
         event_loop
             .handle()
             .insert_source(ping_source, |_, _, state: &mut State| {
+                let start = Instant::now();
                 let t = state.now();
                 state.events.push(HostEvent::External { t });
+                state.timed(start);
             })
             .map_err(|e| HostError::Connect(format!("ping source: {e}")))?;
 
@@ -635,6 +642,7 @@ impl WaylandHost {
             presentation,
             caps,
             diag,
+            callbacks: 0.0,
             origin,
             instance: None,
             gpu: None,
@@ -664,14 +672,27 @@ impl WaylandHost {
         let mut queue = queue;
         queue.roundtrip(&mut state).map_err(|e| HostError::Connect(format!("output roundtrip: {e}")))?;
         state.stage("outputs known");
-        WaylandSource::new(state.conn.clone(), queue)
-            .insert(event_loop.handle())
+        // Inserted by hand rather than with `WaylandSource::insert`, to time the handlers.
+        event_loop
+            .handle()
+            .insert_source(WaylandSource::new(state.conn.clone(), queue), |_, queue, state: &mut State| {
+                let start = Instant::now();
+                let dispatched = queue.dispatch_pending(state);
+                state.timed(start);
+                dispatched
+            })
             .map_err(|e| HostError::Connect(format!("wayland source: {e}")))?;
         Ok(WaylandHost { state, event_loop, sessions: 0, warming: false })
     }
 }
 
 impl State {
+    /// An event callback that began at `start` ends: its time counts toward the loop's turn
+    /// (`HostDiag::longest_turn`).
+    pub(crate) fn timed(&mut self, start: Instant) {
+        self.callbacks += start.elapsed().as_secs_f64();
+    }
+
     pub(crate) fn stage(&mut self, name: &'static str) {
         let t = self.now();
         self.diag.stages.push((name, t));
@@ -775,23 +796,29 @@ impl State {
         display_handle_of(&self.conn)
     }
 
-    /// Starts the device thread. Without `then` it waits for the first GPU surface (`open`
-    /// sends it) and sets up its swapchain too; with `then` it makes the device with no
-    /// surface and runs `then` with it on that thread before handing it over.
-    fn spawn_gpu(&mut self, then: Option<WarmUp>) -> bool {
+    /// Starts the device thread. With `surface` it waits for the first GPU surface (`open`
+    /// sends it) and sets up its swapchain too; without, it makes the device with no surface.
+    /// It runs `then` with the device on that thread before handing it over.
+    fn spawn_gpu(&mut self, then: Option<WarmUp>, surface: bool) -> bool {
         let Ok((ping, source)) = calloop::ping::make_ping() else { return false };
-        if self.loop_handle.insert_source(source, |_, _, state: &mut State| state.poll_gpu(false)).is_err() {
+        let polled = |_, _: &mut (), state: &mut State| {
+            let start = Instant::now();
+            state.poll_gpu(false);
+            state.timed(start);
+        };
+        if self.loop_handle.insert_source(source, polled).is_err() {
             return false;
         }
         let (tx, rx) = mpsc::channel();
         let (target_tx, target_rx) = mpsc::channel();
         let (display, origin) = (self.display_handle(), self.origin);
         let early = EarlyInstance(self.early.0.take());
-        let warm = then.is_some();
         let spawned = std::thread::Builder::new().name("vo-gpu".into()).spawn(move || {
             let made = make_gpu(display, origin, target_rx, early);
             if let (Ok(b), Some(then)) = (&made, then) {
-                then(&Gpu { device: b.device.clone(), queue: b.queue.clone(), adapter: b.adapter.get_info().name });
+                let format = b.surface.as_ref().map(|(_, config, _)| config.format);
+                let gpu = Gpu { device: b.device.clone(), queue: b.queue.clone(), adapter: b.adapter.get_info().name };
+                then(&gpu, format);
             }
             let _ = tx.send(made);
             ping.ping();
@@ -801,9 +828,21 @@ impl State {
         }
         self.bg = Some(rx);
         // A warm-up has no surface to wait for: dropping the sender lets the thread go on.
-        self.bg_target = if warm { None } else { Some(target_tx) };
+        self.bg_target = surface.then_some(target_tx);
         self.stage("gpu thread started");
         true
+    }
+
+    /// `HostCtl::gpu_in_background` with an optional `then` for the device thread. A thread
+    /// already running (a warm-up) keeps going, and `then` is dropped.
+    fn background_gpu(&mut self, then: Option<WarmUp>) -> bool {
+        if self.bg.is_some() {
+            return true;
+        }
+        if !self.caps.cpu_first_frame || self.gpu.is_some() || self.instance.is_some() {
+            return false;
+        }
+        self.spawn_gpu(then, true)
     }
 
     /// Takes the device thread's answer if it is there; with `wait`, waits for it.
@@ -1299,13 +1338,10 @@ impl HostCtl for State {
     }
 
     fn gpu_in_background(&mut self) -> bool {
-        if self.bg.is_some() {
-            return true;
-        }
-        if !self.caps.cpu_first_frame || self.gpu.is_some() || self.instance.is_some() {
-            return false;
-        }
-        self.spawn_gpu(None)
+        self.background_gpu(None)
+    }
+    fn gpu_in_background_then(&mut self, then: WarmUp) -> bool {
+        self.background_gpu(Some(then))
     }
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
         // While the device thread runs the GPU draws on a sub-surface, so a spare is no use.
@@ -1663,6 +1699,9 @@ impl HostCtl for WaylandHost {
     fn gpu_in_background(&mut self) -> bool {
         self.state.gpu_in_background()
     }
+    fn gpu_in_background_then(&mut self, then: WarmUp) -> bool {
+        self.state.gpu_in_background_then(then)
+    }
     fn open(&mut self, spec: &OverlaySpec) -> Result<SurfaceId, HostError> {
         self.state.open(spec)
     }
@@ -1725,7 +1764,7 @@ impl WaylandHost {
         if s.bg.is_some() || s.gpu.is_some() || s.instance.is_some() || !s.caps.cpu_first_frame {
             return false;
         }
-        self.warming = s.spawn_gpu(Some(then));
+        self.warming = s.spawn_gpu(Some(then), false);
         self.warming
     }
 
@@ -1778,7 +1817,9 @@ impl WaylandHost {
             let _ = state.conn.flush();
             let timeout = state.timeout();
             state.diag.loop_wakeups += 1;
+            state.callbacks = 0.0;
             event_loop.dispatch(timeout, state).map_err(|e| HostError::Connect(format!("event loop: {e}")))?;
+            let turn = Instant::now();
             state.expire_resizes();
             if state.timer.is_some_and(|t| state.now() >= t) {
                 state.timer = None;
@@ -1799,6 +1840,8 @@ impl WaylandHost {
                 }
                 i += 1;
             }
+            let turn = turn.elapsed().as_secs_f64() + state.callbacks;
+            state.diag.longest_turn = state.diag.longest_turn.max(turn);
         }
         Ok(())
     }
