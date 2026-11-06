@@ -317,7 +317,9 @@ impl PointerHandler for State {
             | PointerEventKind::Axis { time, .. } => Some(time),
             _ => None,
         });
-        let t = stamped.map_or(now, |ms| self.pointer_clock.at(now, ms as f64 / 1000.0));
+        let mono_ms = (crate::monotonic() * 1000.0) as u64;
+        let age = stamped.and_then(|ms| crate::event_age(mono_ms, ms as u64, Some(1 << 32), 1e-3));
+        let t = now - age.unwrap_or(0.0);
         for e in events {
             let Some(i) = self.surface_index(&e.surface) else { continue };
             let kind = match e.kind {
@@ -366,7 +368,8 @@ impl RelativePointerHandler for State {
             return;
         };
         let now = self.now();
-        let t = self.relative_clock.at(now, event.utime as f64 / 1e6);
+        let mono_us = (crate::monotonic() * 1e6) as u64;
+        let t = now - crate::event_age(mono_us, event.utime, None, 1e-6).unwrap_or(0.0);
         let kind = PointerKind::Relative { dx: event.delta.0 as f32, dy: event.delta.1 as f32 };
         self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
     }
