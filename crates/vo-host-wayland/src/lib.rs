@@ -177,6 +177,17 @@ pub(crate) struct FocusProxy {
     buffer: Option<Buffer>,
 }
 
+/// A seat's pointer: its `wl_pointer`, its relative pointer, and the surface it is on and
+/// where, so relative motion and a cancel go to that surface.
+pub(crate) struct SeatPointer {
+    pub(crate) seat: wayland_client::protocol::wl_seat::WlSeat,
+    pub(crate) pointer: WlPointer,
+    pub(crate) relative: Option<
+        smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
+    >,
+    pub(crate) at: Option<(SurfaceId, vo_host::Point)>,
+}
+
 pub(crate) struct Surf {
     pub(crate) id: SurfaceId,
     spec: OverlaySpec,
@@ -222,6 +233,9 @@ pub(crate) struct Surf {
     pending_blur: Option<Option<InputRegion>>,
     /// The cursor over this surface (`SurfaceChange::Cursor`).
     pub(crate) cursor: CursorShape,
+    /// The outputs the surface is on, in the order it entered them. The last one is the one
+    /// reported in `HostEvent::Output`.
+    pub(crate) outputs: Vec<wl_output::WlOutput>,
 }
 
 impl Surf {
@@ -449,13 +463,11 @@ pub struct State {
     pub(crate) surfaces: Vec<Surf>,
     pub(crate) proxies: Vec<FocusProxy>,
     next_id: SurfaceId,
-    pub(crate) pointers: Vec<WlPointer>,
-    /// `zwp_relative_pointer_manager_v1`, when the compositor has it, and one relative
-    /// pointer per `wl_pointer`: motion that does not depend on where the surface is.
+    /// One pointer per seat that has one, with its relative pointer and focus.
+    pub(crate) pointers: Vec<SeatPointer>,
+    /// `zwp_relative_pointer_manager_v1`, when the compositor has it: motion that does not
+    /// depend on where the surface is.
     pub(crate) relative: smithay_client_toolkit::seat::relative_pointer::RelativePointerState,
-    pub(crate) relative_pointers: Vec<smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1>,
-    /// The surface the pointer is on and where, for relative motion.
-    pub(crate) pointer_at: Option<(SurfaceId, vo_host::Point)>,
     pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
     pub(crate) keyboard: keyboard::Keyboard,
     pub(crate) clipboard: clipboard::Clipboard,
@@ -589,8 +601,6 @@ impl WaylandHost {
             next_id: 1,
             pointers: Vec::new(),
             relative,
-            relative_pointers: Vec::new(),
-            pointer_at: None,
             keyboards: Vec::new(),
             proxies: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
@@ -637,6 +647,17 @@ impl State {
             })
             .filter(|h| *h > 0)
             .unwrap_or(1080)
+    }
+
+    /// Sends `HostEvent::Output` for surface `i`'s current output (the last it entered), when
+    /// its size is known.
+    pub(crate) fn report_output(&mut self, i: usize) {
+        let Some(output) = self.surfaces[i].outputs.last().cloned() else { return };
+        if let Some(info) = self.output_info(&output) {
+            let id = self.surfaces[i].id;
+            let t = self.now();
+            self.events.push(HostEvent::Output { id, t, output: info });
+        }
     }
 
     /// The name and logical size of `output`, when its size is known.
@@ -1327,6 +1348,7 @@ impl HostCtl for State {
             blur: None,
             pending_blur: None,
             cursor: CursorShape::Default,
+            outputs: Vec::new(),
         });
         Ok(id)
     }

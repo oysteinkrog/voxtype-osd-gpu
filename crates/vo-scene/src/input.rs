@@ -76,6 +76,9 @@ pub enum PointerPhase {
     /// surface it sits on, such as a drag area: the travel stays right while the surface
     /// moves, which positions relative to the surface do not. Not every host sends it.
     Travel { dx: f32, dy: f32 },
+    /// The press ended without a release: the pointer went away (its seat lost it) or the
+    /// compositor took the grab. Drop whatever the press started.
+    Cancel,
 }
 
 /// Longest gap between the presses of a double or triple click, in seconds.
@@ -211,7 +214,12 @@ impl<M: Clone> Scene<M> {
                     }
                 }
             }
-            PointerKind::Cancel | PointerKind::Leave => self.pointer.pressed = None,
+            PointerKind::Cancel => {
+                if let Some(id) = self.pointer.pressed.take() {
+                    msgs.extend(self.pointer_msg(id, ev, PointerPhase::Cancel));
+                }
+            }
+            PointerKind::Leave => self.pointer.pressed = None,
             _ => {}
         }
         msgs
@@ -272,6 +280,19 @@ mod tests {
         assert_eq!(inputs(up), [(PointerPhase::Release, Point::new(140.0, 11.0))]);
         // A move with no button is no drag.
         assert!(s.pointer(&ev(1.3, 30.0, 40.0, PointerKind::Motion)).is_empty());
+    }
+
+    #[test]
+    fn a_cancel_tells_the_pressed_node_and_ends_the_press() {
+        let mut s = scene();
+        s.pointer(&ev(1.0, 25.0, 40.0, PointerKind::Down(Button::Primary)));
+        let cancel = s.pointer(&ev(1.1, 25.0, 40.0, PointerKind::Cancel));
+        assert_eq!(inputs(cancel), [(PointerPhase::Cancel, Point::new(15.0, 10.0))]);
+        // The press is over: neither motion nor travel reaches the node now.
+        assert!(s.pointer(&ev(1.2, 30.0, 40.0, PointerKind::Motion)).is_empty());
+        assert!(s.pointer(&ev(1.3, 30.0, 40.0, PointerKind::Relative { dx: 1.0, dy: 0.0 })).is_empty());
+        // A cancel with nothing pressed says nothing.
+        assert!(s.pointer(&ev(1.4, 25.0, 40.0, PointerKind::Cancel)).is_empty());
     }
 
     #[test]

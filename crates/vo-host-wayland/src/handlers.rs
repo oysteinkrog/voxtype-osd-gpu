@@ -35,7 +35,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1:
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-use crate::{Role, State, Surf};
+use crate::{Role, SeatPointer, State, Surf};
 
 impl Surf {
     /// The oldest frame waiting for present feedback on `wl`.
@@ -133,20 +133,25 @@ impl CompositorHandler for State {
     ) {
         // The role surface only: its GPU sub-surface enters the same output.
         let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
-        let id = self.surfaces[i].id;
-        if let Some(output) = self.output_info(output) {
-            let t = self.now();
-            self.events.push(HostEvent::Output { id, t, output });
-        }
+        let outputs = &mut self.surfaces[i].outputs;
+        outputs.retain(|o| o != output);
+        outputs.push(output.clone());
+        self.report_output(i);
     }
 
     fn surface_leave(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        wl: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
+        let was = self.surfaces[i].outputs.last().cloned();
+        self.surfaces[i].outputs.retain(|o| o != output);
+        if self.surfaces[i].outputs.last() != was.as_ref() {
+            self.report_output(i);
+        }
     }
 }
 
@@ -248,31 +253,24 @@ impl SeatHandler for State {
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
-        if cap == Capability::Pointer {
-            if let Ok(p) = self.seats.get_pointer(qh, &seat) {
-                self.cursors.pointer(qh, &p);
-                if let Ok(r) = self.relative.get_relative_pointer(&p, qh) {
-                    self.relative_pointers.push(r);
-                }
-                self.pointers.push(p);
+        if cap == Capability::Pointer && !self.pointers.iter().any(|p| p.seat == seat) {
+            if let Ok(pointer) = self.seats.get_pointer(qh, &seat) {
+                self.cursors.pointer(qh, &pointer);
+                let relative = self.relative.get_relative_pointer(&pointer, qh).ok();
+                self.pointers.push(SeatPointer { seat, pointer, relative, at: None });
             }
         }
     }
 
-    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
+    fn remove_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
-            self.cursors.pointers_gone();
-            self.pointer_at = None;
-            for r in self.relative_pointers.drain(..) {
-                r.destroy();
-            }
-            for p in self.pointers.drain(..) {
-                p.release();
-            }
+            self.drop_pointer(qh, &seat);
         }
     }
 
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn remove_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.drop_pointer(qh, &seat);
+    }
 }
 
 fn button(code: u32) -> Option<Button> {
@@ -284,8 +282,32 @@ fn button(code: u32) -> Option<Button> {
     }
 }
 
+impl State {
+    /// Seat `seat`'s pointer went away. The surface it was on gets `PointerKind::Cancel` first,
+    /// so a node holding a press is told and a pointer that comes later starts afresh. Other
+    /// seats' pointers stay.
+    fn drop_pointer(&mut self, qh: &QueueHandle<Self>, seat: &wl_seat::WlSeat) {
+        let Some(k) = self.pointers.iter().position(|p| &p.seat == seat) else { return };
+        let gone = self.pointers.remove(k);
+        if let Some((surface, pos)) = gone.at {
+            let t = self.now();
+            self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind: PointerKind::Cancel }));
+        }
+        if let Some(r) = gone.relative {
+            r.destroy();
+        }
+        gone.pointer.release();
+        // The cursor keeps one device per pointer; make them again for the pointers left.
+        self.cursors.pointers_gone();
+        for p in &self.pointers {
+            self.cursors.pointer(qh, &p.pointer);
+        }
+    }
+}
+
 impl PointerHandler for State {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlPointer, events: &[SctkPointer]) {
+    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, pointer: &WlPointer, events: &[SctkPointer]) {
+        let k = self.pointers.iter().position(|p| &p.pointer == pointer);
         // One timestamp per pointer frame: the events in it happened together.
         let t = self.now();
         for e in events {
@@ -314,7 +336,9 @@ impl PointerHandler for State {
             };
             let pos = Point::new(e.position.0 as f32, e.position.1 as f32);
             let surface = self.surfaces[i].id;
-            self.pointer_at = (kind != PointerKind::Leave).then_some((surface, pos));
+            if let Some(p) = k.map(|k| &mut self.pointers[k]) {
+                p.at = (kind != PointerKind::Leave).then_some((surface, pos));
+            }
             self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
         }
     }
@@ -326,10 +350,13 @@ impl RelativePointerHandler for State {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &ZwpRelativePointerV1,
-        _: &WlPointer,
+        pointer: &WlPointer,
         event: RelativeMotionEvent,
     ) {
-        let Some((surface, pos)) = self.pointer_at else { return };
+        // Only the seat whose pointer moved, and only on the surface that pointer is on.
+        let Some((surface, pos)) = self.pointers.iter().find(|p| &p.pointer == pointer).and_then(|p| p.at) else {
+            return;
+        };
         let t = self.now();
         let kind = PointerKind::Relative { dx: event.delta.0 as f32, dy: event.delta.1 as f32 };
         self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
@@ -341,8 +368,25 @@ impl OutputHandler for State {
         &mut self.outputs
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    /// A new mode, scale or name: surfaces on that output get its new size.
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        for i in 0..self.surfaces.len() {
+            if self.surfaces[i].outputs.last() == Some(&output) {
+                self.report_output(i);
+            }
+        }
+    }
+    /// An output was removed: surfaces drop it, and those it was current for report the one
+    /// they are still on.
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        for i in 0..self.surfaces.len() {
+            let was_current = self.surfaces[i].outputs.last() == Some(&output);
+            self.surfaces[i].outputs.retain(|o| o != &output);
+            if was_current {
+                self.report_output(i);
+            }
+        }
+    }
 }
 
 impl ProvidesRegistryState for State {
