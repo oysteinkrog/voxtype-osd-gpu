@@ -7,6 +7,8 @@
 //!   fake_click click X Y [N]   move there, then press and release the left button (N times,
 //!                              60 ms apart, for a double or triple click)
 //!   fake_click drag X Y X2 Y2  press at (X, Y), move to (X2, Y2) in steps, release there
+//!   fake_click rdrag X Y DX DY press at (X, Y), move by (DX, DY) in relative steps, as a
+//!                              mouse does, release there
 //!
 //! KWin removes the fake pointer when this exits, and clients see the pointer capability go.
 //! Set `FAKE_CLICK_HOLD_MS=N` to keep it N ms longer, for a check that needs the pointer to
@@ -51,9 +53,9 @@ fn main() {
     let (verb, x, y, to) = match args.as_slice() {
         [v, x, y] => (v.as_str(), num(x), num(y), None),
         [v, x, y, n] if v == "click" => (v.as_str(), num(x), num(y), Some((num(n), 0.0))),
-        [v, x, y, x2, y2] if v == "drag" => (v.as_str(), num(x), num(y), Some((num(x2), num(y2)))),
+        [v, x, y, x2, y2] if v == "drag" || v == "rdrag" => (v.as_str(), num(x), num(y), Some((num(x2), num(y2)))),
         _ => {
-            eprintln!("usage: fake_click move|click X Y, click X Y N, or drag X Y X2 Y2");
+            eprintln!("usage: fake_click move|click X Y, click X Y N, drag X Y X2 Y2, or rdrag X Y DX DY");
             std::process::exit(2);
         }
     };
@@ -84,6 +86,16 @@ fn main() {
                 pause(&mut queue);
                 let f = f64::from(i) / 8.0;
                 fake.pointer_motion_absolute(x + (x2 - x) * f, y + (y2 - y) * f);
+            }
+            pause(&mut queue);
+            fake.button(BTN_LEFT, 0);
+        }
+        ("rdrag", Some((dx, dy))) => {
+            pause(&mut queue);
+            fake.button(BTN_LEFT, 1);
+            for _ in 1..=8 {
+                pause(&mut queue);
+                fake.pointer_motion(dx / 8.0, dy / 8.0);
             }
             pause(&mut queue);
             fake.button(BTN_LEFT, 0);

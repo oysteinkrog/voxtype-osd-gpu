@@ -4,10 +4,12 @@
 use smithay_client_toolkit::compositor::CompositorHandler;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::presentation_time::{PresentTime, PresentationTimeHandler, PresentationTimeState};
+use smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::pointer::{
     PointerEvent as SctkPointer, PointerEventKind, PointerHandler, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT,
 };
+use smithay_client_toolkit::seat::relative_pointer::{RelativeMotionEvent, RelativePointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure};
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
@@ -15,8 +17,8 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_presentation_time,
-    delegate_registry, delegate_seat, delegate_shm, delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
-    registry_handlers,
+    delegate_registry, delegate_relative_pointer, delegate_seat, delegate_shm, delegate_subcompositor,
+    delegate_xdg_shell, delegate_xdg_window, registry_handlers,
 };
 use vo_host::{Button, HostCtl, HostEvent, Point, PointerEvent, PointerKind, Size};
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
@@ -249,6 +251,9 @@ impl SeatHandler for State {
         if cap == Capability::Pointer {
             if let Ok(p) = self.seats.get_pointer(qh, &seat) {
                 self.cursors.pointer(qh, &p);
+                if let Ok(r) = self.relative.get_relative_pointer(&p, qh) {
+                    self.relative_pointers.push(r);
+                }
                 self.pointers.push(p);
             }
         }
@@ -257,6 +262,10 @@ impl SeatHandler for State {
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Pointer {
             self.cursors.pointers_gone();
+            self.pointer_at = None;
+            for r in self.relative_pointers.drain(..) {
+                r.destroy();
+            }
             for p in self.pointers.drain(..) {
                 p.release();
             }
@@ -304,8 +313,26 @@ impl PointerHandler for State {
                 PointerEventKind::Axis { .. } => continue,
             };
             let pos = Point::new(e.position.0 as f32, e.position.1 as f32);
-            self.events.push(HostEvent::Pointer(PointerEvent { surface: self.surfaces[i].id, t, pos, kind }));
+            let surface = self.surfaces[i].id;
+            self.pointer_at = (kind != PointerKind::Leave).then_some((surface, pos));
+            self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
         }
+    }
+}
+
+impl RelativePointerHandler for State {
+    fn relative_pointer_motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpRelativePointerV1,
+        _: &WlPointer,
+        event: RelativeMotionEvent,
+    ) {
+        let Some((surface, pos)) = self.pointer_at else { return };
+        let t = self.now();
+        let kind = PointerKind::Relative { dx: event.delta.0 as f32, dy: event.delta.1 as f32 };
+        self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
     }
 }
 
@@ -332,6 +359,7 @@ delegate_xdg_shell!(State);
 delegate_xdg_window!(State);
 delegate_seat!(State);
 delegate_pointer!(State);
+delegate_relative_pointer!(State);
 delegate_presentation_time!(State);
 delegate_registry!(State);
 delegate_shm!(State);

@@ -21,7 +21,7 @@ pub struct PointerEvent {
     pub kind: PointerKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerKind {
     Enter,
     Leave,
@@ -29,6 +29,14 @@ pub enum PointerKind {
     Down(Button),
     Up(Button),
     Cancel,
+    /// The pointer moved by `(dx, dy)` logical pixels on the screen, from the compositor's
+    /// relative pointer events. Unlike `Motion` it does not depend on where the surface is,
+    /// so it stays right while the surface itself moves. `pos` is the last known position.
+    /// Hosts without relative pointer events never send it.
+    Relative {
+        dx: f32,
+        dy: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +61,7 @@ pub struct PointerInput {
     pub tag: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerPhase {
     /// The button went down. `clicks` is 1, or 2 and 3 for a double and triple click: a
     /// press on the same node within `MULTI_CLICK_SECS` of the last one and within
@@ -63,6 +71,11 @@ pub enum PointerPhase {
     Drag,
     /// The button went up.
     Release,
+    /// The pointer moved by `(dx, dy)` on the screen while the button is held, from relative
+    /// pointer events (`PointerKind::Relative`), alongside `Drag`. For a node that moves the
+    /// surface it sits on, such as a drag area: the travel stays right while the surface
+    /// moves, which positions relative to the surface do not. Not every host sends it.
+    Travel { dx: f32, dy: f32 },
 }
 
 /// Longest gap between the presses of a double or triple click, in seconds.
@@ -142,6 +155,13 @@ impl<M: Clone> Scene<M> {
     /// Turns a raw pointer event into app messages, and updates hover and press state.
     pub fn pointer(&mut self, ev: &PointerEvent) -> Vec<M> {
         let mut msgs = Vec::new();
+        // Relative motion changes no hover state: it only reaches a node held by a press.
+        if let PointerKind::Relative { dx, dy } = ev.kind {
+            if let Some(id) = self.pointer.pressed {
+                msgs.extend(self.pointer_msg(id, ev, PointerPhase::Travel { dx, dy }));
+            }
+            return msgs;
+        }
         let hit = match ev.kind {
             PointerKind::Leave | PointerKind::Cancel => None,
             _ => self.hit_test(ev.pos, ev.t),
@@ -252,6 +272,21 @@ mod tests {
         assert_eq!(inputs(up), [(PointerPhase::Release, Point::new(140.0, 11.0))]);
         // A move with no button is no drag.
         assert!(s.pointer(&ev(1.3, 30.0, 40.0, PointerKind::Motion)).is_empty());
+    }
+
+    #[test]
+    fn relative_motion_reaches_only_a_pressed_node_as_travel() {
+        let mut s = scene();
+        let rel = |t| ev(t, 25.0, 40.0, PointerKind::Relative { dx: 3.0, dy: -2.0 });
+        // Not pressed: nothing, not even hover.
+        assert!(s.pointer(&rel(0.9)).is_empty());
+        s.pointer(&ev(1.0, 25.0, 40.0, PointerKind::Down(Button::Primary)));
+        assert_eq!(
+            inputs(s.pointer(&rel(1.1))),
+            [(PointerPhase::Travel { dx: 3.0, dy: -2.0 }, Point::new(15.0, 10.0))]
+        );
+        s.pointer(&ev(1.2, 25.0, 40.0, PointerKind::Up(Button::Primary)));
+        assert!(s.pointer(&rel(1.3)).is_empty());
     }
 
     #[test]

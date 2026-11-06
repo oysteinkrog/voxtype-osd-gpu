@@ -450,6 +450,12 @@ pub struct State {
     pub(crate) proxies: Vec<FocusProxy>,
     next_id: SurfaceId,
     pub(crate) pointers: Vec<WlPointer>,
+    /// `zwp_relative_pointer_manager_v1`, when the compositor has it, and one relative
+    /// pointer per `wl_pointer`: motion that does not depend on where the surface is.
+    pub(crate) relative: smithay_client_toolkit::seat::relative_pointer::RelativePointerState,
+    pub(crate) relative_pointers: Vec<smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1>,
+    /// The surface the pointer is on and where, for relative motion.
+    pub(crate) pointer_at: Option<(SurfaceId, vo_host::Point)>,
     pub(crate) keyboards: Vec<wayland_client::protocol::wl_keyboard::WlKeyboard>,
     pub(crate) keyboard: keyboard::Keyboard,
     pub(crate) clipboard: clipboard::Clipboard,
@@ -551,6 +557,7 @@ impl WaylandHost {
         let clipboard = clipboard::Clipboard::bind(&globals, &qh, &event_loop.handle());
         let cursors = cursor::Cursors::bind(&globals, &qh, &conn, &compositor, shm.as_ref().map(|s| s.wl_shm()));
         let text_input = text_input::TextInput::bind(&globals, &qh);
+        let relative = smithay_client_toolkit::seat::relative_pointer::RelativePointerState::bind(&globals, &qh);
         let mut diag = HostDiag { exec_to_origin, ..HostDiag::default() };
         let t = monotonic() - origin;
         diag.stages.push(("connected", t));
@@ -581,6 +588,9 @@ impl WaylandHost {
             surfaces: Vec::new(),
             next_id: 1,
             pointers: Vec::new(),
+            relative,
+            relative_pointers: Vec::new(),
+            pointer_at: None,
             keyboards: Vec::new(),
             proxies: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
