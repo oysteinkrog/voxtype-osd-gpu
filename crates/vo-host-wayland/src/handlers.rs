@@ -218,7 +218,10 @@ impl PresentationTimeHandler for State {
         s.last_present = Some(t);
         s.refresh = refresh;
         let id = s.id;
-        if frame == 0 {
+        // The session's first frame that showed. Usually frame 0, but the compositor can
+        // discard that one, for example when the surface is placed again right after it
+        // maps (the app learned its output); then the next presented frame counts.
+        if !self.diag.stages.iter().any(|s| s.0 == "first frame on screen") {
             self.diag.stages.push(("first frame on screen", t));
         }
         // The first GPU frame itself may have been replaced before it showed.
