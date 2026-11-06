@@ -885,6 +885,7 @@ impl<A: App> HostApp for Live<A> {
             HostEvent::KeyRepeatInfo { info, .. } => self.driver().repeat_info(info),
             HostEvent::Clipboard { t, text } => self.driver().clipboard(t, text),
             HostEvent::TextInput(ev) => self.driver().text_input(ev.t, &ev),
+            HostEvent::Output { id, t, output } if id == self.surface => self.driver().output(t, &output),
             _ => {}
         }
         self.after_change(host);
@@ -1400,6 +1401,57 @@ mod resize_tests {
         // Asked once only.
         live.follow_main_surface(&mut host);
         assert_eq!(host.log.len(), 2);
+    }
+
+    /// An app that moves its panel to the top-left corner of each output it is put on.
+    #[derive(Default)]
+    struct Mover {
+        outputs: Vec<vo_host::OutputInfo>,
+    }
+
+    impl App for Mover {
+        type Msg = ();
+        fn update(&mut self, _: (), _: &mut Cx<()>) {}
+        fn view(&self, _: &Tokens) -> vo_scene::element::Element<()> {
+            vo_scene::element::Element::column("root")
+        }
+        fn output(&mut self, output: &vo_host::OutputInfo, _: &mut Cx<()>) {
+            self.outputs.push(output.clone());
+        }
+        fn main_surface(&self) -> Option<(Size, Placement)> {
+            let out = self.outputs.last()?;
+            let x = (out.size.w - 600.0) as i32;
+            Some((
+                Size::new(600.0, 180.0),
+                Placement::Anchored {
+                    edges: vo_host::Edges { top: true, left: true, ..Default::default() },
+                    margin: [0, 0, 0, x],
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn the_main_surfaces_output_reaches_the_app_and_can_move_it() {
+        let spec =
+            OverlaySpec { size: Size::new(600.0, 180.0), placement: Placement::Centered, ..OverlaySpec::default() };
+        let mut live = Live::new(Mover::default(), spec, crate::Options::default(), None);
+        let driver = Driver::new(live.pending.take().unwrap().0, vo_scene::Scene::new(), Tokens::default(), 0.0);
+        live.driver = Some(driver);
+        live.surface = 7;
+        let mut host = Changes::default();
+        let dp1 = vo_host::OutputInfo { name: Some("DP-1".into()), size: Size::new(2560.0, 1440.0) };
+
+        // Another surface's output is not the app's.
+        live.event(&mut host, HostEvent::Output { id: 8, t: 1.0, output: dp1.clone() });
+        assert!(live.driver().app.outputs.is_empty());
+
+        live.event(&mut host, HostEvent::Output { id: 7, t: 1.0, output: dp1.clone() });
+        assert_eq!(live.driver().app.outputs, [dp1]);
+        assert!(host.log.contains(&SurfaceChange::Placement(Placement::Anchored {
+            edges: vo_host::Edges { top: true, left: true, ..Default::default() },
+            margin: [0, 0, 0, 1960],
+        })));
     }
 }
 

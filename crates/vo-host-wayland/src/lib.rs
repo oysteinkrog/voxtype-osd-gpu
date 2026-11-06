@@ -66,7 +66,7 @@ use vo_host::{
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_shm::Format;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
-use wayland_client::protocol::{wl_pointer::WlPointer, wl_surface::WlSurface};
+use wayland_client::protocol::{wl_output, wl_pointer::WlPointer, wl_surface::WlSurface};
 use wayland_client::{Connection, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
@@ -627,6 +627,17 @@ impl State {
             })
             .filter(|h| *h > 0)
             .unwrap_or(1080)
+    }
+
+    /// The name and logical size of `output`, when its size is known.
+    pub(crate) fn output_info(&self, output: &wl_output::WlOutput) -> Option<vo_host::OutputInfo> {
+        let info = self.outputs.info(output)?;
+        let (w, h) = info.logical_size.or_else(|| {
+            let mode = info.modes.iter().find(|m| m.current)?;
+            let k = info.scale_factor.max(1);
+            Some((mode.dimensions.0 / k, mode.dimensions.1 / k))
+        })?;
+        (w > 0 && h > 0).then(|| vo_host::OutputInfo { name: info.name.clone(), size: Size::new(w as f32, h as f32) })
     }
 
     /// Logical size of the first output with a known size, as `output_height` finds it.

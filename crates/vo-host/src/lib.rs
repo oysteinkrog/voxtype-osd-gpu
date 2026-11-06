@@ -291,6 +291,22 @@ pub enum HostEvent {
     /// A batch from the input method for the focus proxy that has it on
     /// ([`HostCtl::set_text_input`]).
     TextInput(TextInputEvent),
+    /// Surface `id` is now shown on `output`. Sent when the compositor first puts it on an
+    /// output and when it moves to another one. A host that does not know sends nothing.
+    Output {
+        id: SurfaceId,
+        t: f64,
+        output: OutputInfo,
+    },
+}
+
+/// An output a surface is shown on (`HostEvent::Output`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputInfo {
+    /// The compositor's name for it, such as `DP-1`, when it gives one.
+    pub name: Option<String>,
+    /// Its size in logical pixels.
+    pub size: Size,
 }
 
 /// A frame to draw. The app encodes and submits its work into `texture` before returning; the

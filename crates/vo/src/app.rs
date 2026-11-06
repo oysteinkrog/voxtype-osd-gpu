@@ -92,6 +92,13 @@ pub trait App {
         let _ = (gained, requested, cx);
     }
 
+    /// The main surface is now shown on `output` (live only): when the compositor first puts
+    /// it on an output, and when it moves to another. For an app that keeps a place per output
+    /// or keeps the panel on the screen. Default: ignored.
+    fn output(&mut self, output: &vo_host::OutputInfo, cx: &mut Cx<Self::Msg>) {
+        let _ = (output, cx);
+    }
+
     /// The answer to [`Cx::paste`]: the clipboard's text, or `None` when it is empty, holds
     /// no text, or the host has no clipboard.
     fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Self::Msg>) {
@@ -500,6 +507,13 @@ impl<A: App> Driver<A> {
         self.fire_timers(t);
         self.flush();
         self.run(t, |app, cx| app.clipboard(text, cx));
+    }
+
+    /// The main surface is on a new output (`App::output`).
+    pub(crate) fn output(&mut self, t: f64, output: &vo_host::OutputInfo) {
+        self.fire_timers(t);
+        self.flush();
+        self.run(t, |app, cx| app.output(output, cx));
     }
 
     /// A batch from the input method arrived (`App::text_input`).

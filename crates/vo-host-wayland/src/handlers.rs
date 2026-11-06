@@ -126,9 +126,16 @@ impl CompositorHandler for State {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        wl: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        // The role surface only: its GPU sub-surface enters the same output.
+        let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
+        let id = self.surfaces[i].id;
+        if let Some(output) = self.output_info(output) {
+            let t = self.now();
+            self.events.push(HostEvent::Output { id, t, output });
+        }
     }
 
     fn surface_leave(
