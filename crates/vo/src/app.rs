@@ -664,14 +664,15 @@ impl<A: App> Driver<A> {
     pub(crate) fn pointer_on(&mut self, extra: Option<usize>, ev: &PointerEvent) {
         self.fire_timers(ev.t);
         self.flush();
+        let stamp = ev.t;
         let mut ev = *ev;
         ev.t = ev.t.max(self.last_t);
         self.last_t = ev.t;
         let msgs = match extra {
-            None => self.scene.pointer(&ev),
+            None => self.scene.pointer_stamped(&ev, stamp),
             // A timer above may have closed it.
             Some(i) => match self.extras.list.get_mut(i) {
-                Some(e) => e.scene.pointer(&ev),
+                Some(e) => e.scene.pointer_stamped(&ev, stamp),
                 None => Vec::new(),
             },
         };
@@ -803,6 +804,46 @@ mod tests {
         d.pointer(&ev);
         assert_eq!(d.timers.next_at(), None, "the hover stopped the timer");
         assert!(!d.dirty && !d.moving(1.0), "but asked for no frame");
+    }
+
+    /// An app that logs the clicks of each press on its one pointer area.
+    #[derive(Default)]
+    struct Clicks(Vec<u8>);
+
+    impl App for Clicks {
+        type Msg = Option<u8>;
+
+        fn update(&mut self, msg: Option<u8>, _: &mut Cx<Option<u8>>) {
+            self.0.extend(msg);
+        }
+
+        fn view(&self, _: &Tokens) -> Element<Option<u8>> {
+            Element::panel("root").size(100.0, 40.0).on_pointer(|p| match p.phase {
+                vo_scene::input::PointerPhase::Press { clicks } => Some(clicks),
+                _ => None,
+            })
+        }
+    }
+
+    #[test]
+    fn a_press_read_late_does_not_make_the_next_press_a_double_click() {
+        use vo_host::{Button, PointerEvent, PointerKind};
+        use vo_scene::geom::Point;
+
+        let mut d = Driver::new(Clicks::default(), Scene::new(), Tokens::default(), 0.0);
+        let at = |t, kind| PointerEvent { surface: 0, t, pos: Point::new(10.0, 10.0), kind };
+        // A frame at 1.5 s blocked the loop: the first press and release, at 0.3 s and 0.5 s,
+        // are read after it, and the second press comes on time at 1.55 s.
+        d.dispatch(None, 1.5);
+        d.pointer(&at(0.3, PointerKind::Enter));
+        d.pointer(&at(0.3, PointerKind::Down(Button::Primary)));
+        d.pointer(&at(0.5, PointerKind::Up(Button::Primary)));
+        d.pointer(&at(1.55, PointerKind::Down(Button::Primary)));
+        assert_eq!(d.app.0, [1, 1], "1.25 s apart is two single clicks");
+        // Two presses that were read late together but happened close together still count.
+        d.pointer(&at(1.6, PointerKind::Up(Button::Primary)));
+        d.pointer(&at(1.7, PointerKind::Down(Button::Primary)));
+        assert_eq!(d.app.0, [1, 1, 2]);
     }
 
     /// An app with a dial that spins for ever.

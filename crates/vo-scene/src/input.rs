@@ -164,6 +164,14 @@ impl<M: Clone> Scene<M> {
 
     /// Turns a raw pointer event into app messages, and updates hover and press state.
     pub fn pointer(&mut self, ev: &PointerEvent) -> Vec<M> {
+        self.pointer_stamped(ev, ev.t)
+    }
+
+    /// As `pointer`, with `stamp` the time the event happened. A driver that keeps events in
+    /// time order moves a late event's `t` up to its last event, which can put two presses
+    /// read in different batches closer than they were; multi-click detection measures
+    /// between stamps instead.
+    pub fn pointer_stamped(&mut self, ev: &PointerEvent, stamp: f64) -> Vec<M> {
         let mut msgs = Vec::new();
         // Relative motion changes no hover state: it only reaches a node held by a press.
         if let PointerKind::Relative { dx, dy } = ev.kind {
@@ -194,14 +202,14 @@ impl<M: Clone> Scene<M> {
                     let clicks = match self.pointer.last_press {
                         Some((last, at, p, n))
                             if last == id
-                                && ev.t - at <= MULTI_CLICK_SECS
+                                && stamp - at <= MULTI_CLICK_SECS
                                 && (ev.pos.x - p.x).hypot(ev.pos.y - p.y) <= MULTI_CLICK_PX =>
                         {
                             n % 3 + 1
                         }
                         _ => 1,
                     };
-                    self.pointer.last_press = Some((id, ev.t, ev.pos, clicks));
+                    self.pointer.last_press = Some((id, stamp, ev.pos, clicks));
                     msgs.extend(self.pointer_msg(id, ev, PointerPhase::Press { clicks }));
                 }
             }
