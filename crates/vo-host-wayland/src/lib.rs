@@ -1797,6 +1797,20 @@ fn from_top_margin(fraction: f32, output_h: i32, surface_h: i32) -> i32 {
 }
 
 /// The top margin for `Placement::LineAt`: the line `y` below the surface's top at
+/// The surface left `output`; `outputs` lists the outputs it is on, the current one last.
+/// Returns true when the current output changed, so it is reported again. A surface keeps
+/// its only output: KWin sends a leave for it when the output shrinks so the surface no
+/// longer fits on it, and dropping it would lose the output's later size updates. Only
+/// `output_destroyed` drops an output for good.
+pub(crate) fn leave_output<T: PartialEq>(outputs: &mut Vec<T>, output: &T) -> bool {
+    if outputs.len() == 1 && outputs[0] == *output {
+        return false;
+    }
+    let was_current = outputs.last() == Some(output);
+    outputs.retain(|o| o != output);
+    was_current && !outputs.is_empty()
+}
+
 /// `fraction` of the output's height, kept on the output as in `from_top_margin`.
 fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
     let top = (fraction.clamp(0.0, 1.0) * output_h as f32 - y).round() as i32;
@@ -1806,6 +1820,28 @@ fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{from_top_margin, line_at_margin, next_present, resize_expired, to_px, RESIZE_WAIT};
+
+    /// A surface keeps its only output on a leave, so later size updates of that output still
+    /// reach it; with two outputs it drops the one it left, and reports when that was current.
+    #[test]
+    fn a_surface_keeps_its_only_output_when_it_leaves_it() {
+        use super::leave_output;
+        let mut on = vec!["DP-1"];
+        assert!(!leave_output(&mut on, &"DP-1"));
+        assert_eq!(on, ["DP-1"]);
+        // On two outputs: leaving the current one makes the other current.
+        let mut on = vec!["DP-1", "HDMI-A-1"];
+        assert!(leave_output(&mut on, &"HDMI-A-1"));
+        assert_eq!(on, ["DP-1"]);
+        // Leaving one that is not current changes nothing to report.
+        let mut on = vec!["DP-1", "HDMI-A-1"];
+        assert!(!leave_output(&mut on, &"DP-1"));
+        assert_eq!(on, ["HDMI-A-1"]);
+        // An output the surface is not on.
+        let mut on = vec!["DP-1"];
+        assert!(!leave_output(&mut on, &"DP-2"));
+        assert_eq!(on, ["DP-1"]);
+    }
 
     #[test]
     fn a_resize_stops_waiting_for_its_configure_after_a_while() {

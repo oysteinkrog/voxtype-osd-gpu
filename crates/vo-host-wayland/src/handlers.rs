@@ -147,9 +147,7 @@ impl CompositorHandler for State {
         output: &wl_output::WlOutput,
     ) {
         let Some(i) = self.surfaces.iter().position(|s| s.role.wl() == wl) else { return };
-        let was = self.surfaces[i].outputs.last().cloned();
-        self.surfaces[i].outputs.retain(|o| o != output);
-        if self.surfaces[i].outputs.last() != was.as_ref() {
+        if crate::leave_output(&mut self.surfaces[i].outputs, output) {
             self.report_output(i);
         }
     }

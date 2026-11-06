@@ -293,9 +293,10 @@ pub enum HostEvent {
     TextInput(TextInputEvent),
     /// Surface `id` is now shown on `output`. Sent when the compositor first puts it on an
     /// output, when it moves to another one, and when that output's size or scale changes.
-    /// When the surface leaves every output (its last one unplugged, say) nothing is sent:
-    /// the last `Output` still holds until the compositor puts it on one again. A host that
-    /// does not know sends nothing.
+    /// A surface keeps its only output when the compositor says it left it (KWin does when
+    /// the output shrinks under it), so that output's later size changes are still sent.
+    /// When its last output is unplugged nothing is sent: the last `Output` still holds until
+    /// the compositor puts it on one again. A host that does not know sends nothing.
     Output {
         id: SurfaceId,
         t: f64,
