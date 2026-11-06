@@ -482,6 +482,10 @@ pub struct State {
     next_id: SurfaceId,
     /// One pointer per seat that has one, with its relative pointer and focus.
     pub(crate) pointers: Vec<SeatPointer>,
+    /// The compositor's pointer event times (ms) and relative motion times (µs) on the
+    /// host clock: events read late, after a long frame, keep the times they happened.
+    pub(crate) pointer_clock: EventClock,
+    pub(crate) relative_clock: EventClock,
     /// `zwp_relative_pointer_manager_v1`, when the compositor has it: motion that does not
     /// depend on where the surface is.
     pub(crate) relative: smithay_client_toolkit::seat::relative_pointer::RelativePointerState,
@@ -617,6 +621,8 @@ impl WaylandHost {
             surfaces: Vec::new(),
             next_id: 1,
             pointers: Vec::new(),
+            pointer_clock: EventClock::default(),
+            relative_clock: EventClock::default(),
             relative,
             keyboards: Vec::new(),
             proxies: Vec::new(),
@@ -1843,6 +1849,32 @@ pub(crate) fn leave_output<T: PartialEq>(outputs: &mut Vec<T>, output: &T) -> bo
     was_current && !outputs.is_empty()
 }
 
+/// Puts an event time from the compositor (seconds on its own clock) on the host clock.
+/// The offset between the two is the smallest delay seen: an event is never read before it
+/// happened, so the least-delayed one gives it. Events the host reads late (its loop was busy
+/// with a long frame) keep the time they happened, so two presses read together are not
+/// taken for a double click. A jump forward of more than [`EventClock::RESYNC_S`] (the
+/// compositor's 32-bit millisecond clock wrapping, or a new compositor clock) starts over.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EventClock {
+    offset: Option<f64>,
+}
+
+impl EventClock {
+    const RESYNC_S: f64 = 60.0;
+
+    /// The host time of an event the compositor stamped `event_s`, read at host time `now`.
+    pub(crate) fn at(&mut self, now: f64, event_s: f64) -> f64 {
+        let delay_offset = now - event_s;
+        let offset = match self.offset {
+            Some(o) if delay_offset >= o && delay_offset - o <= Self::RESYNC_S => o,
+            _ => delay_offset,
+        };
+        self.offset = Some(offset);
+        (event_s + offset).min(now)
+    }
+}
+
 /// `fraction` of the output's height, kept on the output as in `from_top_margin`.
 fn line_at_margin(fraction: f32, y: f32, output_h: i32, surface_h: i32) -> i32 {
     let top = (fraction.clamp(0.0, 1.0) * output_h as f32 - y).round() as i32;
@@ -1855,6 +1887,24 @@ mod tests {
 
     /// A surface keeps its only output on a leave, so later size updates of that output still
     /// reach it; with two outputs it drops the one it left, and reports when that was current.
+    /// Events read late keep the times they happened; a clock wrap starts over.
+    #[test]
+    fn late_events_keep_the_compositor_times() {
+        use super::EventClock;
+        let mut c = EventClock::default();
+        // Read at once: host 10.0 for compositor 500.0.
+        assert_eq!(c.at(10.0, 500.0), 10.0);
+        // Two presses 0.5 s apart, both read 1.3 s late at host 12.0.
+        assert!((c.at(12.0, 500.7) - 10.7).abs() < 1e-9);
+        assert!((c.at(12.0, 501.2) - 11.2).abs() < 1e-9);
+        // A less-delayed event moves the offset; the time never passes now.
+        assert!((c.at(12.1, 502.15) - 12.1).abs() < 1e-9);
+        assert!((c.at(12.2, 502.0) - 11.95).abs() < 1e-9);
+        // The compositor clock wraps: far later than any delay, so it starts over.
+        assert_eq!(c.at(13.0, 1.0), 13.0);
+        assert!((c.at(13.5, 1.4) - 13.4).abs() < 1e-9);
+    }
+
     #[test]
     fn a_surface_keeps_its_only_output_when_it_leaves_it() {
         use super::leave_output;

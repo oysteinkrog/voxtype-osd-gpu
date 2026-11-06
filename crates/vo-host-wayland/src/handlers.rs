@@ -306,8 +306,18 @@ impl State {
 impl PointerHandler for State {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, pointer: &WlPointer, events: &[SctkPointer]) {
         let k = self.pointers.iter().position(|p| &p.pointer == pointer);
-        // One timestamp per pointer frame: the events in it happened together.
-        let t = self.now();
+        // One time per pointer frame: the events in it happened together. It is the
+        // compositor's time for them on the host clock, so events read late keep the time
+        // they happened; a frame of only enter or leave has none and takes now.
+        let now = self.now();
+        let stamped = events.iter().find_map(|e| match e.kind {
+            PointerEventKind::Motion { time }
+            | PointerEventKind::Press { time, .. }
+            | PointerEventKind::Release { time, .. }
+            | PointerEventKind::Axis { time, .. } => Some(time),
+            _ => None,
+        });
+        let t = stamped.map_or(now, |ms| self.pointer_clock.at(now, ms as f64 / 1000.0));
         for e in events {
             let Some(i) = self.surface_index(&e.surface) else { continue };
             let kind = match e.kind {
@@ -355,7 +365,8 @@ impl RelativePointerHandler for State {
         let Some((surface, pos)) = self.pointers.iter().find(|p| &p.pointer == pointer).and_then(|p| p.at) else {
             return;
         };
-        let t = self.now();
+        let now = self.now();
+        let t = self.relative_clock.at(now, event.utime as f64 / 1e6);
         let kind = PointerKind::Relative { dx: event.delta.0 as f32, dy: event.delta.1 as f32 };
         self.events.push(HostEvent::Pointer(PointerEvent { surface, t, pos, kind }));
     }
