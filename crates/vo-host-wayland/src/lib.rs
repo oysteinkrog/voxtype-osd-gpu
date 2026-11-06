@@ -24,8 +24,10 @@
 //!   surface, placed over it at (0, 0). The sub-surface starts synchronized: the first GPU
 //!   frame's commit waits in its cache until the host commits the role surface with a clear
 //!   buffer, so the switch from CPU to GPU pixels lands in one compositor update. Then the
-//!   sub-surface goes desynchronized and runs on its own. Input regions live on the GPU
-//!   surface, so the overlay is click-through until the first GPU frame.
+//!   sub-surface goes desynchronized and runs on its own. Until the hand-over the input
+//!   region sits on the role surface, which shows the CPU frames; the GPU sub-surface has no
+//!   buffer yet, so a region there would take nothing. The hand-over commit moves the region
+//!   to the sub-surface (voxtype-osd-gpu-6jmj).
 
 mod blur;
 mod clipboard;
@@ -227,6 +229,8 @@ pub(crate) struct Surf {
     pub(crate) last_present: Option<f64>,
     pub(crate) refresh: f64,
     pending_input: Option<InputMode>,
+    /// The input mode last applied, so the hand-over can move it to the GPU's sub-surface.
+    input: InputMode,
     /// The compositor blur object, made on the first blur change, and a region waiting for
     /// the frame's commit (`Some(None)` turns the blur off).
     blur: Option<ExtBackgroundEffectSurfaceV1>,
@@ -238,8 +242,25 @@ pub(crate) struct Surf {
     pub(crate) outputs: Vec<wl_output::WlOutput>,
 }
 
+/// Whether the input region belongs on the role surface: while a GPU sub-surface exists
+/// and the CPU first frame has not handed over to it yet (`handed_over` is `None` without
+/// a CPU stage).
+fn input_on_role(has_child: bool, handed_over: Option<bool>) -> bool {
+    has_child && handed_over == Some(false)
+}
+
 impl Surf {
-    /// The surface the GPU draws into, which also holds the input region.
+    /// The surface that holds the input region: the role surface during the CPU first
+    /// frame, else the surface the GPU draws into.
+    pub(crate) fn input_wl(&self) -> &WlSurface {
+        if input_on_role(self.child.is_some(), self.shm.as_ref().map(|m| m.handed_over)) {
+            self.role.wl()
+        } else {
+            self.gpu_wl()
+        }
+    }
+
+    /// The surface the GPU draws into.
     pub(crate) fn gpu_wl(&self) -> &WlSurface {
         self.child.as_ref().map_or(self.role.wl(), |c| &c.wl)
     }
@@ -959,17 +980,7 @@ impl State {
             self.remove(i);
             return;
         }
-        let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
-        if pending.0.is_some() || pending.1.is_some() {
-            let gpu_wl = self.surfaces[i].gpu_wl().clone();
-            if let Some(mode) = pending.0 {
-                self.apply_input(&gpu_wl, &mode);
-            }
-            if let Some(region) = pending.1 {
-                self.apply_blur(i, region.as_ref());
-            }
-            gpu_wl.commit();
-        }
+        self.apply_pending_regions(i);
         if !drawn {
             self.surfaces[i].shm = Some(stage);
             return;
@@ -994,6 +1005,22 @@ impl State {
         }
     }
 
+    /// Applies the input and blur regions the app sent during a frame, on the surfaces that
+    /// hold them, and commits those.
+    fn apply_pending_regions(&mut self, i: usize) {
+        let (input, blur) = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
+        if let Some(mode) = input {
+            let wl = self.surfaces[i].input_wl().clone();
+            self.apply_input(&wl, &mode);
+            self.surfaces[i].input = mode;
+            wl.commit();
+        }
+        if let Some(region) = blur {
+            self.apply_blur(i, region.as_ref());
+            self.surfaces[i].gpu_wl().clone().commit();
+        }
+    }
+
     /// After the first GPU frame: a clear buffer on the role surface, committed together with
     /// the GPU frame waiting in the synchronized sub-surface's cache.
     fn hand_over(&mut self, i: usize) {
@@ -1005,7 +1032,17 @@ impl State {
             return;
         }
         stage.handed_over = true;
-        let role = s.role.wl();
+        let role = s.role.wl().clone();
+        let child_wl = child.wl.clone();
+        // The input region moves from the role surface to the sub-surface in this commit:
+        // the sub-surface is still synchronized, so its region lands with the role's commit.
+        let mode = s.input.clone();
+        self.apply_input(&child_wl, &mode);
+        child_wl.commit();
+        self.apply_input(&role, &InputMode::None);
+        let s = &mut self.surfaces[i];
+        let (Some(stage), Some(child)) = (s.shm.as_mut(), s.child.as_ref()) else { return };
+        let role = &role;
         if let Ok((clear, canvas)) = stage.pool.create_buffer(w, h, w * 4, Format::Argb8888) {
             canvas.fill(0);
             let _ = clear.attach_to(role);
@@ -1051,17 +1088,7 @@ impl State {
             }
             if !draw {
                 // Nothing to show changed, but a region the app sent still goes out.
-                let pending = (self.surfaces[i].pending_input.take(), self.surfaces[i].pending_blur.take());
-                if pending.0.is_some() || pending.1.is_some() {
-                    let wl = self.surfaces[i].gpu_wl().clone();
-                    if let Some(mode) = pending.0 {
-                        self.apply_input(&wl, &mode);
-                    }
-                    if let Some(region) = pending.1 {
-                        self.apply_blur(i, region.as_ref());
-                    }
-                    wl.commit();
-                }
+                self.apply_pending_regions(i);
                 return;
             }
             // Drawing goes on; if the texture cannot be had, the frame is tried again.
@@ -1109,7 +1136,10 @@ impl State {
             return;
         }
         if let Some(mode) = self.surfaces[i].pending_input.take() {
-            self.apply_input(&wl, &mode);
+            // Before the hand-over this goes to the role surface, which is committed there.
+            let input_wl = self.surfaces[i].input_wl().clone();
+            self.apply_input(&input_wl, &mode);
+            self.surfaces[i].input = mode;
         }
         if let Some(region) = self.surfaces[i].pending_blur.take() {
             self.apply_blur(i, region.as_ref());
@@ -1297,8 +1327,9 @@ impl HostCtl for State {
         });
         match &child {
             Some(c) => {
-                self.apply_input(role.wl(), &InputMode::None);
-                self.apply_input(&c.wl, &spec.input);
+                // The CPU first frame: the role surface takes the input until the hand-over.
+                self.apply_input(role.wl(), &spec.input);
+                self.apply_input(&c.wl, &InputMode::None);
                 c.wl.commit();
             }
             None => self.apply_input(role.wl(), &spec.input),
@@ -1345,6 +1376,7 @@ impl HostCtl for State {
             last_present: None,
             refresh: 0.0,
             pending_input: None,
+            input: spec.input.clone(),
             blur: None,
             pending_blur: None,
             cursor: CursorShape::Default,
@@ -1365,8 +1397,9 @@ impl HostCtl for State {
                 if self.in_frame == Some(id) {
                     self.surfaces[i].pending_input = Some(mode);
                 } else {
-                    let wl = self.surfaces[i].gpu_wl().clone();
+                    let wl = self.surfaces[i].input_wl().clone();
                     self.apply_input(&wl, &mode);
+                    self.surfaces[i].input = mode;
                     wl.commit();
                     let _ = self.conn.flush();
                 }
@@ -1823,6 +1856,19 @@ mod tests {
 
     /// A surface keeps its only output on a leave, so later size updates of that output still
     /// reach it; with two outputs it drops the one it left, and reports when that was current.
+    /// The input region sits on the role surface only during the CPU first frame.
+    #[test]
+    fn the_input_region_is_on_the_role_surface_until_the_hand_over() {
+        use super::input_on_role;
+        // CPU first frame, GPU not drawn yet: the role surface shows the frames and takes input.
+        assert!(input_on_role(true, Some(false)));
+        // Handed over: the GPU's sub-surface takes it.
+        assert!(!input_on_role(true, Some(true)));
+        // No CPU first frame: the one surface takes it.
+        assert!(!input_on_role(false, None));
+        assert!(!input_on_role(true, None));
+    }
+
     #[test]
     fn a_surface_keeps_its_only_output_when_it_leaves_it() {
         use super::leave_output;
